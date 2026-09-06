@@ -43,8 +43,10 @@
     ]
   },
   "mutations/check-rerun.json": {
-    "converged": true,
-    "reasons": []
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
   },
   "mutations/checks-stale.json": {
     "converged": false,
@@ -55,7 +57,8 @@
   "mutations/clean-base-forward.json": {
     "converged": false,
     "reasons": [
-      "check-inventory-unsettled"
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/closed-then-reopened.json": {
@@ -97,7 +100,8 @@
   "mutations/escalated-open-after-review.json": {
     "converged": false,
     "reasons": [
-      "unresolved-review-threads:1"
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1"
     ]
   },
   "mutations/escalation-before-reviewer-edit.json": {
@@ -127,8 +131,9 @@
   "mutations/escalation-wave-5.json": {
     "converged": false,
     "reasons": [
-      "quiet-review-not-completed-for-current-head",
-      "unresolved-review-threads:1"
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/escalation-wave-6.json": {
@@ -142,8 +147,9 @@
   "mutations/escalation-wave-8.json": {
     "converged": false,
     "reasons": [
-      "quiet-review-not-completed-for-current-head",
-      "unresolved-review-threads:1"
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/final-identity-baseRefOid.json": {
@@ -206,7 +212,8 @@
   "mutations/live-exempt-comparison.json": {
     "converged": false,
     "reasons": [
-      "check-inventory-unsettled"
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/material-base-forward.json": {
@@ -233,7 +240,8 @@
   "mutations/multi-commit-clean-base-forward.json": {
     "converged": false,
     "reasons": [
-      "check-inventory-unsettled"
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/no-gating-checks.json": {
@@ -307,7 +315,6 @@
   "mutations/python-fixed-finding.json": {
     "converged": false,
     "reasons": [
-      "undispositioned-review-threads:1",
       "quiet-review-not-completed-for-current-head"
     ]
   },
@@ -493,15 +500,24 @@
     ]
   },
   "mutations/python-wave-ancestry-unavailable.json": {
-    "error": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...113746d23d6c7b398ef34464a071dca532791898"
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
   },
   "mutations/python-wave-base-comparison-unavailable.json": {
-    "error": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
   },
   "mutations/rename-only-head.json": {
     "converged": false,
     "reasons": [
-      "check-inventory-unsettled"
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/request-deleted.json": {
@@ -600,8 +616,9 @@
   "mutations/wave-census-after-rerun.json": {
     "converged": false,
     "reasons": [
-      "quiet-review-not-completed-for-current-head",
-      "unresolved-review-threads:1"
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "pr-1566.json.gz": {
@@ -668,7 +685,7 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
-      "undispositioned-review-threads:23",
+      "undispositioned-review-threads:25",
       "quiet-review-not-completed-for-current-head",
       "check-not-green:Rust change scope:QUEUED",
       "check-not-green:Rust coverage (report only):IN_PROGRESS",
@@ -721,7 +738,7 @@
     "reasons": [
       "check-inventory-unsettled",
       "unresolved-review-threads:2",
-      "undispositioned-review-threads:17",
+      "undispositioned-review-threads:19",
       "quiet-review-not-completed-for-current-head",
       "check-not-green:Anthropic smoke eligibility:QUEUED",
       "check-not-green:Codex smoke eligibility:QUEUED",

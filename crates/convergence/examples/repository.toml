@@ -1,5 +1,5 @@
 repository = "KeenWill/signalbox"
-fixed_in_commit_pattern = '(?i)^fixed in commits?\s+`?([0-9a-f]{7,40})`?'
+fixed_in_commit_pattern = '(?i)^fixed in (?:commits?\s+)?`?([0-9a-f]{7,40})`?'
 declined_prefix = "declined:"
 informational_classes = ["question", "informational", "note"]
 acknowledgement_words = ["ack", "acknowledged", "done", "noted", "ok", "okay", "thanks", "thank you"]

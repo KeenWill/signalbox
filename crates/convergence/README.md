@@ -43,6 +43,10 @@ pagination bounds, and escalation wave caps. Check patterns use case-insensitive
 `--repo owner/name` selects the live repository instead of the policy's
 repository.
 
+The example disposition grammar is
+`` (?i)^fixed in (?:commits?\s+)?`?([0-9a-f]{7,40})`? ``. It accepts a fixing
+revision with optional backticks and an optional `commit` or `commits` label.
+
 Every policy field is listed below. “Required” means loading fails when the
 field is absent; there is no compiled default. Repository values live in the
 [example](examples/repository.toml).

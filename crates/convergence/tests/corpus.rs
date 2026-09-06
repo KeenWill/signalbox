@@ -49,6 +49,29 @@ fn recorded_corpus_matches_frozen_python_verdicts() -> Result<(), Box<dyn Error>
 }
 
 #[test]
+fn fixing_revision_reply_forms_disposition_a_thread() -> Result<(), Box<dyn Error>> {
+    let policy = policy()?;
+    let recording = Recording::read(&root().join("fixtures/mutations/python-fixed-finding.json"))?;
+    for reply in [
+        "Fixed in `113746d23d6c7b398ef34464a071dca532791898`: corrected.",
+        "Fixed in 113746d23d6c7b398ef34464a071dca532791898: corrected.",
+        "Fixed in commit 113746d23d6c7b398ef34464a071dca532791898: corrected.",
+        "Fixed in commits `113746d23d6c7b398ef34464a071dca532791898`: corrected.",
+    ] {
+        let mut snapshot = recording.snapshot(&policy)?;
+        for node in [&mut snapshot.initial, &mut snapshot.current] {
+            node["reviewThreads"]["nodes"][0]["comments"]["nodes"][1]["body"] = json!(reply);
+        }
+        assert_eq!(
+            evaluate(&snapshot, &policy)?.undispositioned_review_threads,
+            0,
+            "{reply}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn pagination_completeness_rejects_every_missing_suffix() -> Result<(), Box<dyn Error>> {
     TestRunner::default().run(&(1usize..400, any::<usize>()), |(total,seed)| {
         let missing = seed % total + 1;
@@ -193,9 +216,9 @@ fn draft_and_description_evidence_require_their_declared_types() -> Result<(), B
 #[test]
 fn dispositioned_escalation_remains_a_blocker_until_the_thread_closes() -> Result<(), Box<dyn Error>>
 {
-    let policy = policy()?;
     let recording =
         Recording::read(&root().join("fixtures/mutations/escalated-open-after-review.json"))?;
+    let policy = serde_json::from_value(recording.previous["policy_identity"].clone())?;
     let result = evaluate(&recording.snapshot(&policy)?, &policy)?;
     assert!(
         result.facts.review_threads.iter().any(|thread| {
@@ -407,12 +430,12 @@ fn observed_resolution_authenticates_later_request_and_is_pruned_on_reopen()
 fn live_recording_fetches_old_review_comparison_and_finishes_with_identity()
 -> Result<(), Box<dyn Error>> {
     use signalbox_convergence::fetch::{GitHubRequest, RequestFuture, record_with};
-    let policy = policy()?;
     for name in [
         "live-exempt-comparison.json",
         "multi-commit-clean-base-forward.json",
     ] {
         let fixture = Recording::read(&root().join("fixtures/mutations").join(name))?;
+        let policy = serde_json::from_value(fixture.previous["policy_identity"].clone())?;
         let mut transcript = fixture.observations.iter().flatten();
         let mut compared = Vec::new();
         let mut send = |request| -> RequestFuture<'_> {
@@ -608,9 +631,9 @@ fn later_authenticated_finding_invalidates_quiet_review_and_persisted_authentica
 
 #[test]
 fn escalation_must_follow_the_latest_reviewer_edit() -> Result<(), Box<dyn Error>> {
-    let policy = policy()?;
     let recording =
         Recording::read(&root().join("fixtures/mutations/escalation-before-reviewer-edit.json"))?;
+    let policy = serde_json::from_value(recording.previous["policy_identity"].clone())?;
     let mut snapshot = recording.snapshot(&policy)?;
     let result = evaluate(&snapshot, &policy)?;
     assert!(!result.facts.review_threads[0].is_escalated);
