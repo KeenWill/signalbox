@@ -54,6 +54,7 @@ mod blob_tools;
 mod blob_upload_runtime;
 mod configuration;
 mod context_guard;
+mod convergence_sweep_runtime;
 mod conversation_introspection;
 mod credential_pools;
 mod daemon_tools;
@@ -88,14 +89,19 @@ pub use blob_tools::{
     BlobToolConstructionError, BlobToolExecutor, BlobToolExecutorError, BlobTools,
 };
 pub use configuration::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DaemonToolConfiguration, DerivedModelCallCost,
-    FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError, ModelAdapter,
-    ModelBillingRates, NumericBoundsConfiguration, OPENAI_CREDENTIAL_REFERENCE,
+    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, ConvergenceSweepConfiguration,
+    DaemonToolConfiguration, DerivedModelCallCost, FileCredentialAccess, HubModelConfiguration,
+    HubModelConfigurationError, ModelAdapter, ModelBillingRates, NumericBoundsConfiguration,
+    OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
     WorkspaceInstructionConfiguration,
 };
 pub use context_guard::{
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ReportedUsageCompaction,
     ReportedUsageCompactionError,
+};
+pub use convergence_sweep_runtime::{
+    ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
+    ConvergenceSweepRuntimeConstructionError,
 };
 pub use conversation_introspection::{
     ConversationIntrospectionError, PostgresConversationIntrospection,
@@ -154,20 +160,18 @@ pub use signalbox_tools_code_host::{
     CodeHostCursor, CodeHostExecutor, CodeHostExecutorError, CodeHostFilePath,
     CodeHostNumericBounds, CodeHostOpaqueId, CodeHostOperation, CodeHostRepository, CodeHostResult,
     CodeHostResultCompleteness, CodeHostRevision, CodeHostTools, CodeHostToolsConstructionError,
-    CodeHostTransport, CodeHostTransportFailure, ConvergenceStateArguments, ConvergenceStateFields,
-    ConvergenceStateResult, ConvergenceVerdict, FilePatchArguments, FilePatchResult,
-    GitHubCodeHostConstructionError, GitHubCodeHostTransport, REPOSITORY_LIST_DIRECTORY_NAME,
-    REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RepositoryDirectoryEntry,
-    RepositoryFileContentFields, RepositoryLineRange, RepositoryListDirectoryArguments,
-    RepositoryListDirectoryResult, RepositoryObjectKind, RepositoryReadFileArguments,
-    RepositoryReadFileResult, RerunFailedJobsArguments, RerunFailedJobsResult, ReviewAuthorClass,
-    ReviewCheck, ReviewDispositionClass, ReviewGateBlockerCode, ReviewGateCheckArguments,
-    ReviewGateCheckResult, ReviewGatePurpose, ReviewThread, ReviewThreadComment,
-    ReviewThreadFields, ReviewThreadIdentity, ReviewThreadInventoryFields,
+    CodeHostTransport, CodeHostTransportFailure, ConvergenceReadResult, ConvergenceStateArguments,
+    FilePatchArguments, FilePatchResult, GitHubCodeHostConstructionError, GitHubCodeHostTransport,
+    REPOSITORY_LIST_DIRECTORY_NAME, REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME,
+    RepositoryDirectoryEntry, RepositoryFileContentFields, RepositoryLineRange,
+    RepositoryListDirectoryArguments, RepositoryListDirectoryResult, RepositoryObjectKind,
+    RepositoryReadFileArguments, RepositoryReadFileResult, RerunFailedJobsArguments,
+    RerunFailedJobsResult, ReviewAuthorClass, ReviewDispositionClass, ReviewGateCheckArguments,
+    ReviewThread, ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
     ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsArguments, ReviewThreadsResult,
-    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, StackStateArguments,
-    StackStateFields, StackStateResult, ThreadInventoryArguments, ThreadInventoryResult,
-    ThreadReplyArguments, ThreadReplyResult, ThreadResolveArguments, ThreadResolveResult,
+    StackStateArguments, StackStateFields, StackStateResult, ThreadInventoryArguments,
+    ThreadInventoryResult, ThreadReplyArguments, ThreadReplyResult, ThreadResolveArguments,
+    ThreadResolveResult,
 };
 pub use signalbox_tools_conversations::{
     CONVERSATION_TOOL_NAMES, ConversationExecutor, ConversationIntrospectionPort,
@@ -4198,7 +4202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv034_commit_ambiguous_activation_raises_the_fatal_recovery_signal() {
+    async fn commit_ambiguous_activation_raises_the_fatal_recovery_signal() {
         let (execution, signal) = FatalExecutionSupervisor::new(NoopExecution);
         let mut pass = ActivatedTurnPass::new(
             StartEligibleTurnService::new(AdvancingIds::new(), CommitAmbiguousTransaction),
@@ -4243,7 +4247,7 @@ mod tests {
     }
 
     #[test]
-    fn inv034_ambiguous_reported_usage_failure_closure_raises_the_fatal_recovery_signal() {
+    fn ambiguous_reported_usage_failure_closure_raises_the_fatal_recovery_signal() {
         let (execution, signal) = FatalExecutionSupervisor::new(NoopExecution);
         let source =
             CommitActivationPreviewError::Activation(StartEligibleTurnRepositoryError::Database {

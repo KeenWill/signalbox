@@ -215,7 +215,7 @@ where
         None => repository,
     };
     // A command identity that already names durable intent must reach the
-    // replay boundary unconditionally (INV-012): the first handling already
+    // replay boundary unconditionally: the first handling already
     // released the wait, so re-applying the current-state precondition would
     // answer a retry of a committed decision with a refusal instead of its
     // recorded result.
@@ -268,7 +268,7 @@ where
                 // equal-identity request that overlapped ours can have released
                 // the wait in between. Rechecking the claim before refusing
                 // keeps the loser of that race on the replay boundary instead
-                // of answering a committed decision with a refusal (INV-012).
+                // of answering a committed decision with a refusal.
                 match repository.load(command_id).await {
                     Ok(Some(_)) | Err(SubmitInputRepositoryError::DifferentCommandKind { .. }) => {}
                     Ok(None) => {
@@ -358,7 +358,7 @@ pub(super) const fn decode_descendant_scope(
 ///
 /// The delivery is the `Interrupt` treatment the turn lifecycle already
 /// defines: cancellation authority exists only as an applied interrupt bound
-/// to an immediate successor (INV-029), so the stop carries the successor
+/// to an immediate successor, so the stop carries the successor
 /// content and no standalone cancellation command is introduced. The
 /// authoritative transaction validates the expected active turn under the
 /// session lock and records every typed refusal, so no precondition read runs
@@ -756,7 +756,7 @@ pub(super) fn session_defaults_internal_diagnostic(
 /// Records one user tool decision through the canonical decision command.
 ///
 /// A claimed command identity reaches the durable replay boundary
-/// unconditionally (INV-012). Otherwise a narrow read refuses, before any
+/// unconditionally. Otherwise a narrow read refuses, before any
 /// command is recorded, a decision whose named session does not own the named
 /// request; an absent request is left to the transaction's recorded
 /// `request_not_found`, and every other outcome is the recorded result of the
@@ -832,7 +832,7 @@ where
                 // recorded the decision in between. Rechecking the claim
                 // before refusing keeps the loser of that race on the replay
                 // boundary instead of answering a committed decision with a
-                // refusal (INV-012).
+                // refusal.
                 match repository.load_recorded_decision(command_id).await {
                     Ok(Some(_)) | Err(ToolLoopRepositoryError::DifferentCommandKind) => {}
                     Ok(None) => {
@@ -933,7 +933,7 @@ pub(super) fn wire_tool_decision(
 /// override command.
 ///
 /// A claimed command identity reaches the durable replay boundary
-/// unconditionally (INV-012). The session is part of the canonical override
+/// unconditionally. The session is part of the canonical override
 /// payload, so an other-session request is the transaction's recorded
 /// `request_not_in_session` rejection rather than a pre-command refusal, and
 /// every outcome is the recorded result of the canonical command.

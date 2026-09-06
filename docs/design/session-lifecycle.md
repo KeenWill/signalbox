@@ -22,16 +22,15 @@ structural and retry-budget parks, the standing failure cause attached; it never
 terminalizes the session directly. A retryable failure moves the session through
 recovering or blocked while budgeted retries run, and the retryable outcome is
 recorded only when the session closes with the retryable cause standing. A
-structural failure is never resumed automatically; its expected closure is a
-fresh session that supersedes it. When [goal mode](../spec/goal-mode.md) reaches
-either its attempt budget or its lifetime attempt ceiling, the goal's session
-moves from blocked to parked with cause retry budget exhausted, where the owner
-sees it; exhaustion is never a silent stop. The domain already defines the park
-causes, the rule that a park's cause must admit its standing failure cause, and
-the closures that carry the standing cause forward. The missing part is the
-driver: the turn liveness pass, the goal disposition pass, and model-call
-failure classification call the park path with the classified cause inside the
-transaction that records the failure.
+structural failure is never resumed automatically. When
+[goal mode](../spec/goal-mode.md) reaches either its attempt budget or its
+lifetime attempt ceiling, the goal's session moves from blocked to parked with
+cause retry budget exhausted, where the owner sees it; exhaustion is never a
+silent stop. The domain already defines the park causes, the rule that a park's
+cause must admit its standing failure cause, and the closures that carry the
+standing cause forward. The missing part is the driver: the turn liveness pass,
+the goal disposition pass, and model-call failure classification call the park
+path with the classified cause inside the transaction that records the failure.
 
 Every deadline expiry is a published transition with the expired deadline named
 in its cause. Admission expiry reaches the terminal event the satellite's

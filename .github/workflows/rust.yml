@@ -77,7 +77,7 @@ jobs:
                 # Binding process/specification prose and generated indexes
                 # run the complete bar even though they are Markdown.
                 AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
-                  | docs/domain-spine.md | docs/invariants.md \
+                  | docs/api/* \
                   | docs/scenarios.md | docs/style.md)
                   rust=$((rust + 1))
                   ;;
@@ -113,22 +113,36 @@ jobs:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 10
     steps:
-      # Full history also fetches `refs/remotes/origin/*`, which the docs
-      # checker reads verification provenance from: the first-parent history of
-      # `origin/main`, never a merge the branch under review contributes.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Install Python checker dependencies
-        run: python3 -m pip install --user --break-system-packages -r tooling/requirements-mdformat.txt
-      - name: Check generated invariant index
-        run: python3 scripts/generate_invariants.py --check
-      - name: Check domain spine sync
-        run: python3 scripts/check_domain_spine.py
+      - name: Use Python with Markdown exclusion support
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install Markdown toolchain
+        run: |
+          python3 -m venv --clear /tmp/mdformat-venv
+          /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
+      - name: Check generated domain API declarations
+        run: |
+          rustdoc_toolchain=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("docs/api/crates.toml").read_text())["rustdoc_toolchain"])')
+          rustup toolchain install "$rustdoc_toolchain" --profile minimal
+          python3 scripts/render_domain_spine.py
+          git diff --exit-code -- docs/api
+          test -z "$(git ls-files --others --exclude-standard docs/api)"
+      - name: Report domain API digest
+        continue-on-error: true
+        env:
+          DOMAIN_SPINE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          export PATH="$PATH:${CARGO_HOME:-$HOME/.cargo}/bin"
+          command -v cargo-public-api || cargo install cargo-public-api --locked
+          python3 scripts/domain_spine_digest.py >> "$GITHUB_STEP_SUMMARY"
       - name: Check documentation consistency
-        run: python3 scripts/check_docs_consistency.py
+        run: /tmp/mdformat-venv/bin/python scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
         run: python3 scripts/check_migration_versions.py
       - name: Check numeric bound declarations
@@ -157,10 +171,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Python checker dependencies
-        run: python3 -m pip install --user --break-system-packages -r tooling/requirements-mdformat.txt
-      - name: Test domain-spine checker
-        run: python3 scripts/test_check_domain_spine.py
+      - name: Use Python with Markdown exclusion support
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install Markdown toolchain
+        run: |
+          python3 -m venv --clear /tmp/mdformat-venv
+          /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
+      - name: Test domain API digest
+        run: python3 scripts/test_domain_spine_digest.py
+      - name: Test domain API renderer
+        run: python3 scripts/test_render_domain_spine.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
       - name: Test numeric bound checker
@@ -172,11 +194,9 @@ jobs:
       - name: Test ownership-seam checker
         run: python3 scripts/test_check_ownership_seam.py
       - name: Test documentation consistency checker
-        run: python3 scripts/test_check_docs_consistency.py
+        run: /tmp/mdformat-venv/bin/python scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader
-        run: python3 scripts/test_postgres_integration_suites.py
-      - name: Test the convergence reconciler
-        run: python3 tooling/convergence-reconciler/test_reconcile.py
+        run: /tmp/mdformat-venv/bin/python scripts/test_postgres_integration_suites.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
       - name: Test the lifecycle watchdog
@@ -191,10 +211,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check Markdown formatting
-        run: |
-          python3 -m venv /tmp/mdformat-venv
-          /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
-          /tmp/mdformat-venv/bin/mdformat --check *.md docs/
+        run: /tmp/mdformat-venv/bin/mdformat --check *.md docs/
       # Conservative inventory for the recorded session-lock protocols. The
       # checksum makes changes to the small
       # reviewed inventory explicit; the scan rejects strongest-mode row-lock
@@ -403,6 +420,8 @@ jobs:
             ' sh "$runner_uid" "$runner_gid" "$runner_home" "$test_command" "$runner_path"
       - name: Test generated browser contract runtime
         run: node --test crates/web-contract/tests/generated_roundtrip.mjs
+      - name: Test the convergence reconciler
+        run: python3 tooling/convergence-reconciler/test_reconcile.py
       # `--all-targets` excludes doctests, so the domain's compile_fail
       # sealing proofs need this separate run.
       - name: Run doctests

@@ -3317,7 +3317,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_codex_reprojection_rejects_non_string_named_tool_input() {
+    fn s28_codex_reprojection_rejects_non_string_named_tool_input() {
         let normalized = object_with_members(vec![
             (
                 "type",
@@ -3372,10 +3372,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: the Codex reprojection maps a `tool_search_call`'s exact
+    /// S28: the Codex reprojection maps a `tool_search_call`'s exact
     /// `arguments` value as tool input and fabricates no tool name for it.
     #[test]
-    fn s28_inv038_codex_reprojection_maps_tool_search_call_arguments_without_a_name() {
+    fn s28_codex_reprojection_maps_tool_search_call_arguments_without_a_name() {
         assert_codex_payload_projects_one_entry_attesting_no_speaker(
             object_with_members(vec![
                 (
@@ -3403,10 +3403,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: the Codex reprojection maps a `local_shell_call`'s exact
+    /// S28: the Codex reprojection maps a `local_shell_call`'s exact
     /// `action` value as tool input and fabricates no tool name for it.
     #[test]
-    fn s28_inv038_codex_reprojection_maps_local_shell_call_action_without_a_name() {
+    fn s28_codex_reprojection_maps_local_shell_call_action_without_a_name() {
         assert_codex_payload_projects_one_entry_attesting_no_speaker(
             object_with_members(vec![
                 (
@@ -3434,11 +3434,11 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: the Codex reprojection takes a web-search call's identity
+    /// S28: the Codex reprojection takes a web-search call's identity
     /// from the item `id`; the payload also states a competing `call_id` the
     /// mapping must not read.
     #[test]
-    fn s28_inv038_codex_reprojection_maps_web_search_item_id_as_call_identity() {
+    fn s28_codex_reprojection_maps_web_search_item_id_as_call_identity() {
         assert_codex_payload_projects_one_entry_attesting_no_speaker(
             object_with_members(vec![
                 (
@@ -3467,10 +3467,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: the Codex reprojection reads a custom tool call's payload
+    /// S28: the Codex reprojection reads a custom tool call's payload
     /// from `input` while retaining its exact attested name.
     #[test]
-    fn s28_inv038_codex_reprojection_maps_custom_tool_call_input_field() {
+    fn s28_codex_reprojection_maps_custom_tool_call_input_field() {
         assert_codex_payload_projects_one_entry_attesting_no_speaker(
             object_with_members(vec![
                 (
@@ -3498,11 +3498,11 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: the Codex reprojection maps a
+    /// S28: the Codex reprojection maps a
     /// `custom_tool_call_output`'s exact `call_id` and string `output` as an
     /// exact-text result without fabricating an error attestation.
     #[test]
-    fn s28_inv038_codex_reprojection_maps_custom_tool_call_output_as_exact_text_result() {
+    fn s28_codex_reprojection_maps_custom_tool_call_output_as_exact_text_result() {
         let source_call_id = text("call-custom");
         let output = text("applied");
 
@@ -3526,11 +3526,11 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: the Codex reprojection emits one ordered source result
+    /// S28: the Codex reprojection emits one ordered source result
     /// block per tool-search element, retaining an object element's exact type
     /// attestation and leaving a non-object element unattested.
     #[test]
-    fn s28_inv038_codex_reprojection_maps_tool_search_output_as_ordered_blocks() {
+    fn s28_codex_reprojection_maps_tool_search_output_as_ordered_blocks() {
         assert_codex_payload_projects_one_entry_attesting_no_speaker(
             object_with_members(vec![
                 (
@@ -3570,30 +3570,30 @@ mod tests {
         );
     }
 
-    /// S28 / INV-002 / INV-038: cloning an unvalidated source value is
+    /// S28: cloning an unvalidated source value is
     /// stack-safe before typed depth rejection.
     #[test]
-    fn s28_inv002_inv038_unvalidated_structured_clone_is_stack_safe() {
+    fn s28_unvalidated_structured_clone_is_stack_safe() {
         let value = nested_array(32_768);
         let cloned = value.clone();
 
         drop(cloned);
     }
 
-    /// S28 / INV-002 / INV-038: structural equality for unvalidated source
+    /// S28: structural equality for unvalidated source
     /// values is stack-safe before typed depth rejection.
     #[test]
-    fn s28_inv002_inv038_unvalidated_structured_equality_is_stack_safe() {
+    fn s28_unvalidated_structured_equality_is_stack_safe() {
         let value = nested_array(32_768);
 
         assert_eq!(value, nested_array(32_768));
         assert_ne!(value, nested_array(32_767));
     }
 
-    /// S28 / INV-002 / INV-038: formatting an unvalidated source value is
+    /// S28: formatting an unvalidated source value is
     /// stack-safe before typed depth rejection.
     #[test]
-    fn s28_inv002_inv038_unvalidated_structured_debug_is_stack_safe() {
+    fn s28_unvalidated_structured_debug_is_stack_safe() {
         let value = nested_array(32_768);
 
         let rendered = format!("{value:?}");
@@ -3601,10 +3601,10 @@ mod tests {
         assert!(rendered.ends_with("])])"));
     }
 
-    /// S28 / INV-002 / INV-038: hashing an unvalidated source value is
+    /// S28: hashing an unvalidated source value is
     /// stack-safe before typed depth rejection.
     #[test]
-    fn s28_inv002_inv038_unvalidated_structured_hash_is_stack_safe() {
+    fn s28_unvalidated_structured_hash_is_stack_safe() {
         let value = nested_array(32_768);
         let equal = nested_array(32_768);
 
@@ -3825,10 +3825,10 @@ mod tests {
         .expect("complete converted fixture is valid")
     }
 
-    /// INV-038: exact raw records, rich normalized entries, and every imported
+    /// exact raw records, rich normalized entries, and every imported
     /// entry boundary survive one checked immutable aggregate.
     #[test]
-    fn inv038_lossless_aggregate_exposes_every_addressable_prefix() {
+    fn lossless_aggregate_exposes_every_addressable_prefix() {
         let imported = converted();
         assert_eq!(imported.raw_records().len(), 2);
         assert_eq!(
@@ -3871,9 +3871,9 @@ mod tests {
         );
     }
 
-    /// INV-038: raw bytes and format/order jointly determine stable digests.
+    /// raw bytes and format/order jointly determine stable digests.
     #[test]
-    fn inv038_content_hashes_and_source_digest_are_stable_and_ordered() {
+    fn content_hashes_and_source_digest_are_stable_and_ordered() {
         let imported = converted();
         let repeated = converted();
         assert_eq!(imported.source_digest(), repeated.source_digest());
@@ -3920,7 +3920,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_raw_and_conversion_digests_match_the_public_vector() {
+    fn raw_and_conversion_digests_match_the_public_vector() {
         let raw = ImportedRawSourceRecord::from_converted(
             b"{}".to_vec(),
             ImportedStructuredValue::Object(Vec::new().into_boxed_slice()),
@@ -3982,7 +3982,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_coordinated_normalized_and_entry_corruption_fails_closed() {
+    fn coordinated_normalized_and_entry_corruption_fails_closed() {
         let owner = conversation(1);
         let normalized_message = |value: &str| {
             object_with_members(vec![
@@ -4039,10 +4039,10 @@ mod tests {
         );
     }
 
-    /// INV-002 / INV-038: raw-hash corruption fails closed while retaining all
+    /// raw-hash corruption fails closed while retaining all
     /// typed storage inputs.
     #[test]
-    fn inv002_inv038_raw_hash_corruption_retains_complete_input() {
+    fn raw_hash_corruption_retains_complete_input() {
         let owner = conversation(1);
         let bytes = br#"{"type":"system"}"#.to_vec();
         let raw_records = vec![ImportedRawSourceRecordReconstitutionInput::new(
@@ -4090,7 +4090,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_message_content_without_source_speaker_fails_closed() {
+    fn message_content_without_source_speaker_fails_closed() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"user","message":{"content":[]}}"#.to_vec(),
@@ -4122,7 +4122,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_reversed_raw_record_mapping_fails_closed() {
+    fn reversed_raw_record_mapping_fails_closed() {
         let imported = converted();
         let mut entries = imported
             .entries()
@@ -4156,7 +4156,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_first_entry_cannot_skip_first_raw_record() {
+    fn first_entry_cannot_skip_first_raw_record() {
         let owner = conversation(1);
         let raw_records = vec![
             ImportedRawSourceRecord::from_converted(
@@ -4194,7 +4194,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_source_event_rejects_a_message_record_type() {
+    fn source_event_rejects_a_message_record_type() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"user"}"#.to_vec(),
@@ -4223,7 +4223,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_message_speaker_must_match_the_raw_record_type() {
+    fn message_speaker_must_match_the_raw_record_type() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"user","message":{"role":"assistant"}}"#.to_vec(),
@@ -4253,7 +4253,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_empty_raw_source_record_fails_closed() {
+    fn empty_raw_source_record_fails_closed() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             Vec::new(),
@@ -4284,7 +4284,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_entry_content_must_match_the_complete_normalized_record() {
+    fn entry_content_must_match_the_complete_normalized_record() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"user","message":{"content":"original"}}"#.to_vec(),
@@ -4312,7 +4312,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_entry_metadata_must_match_the_complete_normalized_record() {
+    fn entry_metadata_must_match_the_complete_normalized_record() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"system","uuid":"record"}"#.to_vec(),
@@ -4344,7 +4344,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_raw_record_entry_count_must_match_its_normalized_projection() {
+    fn raw_record_entry_count_must_match_its_normalized_projection() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"assistant","message":{"content":[{"type":"text","text":"one"},{"type":"text","text":"two"}]}}"#.to_vec(),
@@ -4388,10 +4388,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: converter version 1 retains its original closed block
+    /// S28: converter version 1 retains its original closed block
     /// interpretation while version 2 admits source-defined message blocks.
     #[test]
-    fn s28_inv038_converter_versions_do_not_reinterpret_source_blocks() {
+    fn s28_converter_versions_do_not_reinterpret_source_blocks() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"assistant","message":{"content":[{"type":"future-kind"}]}}"#.to_vec(),
@@ -4443,10 +4443,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: the version boundary also preserves the original closed
+    /// S28: the version boundary also preserves the original closed
     /// tool-result block vocabulary.
     #[test]
-    fn s28_inv038_converter_versions_do_not_reinterpret_result_blocks() {
+    fn s28_converter_versions_do_not_reinterpret_result_blocks() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"future-result"}]}]}}"#.to_vec(),
@@ -4514,7 +4514,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_complete_normalized_record_rejects_129_containers() {
+    fn complete_normalized_record_rejects_129_containers() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"system","nested":[]}"#.to_vec(),
@@ -4547,10 +4547,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-002 / INV-038: stored structured depth is checked iteratively
+    /// S28: stored structured depth is checked iteratively
     /// before any recursive conversion-digest traversal.
     #[test]
-    fn s28_inv002_inv038_checks_raw_depth_before_recursive_conversion_digest() {
+    fn s28_checks_raw_depth_before_recursive_conversion_digest() {
         let owner = conversation(1);
         let bytes = br#"{"type":"system","nested":[]}"#.to_vec();
         let stored_hash = ImportedRawRecordHash::digest(&bytes);
@@ -4591,10 +4591,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-002 / INV-038: conversion digesting and rejection remain
+    /// S28: conversion digesting and rejection remain
     /// stack-safe for excessive caller-supplied structured depth.
     #[test]
-    fn s28_inv002_inv038_converted_raw_depth_fails_closed_and_drops_safely() {
+    fn s28_converted_raw_depth_fails_closed_and_drops_safely() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"system","nested":[]}"#.to_vec(),
@@ -4631,7 +4631,7 @@ mod tests {
     }
 
     #[test]
-    fn inv038_entry_carried_structured_value_rejects_129_containers() {
+    fn entry_carried_structured_value_rejects_129_containers() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"assistant","message":{"content":[{"type":"tool_use","input":null}]}}"#

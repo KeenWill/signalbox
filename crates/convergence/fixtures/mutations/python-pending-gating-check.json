@@ -1,0 +1,26 @@
+{
+  "source": "settled.json",
+  "edge": "pending gating check",
+  "mutations": [
+    {
+      "path": "/observations/0/1/response/data/repository/object/statusCheckRollup/contexts/nodes/0",
+      "value": {
+        "__typename": "CheckRun",
+        "name": "required build",
+        "status": "IN_PROGRESS",
+        "conclusion": null,
+        "completedAt": null
+      }
+    },
+    {
+      "path": "/observations/1/1/response/data/repository/object/statusCheckRollup/contexts/nodes/0",
+      "value": {
+        "__typename": "CheckRun",
+        "name": "required build",
+        "status": "IN_PROGRESS",
+        "conclusion": null,
+        "completedAt": null
+      }
+    }
+  ]
+}

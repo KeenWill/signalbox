@@ -130,6 +130,17 @@ own one-based ordinal. A reaction naming a committed dispatch remains admissible
 after its rule is deactivated; deactivation prevents only new matched
 dispatches.
 
+The convergence sweep is a periodic pass that runs beside repository watch.
+Repository watch owns event-driven dispatch; the sweep supplies liveness for
+watched pull requests whose provider events stopped arriving. It uses
+`signalbox-convergence` for its predicate and owns its fenced commission,
+durable retry and park records, and configuration throttle. It is opt-in twice:
+`[repository_watch.convergence_sweep]` supplies one review-response session
+template and the timing policy, and each repository lists its
+`convergence_pull_requests`. The `[convergence]` policy supplies the shared
+predicate described in [review workflows](review-workflows.md). The sweep
+evaluates one revalidated snapshot and uses that verdict for its decision.
+
 The module records a command in `dispatch_ledger` before submission and applies
 settlement lifecycle events to pending ledger rows. `SessionCreated` settles the
 next pending create action for its repository-watch dispatch and records the new

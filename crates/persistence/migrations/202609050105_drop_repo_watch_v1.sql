@@ -1,4 +1,4 @@
--- The public schema retains only the repository and branch validators used by commissioned dispatch.
+-- The public schema retains commissioned-session census records and their validators.
 
 DROP TRIGGER commissioned_dispatch_counts_pull_request_session
     ON commissioned_dispatch;
@@ -6,7 +6,6 @@ DROP TRIGGER repo_watch_dispatch_release_on_terminal_goal ON goal_event;
 DROP TRIGGER repo_watch_dispatch_release_on_terminal_turn ON turn_lifecycle;
 
 DROP VIEW repo_watch_current_pull_request_convergence,
-          convergence_sweep_parked_target,
           repo_watch_headless_approval_escalation_audit,
           repo_watch_held_dispatch_slot,
           repo_watch_outstanding_dispatch_obligation,
@@ -16,8 +15,6 @@ DROP VIEW repo_watch_current_pull_request_convergence,
 CASCADE;
 
 DROP TABLE repo_watch_achieved_dispatch_settlement,
-           convergence_sweep_event,
-           convergence_sweep_target,
            repo_watch_complete_poll,
            repo_watch_convergence_cutoff,
            repo_watch_convergence_cutoff_goal,
@@ -32,8 +29,6 @@ DROP TABLE repo_watch_achieved_dispatch_settlement,
            repo_watch_current_repository_held_count,
            repo_watch_current_repository_obligation_count,
            repo_watch_current_singleton_cooldown,
-           repo_watch_dispatch_action,
-           repo_watch_dispatch_batch,
            repo_watch_dispatch_delivery,
            repo_watch_dispatch_delivery_intent,
            repo_watch_dispatch_obligation,
@@ -42,7 +37,6 @@ DROP TABLE repo_watch_achieved_dispatch_settlement,
            repo_watch_dispatch_start_lease,
            repo_watch_dispatch_start_lease_expiration,
            repo_watch_dispatch_start_lease_quarantine,
-           repo_watch_event,
            repo_watch_headless_approval_escalation,
            repo_watch_lifecycle_cutoff,
            repo_watch_lifecycle_cutoff_goal,
@@ -61,8 +55,6 @@ DROP TABLE repo_watch_achieved_dispatch_settlement,
            repo_watch_webhook_payload,
            repo_watch_webhook_pending
 CASCADE;
-
-DROP FUNCTION convergence_sweep_retry_budget();
 
 DO $drop_repo_watch_functions$
 DECLARE

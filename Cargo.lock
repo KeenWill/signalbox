@@ -4158,6 +4158,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "signal-hook"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4275,6 +4285,24 @@ dependencies = [
  "testcontainers-modules",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "signalbox-convergence"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "flate2",
+ "futures-executor",
+ "nix",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -4762,6 +4790,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-convergence",
  "signalbox-domain",
  "signalbox-egress-transport",
  "signalbox-model-runtime",
@@ -4976,6 +5005,7 @@ dependencies = [
  "signalbox-blob-store",
  "signalbox-blob-store-filesystem",
  "signalbox-blob-store-s3",
+ "signalbox-convergence",
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",
  "signalbox-domain",
@@ -5008,6 +5038,7 @@ dependencies = [
  "tempfile",
  "testcontainers-modules",
  "tokio",
+ "toml",
  "toml_edit",
  "tonic",
  "tower",

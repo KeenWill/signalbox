@@ -41,7 +41,7 @@ async fn web_search_resolves_one_credential_per_physical_request() {
     assert_eq!(searches.load(Ordering::Relaxed), 1);
 }
 
-/// INV-035: query/credential collisions are rejected before the injected
+/// query/credential collisions are rejected before the injected
 /// transport boundary, independent of the production request builder.
 #[tokio::test]
 async fn web_search_rejects_query_credential_before_injected_transport() {
@@ -71,7 +71,7 @@ async fn web_search_rejects_query_credential_before_injected_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: fixed provider request metadata is checked before the
+/// fixed provider request metadata is checked before the
 /// injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_fixed_request_metadata_before_injected_transport() {
@@ -101,7 +101,7 @@ async fn web_search_rejects_fixed_request_metadata_before_injected_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: every fixed provider query component is checked before the
+/// every fixed provider query component is checked before the
 /// injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_fixed_query_metadata_before_injected_transport() {
@@ -131,7 +131,7 @@ async fn web_search_rejects_fixed_query_metadata_before_injected_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: syntax introduced by serializing the provider URL is checked
+/// syntax introduced by serializing the provider URL is checked
 /// before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_serialized_url_syntax_before_injected_transport() {
@@ -161,7 +161,7 @@ async fn web_search_rejects_serialized_url_syntax_before_injected_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: the request's fixed Debug representation is checked before the
+/// the request's fixed Debug representation is checked before the
 /// injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_fixed_request_debug_before_injected_transport() {
@@ -191,7 +191,7 @@ async fn web_search_rejects_fixed_request_debug_before_injected_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: the executor's own fixed Debug placeholders are checked against
+/// the executor's own fixed Debug placeholders are checked against
 /// the resolved credential before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_executor_debug_before_injected_transport() {
@@ -221,7 +221,7 @@ async fn web_search_rejects_executor_debug_before_injected_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: the credential value's fixed redacted Debug representation is
+/// the credential value's fixed redacted Debug representation is
 /// checked before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_fixed_credential_debug_before_injected_transport() {
@@ -253,7 +253,7 @@ async fn web_search_rejects_fixed_credential_debug_before_injected_transport() {
     assert!(captured_telemetry().is_empty());
 }
 
-/// INV-035: the result's fixed redacted Debug representation is checked
+/// the result's fixed redacted Debug representation is checked
 /// before an injected transport can emit it as telemetry.
 #[tokio::test]
 async fn web_search_rejects_fixed_result_debug_before_injected_transport() {
@@ -281,7 +281,7 @@ async fn web_search_rejects_fixed_result_debug_before_injected_transport() {
     assert!(!captured_telemetry().contains(RESULT_DEBUG_COLLISION_KEY));
 }
 
-/// INV-035: diagnostic framing that combines the request and credential
+/// diagnostic framing that combines the request and credential
 /// Debug values is checked before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_combined_request_credential_debug_before_transport() {
@@ -339,7 +339,7 @@ async fn web_search_removed_response_debug_field_does_not_block_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 1);
 }
 
-/// INV-035: fixed successful-payload member names are checked before the
+/// fixed successful-payload member names are checked before the
 /// injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_fixed_success_payload_before_injected_transport() {
@@ -369,7 +369,7 @@ async fn web_search_rejects_fixed_success_payload_before_injected_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: fixed JSON delimiters in every successful payload are checked
+/// fixed JSON delimiters in every successful payload are checked
 /// before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_fixed_success_payload_delimiter_before_transport() {
@@ -399,7 +399,7 @@ async fn web_search_rejects_fixed_success_payload_delimiter_before_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: the empty result-list representation is checked before the
+/// the empty result-list representation is checked before the
 /// injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_empty_success_payload_before_injected_transport() {
@@ -425,7 +425,7 @@ async fn web_search_rejects_empty_success_payload_before_injected_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: the delimiter between multiple serialized results is checked
+/// the delimiter between multiple serialized results is checked
 /// before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_multi_result_payload_before_injected_transport() {
@@ -451,7 +451,7 @@ async fn web_search_rejects_multi_result_payload_before_injected_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: fixed successful-payload field framing is checked together
+/// fixed successful-payload field framing is checked together
 /// with every possible provider-controlled value prefix before dispatch.
 #[tokio::test]
 async fn web_search_rejects_success_field_boundary_collision_before_transport() {
@@ -479,7 +479,7 @@ async fn web_search_rejects_success_field_boundary_collision_before_transport() 
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: every provider-controlled value suffix is checked together
+/// every provider-controlled value suffix is checked together
 /// with the following fixed successful-payload framing before dispatch.
 #[tokio::test]
 async fn web_search_rejects_trailing_success_field_boundary_before_transport() {
@@ -507,7 +507,7 @@ async fn web_search_rejects_trailing_success_field_boundary_before_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: the actual serialized snippet-to-title boundary is checked
+/// the actual serialized snippet-to-title boundary is checked
 /// against every possible provider-controlled snippet suffix before dispatch.
 #[tokio::test]
 async fn web_search_rejects_serialized_snippet_title_boundary_before_transport() {
@@ -535,7 +535,7 @@ async fn web_search_rejects_serialized_snippet_title_boundary_before_transport()
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: a credential split across two provider-controlled values and
+/// a credential split across two provider-controlled values and
 /// their complete serialized field separator is rejected before dispatch.
 #[tokio::test]
 async fn web_search_rejects_dynamic_field_boundary_before_transport() {
@@ -563,7 +563,7 @@ async fn web_search_rejects_dynamic_field_boundary_before_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: a credential split across adjacent provider results and their
+/// a credential split across adjacent provider results and their
 /// complete serialized result separator is rejected before dispatch.
 #[tokio::test]
 async fn web_search_rejects_dynamic_result_boundary_before_transport() {
@@ -589,7 +589,7 @@ async fn web_search_rejects_dynamic_result_boundary_before_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: fixed bound-wrapper and payload prefixes are checked together
+/// fixed bound-wrapper and payload prefixes are checked together
 /// with every possible provider-controlled value prefix before dispatch.
 #[tokio::test]
 async fn web_search_rejects_bound_wrapper_dynamic_prefix_before_transport() {
@@ -617,7 +617,7 @@ async fn web_search_rejects_bound_wrapper_dynamic_prefix_before_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: a terminated standard named reference outside the locally decoded
+/// a terminated standard named reference outside the locally decoded
 /// table fails closed before reaching the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_unsupported_named_html_reference_before_transport() {
@@ -647,7 +647,7 @@ async fn web_search_rejects_unsupported_named_html_reference_before_transport() 
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: a numeric HTML reference whose terminator exceeds the scan
+/// a numeric HTML reference whose terminator exceeds the scan
 /// window fails closed before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_over_window_numeric_reference_before_transport() {
@@ -677,7 +677,7 @@ async fn web_search_rejects_over_window_numeric_reference_before_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: reversible query decoding and Unicode case normalization
+/// reversible query decoding and Unicode case normalization
 /// cannot conceal a credential before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_encoded_case_normalized_query_credential_before_transport() {
@@ -707,7 +707,7 @@ async fn web_search_rejects_encoded_case_normalized_query_credential_before_tran
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: reversible decoding of the credential itself cannot conceal a
+/// reversible decoding of the credential itself cannot conceal a
 /// collision with a decoded query before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_query_matching_decoded_credential_before_transport() {
@@ -737,7 +737,7 @@ async fn web_search_rejects_query_matching_decoded_credential_before_transport()
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: JSON Unicode escapes cannot conceal a credential before the
+/// JSON Unicode escapes cannot conceal a credential before the
 /// injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_json_unicode_escaped_query_credential_before_transport() {
@@ -767,7 +767,7 @@ async fn web_search_rejects_json_unicode_escaped_query_credential_before_transpo
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: reversible short JSON escapes in the credential itself cannot
+/// reversible short JSON escapes in the credential itself cannot
 /// conceal a decoded query before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_query_matching_json_solidus_escaped_credential() {
@@ -797,7 +797,7 @@ async fn web_search_rejects_query_matching_json_solidus_escaped_credential() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: a multi-character full Unicode case fold cannot conceal a
+/// a multi-character full Unicode case fold cannot conceal a
 /// credential before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_full_case_folded_query_credential_before_transport() {

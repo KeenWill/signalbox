@@ -95,27 +95,38 @@ evidence naming what failed. The rotation test in
 `crates/persistence/tests/postgres_integration/model_call_execution_and_recovery.rs`
 pins this ending.
 
-Successor: the adapter supplied pre-stream proof that the provider never
-accepted the request, a stop was not requested, and either a transient cause has
-same-credential attempts remaining or the pinned action is `switch_now` and a
-member remains. The turn stays active and keeps its slot; the predecessor
-attempt ends KnownFailure without terminalizing, and the same commit prepares a
-successor attempt. That commit appends no `TurnFailed`: one commit never both
-terminalizes the turn and authorizes a successor. The rotation and transient
-retry tests pin this ending.
+Successor: a stop was not requested, and either a transient cause has
+same-credential attempts remaining with adapter proof that the provider never
+accepted the request, or the pinned action is `switch_now` and a member remains.
+`switch_now` also admits credential rejection without separate non-acceptance
+proof; rejection never admits same-credential retry. Every other availability
+successor requires the adapter's pre-stream proof. The turn stays active and
+keeps its slot; the predecessor attempt ends KnownFailure without terminalizing,
+and the same commit prepares a successor attempt. That commit appends no
+`TurnFailed`: one commit never both terminalizes the turn and authorizes a
+successor. The rotation and transient retry tests pin this ending.
 
-A transient exclusion is the successor's durable retry deadline; after its reset
-the failed member is admitted again. A chain exclusion is written when a failure
-rotates the pool and removes that member for the remainder of the turn. If
-another durable action excludes a retry successor's credential before
-preparation, that successor exhausts instead of selecting another member.
+A same-credential retry additionally requires the failed member itself to remain
+admitted when the observation commits. If a durable action already excludes it,
+the pinned `switch_now` action may rotate to another admitted member; every
+other pinned action terminalizes the known failure.
+
+A transient successor commit writes a credential-scoped durable exclusion whose
+reset equals the successor's durable retry deadline. Every session's call
+preparation skips that credential until the reset passes; after it passes, the
+member is admitted again. A chain exclusion is written when a failure rotates
+the pool and removes that member for the remainder of the turn. If another
+durable action excludes a retry successor's credential before preparation, that
+successor exhausts instead of selecting another member.
 
 A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially
 increasing jittered delay, each capped at five minutes
 (`MAX_AVAILABILITY_BACKOFF` in `crates/persistence/src/model_execution.rs`). A
 successor after a quota failure is immediate. Quota and authentication failures
-bypass same-credential retry and apply their pinned actions immediately.
+bypass same-credential retry and apply their pinned actions immediately. A
+same-credential retry derives local backoff from that credential's recorded
+attempt count; rotation starts the successor's backoff count at one.
 
 The required finite positive
 `numeric_bounds.max_same_credential_attempts_per_turn` bounds recorded calls on
@@ -124,8 +135,9 @@ action instead of readmitting that credential.
 
 Terminal: a known failure no successor is authorized to follow terminalizes the
 turn Failed exactly as it would with no pool. A stop request, missing pre-stream
-proof, non-transient cause without `switch_now`, or transient cause at its bound
-without `switch_now` authorizes no successor.
+proof except for credential-rejection rotation, non-transient cause without
+`switch_now`, or transient cause at its bound without `switch_now` authorizes no
+successor.
 
 ## Planned
 

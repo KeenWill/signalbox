@@ -193,9 +193,6 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
   or an exhausted retry budget on a live owned session parks it with the typed
   cause instead of terminalizing it or stopping silently; see
   [session lifecycle design](../design/session-lifecycle.md).
-- Supersession by redispatch: a module redispatch that owns the retry closes the
-  parked predecessor, a structurally failed one included, as superseded by the
-  successor; see [session lifecycle design](../design/session-lifecycle.md).
 - Deadline events for modules: modules and the program substrate subscribe to
   deadline expiries instead of running their own watchdogs; see
   [session lifecycle design](../design/session-lifecycle.md).
@@ -212,8 +209,8 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
   that parks an active or recovering session on it; see
   [session lifecycle design](../design/session-lifecycle.md).
 - Sticky-stop suppression: re-dispatch of stopped work stays suppressed until
-  the dispatch source is updated; see
-  [session lifecycle design](../design/session-lifecycle.md).
+  the dispatch source is updated; see the
+  [repository-watch reaction contract](repo-watch.md#reducer-and-dispatch-ledger).
 - Worktree and container cleanup on closure: a closed session's worktree and
   container are removed; see
   [session lifecycle design](../design/session-lifecycle.md).

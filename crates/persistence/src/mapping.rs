@@ -513,7 +513,169 @@ pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
-use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
+use crate::{
+    approval_judge::FailedApprovalJudgeDisposition,
+    convergence_sweep::{ConvergenceSweepDecision, ConvergenceSweepFailureKind},
+    outbox::DispatchedRunnerState,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConvergenceSweepStateStorageKind {
+    Observed,
+    RetryWait,
+    Parked,
+}
+
+pub(crate) const fn convergence_sweep_state_to_str(
+    value: ConvergenceSweepStateStorageKind,
+) -> &'static str {
+    match value {
+        ConvergenceSweepStateStorageKind::Observed => "observed",
+        ConvergenceSweepStateStorageKind::RetryWait => "retry_wait",
+        ConvergenceSweepStateStorageKind::Parked => "parked",
+    }
+}
+
+pub(crate) fn convergence_sweep_state_from_str(
+    value: &str,
+) -> Option<ConvergenceSweepStateStorageKind> {
+    match value {
+        "observed" => Some(ConvergenceSweepStateStorageKind::Observed),
+        "retry_wait" => Some(ConvergenceSweepStateStorageKind::RetryWait),
+        "parked" => Some(ConvergenceSweepStateStorageKind::Parked),
+        _ => None,
+    }
+}
+
+pub(crate) const fn convergence_sweep_failure_to_str(
+    value: ConvergenceSweepFailureKind,
+) -> &'static str {
+    match value {
+        ConvergenceSweepFailureKind::FactsFetch => "facts_fetch",
+        ConvergenceSweepFailureKind::CommissionRefused => "commission_refused",
+        ConvergenceSweepFailureKind::TemplateDrift => "template_drift",
+        ConvergenceSweepFailureKind::NoModelActivity => "no_model_activity",
+        ConvergenceSweepFailureKind::StateAccess => "state_access",
+    }
+}
+
+pub(crate) fn convergence_sweep_failure_from_str(
+    value: &str,
+) -> Option<ConvergenceSweepFailureKind> {
+    match value {
+        "facts_fetch" => Some(ConvergenceSweepFailureKind::FactsFetch),
+        "commission_refused" => Some(ConvergenceSweepFailureKind::CommissionRefused),
+        "template_drift" => Some(ConvergenceSweepFailureKind::TemplateDrift),
+        "no_model_activity" => Some(ConvergenceSweepFailureKind::NoModelActivity),
+        "state_access" => Some(ConvergenceSweepFailureKind::StateAccess),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConvergenceSweepOutcomeStorageKind {
+    Dispatched,
+    Converged,
+    CoolingOff,
+    LiveSession,
+    FactsFetchFailed,
+    CommissionRefused,
+    TemplateDrift,
+    NoModelActivity,
+    StateAccessFailed,
+}
+
+pub(crate) const fn convergence_sweep_outcome_to_str(
+    value: ConvergenceSweepOutcomeStorageKind,
+) -> &'static str {
+    match value {
+        ConvergenceSweepOutcomeStorageKind::Dispatched => "dispatched",
+        ConvergenceSweepOutcomeStorageKind::Converged => "converged",
+        ConvergenceSweepOutcomeStorageKind::CoolingOff => "cooling_off",
+        ConvergenceSweepOutcomeStorageKind::LiveSession => "live_session",
+        ConvergenceSweepOutcomeStorageKind::FactsFetchFailed => "facts_fetch_failed",
+        ConvergenceSweepOutcomeStorageKind::CommissionRefused => "commission_refused",
+        ConvergenceSweepOutcomeStorageKind::TemplateDrift => "template_drift",
+        ConvergenceSweepOutcomeStorageKind::NoModelActivity => "no_model_activity",
+        ConvergenceSweepOutcomeStorageKind::StateAccessFailed => "state_access_failed",
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn convergence_sweep_outcome_from_str(
+    value: &str,
+) -> Option<ConvergenceSweepOutcomeStorageKind> {
+    match value {
+        "dispatched" => Some(ConvergenceSweepOutcomeStorageKind::Dispatched),
+        "converged" => Some(ConvergenceSweepOutcomeStorageKind::Converged),
+        "cooling_off" => Some(ConvergenceSweepOutcomeStorageKind::CoolingOff),
+        "live_session" => Some(ConvergenceSweepOutcomeStorageKind::LiveSession),
+        "facts_fetch_failed" => Some(ConvergenceSweepOutcomeStorageKind::FactsFetchFailed),
+        "commission_refused" => Some(ConvergenceSweepOutcomeStorageKind::CommissionRefused),
+        "template_drift" => Some(ConvergenceSweepOutcomeStorageKind::TemplateDrift),
+        "no_model_activity" => Some(ConvergenceSweepOutcomeStorageKind::NoModelActivity),
+        "state_access_failed" => Some(ConvergenceSweepOutcomeStorageKind::StateAccessFailed),
+        _ => None,
+    }
+}
+
+pub(crate) const fn convergence_sweep_failure_outcome(
+    value: ConvergenceSweepFailureKind,
+) -> ConvergenceSweepOutcomeStorageKind {
+    match value {
+        ConvergenceSweepFailureKind::FactsFetch => {
+            ConvergenceSweepOutcomeStorageKind::FactsFetchFailed
+        }
+        ConvergenceSweepFailureKind::CommissionRefused => {
+            ConvergenceSweepOutcomeStorageKind::CommissionRefused
+        }
+        ConvergenceSweepFailureKind::TemplateDrift => {
+            ConvergenceSweepOutcomeStorageKind::TemplateDrift
+        }
+        ConvergenceSweepFailureKind::NoModelActivity => {
+            ConvergenceSweepOutcomeStorageKind::NoModelActivity
+        }
+        ConvergenceSweepFailureKind::StateAccess => {
+            ConvergenceSweepOutcomeStorageKind::StateAccessFailed
+        }
+    }
+}
+
+pub(crate) const fn convergence_sweep_operator_need_to_str(
+    value: ConvergenceSweepFailureKind,
+) -> &'static str {
+    match value {
+        ConvergenceSweepFailureKind::FactsFetch => "repair_facts_fetch",
+        ConvergenceSweepFailureKind::CommissionRefused => "repair_commission",
+        ConvergenceSweepFailureKind::TemplateDrift => "repair_template",
+        ConvergenceSweepFailureKind::NoModelActivity => "inspect_inactive_session",
+        ConvergenceSweepFailureKind::StateAccess => "repair_sweep_state",
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn convergence_sweep_operator_need_from_str(
+    value: &str,
+) -> Option<ConvergenceSweepFailureKind> {
+    match value {
+        "repair_facts_fetch" => Some(ConvergenceSweepFailureKind::FactsFetch),
+        "repair_commission" => Some(ConvergenceSweepFailureKind::CommissionRefused),
+        "repair_template" => Some(ConvergenceSweepFailureKind::TemplateDrift),
+        "inspect_inactive_session" => Some(ConvergenceSweepFailureKind::NoModelActivity),
+        "repair_sweep_state" => Some(ConvergenceSweepFailureKind::StateAccess),
+        _ => None,
+    }
+}
+
+pub(crate) const fn convergence_sweep_decision_outcome(
+    value: ConvergenceSweepDecision,
+) -> ConvergenceSweepOutcomeStorageKind {
+    match value {
+        ConvergenceSweepDecision::Converged => ConvergenceSweepOutcomeStorageKind::Converged,
+        ConvergenceSweepDecision::CoolingOff => ConvergenceSweepOutcomeStorageKind::CoolingOff,
+        ConvergenceSweepDecision::LiveSession => ConvergenceSweepOutcomeStorageKind::LiveSession,
+    }
+}
 
 /// Closed evaluation-corpus source discriminators stored by PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2837,11 +2999,15 @@ mod tests {
     };
     use sqlx::types::Uuid;
 
-    use crate::outbox::DispatchedRunnerState;
+    use crate::{
+        convergence_sweep::{ConvergenceSweepDecision, ConvergenceSweepFailureKind},
+        outbox::DispatchedRunnerState,
+    };
 
     use super::{
         ActiveTurnPhaseStorageKind, ApprovalJudgeStateStorageKind,
         ApprovalJudgeTerminalDispositionStorageKind, BlobReadRejectionStorageKind,
+        ConvergenceSweepOutcomeStorageKind, ConvergenceSweepStateStorageKind,
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
         EvaluationCorpusSourceStorageKind, PlanEventStorageKind, PositiveOrdinalMappingError,
@@ -2855,7 +3021,12 @@ mod tests {
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
         blob_read_rejection_from_str, blob_read_rejection_to_str, bound_child_action_from_str,
-        bound_child_action_to_str, defaults_version_from_numeric, defaults_version_to_numeric,
+        bound_child_action_to_str, convergence_sweep_decision_outcome,
+        convergence_sweep_failure_from_str, convergence_sweep_failure_outcome,
+        convergence_sweep_failure_to_str, convergence_sweep_operator_need_from_str,
+        convergence_sweep_operator_need_to_str, convergence_sweep_outcome_from_str,
+        convergence_sweep_outcome_to_str, convergence_sweep_state_from_str,
+        convergence_sweep_state_to_str, defaults_version_from_numeric, defaults_version_to_numeric,
         delegation_message_direction_from_str, delegation_message_direction_to_str,
         delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
         delegation_outcome_reason_from_str, delegation_outcome_reason_to_str,
@@ -2948,7 +3119,7 @@ mod tests {
     }
 
     #[test]
-    fn inv061_workspace_instruction_root_and_bundle_mappings_are_closed() {
+    fn workspace_instruction_root_and_bundle_mappings_are_closed() {
         assert_eq!(
             instruction_root_kind_to_str(InstructionDiscoveryRootKind::Workspace),
             "workspace"
@@ -2995,7 +3166,7 @@ mod tests {
     }
 
     #[test]
-    fn inv061_workspace_instruction_finding_mapping_is_closed() {
+    fn workspace_instruction_finding_mapping_is_closed() {
         assert_instruction_finding_mapping(
             InstructionDiscoveryFindingKind::RootUnavailable,
             "root_unavailable",
@@ -3042,7 +3213,7 @@ mod tests {
     }
 
     #[test]
-    fn inv061_workspace_instruction_placement_authority_mapping_is_closed() {
+    fn workspace_instruction_placement_authority_mapping_is_closed() {
         assert_eq!(
             workspace_instruction_authority_from_placement_state("unpinned"),
             Some(WorkspaceInstructionAuthorityStorageKind::Runner)
@@ -3066,6 +3237,90 @@ mod tests {
         assert_eq!(
             workspace_instruction_authority_from_placement_state("unknown"),
             None
+        );
+    }
+
+    #[test]
+    fn convergence_sweep_state_mapping_is_closed() {
+        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::Observed);
+        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::RetryWait);
+        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::Parked);
+        assert_eq!(convergence_sweep_state_from_str("unknown"), None);
+    }
+
+    #[track_caller]
+    fn assert_convergence_sweep_state_mapping(value: ConvergenceSweepStateStorageKind) {
+        assert_eq!(
+            convergence_sweep_state_from_str(convergence_sweep_state_to_str(value)),
+            Some(value)
+        );
+    }
+
+    #[test]
+    fn convergence_sweep_failure_mappings_are_closed() {
+        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::FactsFetch);
+        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::CommissionRefused);
+        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::TemplateDrift);
+        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::NoModelActivity);
+        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::StateAccess);
+        assert_eq!(convergence_sweep_failure_from_str("unknown"), None);
+        assert_eq!(convergence_sweep_operator_need_from_str("unknown"), None);
+    }
+
+    #[track_caller]
+    fn assert_convergence_sweep_failure_mappings(failure: ConvergenceSweepFailureKind) {
+        assert_eq!(
+            convergence_sweep_failure_from_str(convergence_sweep_failure_to_str(failure)),
+            Some(failure)
+        );
+        let outcome = convergence_sweep_failure_outcome(failure);
+        assert_eq!(
+            convergence_sweep_outcome_from_str(convergence_sweep_outcome_to_str(outcome)),
+            Some(outcome)
+        );
+        assert_eq!(
+            convergence_sweep_operator_need_from_str(convergence_sweep_operator_need_to_str(
+                failure
+            )),
+            Some(failure)
+        );
+    }
+
+    #[test]
+    fn convergence_sweep_outcome_mapping_is_closed() {
+        assert_convergence_sweep_outcome_mapping(ConvergenceSweepOutcomeStorageKind::Dispatched);
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
+            ConvergenceSweepDecision::Converged,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
+            ConvergenceSweepDecision::CoolingOff,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
+            ConvergenceSweepDecision::LiveSession,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::FactsFetch,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::CommissionRefused,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::TemplateDrift,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::NoModelActivity,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::StateAccess,
+        ));
+        assert_eq!(convergence_sweep_outcome_from_str("unknown"), None);
+    }
+
+    #[track_caller]
+    fn assert_convergence_sweep_outcome_mapping(value: ConvergenceSweepOutcomeStorageKind) {
+        assert_eq!(
+            convergence_sweep_outcome_from_str(convergence_sweep_outcome_to_str(value)),
+            Some(value)
         );
     }
 
@@ -3624,10 +3879,10 @@ mod tests {
         );
     }
 
-    /// INV-003 / INV-053: the JSONB mapping preserves complete model-settings
+    /// the JSONB mapping preserves complete model-settings
     /// precedence, effective value, source evidence, and validation identity.
     #[test]
-    fn inv003_inv053_model_settings_json_round_trips_complete_evidence() {
+    fn model_settings_json_round_trips_complete_evidence() {
         let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x51));
         let capabilities = ModelCapabilities::new(
             BTreeSet::from([ReasoningLevel::High]),
@@ -3654,10 +3909,10 @@ mod tests {
         assert_eq!(decoded, settings);
     }
 
-    /// INV-003: unknown stored settings members fail closed instead of being
+    /// unknown stored settings members fail closed instead of being
     /// silently ignored during reconstitution.
     #[test]
-    fn inv003_model_settings_json_rejects_unknown_members() {
+    fn model_settings_json_rejects_unknown_members() {
         let mut encoded =
             model_settings_to_json(signalbox_domain::ValidatedModelSettings::provider_defaults());
         encoded
@@ -3684,10 +3939,10 @@ mod tests {
         assert!(matches!(nested_error, StoredModelSettingsError::Json(_)));
     }
 
-    /// INV-003: every nullable member remains required durable evidence, so
+    /// every nullable member remains required durable evidence, so
     /// omission cannot normalize a truncated document into provider defaults.
     #[test]
-    fn inv003_model_settings_json_rejects_missing_nullable_members() {
+    fn model_settings_json_rejects_missing_nullable_members() {
         let mut missing_source =
             model_settings_to_json(signalbox_domain::ValidatedModelSettings::provider_defaults());
         missing_source
@@ -3715,10 +3970,10 @@ mod tests {
         assert!(matches!(effective_error, StoredModelSettingsError::Json(_)));
     }
 
-    /// INV-003: fast mode has no provider-default state in the domain, so a
+    /// fast mode has no provider-default state in the domain, so a
     /// durable spelling that invents one fails closed.
     #[test]
-    fn inv003_model_settings_overlay_rejects_provider_default_fast_mode() {
+    fn model_settings_overlay_rejects_provider_default_fast_mode() {
         let encoded = serde_json::json!({
             "reasoning_level": {"kind": "inherit"},
             "fast_mode": {"kind": "provider_default"},
@@ -4064,10 +4319,10 @@ mod tests {
         assert_eq!(tool_approval_posture_from_str(UNKNOWN_POSTURE), None);
     }
 
-    /// INV-002: PostgreSQL numeric values are decoded and checked before a
+    /// PostgreSQL numeric values are decoded and checked before a
     /// domain defaults version exists.
     #[test]
-    fn inv002_defaults_version_numeric_boundary() {
+    fn defaults_version_numeric_boundary() {
         assert_eq!(
             defaults_version_from_numeric(Decimal::ZERO),
             Err(PositiveOrdinalMappingError::NonPositive)
@@ -4097,10 +4352,10 @@ mod tests {
         );
     }
 
-    /// INV-002: PostgreSQL numeric values are decoded and checked before a
+    /// PostgreSQL numeric values are decoded and checked before a
     /// domain input position exists.
     #[test]
-    fn inv002_input_position_numeric_boundary() {
+    fn input_position_numeric_boundary() {
         assert_eq!(
             input_position_from_numeric(Decimal::ZERO),
             Err(PositiveOrdinalMappingError::NonPositive)
@@ -4130,10 +4385,10 @@ mod tests {
         );
     }
 
-    /// INV-002: each CreateSession identity kind crosses the persistence
+    /// each CreateSession identity kind crosses the persistence
     /// boundary through its own typed conversion.
     #[test]
-    fn inv002_create_session_identity_mappings_remain_kind_specific() {
+    fn create_session_identity_mappings_remain_kind_specific() {
         let session_uuid = Uuid::from_u128(1);
         let command_uuid = Uuid::from_u128(2);
 
@@ -4146,10 +4401,10 @@ mod tests {
         assert_eq!(durable_command_id_to_uuid(command), command_uuid);
     }
 
-    /// INV-002: accepted-input and future-turn identities cross the SQL
+    /// accepted-input and future-turn identities cross the SQL
     /// boundary through distinct mappings even though both use native UUIDs.
     #[test]
-    fn inv002_submit_input_identity_mappings_remain_kind_specific() {
+    fn submit_input_identity_mappings_remain_kind_specific() {
         let accepted_uuid = Uuid::from_u128(3);
         let turn_uuid = Uuid::from_u128(4);
 
@@ -4162,10 +4417,10 @@ mod tests {
         assert_eq!(turn_id_to_uuid(turn), turn_uuid);
     }
 
-    /// INV-002: the durable-command boundary rejects the nil and max sentinel
+    /// the durable-command boundary rejects the nil and max sentinel
     /// UUIDs rather than admitting them as command identities.
     #[test]
-    fn inv002_durable_command_mapping_rejects_sentinel_uuids() {
+    fn durable_command_mapping_rejects_sentinel_uuids() {
         assert_eq!(
             durable_command_id_from_uuid(Uuid::nil()),
             Err(DurableCommandIdMappingError::SentinelUuid)

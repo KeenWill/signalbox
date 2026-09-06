@@ -1,0 +1,26 @@
+{
+  "source": "declined-finding.json",
+  "edge": "untrusted disposition",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/author",
+      "value": {
+        "login": "chatgpt-codex-connector"
+      }
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/author",
+      "value": {
+        "login": "chatgpt-codex-connector"
+      }
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/authorAssociation",
+      "value": "NONE"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/authorAssociation",
+      "value": "NONE"
+    }
+  ]
+}

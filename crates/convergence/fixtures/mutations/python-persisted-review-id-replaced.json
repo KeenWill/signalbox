@@ -1,0 +1,14 @@
+{
+  "source": "rename-only-head.json",
+  "edge": "persisted review id replaced",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews/nodes/0/id",
+      "value": "PRR_kwDOTWhy-88AAAABMUiacg-replaced"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews/nodes/0/id",
+      "value": "PRR_kwDOTWhy-88AAAABMUiacg-replaced"
+    }
+  ]
+}

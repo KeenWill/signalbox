@@ -27,11 +27,6 @@ event or rule surface.
 
 ## Compatibility constraints
 
-The dispatch transaction records dispatch, session, context, and input
-identities; provenance references those identities and never recreates or
-reinterprets them. A composed repository-watch worker cannot dispatch until this
-attribution is available.
-
 The persisted cache never holds raw provider JSON, credential values, or
 reactions from actors outside the configured signal-reviewer set. Rules and
 durable events cannot inspect it. The present cursor persists no validator and
