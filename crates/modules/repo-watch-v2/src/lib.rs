@@ -509,6 +509,13 @@ impl RepoWatchStore {
             .bind(repository.as_str())
             .execute(&mut *transaction)
             .await?;
+        let projection_existed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM repository_state WHERE repository = $1)",
+        )
+        .bind(repository.as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
         let projections_match = stored_projections_match(
             &mut transaction,
             repository_state,
@@ -622,7 +629,20 @@ impl RepoWatchStore {
             transaction.rollback().await?;
             return Ok(FrontierEventAdmission::Stale);
         }
-        let next_generation = expected_generation
+        let generation_floor = if projection_existed {
+            expected_generation
+        } else {
+            sqlx::query_scalar::<_, Decimal>(
+                "SELECT COALESCE(max(frontier_generation), 0) FROM gh_event
+                  WHERE repository = $1",
+            )
+            .bind(repository.as_str())
+            .fetch_one(&mut *transaction)
+            .await?
+            .to_u64()
+            .ok_or(StoreError::InvalidFrontierGeneration)?
+        };
+        let next_generation = generation_floor
             .checked_add(1)
             .ok_or(StoreError::InvalidFrontierGeneration)?;
         let mut repository_event_ordinal = sqlx::query_scalar::<_, Decimal>(

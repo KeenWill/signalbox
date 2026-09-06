@@ -1062,6 +1062,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .fetch_one(&module_pool)
             .await?;
     assert!(accepted_event_count > 0);
+    let accepted_event_generation: i64 = sqlx::query_scalar(
+        "SELECT max(frontier_generation)::bigint FROM gh_event WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
     sqlx::query("DELETE FROM repository_state WHERE repository = $1")
         .bind(repository.as_str())
         .execute(&module_pool)
@@ -1075,6 +1081,46 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_one(&module_pool)
     .await?;
     assert_eq!(retained_after_projection_delete, (0, accepted_event_count));
+
+    let restored_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(19)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("restore"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    let restored_occurrence = event_candidate(
+        &restored_event,
+        RepoWatchEventContentIdentityV1::from_bytes([19; 32]),
+    );
+    let restored_generation = u64::try_from(accepted_event_generation)? + 1;
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &projection,
+                0,
+                &frontier_entries(&frontier),
+                &[restored_occurrence],
+                EventProducer::Poll,
+                observed_at + Duration::from_secs(5),
+            )
+            .await?,
+        FrontierEventAdmission::Committed {
+            generation: restored_generation,
+            events: Box::new([EventAdmission::Inserted]),
+        }
+    );
+    let restored_coordinates: (Decimal, Decimal) = sqlx::query_as(
+        "SELECT frontier_generation, event_ordinal
+           FROM gh_event WHERE event_id = $1",
+    )
+    .bind(restored_event.id().into_uuid())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(
+        restored_coordinates,
+        (Decimal::from(restored_generation), Decimal::from(1_u64))
+    );
 
     module_pool.close().await;
     core_pool.close().await;
