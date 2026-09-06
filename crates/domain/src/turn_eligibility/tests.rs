@@ -1,7 +1,7 @@
 //! Turn scheduling eligibility tests for `docs/spec/turn-lifecycle-and-scheduling.md`.
 
 use expect_test::expect;
-use signalbox_expect_table::table;
+use expectable::print;
 
 use super::*;
 use crate::{

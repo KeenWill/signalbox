@@ -749,7 +749,7 @@ mod tests {
         ReplaceSessionDefaultsReconstitutionInput, ReplaceSessionDefaultsRejectedResult,
         ReplaceSessionDefaultsResult,
     };
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use crate::test_support::{command_id, direct, session_id};
     use crate::{
@@ -1197,14 +1197,10 @@ mod tests {
         /// rendered as a snapshot row supplementing the targeted asserts
         /// above (TS-10, TS-12). The field names
         /// are the rendered column headers.
-        #[derive(Debug)]
-        #[allow(
-            dead_code,
-            reason = "the table renderer reads every field through the Debug derive"
-        )]
+        #[derive(Debug, serde::Serialize)]
         struct PerturbedFactRow {
             perturbed_stored_fact: &'static str,
-            failure: ReplaceSessionDefaultsReconstitutionFailure,
+            failure: String,
         }
 
         expect![[r#"
@@ -1218,26 +1214,26 @@ mod tests {
             │ stored replacement differs         │ StoredDefaultsMismatch         │
             └────────────────────────────────────┴────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             PerturbedFactRow {
                 perturbed_stored_fact: "result session cross-wired",
-                failure: cross_wired_result,
+                failure: format!("{cross_wired_result:?}"),
             },
             PerturbedFactRow {
                 perturbed_stored_fact: "defaults owner cross-wired",
-                failure: cross_wired_defaults_owner,
+                failure: format!("{cross_wired_defaults_owner:?}"),
             },
             PerturbedFactRow {
                 perturbed_stored_fact: "result and installed versions torn",
-                failure: torn_result_version,
+                failure: format!("{torn_result_version:?}"),
             },
             PerturbedFactRow {
                 perturbed_stored_fact: "installed version skips successor",
-                failure: skipped_successor,
+                failure: format!("{skipped_successor:?}"),
             },
             PerturbedFactRow {
                 perturbed_stored_fact: "stored replacement differs",
-                failure: replaced_defaults,
+                failure: format!("{replaced_defaults:?}"),
             },
         ]));
     }

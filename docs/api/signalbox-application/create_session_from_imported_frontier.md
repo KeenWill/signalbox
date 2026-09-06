@@ -10,16 +10,16 @@ pub struct CreateSessionFromImportedFrontierRequest {/* private */}
 impl CreateSessionFromImportedFrontierRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
-        imported_frontier: entry::ImportedTranscriptFrontier,
-        relationship: session::ImportedSessionRelationship,
-        initial_configuration_defaults: configuration::SessionConfigurationDefaults,
+        imported_frontier: signalbox_domain::ImportedTranscriptFrontier,
+        relationship: signalbox_domain::ImportedSessionRelationship,
+        initial_configuration_defaults: signalbox_domain::SessionConfigurationDefaults,
     ) -> result::Result<Self, InvalidDurableCommandId>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
-    pub const fn imported_frontier(&self) -> entry::ImportedTranscriptFrontier;
-    pub const fn relationship(&self) -> session::ImportedSessionRelationship;
+    pub const fn imported_frontier(&self) -> signalbox_domain::ImportedTranscriptFrontier;
+    pub const fn relationship(&self) -> signalbox_domain::ImportedSessionRelationship;
     pub const fn initial_configuration_defaults(
         &self,
-    ) -> &configuration::SessionConfigurationDefaults;
+    ) -> &signalbox_domain::SessionConfigurationDefaults;
 }
 ```
 
@@ -28,8 +28,8 @@ impl CreateSessionFromImportedFrontierRequest {
 ```rust
 pub trait CreateSessionFromImportedFrontierIdGenerator {
     fn next_session_id(&mut self) -> signalbox_domain::SessionId;
-    fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_semantic_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
 }
 ```
 
@@ -42,8 +42,8 @@ impl CreateSessionFromImportedFrontierIdGenerator
     for UuidV7CreateSessionFromImportedFrontierIdGenerator
 {
     fn next_session_id(&mut self) -> signalbox_domain::SessionId;
-    fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_semantic_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
 }
 ```
 
@@ -51,12 +51,12 @@ impl CreateSessionFromImportedFrontierIdGenerator
 
 ```rust
 pub enum CreateSessionFromImportedFrontierOutcome {
-    Applied(imported_session::CreateSessionFromImportedFrontierAppliedResult),
+    Applied(signalbox_domain::CreateSessionFromImportedFrontierAppliedResult),
     ImportedConversationNotFound {
         conversation: signalbox_domain::ImportedConversationId,
     },
     ImportedFrontierNotFound {
-        frontier: entry::ImportedTranscriptFrontier,
+        frontier: signalbox_domain::ImportedTranscriptFrontier,
     },
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
@@ -72,9 +72,9 @@ pub trait CreateSessionFromImportedFrontierTransaction {
     type Error;
     fn handle<NextSemanticEntryId>(
         &mut self,
-        command: session::CreateSessionFromImportedFrontier,
+        command: signalbox_domain::CreateSessionFromImportedFrontier,
         session: signalbox_domain::SessionId,
-        seed_frontier: context_frontier::ContextFrontierId,
+        seed_frontier: signalbox_domain::ContextFrontierId,
         next_semantic_entry_id: NextSemanticEntryId,
     ) -> impl future::Future<
         Output = result::Result<
@@ -84,7 +84,7 @@ pub trait CreateSessionFromImportedFrontierTransaction {
     > + marker::Send
     where
         NextSemanticEntryId:
-            function::FnMut() -> context_frontier::SemanticTranscriptEntryId + marker::Send;
+            function::FnMut() -> signalbox_domain::SemanticTranscriptEntryId + marker::Send;
 }
 ```
 

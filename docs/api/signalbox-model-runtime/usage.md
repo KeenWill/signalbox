@@ -12,12 +12,6 @@ pub struct TokenUsage {
     pub cache_read_input_tokens: option::Option<u64>,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq, default::Default
-impl<T> dyn_clone::DynClone for TokenUsage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl TokenUsage {
     pub fn unreported() -> Self;
     pub fn absorb(&mut self, later: TokenUsage);

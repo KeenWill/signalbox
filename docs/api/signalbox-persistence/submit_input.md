@@ -6,66 +6,12 @@
 
 ```rust
 pub enum SubmitInputHandlingOutcome {
-    Recorded(result::SubmitInputResult),
+    Recorded(signalbox_domain::SubmitInputResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for submit_input::SubmitInputHandlingOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for submit_input::SubmitInputHandlingOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for submit_input::SubmitInputHandlingOutcome {}
-impl<T> parse_display::IntoResult<T> for submit_input::SubmitInputHandlingOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for submit_input::SubmitInputHandlingOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for submit_input::SubmitInputHandlingOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for submit_input::SubmitInputHandlingOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for submit_input::SubmitInputHandlingOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for submit_input::SubmitInputHandlingOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for submit_input::SubmitInputHandlingOutcome
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## SubmitInputCorruption
@@ -84,67 +30,13 @@ pub enum SubmitInputCorruption {
     },
     InvalidContent {
         field: &'static str,
-        failure: user_content::NonEmptyUnicodeTextFailure,
+        failure: signalbox_domain::NonEmptyUnicodeTextFailure,
     },
     CurrentSession(session::SessionCorruption),
-    Domain(reconstituted::SubmitInputReconstitutionFailure),
-    Scheduling(failure::AcceptedInputSchedulingReconstitutionFailure),
+    Domain(signalbox_domain::SubmitInputReconstitutionFailure),
+    Scheduling(signalbox_domain::AcceptedInputSchedulingReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for submit_input::SubmitInputCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for submit_input::SubmitInputCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for submit_input::SubmitInputCorruption {}
-impl<T> parse_display::IntoResult<T> for submit_input::SubmitInputCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for submit_input::SubmitInputCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for submit_input::SubmitInputCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for submit_input::SubmitInputCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for submit_input::SubmitInputCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for submit_input::SubmitInputCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for submit_input::SubmitInputCorruption
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for submit_input::SubmitInputCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -167,53 +59,11 @@ pub enum SubmitInputRepositoryError {
         active_turn: signalbox_domain::TurnId,
         accepted_input: signalbox_domain::AcceptedInputId,
     },
-    UnsupportedModelSetting(model_settings::UnsupportedModelSetting),
+    UnsupportedModelSetting(signalbox_domain::UnsupportedModelSetting),
     Corruption(submit_input::SubmitInputCorruption),
     ModelExecution(boxed::Box<model_execution::ModelCallRepositoryError>),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for submit_input::SubmitInputRepositoryError {}
-impl<T> parse_display::IntoResult<T> for submit_input::SubmitInputRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for submit_input::SubmitInputRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for submit_input::SubmitInputRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for submit_input::SubmitInputRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for submit_input::SubmitInputRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for submit_input::SubmitInputRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for submit_input::SubmitInputRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for submit_input::SubmitInputRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -240,74 +90,20 @@ impl convert::From<model_execution::ModelCallRepositoryError>
 ```rust
 pub struct SubmitInputRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for submit_input::SubmitInputRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for submit_input::SubmitInputRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for submit_input::SubmitInputRepository {}
-impl<T> parse_display::IntoResult<T> for submit_input::SubmitInputRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for submit_input::SubmitInputRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for submit_input::SubmitInputRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for submit_input::SubmitInputRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for submit_input::SubmitInputRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for submit_input::SubmitInputRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for submit_input::SubmitInputRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl submit_input::SubmitInputRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub fn with_model_capabilities(
         pool: sqlx_postgres::PgPool,
-        model_capabilities: model_settings::ModelCapabilityCatalog,
+        model_capabilities: signalbox_domain::ModelCapabilityCatalog,
     ) -> Self;
     #[must_use]
     pub const fn with_attachment_maximum_bytes(self, maximum_bytes: u64) -> Self;
     pub async fn handle_with_candidates<NextTurn, NextToolCancellation>(
         &self,
-        command: command::SubmitInput,
+        command: signalbox_domain::SubmitInput,
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: option::Option<signalbox_domain::TurnId>,
-        cancellation_identities: model_execution::CancelledModelCallTurnIdentities,
+        cancellation_identities: signalbox_domain::CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
     ) -> result::Result<
@@ -320,21 +116,22 @@ impl submit_input::SubmitInputRepository {
         NextToolCancellation: function::FnMut(
                 &[signalbox_domain::ToolRequestId],
             ) -> (
-                vec::Vec<context_frontier::SemanticTranscriptEntryId>,
-                context_frontier::ContextFrontierId,
+                vec::Vec<signalbox_domain::SemanticTranscriptEntryId>,
+                signalbox_domain::ContextFrontierId,
             ) + marker::Send;
     pub async fn handle_with_candidates_alias_resolver<NextTurn, NextToolCancellation>(
         &self,
-        command: command::SubmitInput,
+        command: signalbox_domain::SubmitInput,
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: option::Option<signalbox_domain::TurnId>,
-        cancellation_identities: model_execution::CancelledModelCallTurnIdentities,
+        cancellation_identities: signalbox_domain::CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
         select_definition: impl function::FnOnce(
-            configuration::ModelAlias,
-        )
-            -> option::Option<configuration::FrozenAliasDefinition>,
+            signalbox_domain::ModelAlias,
+        ) -> option::Option<
+            signalbox_domain::FrozenAliasDefinition,
+        >,
     ) -> result::Result<
         submit_input::SubmitInputHandlingOutcome,
         submit_input::SubmitInputRepositoryError,
@@ -345,8 +142,8 @@ impl submit_input::SubmitInputRepository {
         NextToolCancellation: function::FnMut(
                 &[signalbox_domain::ToolRequestId],
             ) -> (
-                vec::Vec<context_frontier::SemanticTranscriptEntryId>,
-                context_frontier::ContextFrontierId,
+                vec::Vec<signalbox_domain::SemanticTranscriptEntryId>,
+                signalbox_domain::ContextFrontierId,
             ) + marker::Send;
     pub async fn handle_with_candidates_alias_resolver_as<
         NextTurn,
@@ -355,20 +152,21 @@ impl submit_input::SubmitInputRepository {
         NextClosureAttempt,
     >(
         &self,
-        command: command::SubmitInput,
-        principal: session_lifecycle_command::CommandPrincipal,
-        cascade_root_kind: vocabulary::ParentTerminationKind,
+        command: signalbox_domain::SubmitInput,
+        principal: signalbox_domain::CommandPrincipal,
+        cascade_root_kind: signalbox_domain::ParentTerminationKind,
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: option::Option<signalbox_domain::TurnId>,
-        cancellation_identities: model_execution::CancelledModelCallTurnIdentities,
+        cancellation_identities: signalbox_domain::CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
         next_closure_decision: NextClosureDecision,
         next_closure_attempt: NextClosureAttempt,
         select_definition: impl function::FnOnce(
-            configuration::ModelAlias,
-        )
-            -> option::Option<configuration::FrozenAliasDefinition>,
+            signalbox_domain::ModelAlias,
+        ) -> option::Option<
+            signalbox_domain::FrozenAliasDefinition,
+        >,
     ) -> result::Result<
         submit_input::SubmitInputHandlingOutcome,
         submit_input::SubmitInputRepositoryError,
@@ -379,8 +177,8 @@ impl submit_input::SubmitInputRepository {
         NextToolCancellation: function::FnMut(
                 &[signalbox_domain::ToolRequestId],
             ) -> (
-                vec::Vec<context_frontier::SemanticTranscriptEntryId>,
-                context_frontier::ContextFrontierId,
+                vec::Vec<signalbox_domain::SemanticTranscriptEntryId>,
+                signalbox_domain::ContextFrontierId,
             ) + marker::Send,
         NextClosureDecision: function::FnMut() -> signalbox_domain::DurableCommandId + marker::Send,
         NextClosureAttempt: function::FnMut() -> signalbox_domain::TurnAttemptId + marker::Send;
@@ -388,25 +186,25 @@ impl submit_input::SubmitInputRepository {
         &self,
         command_id: signalbox_domain::DurableCommandId,
     ) -> result::Result<
-        option::Option<reconstituted::ReconstitutedSubmitInput>,
+        option::Option<signalbox_domain::ReconstitutedSubmitInput>,
         submit_input::SubmitInputRepositoryError,
     >;
 }
-impl submit_input::SubmitInputTransaction for submit_input::SubmitInputRepository {
+impl signalbox_application::SubmitInputTransaction for submit_input::SubmitInputRepository {
     type Error = submit_input::SubmitInputRepositoryError;
     async fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
         &mut self,
-        command: command::SubmitInput,
+        command: signalbox_domain::SubmitInput,
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: option::Option<signalbox_domain::TurnId>,
-        cancellation_identities: model_execution::CancelledModelCallTurnIdentities,
+        cancellation_identities: signalbox_domain::CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
         _next_closure_decision: NextClosureDecision,
         _next_closure_attempt: NextClosureAttempt,
     ) -> result::Result<
-        submit_input::SubmitInputOutcome,
-        <Self as submit_input::SubmitInputTransaction>::Error,
+        signalbox_application::SubmitInputOutcome,
+        <Self as signalbox_application::SubmitInputTransaction>::Error,
     >
     where
         NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId
@@ -414,8 +212,8 @@ impl submit_input::SubmitInputTransaction for submit_input::SubmitInputRepositor
         NextToolCancellation: function::FnMut(
                 &[signalbox_domain::ToolRequestId],
             ) -> (
-                vec::Vec<context_frontier::SemanticTranscriptEntryId>,
-                context_frontier::ContextFrontierId,
+                vec::Vec<signalbox_domain::SemanticTranscriptEntryId>,
+                signalbox_domain::ContextFrontierId,
             ) + marker::Send,
         NextClosureDecision: function::FnMut() -> signalbox_domain::DurableCommandId + marker::Send,
         NextClosureAttempt: function::FnMut() -> signalbox_domain::TurnAttemptId + marker::Send;
@@ -428,62 +226,8 @@ impl submit_input::SubmitInputTransaction for submit_input::SubmitInputRepositor
 pub struct FreshInitialInput {
     pub accepted_input: signalbox_domain::AcceptedInputId,
     pub turn: signalbox_domain::TurnId,
-    pub cancellation_entry: context_frontier::SemanticTranscriptEntryId,
-    pub cancellation_frontier: context_frontier::ContextFrontierId,
+    pub cancellation_entry: signalbox_domain::SemanticTranscriptEntryId,
+    pub cancellation_frontier: signalbox_domain::ContextFrontierId,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for submit_input::FreshInitialInput
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for submit_input::FreshInitialInput
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for submit_input::FreshInitialInput {}
-impl<T> parse_display::IntoResult<T> for submit_input::FreshInitialInput {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for submit_input::FreshInitialInput
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for submit_input::FreshInitialInput {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for submit_input::FreshInitialInput {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for submit_input::FreshInitialInput
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for submit_input::FreshInitialInput
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for submit_input::FreshInitialInput
-where
-    T: ?marker::Sized,
-{
-}
 ```

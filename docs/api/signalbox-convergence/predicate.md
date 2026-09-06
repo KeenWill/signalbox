@@ -36,7 +36,6 @@ pub enum Reason {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, cmp::Eq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for Reason where T: for<'de> de::Deserialize<'de> {}
 impl Reason {
     pub fn reference_reason(&self) -> string::String;
 }
@@ -50,7 +49,6 @@ pub enum Verdict {
     NotConverged { reasons: vec::Vec<Reason> },
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, cmp::Eq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for Verdict where T: for<'de> de::Deserialize<'de> {}
 impl Verdict {
     pub fn is_converged(&self) -> bool;
     pub fn reasons(&self) -> &[Reason];
@@ -77,7 +75,6 @@ pub struct Facts {
     pub base_commits_not_in_head: option::Option<u64>,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, ser::Serialize
-impl<T> de::DeserializeOwned for Facts where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## evaluate_facts

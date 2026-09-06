@@ -12,60 +12,6 @@ pub enum StartupScanIdentityCollision {
     ReclassifiedTurn,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for startup::StartupScanIdentityCollision
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for startup::StartupScanIdentityCollision
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for startup::StartupScanIdentityCollision {}
-impl<T> parse_display::IntoResult<T> for startup::StartupScanIdentityCollision {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for startup::StartupScanIdentityCollision
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for startup::StartupScanIdentityCollision {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for startup::StartupScanIdentityCollision {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for startup::StartupScanIdentityCollision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for startup::StartupScanIdentityCollision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for startup::StartupScanIdentityCollision
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for startup::StartupScanIdentityCollision {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -85,60 +31,6 @@ pub enum StartupScanCorruption {
     ModelCall(model_execution::ModelCallCorruption),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for startup::StartupScanCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for startup::StartupScanCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for startup::StartupScanCorruption {}
-impl<T> parse_display::IntoResult<T> for startup::StartupScanCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for startup::StartupScanCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for startup::StartupScanCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for startup::StartupScanCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for startup::StartupScanCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for startup::StartupScanCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for startup::StartupScanCorruption
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for startup::StartupScanCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -162,56 +54,14 @@ pub enum StartupScanRepositoryError {
     IdentityCollision(startup::StartupScanIdentityCollision),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for startup::StartupScanRepositoryError {}
-impl<T> parse_display::IntoResult<T> for startup::StartupScanRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for startup::StartupScanRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for startup::StartupScanRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for startup::StartupScanRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for startup::StartupScanRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for startup::StartupScanRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for startup::StartupScanRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for startup::StartupScanRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for startup::StartupScanRepositoryError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for startup::StartupScanRepositoryError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for startup::StartupScanRepositoryError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 impl convert::From<startup::StartupScanCorruption> for startup::StartupScanRepositoryError {
     fn from(error: startup::StartupScanCorruption) -> Self;
@@ -229,60 +79,6 @@ impl startup::StartupScanRepositoryError {
 ```rust
 pub struct PostgresStartupScanRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for startup::PostgresStartupScanRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for startup::PostgresStartupScanRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for startup::PostgresStartupScanRepository {}
-impl<T> parse_display::IntoResult<T> for startup::PostgresStartupScanRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for startup::PostgresStartupScanRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for startup::PostgresStartupScanRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for startup::PostgresStartupScanRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for startup::PostgresStartupScanRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for startup::PostgresStartupScanRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for startup::PostgresStartupScanRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl startup::PostgresStartupScanRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn active_sessions(
@@ -294,30 +90,33 @@ impl startup::PostgresStartupScanRepository {
     pub async fn recover<Generator>(
         &self,
         session: signalbox_domain::SessionId,
-        identities: turn_failure::AcceptedInputTurnFailureIdentities,
+        identities: signalbox_domain::AcceptedInputTurnFailureIdentities,
         ids: &mut Generator,
-    ) -> result::Result<startup_scan::StartupScanSessionOutcome, startup::StartupScanRepositoryError>
+    ) -> result::Result<
+        signalbox_application::StartupScanSessionOutcome,
+        startup::StartupScanRepositoryError,
+    >
     where
-        Generator: startup_scan::StartupScanIdGenerator + marker::Send;
+        Generator: signalbox_application::StartupScanIdGenerator + marker::Send;
 }
-impl startup_scan::StartupScanRepository for startup::PostgresStartupScanRepository {
+impl signalbox_application::StartupScanRepository for startup::PostgresStartupScanRepository {
     type Error = startup::StartupScanRepositoryError;
     async fn active_sessions(
         &mut self,
     ) -> result::Result<
         boxed::Box<[signalbox_domain::SessionId]>,
-        <Self as startup_scan::StartupScanRepository>::Error,
+        <Self as signalbox_application::StartupScanRepository>::Error,
     >;
     async fn recover<Generator>(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_failure::AcceptedInputTurnFailureIdentities,
+        identities: signalbox_domain::AcceptedInputTurnFailureIdentities,
         ids: &mut Generator,
     ) -> result::Result<
-        startup_scan::StartupScanSessionOutcome,
-        <Self as startup_scan::StartupScanRepository>::Error,
+        signalbox_application::StartupScanSessionOutcome,
+        <Self as signalbox_application::StartupScanRepository>::Error,
     >
     where
-        Generator: startup_scan::StartupScanIdGenerator + marker::Send;
+        Generator: signalbox_application::StartupScanIdGenerator + marker::Send;
 }
 ```

@@ -41,11 +41,11 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
     pub const fn for_pull_request(
         stream_identity: [u8; 32],
         sequence: nonzero::NonZeroU64,
-        pull_request_number: repo_watch::PullRequestNumber,
+        pull_request_number: signalbox_domain::PullRequestNumber,
     ) -> Self;
     pub const fn stream_identity(&self) -> &[u8; 32];
     pub const fn sequence(&self) -> nonzero::NonZeroU64;
-    pub const fn pull_request_number(&self) -> option::Option<repo_watch::PullRequestNumber>;
+    pub const fn pull_request_number(&self) -> option::Option<signalbox_domain::PullRequestNumber>;
 }
 ```
 
@@ -87,13 +87,14 @@ impl error::Error for RepoWatchEventIdentityFrontierError {
 pub struct RepoWatchEventOccurrenceV1 {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RepoWatchEventOccurrenceV1 {
+    #[cfg(feature = "test-support")]
     pub const fn from_parts(
-        event: repo_watch::RepoWatchEvent,
+        event: signalbox_domain::RepoWatchEvent,
         content_identity: RepoWatchEventContentIdentityV1,
     ) -> Self;
-    pub const fn event(&self) -> &repo_watch::RepoWatchEvent;
+    pub const fn event(&self) -> &signalbox_domain::RepoWatchEvent;
     pub const fn content_identity(&self) -> RepoWatchEventContentIdentityV1;
-    pub fn into_event(self) -> repo_watch::RepoWatchEvent;
+    pub fn into_event(self) -> signalbox_domain::RepoWatchEvent;
 }
 ```
 
@@ -141,13 +142,13 @@ pub struct RepoWatchCheckSuiteObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RepoWatchCheckSuiteObservation {
     pub const fn new(
-        id: repo_watch::GitHubObjectId,
+        id: signalbox_domain::GitHubObjectId,
         completion_generation: RepoWatchCheckCompletionGeneration,
-        outcome: repo_watch::ChecksOutcome,
+        outcome: signalbox_domain::ChecksOutcome,
     ) -> Self;
-    pub const fn id(&self) -> repo_watch::GitHubObjectId;
+    pub const fn id(&self) -> signalbox_domain::GitHubObjectId;
     pub const fn completion_generation(&self) -> &RepoWatchCheckCompletionGeneration;
-    pub const fn outcome(&self) -> repo_watch::ChecksOutcome;
+    pub const fn outcome(&self) -> signalbox_domain::ChecksOutcome;
 }
 ```
 
@@ -158,15 +159,15 @@ pub struct RepoWatchCheckRunObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RepoWatchCheckRunObservation {
     pub const fn new(
-        id: repo_watch::GitHubObjectId,
+        id: signalbox_domain::GitHubObjectId,
         completion_generation: RepoWatchCheckCompletionGeneration,
-        name: repo_watch::CheckRunName,
-        conclusion: repo_watch::CheckConclusion,
+        name: signalbox_domain::CheckRunName,
+        conclusion: signalbox_domain::CheckConclusion,
     ) -> Self;
-    pub const fn id(&self) -> repo_watch::GitHubObjectId;
+    pub const fn id(&self) -> signalbox_domain::GitHubObjectId;
     pub const fn completion_generation(&self) -> &RepoWatchCheckCompletionGeneration;
-    pub const fn name(&self) -> &repo_watch::CheckRunName;
-    pub const fn conclusion(&self) -> repo_watch::CheckConclusion;
+    pub const fn name(&self) -> &signalbox_domain::CheckRunName;
+    pub const fn conclusion(&self) -> signalbox_domain::CheckConclusion;
 }
 ```
 
@@ -177,15 +178,15 @@ pub struct RepoWatchReviewObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RepoWatchReviewObservation {
     pub const fn new(
-        id: repo_watch::GitHubObjectId,
-        reviewer: repo_watch::RepoWatchAuthorLogin,
-        state: option::Option<repo_watch::ReviewState>,
-        commit: repo_watch::CommitSha,
+        id: signalbox_domain::GitHubObjectId,
+        reviewer: signalbox_domain::RepoWatchAuthorLogin,
+        state: option::Option<signalbox_domain::ReviewState>,
+        commit: signalbox_domain::CommitSha,
     ) -> Self;
-    pub const fn id(&self) -> repo_watch::GitHubObjectId;
-    pub const fn reviewer(&self) -> &repo_watch::RepoWatchAuthorLogin;
-    pub const fn state(&self) -> option::Option<repo_watch::ReviewState>;
-    pub const fn commit(&self) -> &repo_watch::CommitSha;
+    pub const fn id(&self) -> signalbox_domain::GitHubObjectId;
+    pub const fn reviewer(&self) -> &signalbox_domain::RepoWatchAuthorLogin;
+    pub const fn state(&self) -> option::Option<signalbox_domain::ReviewState>;
+    pub const fn commit(&self) -> &signalbox_domain::CommitSha;
 }
 ```
 
@@ -205,8 +206,9 @@ pub enum RepoWatchThreadState {
 pub struct RepoWatchThreadObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RepoWatchThreadObservation {
-    pub const fn new(thread: repo_watch::ReviewThreadId, state: RepoWatchThreadState) -> Self;
-    pub const fn thread(&self) -> &repo_watch::ReviewThreadId;
+    pub const fn new(thread: signalbox_domain::ReviewThreadId, state: RepoWatchThreadState)
+        -> Self;
+    pub const fn thread(&self) -> &signalbox_domain::ReviewThreadId;
     pub const fn state(&self) -> RepoWatchThreadState;
 }
 ```
@@ -218,13 +220,13 @@ pub struct RepoWatchReactionObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RepoWatchReactionObservation {
     pub const fn new(
-        subject: repo_watch::ReactionSubject,
-        reactor: repo_watch::RepoWatchAuthorLogin,
-        content: repo_watch::ReactionContent,
+        subject: signalbox_domain::ReactionSubject,
+        reactor: signalbox_domain::RepoWatchAuthorLogin,
+        content: signalbox_domain::ReactionContent,
     ) -> Self;
-    pub const fn subject(&self) -> repo_watch::ReactionSubject;
-    pub const fn reactor(&self) -> &repo_watch::RepoWatchAuthorLogin;
-    pub const fn content(&self) -> &repo_watch::ReactionContent;
+    pub const fn subject(&self) -> signalbox_domain::ReactionSubject;
+    pub const fn reactor(&self) -> &signalbox_domain::RepoWatchAuthorLogin;
+    pub const fn content(&self) -> &signalbox_domain::ReactionContent;
 }
 ```
 
@@ -235,10 +237,10 @@ pub struct RepoWatchMergedCheckSuiteBaselineV1 {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl RepoWatchMergedCheckSuiteBaselineV1 {
     pub const fn new(
-        id: repo_watch::GitHubObjectId,
+        id: signalbox_domain::GitHubObjectId,
         completion_generation: RepoWatchCheckCompletionGeneration,
     ) -> Self;
-    pub const fn id(&self) -> repo_watch::GitHubObjectId;
+    pub const fn id(&self) -> signalbox_domain::GitHubObjectId;
     pub const fn completion_generation(&self) -> &RepoWatchCheckCompletionGeneration;
 }
 ```
@@ -250,13 +252,13 @@ pub struct RepoWatchMergedCheckRunBaselineV1 {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl RepoWatchMergedCheckRunBaselineV1 {
     pub const fn new(
-        id: repo_watch::GitHubObjectId,
+        id: signalbox_domain::GitHubObjectId,
         completion_generation: RepoWatchCheckCompletionGeneration,
-        conclusion: repo_watch::CheckConclusion,
+        conclusion: signalbox_domain::CheckConclusion,
     ) -> Self;
-    pub const fn id(&self) -> repo_watch::GitHubObjectId;
+    pub const fn id(&self) -> signalbox_domain::GitHubObjectId;
     pub const fn completion_generation(&self) -> &RepoWatchCheckCompletionGeneration;
-    pub const fn conclusion(&self) -> repo_watch::CheckConclusion;
+    pub const fn conclusion(&self) -> signalbox_domain::CheckConclusion;
 }
 ```
 
@@ -264,14 +266,14 @@ impl RepoWatchMergedCheckRunBaselineV1 {
 
 ```rust
 pub struct RepoWatchMergedPullRequestBaselineInputV1 {
-    pub number: repo_watch::PullRequestNumber,
-    pub head_sha: repo_watch::CommitSha,
-    pub signal_reviewers: vec::Vec<repo_watch::RepoWatchAuthorLogin>,
-    pub labels: vec::Vec<repo_watch::LabelName>,
-    pub mergeable_state: repo_watch::MergeableState,
+    pub number: signalbox_domain::PullRequestNumber,
+    pub head_sha: signalbox_domain::CommitSha,
+    pub signal_reviewers: vec::Vec<signalbox_domain::RepoWatchAuthorLogin>,
+    pub labels: vec::Vec<signalbox_domain::LabelName>,
+    pub mergeable_state: signalbox_domain::MergeableState,
     pub completed_check_suites: vec::Vec<RepoWatchMergedCheckSuiteBaselineV1>,
     pub completed_check_runs: vec::Vec<RepoWatchMergedCheckRunBaselineV1>,
-    pub review_ids: vec::Vec<repo_watch::GitHubObjectId>,
+    pub review_ids: vec::Vec<signalbox_domain::GitHubObjectId>,
     pub threads: vec::Vec<RepoWatchThreadObservation>,
     pub reactions: vec::Vec<RepoWatchReactionObservation>,
 }
@@ -289,16 +291,16 @@ impl RepoWatchMergedPullRequestBaselineV1 {
     ) -> result::Result<Self, RepoWatchRepositoryStateError>;
     pub fn from_merged_state(
         state: &RepoWatchPullRequestState,
-        signal_reviewers: &[repo_watch::RepoWatchAuthorLogin],
+        signal_reviewers: &[signalbox_domain::RepoWatchAuthorLogin],
     ) -> result::Result<option::Option<Self>, RepoWatchRepositoryStateError>;
-    pub const fn number(&self) -> repo_watch::PullRequestNumber;
-    pub const fn head_sha(&self) -> &repo_watch::CommitSha;
-    pub fn signal_reviewers(&self) -> &[repo_watch::RepoWatchAuthorLogin];
-    pub fn labels(&self) -> &[repo_watch::LabelName];
-    pub const fn mergeable_state(&self) -> repo_watch::MergeableState;
+    pub const fn number(&self) -> signalbox_domain::PullRequestNumber;
+    pub const fn head_sha(&self) -> &signalbox_domain::CommitSha;
+    pub fn signal_reviewers(&self) -> &[signalbox_domain::RepoWatchAuthorLogin];
+    pub fn labels(&self) -> &[signalbox_domain::LabelName];
+    pub const fn mergeable_state(&self) -> signalbox_domain::MergeableState;
     pub fn completed_check_suites(&self) -> &[RepoWatchMergedCheckSuiteBaselineV1];
     pub fn completed_check_runs(&self) -> &[RepoWatchMergedCheckRunBaselineV1];
-    pub fn review_ids(&self) -> &[repo_watch::GitHubObjectId];
+    pub fn review_ids(&self) -> &[signalbox_domain::GitHubObjectId];
     pub fn threads(&self) -> &[RepoWatchThreadObservation];
     pub fn reactions(&self) -> &[RepoWatchReactionObservation];
 }
@@ -308,9 +310,9 @@ impl RepoWatchMergedPullRequestBaselineV1 {
 
 ```rust
 pub struct RepoWatchPullRequestStateInput {
-    pub context: repo_watch::PullRequestEventContext,
+    pub context: signalbox_domain::PullRequestEventContext,
     pub lifecycle: RepoWatchPullRequestLifecycle,
-    pub mergeable_state: repo_watch::MergeableState,
+    pub mergeable_state: signalbox_domain::MergeableState,
     pub completed_check_suites: vec::Vec<RepoWatchCheckSuiteObservation>,
     pub completed_check_runs: vec::Vec<RepoWatchCheckRunObservation>,
     pub reviews: vec::Vec<RepoWatchReviewObservation>,
@@ -329,9 +331,9 @@ impl RepoWatchPullRequestState {
     pub fn try_new(
         input: RepoWatchPullRequestStateInput,
     ) -> result::Result<Self, RepoWatchRepositoryStateError>;
-    pub const fn context(&self) -> &repo_watch::PullRequestEventContext;
+    pub const fn context(&self) -> &signalbox_domain::PullRequestEventContext;
     pub const fn lifecycle(&self) -> RepoWatchPullRequestLifecycle;
-    pub const fn mergeable_state(&self) -> repo_watch::MergeableState;
+    pub const fn mergeable_state(&self) -> signalbox_domain::MergeableState;
     pub fn completed_check_suites(&self) -> &[RepoWatchCheckSuiteObservation];
     pub fn completed_check_runs(&self) -> &[RepoWatchCheckRunObservation];
     pub fn reviews(&self) -> &[RepoWatchReviewObservation];
@@ -347,19 +349,19 @@ pub struct RepoWatchWorkflowRunObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RepoWatchWorkflowRunObservation {
     pub const fn new(
-        id: repo_watch::GitHubObjectId,
-        workflow_id: repo_watch::GitHubObjectId,
-        attempt: repo_watch::RepoWatchWorkflowRunAttempt,
-        branch: repo_watch::BranchName,
-        workflow: repo_watch::WorkflowName,
-        conclusion: repo_watch::CheckConclusion,
+        id: signalbox_domain::GitHubObjectId,
+        workflow_id: signalbox_domain::GitHubObjectId,
+        attempt: signalbox_domain::RepoWatchWorkflowRunAttempt,
+        branch: signalbox_domain::BranchName,
+        workflow: signalbox_domain::WorkflowName,
+        conclusion: signalbox_domain::CheckConclusion,
     ) -> Self;
-    pub const fn id(&self) -> repo_watch::GitHubObjectId;
-    pub const fn workflow_id(&self) -> repo_watch::GitHubObjectId;
-    pub const fn attempt(&self) -> repo_watch::RepoWatchWorkflowRunAttempt;
-    pub const fn branch(&self) -> &repo_watch::BranchName;
-    pub const fn workflow(&self) -> &repo_watch::WorkflowName;
-    pub const fn conclusion(&self) -> repo_watch::CheckConclusion;
+    pub const fn id(&self) -> signalbox_domain::GitHubObjectId;
+    pub const fn workflow_id(&self) -> signalbox_domain::GitHubObjectId;
+    pub const fn attempt(&self) -> signalbox_domain::RepoWatchWorkflowRunAttempt;
+    pub const fn branch(&self) -> &signalbox_domain::BranchName;
+    pub const fn workflow(&self) -> &signalbox_domain::WorkflowName;
+    pub const fn conclusion(&self) -> signalbox_domain::CheckConclusion;
 }
 ```
 
@@ -369,9 +371,12 @@ impl RepoWatchWorkflowRunObservation {
 pub struct RepoWatchBranchHead {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RepoWatchBranchHead {
-    pub const fn new(branch: repo_watch::BranchName, head: repo_watch::CommitSha) -> Self;
-    pub const fn branch(&self) -> &repo_watch::BranchName;
-    pub const fn head(&self) -> &repo_watch::CommitSha;
+    pub const fn new(
+        branch: signalbox_domain::BranchName,
+        head: signalbox_domain::CommitSha,
+    ) -> Self;
+    pub const fn branch(&self) -> &signalbox_domain::BranchName;
+    pub const fn head(&self) -> &signalbox_domain::CommitSha;
 }
 ```
 
@@ -408,10 +413,10 @@ pub struct RepoWatchObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RepoWatchObservation {
     pub fn new(
-        signal_reviewers: vec::Vec<repo_watch::RepoWatchAuthorLogin>,
+        signal_reviewers: vec::Vec<signalbox_domain::RepoWatchAuthorLogin>,
         state: RepoWatchRepositoryState,
     ) -> Self;
-    pub fn signal_reviewers(&self) -> &[repo_watch::RepoWatchAuthorLogin];
+    pub fn signal_reviewers(&self) -> &[signalbox_domain::RepoWatchAuthorLogin];
     pub const fn state(&self) -> &RepoWatchRepositoryState;
 }
 ```
@@ -420,17 +425,17 @@ impl RepoWatchObservation {
 
 ```rust
 pub enum RepoWatchRepositoryStateError {
-    DuplicatePullRequest(repo_watch::PullRequestNumber),
+    DuplicatePullRequest(signalbox_domain::PullRequestNumber),
     MergedPullRequestBaselineLimit,
-    DuplicateCheckSuite(repo_watch::GitHubObjectId),
-    DuplicateCheckRun(repo_watch::GitHubObjectId),
-    DuplicateReview(repo_watch::GitHubObjectId),
-    DuplicateThread(repo_watch::ReviewThreadId),
+    DuplicateCheckSuite(signalbox_domain::GitHubObjectId),
+    DuplicateCheckRun(signalbox_domain::GitHubObjectId),
+    DuplicateReview(signalbox_domain::GitHubObjectId),
+    DuplicateThread(signalbox_domain::ReviewThreadId),
     DuplicateWorkflow {
-        branch: repo_watch::BranchName,
-        workflow_id: repo_watch::GitHubObjectId,
+        branch: signalbox_domain::BranchName,
+        workflow_id: signalbox_domain::GitHubObjectId,
     },
-    DuplicateBranchHead(repo_watch::BranchName),
+    DuplicateBranchHead(signalbox_domain::BranchName),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchRepositoryStateError {
@@ -466,8 +471,8 @@ impl fmt::Display for RepoWatchDifferError {
 impl error::Error for RepoWatchDifferError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl convert::From<repo_watch::RepoWatchEventConstructionError> for RepoWatchDifferError {
-    fn from(value: repo_watch::RepoWatchEventConstructionError) -> Self;
+impl convert::From<signalbox_domain::RepoWatchEventConstructionError> for RepoWatchDifferError {
+    fn from(value: signalbox_domain::RepoWatchEventConstructionError) -> Self;
 }
 impl convert::From<RepoWatchEventIdentityFrontierError> for RepoWatchDifferError {
     fn from(value: RepoWatchEventIdentityFrontierError) -> Self;
@@ -478,7 +483,7 @@ impl convert::From<RepoWatchEventIdentityFrontierError> for RepoWatchDifferError
 
 ```rust
 pub fn derive_repo_watch_events(
-    repository: &repo_watch::RepositorySlug,
+    repository: &signalbox_domain::RepositorySlug,
     previous: option::Option<&RepoWatchObservation>,
     current: &RepoWatchObservation,
     identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
@@ -490,7 +495,7 @@ pub fn derive_repo_watch_events(
 
 ```rust
 pub fn derive_repo_watch_events_with_merged_baselines(
-    repository: &repo_watch::RepositorySlug,
+    repository: &signalbox_domain::RepositorySlug,
     previous: option::Option<&RepoWatchObservation>,
     merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
     current: &RepoWatchObservation,
@@ -503,7 +508,7 @@ pub fn derive_repo_watch_events_with_merged_baselines(
 
 ```rust
 pub fn repo_watch_events_have_equal_identified_content(
-    left: &repo_watch::RepoWatchEvent,
-    right: &repo_watch::RepoWatchEvent,
+    left: &signalbox_domain::RepoWatchEvent,
+    right: &signalbox_domain::RepoWatchEvent,
 ) -> bool;
 ```

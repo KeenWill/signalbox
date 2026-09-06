@@ -18,13 +18,6 @@ pub enum EchoToolConstructionError {
     Duplicate,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for EchoToolConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for EchoToolConstructionError {}
 impl fmt::Display for EchoToolConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -38,13 +31,6 @@ impl error::Error for EchoToolConstructionError {
 ```rust
 pub struct EchoTool {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for EchoTool
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for EchoTool {}
 impl signalbox_tool_contract::ToolContract for EchoTool {
     type Arguments = echo::EchoArguments;
     const NAME: &'static str;
@@ -52,7 +38,7 @@ impl signalbox_tool_contract::ToolContract for EchoTool {
 }
 impl EchoTool {
     pub fn try_new() -> result::Result<Self, EchoToolConstructionError>;
-    pub fn into_parts(self) -> (tool_loop::CompiledToolCatalog, EchoExecutor);
+    pub fn into_parts(self) -> (signalbox_application::CompiledToolCatalog, EchoExecutor);
 }
 ```
 
@@ -61,22 +47,15 @@ impl EchoTool {
 ```rust
 pub struct EchoExecutor;
 // derives: clone::Clone, marker::Copy, fmt::Debug
-impl<T> dyn_clone::DynClone for EchoExecutor
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for EchoExecutor {}
-impl tool_loop::ToolExecutor for EchoExecutor {
+impl signalbox_application::ToolExecutor for EchoExecutor {
     type Error = EchoExecutorError;
     fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> impl future::Future<
         Output = result::Result<
-            tool_loop::CorrelatedToolExecutorEvidence,
-            <Self as tool_loop::ToolExecutor>::Error,
+            signalbox_application::CorrelatedToolExecutorEvidence,
+            <Self as signalbox_application::ToolExecutor>::Error,
         >,
     > + marker::Send;
 }
@@ -87,20 +66,13 @@ impl tool_loop::ToolExecutor for EchoExecutor {
 ```rust
 pub struct EchoExecutorError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for EchoExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for EchoExecutorError {}
 impl fmt::Display for EchoExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for EchoExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for EchoExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for EchoExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```

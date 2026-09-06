@@ -142,7 +142,7 @@ fn reconstitution_rejects_cross_wired_record_identities() {
             │ queue record turn cross-wired             │ QueueTurnMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }            │
             └───────────────────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "turn record session cross-wired",
                 failure: format!("{turn_session:?}"),

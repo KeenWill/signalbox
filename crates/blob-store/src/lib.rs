@@ -348,7 +348,7 @@ impl BlobVerificationFailure {
 pub struct BlobStoreError {
     kind: BlobStoreFailureKind,
     operation: &'static str,
-    verification: Option<BlobVerificationFailure>,
+    verification: Option<Box<BlobVerificationFailure>>,
     source: Option<Box<dyn Error + Send + Sync>>,
 }
 
@@ -398,7 +398,7 @@ impl BlobStoreError {
         Self {
             kind: BlobStoreFailureKind::VerificationFailed,
             operation,
-            verification: Some(failure),
+            verification: Some(Box::new(failure)),
             source: None,
         }
     }
@@ -410,7 +410,10 @@ impl BlobStoreError {
 
     /// Returns retained verification facts for a verification failure.
     pub const fn verification_failure(&self) -> Option<BlobVerificationFailure> {
-        self.verification
+        match &self.verification {
+            Some(failure) => Some(**failure),
+            None => None,
+        }
     }
 }
 
@@ -421,7 +424,7 @@ impl fmt::Display for BlobStoreError {
             "blob store {} failed: {:?}",
             self.operation, self.kind
         )?;
-        if let Some(failure) = self.verification {
+        if let Some(failure) = &self.verification {
             write!(
                 formatter,
                 "; expected {} bytes at {}, observed {} bytes",

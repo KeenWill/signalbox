@@ -31,12 +31,6 @@ pub enum PreparationFailure {
     CredentialUnusable { detail: string::String },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for PreparationFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## PreparationDefect
@@ -47,10 +41,4 @@ pub enum PreparationDefect {
     RequestConstructionFailed { detail: string::String },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for PreparationDefect
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```

@@ -7,12 +7,6 @@
 ```rust
 pub struct ConfiguredGitRemote {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ConfiguredGitRemote
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ConfiguredGitRemote {
     pub fn try_new(
         name: impl convert::Into<string::String>,
@@ -31,12 +25,6 @@ impl fmt::Debug for ConfiguredGitRemote {
 ```rust
 pub struct InvalidConfiguredGitRemote;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for InvalidConfiguredGitRemote
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for InvalidConfiguredGitRemote {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -50,12 +38,6 @@ impl error::Error for InvalidConfiguredGitRemote {
 ```rust
 pub struct GitPushRequest {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitPushRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl GitPushRequest {
     pub fn repository_root(&self) -> &path::Path;
     pub const fn remote(&self) -> &ConfiguredGitRemote;
@@ -73,12 +55,6 @@ impl fmt::Debug for GitPushRequest {
 ```rust
 pub struct GitPushReceipt {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitPushReceipt
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl GitPushReceipt {
     pub fn try_new(
         commit: impl convert::Into<string::String>,
@@ -92,12 +68,6 @@ impl GitPushReceipt {
 ```rust
 pub struct InvalidGitPushReceipt;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for InvalidGitPushReceipt
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for InvalidGitPushReceipt {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -115,12 +85,6 @@ pub enum GitPushTransportFailure {
     DispatchUnknown,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitPushTransportFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for GitPushTransportFailure {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

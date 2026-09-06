@@ -81,13 +81,13 @@ pub enum ConversationListItem {
         session: signalbox_domain::SessionId,
         title: option::Option<string::String>,
         archived: bool,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
     },
     ImportedConversation {
         conversation: signalbox_domain::ImportedConversationId,
         title: option::Option<string::String>,
         entry_count: u64,
-        format: format::ImportedConversationFormat,
+        format: signalbox_domain::ImportedConversationFormat,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq

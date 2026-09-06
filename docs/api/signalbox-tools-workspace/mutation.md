@@ -40,7 +40,6 @@ pub struct WriteFileArguments {
     pub content: string::String,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for WriteFileArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## EditFileArguments
@@ -53,7 +52,6 @@ pub struct EditFileArguments {
     pub replace_all: bool,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for EditFileArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ApplyPatchArguments
@@ -63,7 +61,6 @@ pub struct ApplyPatchArguments {
     pub patch: string::String,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for ApplyPatchArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceMutationPath
@@ -71,12 +68,6 @@ impl<T> de::DeserializeOwned for ApplyPatchArguments where T: for<'de> de::Deser
 ```rust
 pub struct WorkspaceMutationPath(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> dyn_clone::DynClone for WorkspaceMutationPath
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl WorkspaceMutationPath {
     pub fn try_new(
         supplied: impl convert::Into<string::String>,
@@ -94,12 +85,6 @@ pub struct WorkspaceFileSnapshot {
     pub mode: option::Option<u32>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceFileSnapshot
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## WorkspaceMutationSnapshot
@@ -107,12 +92,6 @@ where
 ```rust
 pub struct WorkspaceMutationSnapshot {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceMutationSnapshot
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl WorkspaceMutationSnapshot {
     pub fn try_new(
         files: impl collect::IntoIterator<Item = WorkspaceFileSnapshot>,
@@ -139,12 +118,6 @@ pub enum WorkspaceMutationSnapshotErrorKind {
     Filesystem,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceMutationSnapshotErrorKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## WorkspaceMutationSnapshotError
@@ -155,12 +128,6 @@ pub struct WorkspaceMutationSnapshotError {
     pub kind: WorkspaceMutationSnapshotErrorKind,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceMutationSnapshotError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for WorkspaceMutationSnapshotError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -180,12 +147,6 @@ pub enum WorkspaceFileMutation {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceFileMutation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl WorkspaceFileMutation {
     pub fn path(&self) -> &WorkspaceMutationPath;
 }
@@ -204,12 +165,6 @@ pub enum WorkspaceMutationCommitError {
     Ambiguous,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceMutationCommitError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for WorkspaceMutationCommitError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -255,12 +210,6 @@ pub enum WorkspaceMutationToolConstructionError {
     Root,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceMutationToolConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for WorkspaceMutationToolConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -281,7 +230,7 @@ impl<FileSystem: WorkspaceMutationFileSystem> WorkspaceMutationTools<FileSystem>
     pub fn into_parts(
         self,
     ) -> (
-        tool_loop::CompiledToolCatalog,
+        signalbox_application::CompiledToolCatalog,
         WorkspaceMutationExecutor<FileSystem>,
     );
 }
@@ -291,16 +240,16 @@ impl<FileSystem: WorkspaceMutationFileSystem> WorkspaceMutationTools<FileSystem>
 
 ```rust
 pub struct WorkspaceMutationExecutor<FileSystem: WorkspaceMutationFileSystem> {/* private */}
-impl<FileSystem: WorkspaceMutationFileSystem> tool_loop::ToolExecutor
+impl<FileSystem: WorkspaceMutationFileSystem> signalbox_application::ToolExecutor
     for WorkspaceMutationExecutor<FileSystem>
 {
     type Error = WorkspaceMutationExecutorError;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -313,20 +262,14 @@ pub enum WorkspaceMutationExecutorError {
     ResultEncoding,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceMutationExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for WorkspaceMutationExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for WorkspaceMutationExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for WorkspaceMutationExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for WorkspaceMutationExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -339,12 +282,6 @@ pub struct WriteFileResult {
     pub created: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WriteFileResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## EditFileResult
@@ -356,12 +293,6 @@ pub struct EditFileResult {
     pub bytes_written: usize,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for EditFileResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ApplyPatchResult
@@ -371,10 +302,4 @@ pub struct ApplyPatchResult {
     pub operations_applied: usize,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for ApplyPatchResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```

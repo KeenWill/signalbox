@@ -10,7 +10,6 @@ pub enum Provider {
     Anthropic,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> de::DeserializeOwned for Provider where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## CommercialChannel
@@ -26,7 +25,6 @@ pub enum CommercialChannel {
     ClaudeCodeSubscription,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> de::DeserializeOwned for CommercialChannel where T: for<'de> de::Deserialize<'de> {}
 impl CommercialChannel {
     pub fn actual_billing_kind(self) -> ActualBillingKind;
 }
@@ -52,7 +50,6 @@ pub enum ModelIdentityKind {
     PinnedRelease,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> de::DeserializeOwned for ModelIdentityKind where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## MappingQuality
@@ -66,7 +63,6 @@ pub enum MappingQuality {
     Unknown,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> de::DeserializeOwned for MappingQuality where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Confidence
@@ -78,7 +74,6 @@ pub enum Confidence {
     Low,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> de::DeserializeOwned for Confidence where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## RateDimension
@@ -93,7 +88,6 @@ pub enum RateDimension {
     Operation,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> de::DeserializeOwned for RateDimension where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## DatePrecision
@@ -104,7 +98,6 @@ pub enum DatePrecision {
     ObservationWindow,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> de::DeserializeOwned for DatePrecision where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Catalog

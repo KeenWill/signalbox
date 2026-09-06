@@ -87,7 +87,7 @@ fn active_reconstitution_rejects_cross_session_or_repeated_tail_entries() {
             │ tail entry identity repeated   │ DuplicateAcceptanceTailEntry { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe) }       │
             └────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "tail entry session cross-wired",
                 failure: format!("{cross_session:?}"),
@@ -169,7 +169,7 @@ fn reconstitution_rejects_malformed_snapshot_collection() {
             │ snapshot entry unsupplied          │ SnapshotEntryMissing { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028), entry: SemanticTranscriptEntryRef { source_session: SessionId(00000000-0000-0000-0000-000000000001), entry: SemanticTranscriptEntryId(00000000-0000-0000-0000-000000000063) } } │
             └────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "snapshot owner cross-wired",
                 failure: format!("{cross_session:?}"),
@@ -229,7 +229,7 @@ fn reconstitution_rejects_absent_starting_or_terminal_snapshot() {
             │ stored terminal snapshot absent │ TerminalSnapshotMissing { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) } │
             └─────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "stored starting snapshot absent",
                 failure: format!("{starting:?}"),
@@ -350,7 +350,7 @@ fn reconstitution_rejects_out_of_order_lifecycle_states() {
             │ failed terminal after the active slot │ InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) } │
             └───────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "active slot after queued work",
                 failure: format!("{active_after_queued:?}"),

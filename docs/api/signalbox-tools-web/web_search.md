@@ -7,26 +7,6 @@
 ```rust
 pub struct WebSearchCredentialDiagnostic {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebSearchCredentialDiagnostic
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchCredentialDiagnostic
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchCredentialDiagnostic where T: 'static {}
 impl fmt::Debug for WebSearchCredentialDiagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -45,26 +25,6 @@ pub enum WebSearchExecutorError {
     CredentialDiagnosticCollision(WebSearchCredentialDiagnostic),
 }
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebSearchExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchExecutorError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchExecutorError where T: 'static {}
 impl fmt::Display for WebSearchExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -74,8 +34,8 @@ impl error::Error for WebSearchExecutorError {
 impl fmt::Debug for WebSearchExecutorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl operator_failure::ClassifyOperatorFailure for WebSearchExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for WebSearchExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -93,26 +53,6 @@ pub enum WebSearchProvider {
     Brave,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebSearchProvider
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchProvider
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchProvider where T: 'static {}
 ```
 
 ## WebSearchConfiguration
@@ -120,31 +60,11 @@ impl<T> erased::ErasedDestructor for WebSearchProvider where T: 'static {}
 ```rust
 pub struct WebSearchConfiguration {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebSearchConfiguration
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchConfiguration
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchConfiguration where T: 'static {}
 impl WebSearchConfiguration {
     pub fn new(provider: WebSearchProvider) -> Self;
     pub const fn provider(&self) -> WebSearchProvider;
     pub const fn egress_policy(&self) -> &WebSearchEgressPolicy;
-    pub const fn credential_reference(&self) -> &credential::CredentialReference;
+    pub const fn credential_reference(&self) -> &signalbox_model_runtime::CredentialReference;
 }
 ```
 
@@ -153,26 +73,6 @@ impl WebSearchConfiguration {
 ```rust
 pub struct WebSearchEgressPolicy {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebSearchEgressPolicy
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchEgressPolicy
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchEgressPolicy where T: 'static {}
 impl WebSearchEgressPolicy {
     pub fn allowed_origin(&self) -> &'static str;
 }
@@ -183,41 +83,22 @@ impl WebSearchEgressPolicy {
 ```rust
 pub struct WebSearchExecutor<Credentials, Transport> {/* private */}
 // derives: clone::Clone
-impl<T> dyn_clone::DynClone for WebSearchExecutor<Credentials, Transport>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchExecutor<Credentials, Transport>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchExecutor<Credentials, Transport> where T: 'static {}
 impl<Credentials, Transport> fmt::Debug for WebSearchExecutor<Credentials, Transport> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl<Credentials, Transport> tool_loop::ToolExecutor for WebSearchExecutor<Credentials, Transport>
+impl<Credentials, Transport> signalbox_application::ToolExecutor
+    for WebSearchExecutor<Credentials, Transport>
 where
-    Credentials: credential::CredentialAccess,
+    Credentials: signalbox_model_runtime::CredentialAccess,
     Transport: WebSearchTransport,
 {
     type Error = WebSearchExecutorError;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -227,26 +108,6 @@ where
 ```rust
 pub struct WebSearchRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebSearchRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchRequest
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchRequest where T: 'static {}
 impl WebSearchRequest {
     pub const fn provider(&self) -> WebSearchProvider;
     pub fn query(&self) -> &str;
@@ -258,26 +119,6 @@ impl WebSearchRequest {
 ```rust
 pub struct WebSearchResult {/* private */}
 // derives: clone::Clone
-impl<T> dyn_clone::DynClone for WebSearchResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchResult where T: 'static {}
 impl fmt::Debug for WebSearchResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -295,26 +136,6 @@ pub struct WebSearchResultFields {
     pub snippet: string::String,
 }
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebSearchResultFields
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchResultFields
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchResultFields where T: 'static {}
 impl fmt::Debug for WebSearchResultFields {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -325,26 +146,6 @@ impl fmt::Debug for WebSearchResultFields {
 ```rust
 pub struct WebSearchResponse {/* private */}
 // derives: clone::Clone
-impl<T> dyn_clone::DynClone for WebSearchResponse
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchResponse
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchResponse where T: 'static {}
 impl fmt::Debug for WebSearchResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -366,46 +167,12 @@ pub enum WebSearchPageCompleteness {
     MoreAvailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebSearchPageCompleteness
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchPageCompleteness
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchPageCompleteness where T: 'static {}
 ```
 
 ## WebSearchProviderError
 
 ```rust
 pub struct WebSearchProviderError {/* private */}
-impl<T> policy::PolicyExt for WebSearchProviderError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchProviderError where T: 'static {}
 impl fmt::Display for WebSearchProviderError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -437,26 +204,6 @@ pub enum WebSearchToolConstructionError {
     Transport,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebSearchToolConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchToolConstructionError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchToolConstructionError where T: 'static {}
 impl fmt::Display for WebSearchToolConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -470,26 +217,6 @@ impl error::Error for WebSearchToolConstructionError {
 ```rust
 pub struct WebSearchTool<Credentials, Transport> {/* private */}
 // derives: clone::Clone
-impl<T> dyn_clone::DynClone for WebSearchTool<Credentials, Transport>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebSearchTool<Credentials, Transport>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchTool<Credentials, Transport> where T: 'static {}
 impl<Credentials, Transport> fmt::Debug for WebSearchTool<Credentials, Transport> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -515,7 +242,7 @@ impl<Credentials, Transport> WebSearchTool<Credentials, Transport> {
     pub fn into_parts(
         self,
     ) -> (
-        tool_loop::CompiledToolCatalog,
+        signalbox_application::CompiledToolCatalog,
         WebSearchExecutor<Credentials, Transport>,
     );
 }
@@ -528,7 +255,7 @@ pub trait WebSearchTransport: marker::Send {
     fn search(
         &mut self,
         request: WebSearchRequest,
-        credential: &credential::CredentialValue,
+        credential: &signalbox_model_runtime::CredentialValue,
     ) -> impl future::Future<Output = WebSearchTransportOutcome> + marker::Send;
 }
 ```
@@ -538,26 +265,6 @@ pub trait WebSearchTransport: marker::Send {
 ```rust
 pub struct ReqwestWebSearchTransport {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for ReqwestWebSearchTransport
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for ReqwestWebSearchTransport
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for ReqwestWebSearchTransport where T: 'static {}
 impl ReqwestWebSearchTransport {
     pub fn try_new(
         exchange_timeout: time::Duration,
@@ -567,7 +274,7 @@ impl WebSearchTransport for ReqwestWebSearchTransport {
     async fn search(
         &mut self,
         request: WebSearchRequest,
-        credential: &credential::CredentialValue,
+        credential: &signalbox_model_runtime::CredentialValue,
     ) -> WebSearchTransportOutcome;
 }
 ```
@@ -577,26 +284,6 @@ impl WebSearchTransport for ReqwestWebSearchTransport {
 ```rust
 pub struct ReqwestWebSearchConstructionError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ReqwestWebSearchConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for ReqwestWebSearchConstructionError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for ReqwestWebSearchConstructionError where T: 'static {}
 impl fmt::Display for ReqwestWebSearchConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -617,20 +304,6 @@ pub enum WebSearchTransportFailure {
     ResponseTooLarge,
     DispatchUnknown,
 }
-impl<T> policy::PolicyExt for WebSearchTransportFailure
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchTransportFailure where T: 'static {}
 impl fmt::Display for WebSearchTransportFailure {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -646,26 +319,14 @@ impl fmt::Debug for WebSearchTransportFailure {
 
 ```rust
 pub struct WebSearchTransportOutcome {/* private */}
-impl<T> policy::PolicyExt for WebSearchTransportOutcome
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebSearchTransportOutcome where T: 'static {}
 impl WebSearchTransportOutcome {
-    pub fn completed(response: WebSearchResponse, credential: &credential::CredentialValue)
-        -> Self;
+    pub fn completed(
+        response: WebSearchResponse,
+        credential: &signalbox_model_runtime::CredentialValue,
+    ) -> Self;
     pub fn failed(
         failure: WebSearchTransportFailure,
-        credential: &credential::CredentialValue,
+        credential: &signalbox_model_runtime::CredentialValue,
     ) -> Self;
     pub fn into_result(self) -> result::Result<WebSearchResponse, WebSearchTransportFailure>;
 }

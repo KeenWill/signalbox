@@ -11,35 +11,35 @@ impl ReplaceSessionDefaultsRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
-        expected_current_version: configuration::SessionConfigurationDefaultsVersion,
-        replacement: configuration::SessionConfigurationDefaults,
+        expected_current_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+        replacement: signalbox_domain::SessionConfigurationDefaults,
         prompt_member: PromptMemberStatement,
     ) -> result::Result<Self, InvalidDurableCommandId>;
     pub fn try_new_with_model_settings(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
-        expected_current_version: configuration::SessionConfigurationDefaultsVersion,
-        replacement: configuration::SessionConfigurationDefaults,
-        caller_model_settings: model_settings::ModelSettingsOverlay,
+        expected_current_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+        replacement: signalbox_domain::SessionConfigurationDefaults,
+        caller_model_settings: signalbox_domain::ModelSettingsOverlay,
         prompt_member: PromptMemberStatement,
     ) -> result::Result<Self, InvalidDurableCommandId>;
     pub fn try_new_with_model_settings_adjustments(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
-        expected_current_version: configuration::SessionConfigurationDefaultsVersion,
-        replacement: configuration::SessionConfigurationDefaults,
-        caller_model_settings: model_settings::ModelSettingsOverlay,
-        model_settings_adjustments: vec::Vec<model_settings::ModelChangeAdjustment>,
+        expected_current_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+        replacement: signalbox_domain::SessionConfigurationDefaults,
+        caller_model_settings: signalbox_domain::ModelSettingsOverlay,
+        model_settings_adjustments: vec::Vec<signalbox_domain::ModelChangeAdjustment>,
         prompt_member: PromptMemberStatement,
     ) -> result::Result<Self, InvalidDurableCommandId>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn expected_current_version(
         &self,
-    ) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn replacement(&self) -> &configuration::SessionConfigurationDefaults;
-    pub const fn caller_model_settings(&self) -> model_settings::ModelSettingsOverlay;
-    pub fn model_settings_adjustments(&self) -> &[model_settings::ModelChangeAdjustment];
+    ) -> signalbox_domain::SessionConfigurationDefaultsVersion;
+    pub const fn replacement(&self) -> &signalbox_domain::SessionConfigurationDefaults;
+    pub const fn caller_model_settings(&self) -> signalbox_domain::ModelSettingsOverlay;
+    pub fn model_settings_adjustments(&self) -> &[signalbox_domain::ModelChangeAdjustment];
     pub const fn prompt_member(&self) -> PromptMemberStatement;
 }
 ```
@@ -58,7 +58,7 @@ pub enum PromptMemberStatement {
 
 ```rust
 pub enum ReplaceSessionDefaultsOutcome {
-    Recorded(replace_session_defaults::ReplaceSessionDefaultsResult),
+    Recorded(signalbox_domain::ReplaceSessionDefaultsResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
@@ -74,7 +74,7 @@ pub trait ReplaceSessionDefaultsTransaction {
     type Error;
     fn handle(
         &mut self,
-        command: replace_session_defaults::ReplaceSessionDefaults,
+        command: signalbox_domain::ReplaceSessionDefaults,
         prompt_member: PromptMemberStatement,
     ) -> impl future::Future<
         Output = result::Result<

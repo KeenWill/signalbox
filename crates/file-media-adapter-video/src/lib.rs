@@ -346,7 +346,11 @@ fn matches_mp4_probe(bytes: &[u8]) -> bool {
     payload.len() >= 8
         && mp4_compatible_brand_count_fits(payload)
         && (supported_mp4_brand(&payload[..4])
-            || payload[8..].chunks_exact(4).any(supported_mp4_brand))
+            || payload[8..]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|brand| supported_mp4_brand(brand)))
 }
 
 fn supported_ftyp(payload: &[u8]) -> bool {
@@ -354,7 +358,11 @@ fn supported_ftyp(payload: &[u8]) -> bool {
         && (payload.len() - 8).is_multiple_of(4)
         && mp4_compatible_brand_count_fits(payload)
         && (supported_mp4_brand(&payload[..4])
-            || payload[8..].chunks_exact(4).any(supported_mp4_brand))
+            || payload[8..]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|brand| supported_mp4_brand(brand)))
 }
 
 fn mp4_compatible_brand_count_fits(payload: &[u8]) -> bool {
@@ -1070,8 +1078,10 @@ fn parse_ftyp(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
         major_brand
     } else {
         payload[8..]
-            .chunks_exact(4)
-            .find(|brand| supported_mp4_brand(brand))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .find(|brand| supported_mp4_brand(*brand))
             .ok_or(VideoIssue::Malformed)?
     };
     state.brand = Some(String::from_utf8(brand.to_vec()).map_err(|_| VideoIssue::Malformed)?);

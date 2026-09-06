@@ -10,12 +10,6 @@ pub enum FastModeTarget {
     Mapped(ResolvedTarget),
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for FastModeTarget
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ModelCapabilities
@@ -23,12 +17,6 @@ where
 ```rust
 pub struct ModelCapabilities {/* private */}
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ModelCapabilities
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ModelCapabilities {
     pub const fn new(
         reasoning_levels: set::BTreeSet<ReasoningLevel>,
@@ -51,12 +39,6 @@ impl ModelCapabilities {
 ```rust
 pub struct ModelCapabilityDefinition {/* private */}
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ModelCapabilityDefinition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ModelCapabilityDefinition {
     pub const fn new(target: ResolvedTarget, capabilities: ModelCapabilities) -> Self;
     pub const fn target(&self) -> &ResolvedTarget;
@@ -69,12 +51,6 @@ impl ModelCapabilityDefinition {
 ```rust
 pub struct ModelCapabilityCatalog {/* private */}
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ModelCapabilityCatalog
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ModelCapabilityCatalog {
     pub fn empty() -> Self;
     pub fn try_from_definitions(
@@ -108,12 +84,6 @@ pub enum ModelCapabilityError {
     UnsupportedServiceTier { service_tier: ServiceTier },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ModelCapabilityError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for ModelCapabilityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -128,12 +98,6 @@ pub enum ModelCapabilityCatalogError {
     SelfMappedFastTarget { target: ResolvedTarget },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ModelCapabilityCatalogError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for ModelCapabilityCatalogError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

@@ -1244,11 +1244,7 @@ pub(super) fn active_input_after_historical_interrupt(
     )
 }
 
-#[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "the table renderer reads every field through the Debug derive"
-)]
+#[derive(Debug, serde::Serialize)]
 pub(super) struct ReconstitutionFailureRow {
     pub(super) perturbed_stored_fact: &'static str,
     pub(super) failure: String,
