@@ -261,21 +261,20 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
     stays in one test even though its description contains "and". Splitting such
     guarantees across separate executions lets each half pass under a different
     interleaving while no test can detect a violation of the combined contract.
-    When renaming or splitting a test, preserve its scenario prefix and the
-    wording that identifies each behavior it exercises.
+    When renaming or splitting a test, name each test for its behavior.
 
 From the application sweep, `replace_session_defaults.rs` — two behaviors, so a
 split, not an unroll:
 
 ```rust
 // Bad: one loop runs two behaviors under one test name.
-fn s01_recorded_applied_and_rejected_results_pass_through() {
+fn recorded_applied_and_rejected_results_pass_through() {
     for (command, recorded) in [(applied_cmd, applied), (rejected_cmd, rejected)] { /* … */ }
 }
 
 // Good: one behavior per test, each named for its behavior.
-fn s01_recorded_applied_result_passes_through() { /* … */ }
-fn s01_recorded_rejected_result_passes_through() { /* … */ }
+fn recorded_applied_result_passes_through() { /* … */ }
+fn recorded_rejected_result_passes_through() { /* … */ }
 ```
 
 ## Fixture and helper placement
