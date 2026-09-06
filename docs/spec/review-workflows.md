@@ -258,8 +258,12 @@ pull-request identity during decision revalidation is an error; the predicate
 performs no I/O. Persisted authentication and review waves are bound to the
 complete policy value and requalified when it changes. Exempt head changes are
 rename-only changes and clean base forwards; comment-only changes require a
-fresh quiet review. The Python reconciler delegates evidence evaluation to the
-crate's CLI and retains its loop, dispatch fence, and cool-off state.
+fresh quiet review. The crate's `reconcile` subcommand runs candidate selection,
+in-process fetch and evaluation, the dispatch fence, and repository-bound
+cool-off state. It syncs the state file and parent directory before starting a
+dispatch child; every ambiguous outcome retains the fence. Operator commands run
+as argv in their own process groups; timeout kills the group and reaps the
+child. `SIGINT` stops the loop.
 
 ## Planned
 

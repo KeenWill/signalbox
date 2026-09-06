@@ -1,11 +1,12 @@
 # Pull-request convergence reconciler
 
-`reconcile.py` keeps selected GitHub pull requests moving. It lists candidates
-with `gh api graphql` and calls `signalbox-converge evaluate` for each current
-snapshot and verdict. It invokes operator-supplied commands when an unconverged
-pull request has no active work. Only pull requests whose head repository is the
-configured repository are eligible. The loop, dispatch fence, and cool-off state
-are Python; evidence rules are in
+`signalbox-converge reconcile` keeps selected GitHub pull requests moving. It
+lists candidates with `gh api graphql` and calls the crate's fetch and evidence
+functions in process for each current snapshot and verdict. It invokes
+operator-supplied commands when an unconverged pull request has no active work.
+Only pull requests whose head repository is the configured repository are
+eligible. The loop, dispatch fence, and cool-off state are in the Rust binary;
+evidence rules are in
 [signalbox-convergence](../../crates/convergence/README.md).
 
 The script writes one JSON log record for every decision. By default those
@@ -17,8 +18,8 @@ file is bound to one repository and is rejected under another.
 
 ## Requirements and invocation
 
-Runtime requires Python 3, an authenticated `gh` CLI, and `signalbox-converge`
-on `PATH`. Build the CLI and run one non-mutating tick:
+Runtime requires an authenticated `gh` CLI and `signalbox-converge` on `PATH`.
+Build the CLI and run one tick without dispatch:
 
 ```console
 cargo build -p signalbox-convergence --bin signalbox-converge
@@ -26,7 +27,7 @@ export PATH="$PWD/target/debug:$PATH"
 ```
 
 ```console
-python3 tooling/convergence-reconciler/reconcile.py \
+signalbox-converge reconcile \
   --repo OWNER/REPOSITORY \
   --active-command 'session-control is-active' \
   --dry-run \
@@ -51,11 +52,11 @@ configures reviewers, evidence grammars, check exemptions, and limits.
 `--policy` selects a TOML or JSON policy file; `--repo` selects the repository
 for live reads.
 
-Each evaluation receives its pull request's prior state through the CLI's
-`--state` file. The returned state is persisted with driver timing and dispatch
-records. The CLI supplies refreshed identity, checks, thread evidence, verdict,
-and every reason; an evaluation error takes the tick-error path without
-dispatch. A new check inventory must settle across observations.
+Each evaluation receives its pull request's prior evidence state in process. The
+returned state is persisted with driver timing and dispatch records. The crate
+supplies refreshed identity, checks, thread evidence, verdict, and every reason;
+an evaluation error takes the tick-error path without dispatch. A new check
+inventory must settle across observations.
 
 ## Decision flow
 
@@ -92,8 +93,9 @@ command. Standard output or error from a failing command, and standard output
 from a successful dispatch, is truncated to 512 characters and attached to the
 decision log. The configurable command timeout bounds GitHub listing,
 convergence evaluation, and operator-command subprocesses to protect tick
-latency; its default is 60 seconds. An evaluation timeout terminates the CLI's
-process group, including its GitHub subprocesses.
+latency; its default is 60 seconds. Each child runs in its own process group;
+timeout or `SIGINT` kills the group and reaps the child. All GitHub requests for
+one evaluation share its timeout budget.
 
 An unconverged observation starts `unconverged_since`. An inactive result starts
 `idle_since`; active work or a successful dispatch clears it after the
@@ -126,7 +128,8 @@ required. `dispatch_command` is required unless dry-run is enabled.
 
 Set the configuration-file path with `--config` or
 `CONVERGENCE_RECONCILER_CONFIG`. Command values in JSON may be arrays, which
-avoid quoting ambiguity:
+avoid quoting ambiguity. Flags and environment values also accept JSON argv
+arrays or shell-like quoted strings; no shell expansion occurs:
 
 ```json
 {
@@ -151,7 +154,7 @@ export CONVERGENCE_RECONCILER_REPOSITORY=OWNER/REPOSITORY
 export CONVERGENCE_RECONCILER_ACTIVE_COMMAND='session-control is-active'
 export CONVERGENCE_RECONCILER_DISPATCH_COMMAND='session-control dispatch'
 export CONVERGENCE_RECONCILER_STATE_FILE=runtime/convergence-state.json
-python3 tooling/convergence-reconciler/reconcile.py
+signalbox-converge reconcile
 ```
 
 These examples intentionally use placeholders and relative paths. Deployment
@@ -161,14 +164,12 @@ service supervision owns that singleton policy.
 
 ## Tests
 
-Driver tests exercise decisions, state persistence, and dispatch fences with
-recorded convergence results. The
+Rust driver tests exercise decisions, state persistence, dispatch fences, and
+process-group timeouts with recorded evidence and an injected GitHub reader. The
 [fixture corpus](../../crates/convergence/fixtures/) covers evidence rules with
-frozen differential expectations. The CLI regression runner checks those
-verdicts and reason sets without a second predicate implementation.
+frozen differential expectations. Cargo tests check those verdicts and reason
+sets without a second predicate implementation.
 
 ```console
-cargo build -p signalbox-convergence --bin signalbox-converge
-python3 tooling/convergence-reconciler/test_reconcile.py
-python3 tooling/convergence-reconciler/differential.py
+cargo test --no-fail-fast -p signalbox-convergence --all-features
 ```

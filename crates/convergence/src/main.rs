@@ -1,3 +1,6 @@
+//! Recording, evaluation, and operator reconciliation commands.
+mod reconcile;
+
 use signalbox_convergence::{ConvergencePolicy, Error, Recording, evaluate, fetch};
 use std::{collections::BTreeMap, io::Write, path::Path, process::ExitCode};
 
@@ -15,7 +18,12 @@ fn save_state(path: &Path, state: &serde_json::Value) -> Result<(), Error> {
 
 fn run() -> Result<u8, Error> {
     let mut arguments = std::env::args().skip(1);
-    let command = arguments.next().ok_or_else(|| Error::Evidence("usage: signalbox-converge record|evaluate --pr N|--fixture file --policy file [--out file]".into()))?;
+    let command = arguments.next().ok_or_else(|| {
+        Error::Evidence("usage: signalbox-converge record|evaluate|reconcile --policy file".into())
+    })?;
+    if command == "reconcile" {
+        return reconcile::run(arguments.collect());
+    }
     if !matches!(command.as_str(), "record" | "evaluate") {
         return Err(Error::Evidence("expected record or evaluate".into()));
     }
