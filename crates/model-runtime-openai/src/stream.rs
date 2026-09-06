@@ -95,12 +95,7 @@ impl StreamDecoder {
                 let Some(response) = event.response else {
                     return self.violation("terminal event lacks response");
                 };
-                let terminal_has_tools = response.output.as_ref().is_some_and(|items| {
-                    items.iter().any(|raw| {
-                        serde_json::from_str::<WireOutputItem>(raw.get())
-                            .is_ok_and(|item| item.kind == "function_call")
-                    })
-                });
+                let terminal_has_tools = Self::response_has_tools(&response);
                 if self.opened_tool_calls
                     && !terminal_has_tools
                     && response.status.as_deref() == Some("completed")
@@ -213,9 +208,26 @@ impl StreamDecoder {
             | "response.reasoning_summary_part.added"
             | "response.reasoning_summary_part.done"
             | "response.reasoning_summary_text.delta"
-            | "response.reasoning_summary_text.done" => StreamStep::Continue,
+            | "response.reasoning_summary_text.done" => {
+                let (Some(index), Some(id)) = (event.output_index, event.item_id) else {
+                    return self.violation("indexed event lacks output index or item id");
+                };
+                if let Err(detail) = self.observe_item(index, &id) {
+                    return self.violation(detail);
+                }
+                StreamStep::Continue
+            }
             other => self.violation(format!("unrecognized Responses event type {other:?}")),
         }
+    }
+
+    fn response_has_tools(response: &Response) -> bool {
+        response.output.as_ref().is_some_and(|items| {
+            items.iter().any(|raw| {
+                serde_json::from_str::<WireOutputItem>(raw.get())
+                    .is_ok_and(|item| item.kind == "function_call")
+            })
+        })
     }
 
     fn observe_response<C: Clone>(
@@ -224,6 +236,7 @@ impl StreamDecoder {
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), String> {
+        self.opened_tool_calls |= Self::response_has_tools(response);
         if response.id.as_deref().is_none_or(str::is_empty) {
             return Err("response event lacks its response id".to_string());
         }
@@ -257,6 +270,15 @@ impl StreamDecoder {
         }
         if let Some(usage) = &response.usage {
             self.usage.absorb(convert_usage(usage));
+        }
+        for (index, raw) in response.output.iter().flatten().enumerate() {
+            let item: WireOutputItem = serde_json::from_str(raw.get()).map_err(|error| {
+                self.discarded_unexamined_bytes = true;
+                error.to_string()
+            })?;
+            let id = item.id.ok_or("response output item lacks id")?;
+            let index = u32::try_from(index).map_err(|error| error.to_string())?;
+            self.observe_item(index, &id)?;
         }
         Ok(())
     }
@@ -553,10 +575,186 @@ mod tests {
             );
         }
         assert!(sink.is_empty());
-        assert!(
-            matches!(apply(&mut decoder,terminal(),&mut sink),StreamStep::Terminal(evidence) if matches!(*evidence,TerminalEvidence::Completed(_)))
+        let mut event = terminal();
+        event["response"]["output"].as_array_mut().unwrap().insert(
+            0,
+            json!({"type":"reasoning","id":"rs_fixture","encrypted_content":"complete"}),
         );
+        let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+            panic!("terminal event must terminate");
+        };
+        let TerminalEvidence::Completed(completion) = *evidence else {
+            panic!("matching item identities must complete");
+        };
+        assert_eq!(completion.content.len(), 1);
     }
+    #[test]
+    fn indexed_content_and_reasoning_events_must_preserve_the_established_item_id() {
+        for kind in [
+            "response.content_part.added",
+            "response.content_part.done",
+            "response.output_text.done",
+            "response.output_text.annotation.added",
+            "response.refusal.done",
+            "response.function_call_arguments.done",
+            "response.reasoning_text.delta",
+            "response.reasoning_text.done",
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_part.done",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.done",
+        ] {
+            for id in ["item_established", "item_conflicting"] {
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                apply(
+                    &mut decoder,
+                    json!({"type":"response.output_item.added",
+                    "output_index":0,"item":{"type":"reasoning","id":"item_established"}}),
+                    &mut sink,
+                );
+                let step = apply(
+                    &mut decoder,
+                    json!({"type":kind,"output_index":0,"item_id":id}),
+                    &mut sink,
+                );
+                if id == "item_established" {
+                    assert!(matches!(step, StreamStep::Continue), "{kind}");
+                } else {
+                    assert!(
+                        matches!(step, StreamStep::Terminal(evidence) if matches!(
+                            *evidence, TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                                cause: LossCause::StreamProtocolViolation { .. }, ..
+                            })
+                        )),
+                        "{kind}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_output_must_preserve_item_ids_at_their_established_indices() {
+        for status in ["completed", "incomplete", "failed"] {
+            for swap_items in [false, true] {
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                let mut event = terminal();
+                event["type"] = json!(format!("response.{status}"));
+                event["response"]["status"] = json!(status);
+                event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                event["response"]["error"] = json!({"code":"server_error"});
+                event["response"]["output"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"type":"reasoning","id":"rs_fixture"}));
+                for (index, item) in event["response"]["output"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                {
+                    apply(
+                        &mut decoder,
+                        json!({"type":"response.output_item.added", "output_index":index,"item":item}),
+                        &mut sink,
+                    );
+                }
+                if swap_items {
+                    event["response"]["output"]
+                        .as_array_mut()
+                        .unwrap()
+                        .swap(0, 1);
+                }
+                let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                    panic!("terminal event must terminate");
+                };
+                if swap_items {
+                    assert!(
+                        matches!(
+                            *evidence,
+                            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                                cause: LossCause::StreamProtocolViolation { .. },
+                                ..
+                            })
+                        ),
+                        "{status}"
+                    );
+                } else {
+                    assert!(
+                        matches!(
+                            *evidence,
+                            TerminalEvidence::Completed(_) | TerminalEvidence::ProviderError(_)
+                        ),
+                        "{status}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_snapshot_tools_remain_open_at_loss_despite_unexamined_later_bytes() {
+        for kind in [
+            "response.created",
+            "response.in_progress",
+            "response.queued",
+        ] {
+            for item_kind in ["message", "function_call"] {
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                assert!(matches!(
+                    apply(
+                        &mut decoder,
+                        json!({"type":kind,"response":{
+                            "id":"resp_fixture","output":[{"type":item_kind,"id":"item_fixture"}]
+                        }}),
+                        &mut Vec::new()
+                    ),
+                    StreamStep::Continue
+                ));
+                if item_kind == "function_call" {
+                    decoder.note_discarded_unexamined_bytes();
+                    assert!(matches!(
+                        decoder.cancelled(),
+                        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            tool_calls: ToolCallsAtLoss::Opened,
+                            ..
+                        })
+                    ));
+                }
+                let TerminalEvidence::BoundaryLoss(loss) =
+                    decoder.lost(StreamInterruption::EndOfStream)
+                else {
+                    panic!("EOF without a terminal event must lose the boundary");
+                };
+                assert_eq!(
+                    loss.tool_calls,
+                    if item_kind == "function_call" {
+                        ToolCallsAtLoss::Opened
+                    } else {
+                        ToolCallsAtLoss::NoneOpened
+                    },
+                    "{kind}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_snapshot_output_withholds_the_no_tool_claim() {
+        let evidence = decode(json!({"type":"response.in_progress","response":{
+            "id":"resp_fixture","output":[{"type":"function_call","arguments":42}]
+        }}));
+        assert!(matches!(
+            evidence,
+            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                tool_calls: ToolCallsAtLoss::Unobserved,
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn tool_argument_depth_is_bounded_across_fragments() {
         let mut decoder = StreamDecoder::new(ExchangeFacts::default());
