@@ -333,12 +333,11 @@ async fn refused_response_commits_prior_provider_compaction() -> Result<(), Box<
     assert_eq!(disabled.usage(), reported_usage);
     assert_eq!(disabled.retained_input_tokens(), None);
     assert_eq!(disabled.retained_output_tokens(), None);
-    let (eligible, dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
     assert!(eligible.is_empty());
-    assert!(dispatch_starts.is_empty());
     assert!(!continuation);
 
     pool.close().await;
@@ -487,12 +486,11 @@ async fn latest_reported_usage_does_not_cross_effective_fast_mode_targets()
             .is_none(),
         "the fast-target fallback must not reuse base-target retained counts"
     );
-    let (eligible, dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
     assert!(eligible.is_empty());
-    assert!(dispatch_starts.is_empty());
     assert!(!continuation);
 
     pool.close().await;

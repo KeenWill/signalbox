@@ -397,13 +397,7 @@ impl GoalRepository {
             GoalCommandResult::Rejected(_) => false,
         };
         match &result {
-            GoalCommandResult::Applied(event) => {
-                lock_terminal_repo_watch_dispatch_cohort(
-                    &mut transaction,
-                    command.session(),
-                    event,
-                )
-                .await?;
+            GoalCommandResult::Applied(_) => {
                 lock_scheduler(&mut transaction, command.session()).await?;
             }
             GoalCommandResult::Rejected(_) => {}
@@ -1143,52 +1137,6 @@ impl GoalRepository {
     }
 }
 
-/// Applies scheduler failure authority inside a transaction that already owns
-/// the session lock and has terminalized the exact failed turn.
-///
-/// Approval-judge headless closeout uses this boundary so its turn failure,
-/// blocked goal event, repository-watch requeue, and singleton release share
-/// one commit. The ordinary public method remains the entry point for
-/// independent scheduler passes.
-pub(crate) async fn block_execution_failure_locked(
-    connection: &mut PgConnection,
-    session: SessionId,
-    need: GoalNeed,
-    provenance: GoalSchedulerProvenance,
-) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
-    let Some(goal) = load_goal_from_connection(connection, session).await? else {
-        return Ok(GoalTransitionOutcome::GoalNotAttached);
-    };
-    if let Some(event) = recorded_scheduler_failure(&goal, provenance.turn()) {
-        return Ok(GoalTransitionOutcome::Applied(event.clone()));
-    }
-    let generation = goal_turn_generation(connection, session, provenance.turn()).await?;
-    if generation != Some(goal.current().generation()) {
-        return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-    }
-    if current_goal_turn(connection, session, goal.current().generation()).await?
-        != Some(provenance.turn())
-    {
-        return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-    }
-    if goal_turn_terminal_state(connection, session, provenance.turn()).await?
-        != GoalTurnTerminalState::Unsuccessful
-    {
-        return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-    }
-    let transitioned = match goal.block_execution_failure(need, provenance) {
-        Ok(goal) => goal,
-        Err(error) => return Ok(GoalTransitionOutcome::Rejected(error)),
-    };
-    let event = latest_event(&transitioned)?;
-    insert_event(connection, session, &event).await?;
-    // Same monitor-visibility requirement as `handle_system_transition`: a
-    // blocked transition that retires a queued turn from the live projection
-    // must surface as a durable outbox event.
-    retire_ineligible_queued_goal_turn(connection, session).await?;
-    Ok(GoalTransitionOutcome::Applied(event))
-}
-
 /// Records an operator-required recovery cause inside the transaction that
 /// terminalizes the exact failed turn.
 pub(crate) async fn record_execution_failure_recovery_cause(
@@ -1316,27 +1264,6 @@ fn event_may_retire_queued_turn(event: &GoalEvent) -> bool {
     }
 }
 
-async fn lock_terminal_repo_watch_dispatch_cohort(
-    connection: &mut PgConnection,
-    session: SessionId,
-    event: &GoalEvent,
-) -> Result<(), GoalRepositoryError> {
-    if !matches!(
-        event.kind(),
-        GoalEventKind::Blocked { .. }
-            | GoalEventKind::Achieved { .. }
-            | GoalEventKind::UserStopped { .. }
-            | GoalEventKind::SessionClosed { .. }
-    ) {
-        return Ok(());
-    }
-    sqlx::query(crate::lock_inventory::REPO_WATCH_TERMINAL_GOAL_COHORT)
-        .bind(session_id_to_uuid(session))
-        .execute(&mut *connection)
-        .await?;
-    Ok(())
-}
-
 fn scheduler_failure_rejection(
     failure: GoalTransitionFailure,
 ) -> Result<GoalTurnContinuationOutcome, GoalCorruption> {
@@ -1422,89 +1349,6 @@ pub(crate) async fn insert_fresh_commissioned_goal(
         turn,
     )
     .await
-}
-
-/// Composes a parent-only stop for a repository-watch commission that is still
-/// the session's original pursuing generation.
-///
-/// Repository watch owns the commission it created, but it must not stop a
-/// later user-authored generation or a goal that has already ended. The session
-/// lock makes that check and the stop one atomic decision. The ordinary durable
-/// stop receipt, termination cascade, and event shapes are retained.
-pub(crate) async fn insert_repo_watch_composed_stop(
-    connection: &mut PgConnection,
-    command: GoalUserCommand,
-) -> Result<bool, GoalRepositoryError> {
-    if !matches!(
-        command.action(),
-        GoalUserAction::Stop {
-            descendant_scope: DescendantTerminationScope::ParentAlone,
-        }
-    ) {
-        return Err(GoalCorruption::Inconsistent(
-            "repository-watch cutoff command is not a parent-only stop",
-        )
-        .into());
-    }
-    if !lock_session(connection, command.session()).await? {
-        return Err(GoalCorruption::Missing("dispatched cutoff session").into());
-    }
-    if session_holds_committed_closure(connection, command.session()).await? {
-        return Ok(false);
-    }
-    let Some(goal) = load_goal_from_connection(connection, command.session()).await? else {
-        return Err(GoalCorruption::Missing("dispatched cutoff goal").into());
-    };
-    if goal.current().generation().get() != 1
-        || !matches!(
-            goal.current().state(),
-            GoalState::Pursuing | GoalState::Blocked { .. }
-        )
-    {
-        return Ok(false);
-    }
-    let issuer =
-        crate::command_registry::issuer_columns(signalbox_domain::CommandPrincipal::Module {
-            module: signalbox_domain::DispatchingModule::RepositoryWatch,
-        });
-    let claimed = sqlx::query(
-        "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at,
-             issuer_kind, issuer_module)
-         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(durable_command_id_to_uuid(command.command_id()))
-    .bind(GOAL_KIND)
-    .bind(STORAGE_VERSION)
-    .bind(issuer.0)
-    .bind(issuer.1)
-    .execute(&mut *connection)
-    .await?
-    .rows_affected()
-        == 1;
-    if !claimed {
-        return Err(
-            GoalCorruption::Inconsistent("fresh repository-watch cutoff command identity").into(),
-        );
-    }
-    let result = apply_unconditional_user_command(connection, &command).await?;
-    let GoalCommandResult::Applied(event) = &result else {
-        return Err(GoalCorruption::Inconsistent(
-            "repository-watch cutoff stop was rejected after locking",
-        )
-        .into());
-    };
-    lock_terminal_repo_watch_dispatch_cohort(connection, command.session(), event).await?;
-    lock_scheduler(connection, command.session()).await?;
-    insert_command(connection, &command, &result).await?;
-    insert_event(connection, command.session(), event).await?;
-    retire_ineligible_queued_goal_turn(connection, command.session()).await?;
-    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1, 'stopped')")
-        .bind(durable_command_id_to_uuid(command.command_id()))
-        .execute(&mut *connection)
-        .await?;
-    Ok(true)
 }
 
 fn event_starts_pursuit(event: &GoalEvent) -> bool {

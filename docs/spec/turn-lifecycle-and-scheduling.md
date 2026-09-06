@@ -35,11 +35,9 @@ is owned by [persistence-protocol](persistence-protocol.md).
 The scheduler is a loop of per-session authoritative passes. An in-process nudge
 after an accepted input whose applied result is a turn origin feeds it first,
 and a periodic sweep over the durable rows (`PostgresEligibilitySweep`) backs it
-up. The sweep finds five shapes: a queued turn with no active turn, an active
+up. The sweep finds four shapes: a queued turn with no active turn, an active
 turn holding a prepared model call, an active tool round, a terminal pursuing
-goal turn that still lacks its goal disposition, and an unexpired
-repository-watch dispatch-start lease with no model-call evidence, which the
-sweep marks for the reserved dispatch-start place. A pass activates a turn and
+goal turn that still lacks its goal disposition. A pass activates a turn and
 then drives its model call through the execution ports owned by
 [model-call-execution](model-call-execution.md) and [tool-loop](tool-loop.md).
 
@@ -203,24 +201,21 @@ transaction, so no start references a missing or partial snapshot.
 
 The admission cap bounds concurrent per-session passes, not the durable queue; a
 cap of zero pauses execution and an absent cap admits every eligible session.
-For a cap above one, one place is reserved for a repository-watch dispatch start
-that carries no model-call evidence. Each pass first reconciles an active
-running tool round, then drives a retained prepared model call, and only then
-activates a queued turn; failure of either lookup is an ordinary failed pass,
-and only a failure after active-turn execution begins trips fatal recovery
-supervision. A candidate the sweep marked from a repository-watch dispatch-start
-lease first drives its active turn through the dispatch-start resume path, and
-only then activates. A pass releases its slot during attachment or blob-store
-I/O and reacquires one before send authorization, and its guarded transaction
-revalidates authority. A model-originated blob read authorizes no later send, so
-it reacquires its slot before the correlated tool result commits. A pass that
-cannot immediately get an attachment-preparation permit ends and leaves only the
-durable prepared row for a later sweep. When a pass exceeds its occupancy bound,
-the handoff invokes the startup-recovery transaction only for a turn whose
-attempt and turn-progress frontier did not change between two observations, and
-a resumability read that does not settle counts as a resumption; a pass that
-expires inside pre-activation compaction instead hands off only the exact
-compaction call that window made durable.
+Each pass first reconciles an active running tool round, then drives a retained
+prepared model call, and only then activates a queued turn; failure of either
+lookup is an ordinary failed pass, and only a failure after active-turn
+execution begins trips fatal recovery supervision. A pass releases its slot
+during attachment or blob-store I/O and reacquires one before send
+authorization, and its guarded transaction revalidates authority. A
+model-originated blob read authorizes no later send, so it reacquires its slot
+before the correlated tool result commits. A pass that cannot immediately get an
+attachment-preparation permit ends and leaves only the durable prepared row for
+a later sweep. When a pass exceeds its occupancy bound, the handoff invokes the
+startup-recovery transaction only for a turn whose attempt and turn-progress
+frontier did not change between two observations, and a resumability read that
+does not settle counts as a resumption; a pass that expires inside
+pre-activation compaction instead hands off only the exact compaction call that
+window made durable.
 
 A quiescent candidate is an active turn with an accepted-input origin in the
 running phase, with no tool round, approval, or recovery attempt, and no live

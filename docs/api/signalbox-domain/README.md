@@ -24,7 +24,7 @@
 | provider_evidence | 5 | 0 | 0 | [provider_evidence](provider_evidence.md) |
 | queue_order | 5 | 0 | 1 | [queue_order](queue_order.md) |
 | replace_session_defaults | 13 | 0 | 0 | [replace_session_defaults](replace_session_defaults.md) |
-| repo_watch | 51 | 0 | 0 | [repo_watch](repo_watch.md) |
+| repo_watch | 43 | 0 | 0 | [repo_watch](repo_watch.md) |
 | review_workflow | 83 | 0 | 1 | [review_workflow](review_workflow.md) |
 | runner | 70 | 0 | 0 | [runner](runner.md) |
 | semantic_entry | 6 | 0 | 0 | [semantic_entry](semantic_entry.md) |
