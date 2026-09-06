@@ -471,8 +471,10 @@ reconciliation appends deactivation of the old revision and activation of the
 new one after the current event tail; a fresh rule identity remains an admitted
 replacement path. A deactivated identity-and-revision pair cannot be configured
 again, a revision below the highest ever recorded for that identity in that
-repository is refused, and rule identity is per repository, so the same identity
-first configured in a newly watched repository starts its own lineage.
+repository is refused, and the highest revision remains retained after
+retirement so those refusals survive release of lower inactive revisions. Rule
+identity is per repository, so the same identity first configured in a newly
+watched repository starts its own lineage.
 
 Everything the listener does before a delivery is durably admitted is identical
 in both webhook modes. The body's canonical repository must equal the repository
