@@ -7,7 +7,7 @@
 ```rust
 pub struct ProviderModelIdentity(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl model_call::ProviderModelIdentity {
+impl ProviderModelIdentity {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
     pub const fn as_uuid(&self) -> &uuid::Uuid;
     pub const fn into_uuid(self) -> uuid::Uuid;
@@ -19,9 +19,9 @@ impl model_call::ProviderModelIdentity {
 ```rust
 pub struct ResolvedProviderTarget {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_call::ResolvedProviderTarget {
-    pub const fn naming(identity: model_call::ProviderModelIdentity) -> Self;
-    pub const fn identity(&self) -> model_call::ProviderModelIdentity;
+impl ResolvedProviderTarget {
+    pub const fn naming(identity: ProviderModelIdentity) -> Self;
+    pub const fn identity(&self) -> ProviderModelIdentity;
 }
 ```
 
@@ -30,9 +30,9 @@ impl model_call::ResolvedProviderTarget {
 ```rust
 pub struct PinnedProviderTarget {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_call::PinnedProviderTarget {
+impl PinnedProviderTarget {
     pub const fn turn(&self) -> TurnId;
-    pub const fn target(&self) -> model_call::ResolvedProviderTarget;
+    pub const fn target(&self) -> ResolvedProviderTarget;
 }
 ```
 
@@ -41,10 +41,10 @@ impl model_call::PinnedProviderTarget {
 ```rust
 pub struct PinnedProviderTargetReconstitutionInput {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_call::PinnedProviderTargetReconstitutionInput {
-    pub const fn new(turn: TurnId, target: model_call::ResolvedProviderTarget) -> Self;
+impl PinnedProviderTargetReconstitutionInput {
+    pub const fn new(turn: TurnId, target: ResolvedProviderTarget) -> Self;
     pub const fn turn(&self) -> TurnId;
-    pub const fn target(&self) -> model_call::ResolvedProviderTarget;
+    pub const fn target(&self) -> ResolvedProviderTarget;
 }
 ```
 
@@ -77,15 +77,15 @@ pub enum CurrentModelCallState {
 ```rust
 pub struct CurrentModelCall {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_call::CurrentModelCall {
+impl CurrentModelCall {
     pub const fn id(&self) -> ModelCallId;
     pub const fn attempt(&self) -> TurnAttemptId;
-    pub const fn selection(&self) -> configuration::FrozenModelSelection;
-    pub const fn pinned(&self) -> &model_call::PinnedProviderTarget;
+    pub const fn selection(&self) -> FrozenModelSelection;
+    pub const fn pinned(&self) -> &PinnedProviderTarget;
     pub const fn turn(&self) -> TurnId;
-    pub const fn target(&self) -> model_call::ResolvedProviderTarget;
-    pub const fn frontier(&self) -> context_frontier::ContextFrontier;
-    pub const fn state(&self) -> model_call::CurrentModelCallState;
+    pub const fn target(&self) -> ResolvedProviderTarget;
+    pub const fn frontier(&self) -> ContextFrontier;
+    pub const fn state(&self) -> CurrentModelCallState;
 }
 ```
 
@@ -94,15 +94,15 @@ impl model_call::CurrentModelCall {
 ```rust
 pub struct EndedModelCall {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_call::EndedModelCall {
+impl EndedModelCall {
     pub const fn id(&self) -> ModelCallId;
     pub const fn attempt(&self) -> TurnAttemptId;
-    pub const fn selection(&self) -> configuration::FrozenModelSelection;
-    pub const fn pinned(&self) -> &model_call::PinnedProviderTarget;
+    pub const fn selection(&self) -> FrozenModelSelection;
+    pub const fn pinned(&self) -> &PinnedProviderTarget;
     pub const fn turn(&self) -> TurnId;
-    pub const fn target(&self) -> model_call::ResolvedProviderTarget;
-    pub const fn frontier(&self) -> context_frontier::ContextFrontier;
-    pub const fn disposition(&self) -> model_call::ModelCallDisposition;
+    pub const fn target(&self) -> ResolvedProviderTarget;
+    pub const fn frontier(&self) -> ContextFrontier;
+    pub const fn disposition(&self) -> ModelCallDisposition;
 }
 ```
 
@@ -113,7 +113,7 @@ pub enum ModelCallReconstitutionState {
     Prepared,
     InFlight,
     CancellationRequested,
-    Terminal(model_call::ModelCallDisposition),
+    Terminal(ModelCallDisposition),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -123,23 +123,23 @@ pub enum ModelCallReconstitutionState {
 ```rust
 pub struct ModelCallReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_call::ModelCallReconstitutionInput {
+impl ModelCallReconstitutionInput {
     pub const fn new(
         id: ModelCallId,
         turn: TurnId,
         attempt: TurnAttemptId,
-        selection: configuration::FrozenModelSelection,
-        target: model_call::ResolvedProviderTarget,
-        frontier: context_frontier::ContextFrontierId,
-        state: model_call::ModelCallReconstitutionState,
+        selection: FrozenModelSelection,
+        target: ResolvedProviderTarget,
+        frontier: ContextFrontierId,
+        state: ModelCallReconstitutionState,
     ) -> Self;
     pub const fn id(&self) -> ModelCallId;
     pub const fn turn(&self) -> TurnId;
     pub const fn attempt(&self) -> TurnAttemptId;
-    pub const fn selection(&self) -> configuration::FrozenModelSelection;
-    pub const fn target(&self) -> model_call::ResolvedProviderTarget;
-    pub const fn frontier(&self) -> context_frontier::ContextFrontierId;
-    pub const fn state(&self) -> model_call::ModelCallReconstitutionState;
+    pub const fn selection(&self) -> FrozenModelSelection;
+    pub const fn target(&self) -> ResolvedProviderTarget;
+    pub const fn frontier(&self) -> ContextFrontierId;
+    pub const fn state(&self) -> ModelCallReconstitutionState;
 }
 ```
 
@@ -147,8 +147,8 @@ impl model_call::ModelCallReconstitutionInput {
 
 ```rust
 pub enum ReconstitutedModelCall {
-    Current(model_call::CurrentModelCall),
-    Ended(model_call::EndedModelCall),
+    Current(CurrentModelCall),
+    Ended(EndedModelCall),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

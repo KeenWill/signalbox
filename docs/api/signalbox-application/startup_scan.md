@@ -22,7 +22,7 @@ pub trait StartupScanIdGenerator {
 ```rust
 pub struct UuidV7StartupScanIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl startup_scan::StartupScanIdGenerator for startup_scan::UuidV7StartupScanIdGenerator {
+impl StartupScanIdGenerator for UuidV7StartupScanIdGenerator {
     pub fn next_failure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
     pub fn next_terminal_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
     pub fn next_reclassified_turn_id(
@@ -61,13 +61,13 @@ pub enum StartupScanSessionOutcome {
 
 ```rust
 pub trait StartupScanRepository {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure;
     pub fn active_sessions(
         &mut self,
     ) -> impl future::Future<
         Output = result::Result<
             boxed::Box<[signalbox_domain::SessionId]>,
-            <Self as startup_scan::StartupScanRepository>::Error,
+            <Self as StartupScanRepository>::Error,
         >,
     > + marker::Send;
     pub fn recover<Generator>(
@@ -76,13 +76,10 @@ pub trait StartupScanRepository {
         identities: turn_eligibility::AcceptedInputTurnFailureIdentities,
         ids: &mut Generator,
     ) -> impl future::Future<
-        Output = result::Result<
-            startup_scan::StartupScanSessionOutcome,
-            <Self as startup_scan::StartupScanRepository>::Error,
-        >,
+        Output = result::Result<StartupScanSessionOutcome, <Self as StartupScanRepository>::Error>,
     > + marker::Send
     where
-        Generator: startup_scan::StartupScanIdGenerator + marker::Send;
+        Generator: StartupScanIdGenerator + marker::Send;
 }
 ```
 
@@ -91,7 +88,7 @@ pub trait StartupScanRepository {
 ```rust
 pub struct StartupScanOutcome {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl startup_scan::StartupScanOutcome {
+impl StartupScanOutcome {
     pub const fn recovered_turn_count(&self) -> usize;
     pub fn awaiting_recovery_decision_sessions(&self) -> &[signalbox_domain::SessionId];
 }
@@ -102,29 +99,28 @@ impl startup_scan::StartupScanOutcome {
 ```rust
 pub struct StartupScanError<RepositoryError> {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<RepositoryError> startup_scan::StartupScanError<RepositoryError> {
+impl<RepositoryError> StartupScanError<RepositoryError> {
     pub const fn session(&self) -> option::Option<signalbox_domain::SessionId>;
     pub const fn repository_error(&self) -> &RepositoryError;
     pub fn into_repository_error(self) -> RepositoryError;
 }
-impl<RepositoryError> fmt::Display for startup_scan::StartupScanError<RepositoryError>
+impl<RepositoryError> fmt::Display for StartupScanError<RepositoryError>
 where
     RepositoryError: fmt::Display,
 {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl<RepositoryError> error::Error for startup_scan::StartupScanError<RepositoryError>
+impl<RepositoryError> error::Error for StartupScanError<RepositoryError>
 where
     RepositoryError: error::Error + 'static,
 {
     pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl<RepositoryError> operator_failure::ClassifyOperatorFailure
-    for startup_scan::StartupScanError<RepositoryError>
+impl<RepositoryError> ClassifyOperatorFailure for StartupScanError<RepositoryError>
 where
-    RepositoryError: operator_failure::ClassifyOperatorFailure,
+    RepositoryError: ClassifyOperatorFailure,
 {
-    pub fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    pub fn operator_failure_class(&self) -> OperatorFailureClass;
     pub fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```
@@ -134,20 +130,20 @@ where
 ```rust
 pub struct StartupScanService<Generator, Repository> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<Generator, Repository> startup_scan::StartupScanService<Generator, Repository> {
+impl<Generator, Repository> StartupScanService<Generator, Repository> {
     pub const fn new(ids: Generator, repository: Repository) -> Self;
     pub fn into_parts(self) -> (Generator, Repository);
 }
-impl<Generator, Repository> startup_scan::StartupScanService<Generator, Repository>
+impl<Generator, Repository> StartupScanService<Generator, Repository>
 where
-    Generator: startup_scan::StartupScanIdGenerator + marker::Send,
-    Repository: startup_scan::StartupScanRepository,
+    Generator: StartupScanIdGenerator + marker::Send,
+    Repository: StartupScanRepository,
 {
     pub async fn execute(
         &mut self,
     ) -> result::Result<
-        startup_scan::StartupScanOutcome,
-        startup_scan::StartupScanError<<Repository as startup_scan::StartupScanRepository>::Error>,
+        StartupScanOutcome,
+        StartupScanError<<Repository as StartupScanRepository>::Error>,
     >;
 }
 ```

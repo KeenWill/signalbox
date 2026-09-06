@@ -15,10 +15,10 @@ pub enum WorkspaceRootPathError {
     NoFinalComponent,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for workspace::WorkspaceRootPathError {
+impl fmt::Display for WorkspaceRootPathError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for workspace::WorkspaceRootPathError {}
+impl error::Error for WorkspaceRootPathError {}
 ```
 
 ## WorkspaceRootPath
@@ -26,10 +26,8 @@ impl error::Error for workspace::WorkspaceRootPathError {}
 ```rust
 pub struct WorkspaceRootPath(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl workspace::WorkspaceRootPath {
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, workspace::WorkspaceRootPathError>;
+impl WorkspaceRootPath {
+    pub fn try_new(value: string::String) -> result::Result<Self, WorkspaceRootPathError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -43,7 +41,7 @@ pub enum WorkspaceOrigin {
     DaemonDerived,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl workspace::WorkspaceOrigin {
+impl WorkspaceOrigin {
     pub const fn is_operator_registered(self) -> bool;
 }
 ```
@@ -53,14 +51,10 @@ impl workspace::WorkspaceOrigin {
 ```rust
 pub struct WorkspaceRecord {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl workspace::WorkspaceRecord {
-    pub const fn new(
-        id: WorkspaceId,
-        root: workspace::WorkspaceRootPath,
-        origin: workspace::WorkspaceOrigin,
-    ) -> Self;
+impl WorkspaceRecord {
+    pub const fn new(id: WorkspaceId, root: WorkspaceRootPath, origin: WorkspaceOrigin) -> Self;
     pub const fn id(&self) -> WorkspaceId;
-    pub const fn root(&self) -> &workspace::WorkspaceRootPath;
-    pub const fn origin(&self) -> workspace::WorkspaceOrigin;
+    pub const fn root(&self) -> &WorkspaceRootPath;
+    pub const fn origin(&self) -> WorkspaceOrigin;
 }
 ```

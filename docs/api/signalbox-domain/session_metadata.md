@@ -7,16 +7,16 @@
 ```rust
 pub struct SessionMetadataContent {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_metadata::SessionMetadataContent {
-    const MAX_TOTAL_UTF8_BYTES: usize;
-    const MAX_INDEXED_UTF8_BYTES: usize;
+impl SessionMetadataContent {
+    pub const MAX_TOTAL_UTF8_BYTES: usize;
+    pub const MAX_INDEXED_UTF8_BYTES: usize;
     pub fn empty() -> Self;
     pub fn try_new(
         title: option::Option<string::String>,
         tags: vec::Vec<string::String>,
         attributes: vec::Vec<(string::String, string::String)>,
         archived: bool,
-    ) -> result::Result<Self, session_metadata::SessionMetadataContentError>;
+    ) -> result::Result<Self, SessionMetadataContentError>;
     pub fn try_new_with_count_limits(
         title: option::Option<string::String>,
         tags: vec::Vec<string::String>,
@@ -24,7 +24,7 @@ impl session_metadata::SessionMetadataContent {
         archived: bool,
         max_tags: option::Option<usize>,
         max_attributes: option::Option<usize>,
-    ) -> result::Result<Self, session_metadata::SessionMetadataContentError>;
+    ) -> result::Result<Self, SessionMetadataContentError>;
     pub fn title(&self) -> option::Option<&str>;
     pub fn tags(&self) -> impl exact_size::ExactSizeIterator<Item = &str>;
     pub fn attributes(&self) -> impl exact_size::ExactSizeIterator<Item = (&str, &str)>;
@@ -59,7 +59,7 @@ pub enum SessionMetadataContentError {
 ```rust
 pub struct SessionMetadataUpdatedAt(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl session_metadata::SessionMetadataUpdatedAt {
+impl SessionMetadataUpdatedAt {
     pub const fn from_unix_micros(value: u64) -> Self;
     pub const fn as_unix_micros(self) -> u64;
 }
@@ -70,13 +70,10 @@ impl session_metadata::SessionMetadataUpdatedAt {
 ```rust
 pub struct SessionMetadataLastWriter {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_metadata::SessionMetadataLastWriter {
-    pub const fn new(
-        updated_at: session_metadata::SessionMetadataUpdatedAt,
-        actor: actor::Actor,
-    ) -> Self;
-    pub const fn updated_at(self) -> session_metadata::SessionMetadataUpdatedAt;
-    pub const fn actor(self) -> actor::Actor;
+impl SessionMetadataLastWriter {
+    pub const fn new(updated_at: SessionMetadataUpdatedAt, actor: Actor) -> Self;
+    pub const fn updated_at(self) -> SessionMetadataUpdatedAt;
+    pub const fn actor(self) -> Actor;
 }
 ```
 
@@ -85,16 +82,16 @@ impl session_metadata::SessionMetadataLastWriter {
 ```rust
 pub struct SessionMetadataSnapshot {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_metadata::SessionMetadataSnapshot {
+impl SessionMetadataSnapshot {
     pub fn initial(session: SessionId) -> Self;
     pub fn from_recorded_write(
         session: SessionId,
-        content: session_metadata::SessionMetadataContent,
-        last_writer: session_metadata::SessionMetadataLastWriter,
+        content: SessionMetadataContent,
+        last_writer: SessionMetadataLastWriter,
     ) -> Self;
     pub const fn session(&self) -> SessionId;
-    pub const fn content(&self) -> &session_metadata::SessionMetadataContent;
-    pub const fn last_writer(&self) -> option::Option<session_metadata::SessionMetadataLastWriter>;
+    pub const fn content(&self) -> &SessionMetadataContent;
+    pub const fn last_writer(&self) -> option::Option<SessionMetadataLastWriter>;
 }
 ```
 
@@ -103,33 +100,33 @@ impl session_metadata::SessionMetadataSnapshot {
 ```rust
 pub struct ReplaceSessionMetadata {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session_metadata::ReplaceSessionMetadata {
+impl ReplaceSessionMetadata {
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,
-        replacement: session_metadata::SessionMetadataContent,
+        replacement: SessionMetadataContent,
     ) -> Self;
     pub const fn new_for_tool(
         command_id: DurableCommandId,
         session: SessionId,
         request: ToolRequestId,
-        replacement: session_metadata::SessionMetadataContent,
+        replacement: SessionMetadataContent,
     ) -> Self;
     pub const fn command_id(&self) -> DurableCommandId;
     pub const fn session(&self) -> SessionId;
-    pub const fn actor(&self) -> actor::Actor;
-    pub const fn replacement(&self) -> &session_metadata::SessionMetadataContent;
-    pub fn prepare_session_not_found(self) -> session_metadata::PreparedReplaceSessionMetadata;
+    pub const fn actor(&self) -> Actor;
+    pub const fn replacement(&self) -> &SessionMetadataContent;
+    pub fn prepare_session_not_found(self) -> PreparedReplaceSessionMetadata;
     pub fn prepare_applied(
         self,
-        updated_at: session_metadata::SessionMetadataUpdatedAt,
-    ) -> session_metadata::PreparedReplaceSessionMetadata;
+        updated_at: SessionMetadataUpdatedAt,
+    ) -> PreparedReplaceSessionMetadata;
 }
-impl cmp::PartialEq for session_metadata::ReplaceSessionMetadata {
+impl cmp::PartialEq for ReplaceSessionMetadata {
     pub fn eq(&self, other: &Self) -> bool;
 }
-impl cmp::Eq for session_metadata::ReplaceSessionMetadata {}
-impl hash::Hash for session_metadata::ReplaceSessionMetadata {
+impl cmp::Eq for ReplaceSessionMetadata {}
+impl hash::Hash for ReplaceSessionMetadata {
     pub fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 ```
@@ -138,8 +135,8 @@ impl hash::Hash for session_metadata::ReplaceSessionMetadata {
 
 ```rust
 pub enum ReplaceSessionMetadataResult {
-    Applied(session_metadata::ReplaceSessionMetadataAppliedResult),
-    Rejected(session_metadata::ReplaceSessionMetadataRejectedResult),
+    Applied(ReplaceSessionMetadataAppliedResult),
+    Rejected(ReplaceSessionMetadataRejectedResult),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -149,8 +146,8 @@ pub enum ReplaceSessionMetadataResult {
 ```rust
 pub struct ReplaceSessionMetadataAppliedResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_metadata::ReplaceSessionMetadataAppliedResult {
-    pub const fn snapshot(&self) -> &session_metadata::SessionMetadataSnapshot;
+impl ReplaceSessionMetadataAppliedResult {
+    pub const fn snapshot(&self) -> &SessionMetadataSnapshot;
 }
 ```
 
@@ -158,7 +155,7 @@ impl session_metadata::ReplaceSessionMetadataAppliedResult {
 
 ```rust
 pub enum ReplaceSessionMetadataRejectedResult {
-    SessionNotFound(session_metadata::ReplaceSessionMetadataSessionNotFound),
+    SessionNotFound(ReplaceSessionMetadataSessionNotFound),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -168,7 +165,7 @@ pub enum ReplaceSessionMetadataRejectedResult {
 ```rust
 pub struct ReplaceSessionMetadataSessionNotFound {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_metadata::ReplaceSessionMetadataSessionNotFound {
+impl ReplaceSessionMetadataSessionNotFound {
     pub const fn session(self) -> SessionId;
 }
 ```
@@ -178,15 +175,10 @@ impl session_metadata::ReplaceSessionMetadataSessionNotFound {
 ```rust
 pub struct PreparedReplaceSessionMetadata {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session_metadata::PreparedReplaceSessionMetadata {
-    pub const fn command(&self) -> &session_metadata::ReplaceSessionMetadata;
-    pub const fn result(&self) -> &session_metadata::ReplaceSessionMetadataResult;
-    pub fn into_parts(
-        self,
-    ) -> (
-        session_metadata::ReplaceSessionMetadata,
-        session_metadata::ReplaceSessionMetadataResult,
-    );
+impl PreparedReplaceSessionMetadata {
+    pub const fn command(&self) -> &ReplaceSessionMetadata;
+    pub const fn result(&self) -> &ReplaceSessionMetadataResult;
+    pub fn into_parts(self) -> (ReplaceSessionMetadata, ReplaceSessionMetadataResult);
 }
 ```
 
@@ -195,25 +187,25 @@ impl session_metadata::PreparedReplaceSessionMetadata {
 ```rust
 pub struct ReplaceSessionMetadataReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session_metadata::ReplaceSessionMetadataReconstitutionInput {
+impl ReplaceSessionMetadataReconstitutionInput {
     pub const fn applied(
-        command: session_metadata::ReplaceSessionMetadata,
-        command_actor: actor::Actor,
+        command: ReplaceSessionMetadata,
+        command_actor: Actor,
         result_session: SessionId,
-        result_updated_at: session_metadata::SessionMetadataUpdatedAt,
-        result_actor: actor::Actor,
+        result_updated_at: SessionMetadataUpdatedAt,
+        result_actor: Actor,
     ) -> Self;
     pub const fn rejected_session_not_found(
-        command: session_metadata::ReplaceSessionMetadata,
-        command_actor: actor::Actor,
+        command: ReplaceSessionMetadata,
+        command_actor: Actor,
         result_session: SessionId,
     ) -> Self;
-    pub const fn command(&self) -> &session_metadata::ReplaceSessionMetadata;
+    pub const fn command(&self) -> &ReplaceSessionMetadata;
     pub fn reconstitute(
         self,
     ) -> result::Result<
-        session_metadata::ReconstitutedReplaceSessionMetadata,
-        session_metadata::ReplaceSessionMetadataReconstitutionError,
+        ReconstitutedReplaceSessionMetadata,
+        ReplaceSessionMetadataReconstitutionError,
     >;
 }
 ```
@@ -234,14 +226,14 @@ pub enum ReplaceSessionMetadataReconstitutionFailure {
 ```rust
 pub struct ReplaceSessionMetadataReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session_metadata::ReplaceSessionMetadataReconstitutionError {
-    pub const fn failure(&self) -> session_metadata::ReplaceSessionMetadataReconstitutionFailure;
-    pub const fn input(&self) -> &session_metadata::ReplaceSessionMetadataReconstitutionInput;
+impl ReplaceSessionMetadataReconstitutionError {
+    pub const fn failure(&self) -> ReplaceSessionMetadataReconstitutionFailure;
+    pub const fn input(&self) -> &ReplaceSessionMetadataReconstitutionInput;
     pub fn into_parts(
         self,
     ) -> (
-        session_metadata::ReplaceSessionMetadataReconstitutionInput,
-        session_metadata::ReplaceSessionMetadataReconstitutionFailure,
+        ReplaceSessionMetadataReconstitutionInput,
+        ReplaceSessionMetadataReconstitutionFailure,
     );
 }
 ```
@@ -251,8 +243,8 @@ impl session_metadata::ReplaceSessionMetadataReconstitutionError {
 ```rust
 pub struct ReconstitutedReplaceSessionMetadata {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session_metadata::ReconstitutedReplaceSessionMetadata {
-    pub const fn command(&self) -> &session_metadata::ReplaceSessionMetadata;
-    pub const fn result(&self) -> &session_metadata::ReplaceSessionMetadataResult;
+impl ReconstitutedReplaceSessionMetadata {
+    pub const fn command(&self) -> &ReplaceSessionMetadata;
+    pub const fn result(&self) -> &ReplaceSessionMetadataResult;
 }
 ```

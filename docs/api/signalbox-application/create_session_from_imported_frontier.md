@@ -7,13 +7,13 @@
 ```rust
 pub struct CreateSessionFromImportedFrontierRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl create_session_from_imported_frontier::CreateSessionFromImportedFrontierRequest {
+impl CreateSessionFromImportedFrontierRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
         imported_frontier: imported_conversation::ImportedTranscriptFrontier,
         relationship: session::ImportedSessionRelationship,
         initial_configuration_defaults: configuration::SessionConfigurationDefaults,
-    ) -> result::Result<Self, create_session::InvalidDurableCommandId>;
+    ) -> result::Result<Self, InvalidDurableCommandId>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn imported_frontier(&self) -> imported_conversation::ImportedTranscriptFrontier;
     pub const fn relationship(&self) -> session::ImportedSessionRelationship;
@@ -38,8 +38,8 @@ pub trait CreateSessionFromImportedFrontierIdGenerator {
 ```rust
 pub struct UuidV7CreateSessionFromImportedFrontierIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl create_session_from_imported_frontier::CreateSessionFromImportedFrontierIdGenerator
-    for create_session_from_imported_frontier::UuidV7CreateSessionFromImportedFrontierIdGenerator
+impl CreateSessionFromImportedFrontierIdGenerator
+    for UuidV7CreateSessionFromImportedFrontierIdGenerator
 {
     pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
     pub fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
@@ -70,15 +70,21 @@ pub enum CreateSessionFromImportedFrontierOutcome {
 ```rust
 pub trait CreateSessionFromImportedFrontierTransaction {
     type Error;
-    pub fn handle<NextSemanticEntryId>(&mut self, command:
-        session::CreateSessionFromImportedFrontier, session: signalbox_domain::SessionId,
-        seed_frontier: context_frontier::ContextFrontierId, next_semantic_entry_id:
-        NextSemanticEntryId) -> impl future::Future<Output =
-        result::Result<create_session_from_imported_frontier::CreateSessionFromImportedFrontierOutcome,
-        <Self as
-        create_session_from_imported_frontier::CreateSessionFromImportedFrontierTransaction>::Error>>
-        + marker::Send where NextSemanticEntryId: function::FnMut() ->
-        context_frontier::SemanticTranscriptEntryId + marker::Send;
+    pub fn handle<NextSemanticEntryId>(
+        &mut self,
+        command: session::CreateSessionFromImportedFrontier,
+        session: signalbox_domain::SessionId,
+        seed_frontier: context_frontier::ContextFrontierId,
+        next_semantic_entry_id: NextSemanticEntryId,
+    ) -> impl future::Future<
+        Output = result::Result<
+            CreateSessionFromImportedFrontierOutcome,
+            <Self as CreateSessionFromImportedFrontierTransaction>::Error,
+        >,
+    > + marker::Send
+    where
+        NextSemanticEntryId:
+            function::FnMut() -> context_frontier::SemanticTranscriptEntryId + marker::Send;
 }
 ```
 
@@ -87,30 +93,21 @@ pub trait CreateSessionFromImportedFrontierTransaction {
 ```rust
 pub struct CreateSessionFromImportedFrontierService<Generator, Transaction> {/* private */}
 // derives: fmt::Debug
-impl<Generator, Transaction>
-    create_session_from_imported_frontier::CreateSessionFromImportedFrontierService<
-        Generator,
-        Transaction,
-    >
-{
+impl<Generator, Transaction> CreateSessionFromImportedFrontierService<Generator, Transaction> {
     pub const fn new(ids: Generator, transaction: Transaction) -> Self;
     pub fn into_parts(self) -> (Generator, Transaction);
 }
-impl<Generator, Transaction>
-    create_session_from_imported_frontier::CreateSessionFromImportedFrontierService<
-        Generator,
-        Transaction,
-    >
+impl<Generator, Transaction> CreateSessionFromImportedFrontierService<Generator, Transaction>
 where
-    Generator: create_session_from_imported_frontier::CreateSessionFromImportedFrontierIdGenerator
-        + marker::Send,
-    Transaction:
-        create_session_from_imported_frontier::CreateSessionFromImportedFrontierTransaction,
+    Generator: CreateSessionFromImportedFrontierIdGenerator + marker::Send,
+    Transaction: CreateSessionFromImportedFrontierTransaction,
 {
-    pub async fn execute(&mut self, request:
-        create_session_from_imported_frontier::CreateSessionFromImportedFrontierRequest) ->
-        result::Result<create_session_from_imported_frontier::CreateSessionFromImportedFrontierOutcome,
-        <Transaction as
-        create_session_from_imported_frontier::CreateSessionFromImportedFrontierTransaction>::Error>;
+    pub async fn execute(
+        &mut self,
+        request: CreateSessionFromImportedFrontierRequest,
+    ) -> result::Result<
+        CreateSessionFromImportedFrontierOutcome,
+        <Transaction as CreateSessionFromImportedFrontierTransaction>::Error,
+    >;
 }
 ```

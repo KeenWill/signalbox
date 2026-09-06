@@ -10,5 +10,5 @@ pub fn render_model_user_content(
     attachment_byte_length: impl function::FnMut(
         blob::BlobDigest,
     ) -> option::Option<nonzero::NonZeroU64>,
-) -> result::Result<model_execution::ModelUserContent, model_execution::ModelFrontierRenderingError>;
+) -> result::Result<ModelUserContent, ModelFrontierRenderingError>;
 ```

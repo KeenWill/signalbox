@@ -7,7 +7,7 @@
 ```rust
 pub struct DirectModelSelection(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl configuration::DirectModelSelection {
+impl DirectModelSelection {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
     pub const fn as_uuid(&self) -> &uuid::Uuid;
     pub const fn into_uuid(self) -> uuid::Uuid;
@@ -19,7 +19,7 @@ impl configuration::DirectModelSelection {
 ```rust
 pub struct ModelAlias(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl configuration::ModelAlias {
+impl ModelAlias {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
     pub const fn as_uuid(&self) -> &uuid::Uuid;
     pub const fn into_uuid(self) -> uuid::Uuid;
@@ -31,9 +31,9 @@ impl configuration::ModelAlias {
 ```rust
 pub struct FrozenAliasDefinition {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl configuration::FrozenAliasDefinition {
-    pub const fn selecting(selected: configuration::DirectModelSelection) -> Self;
-    pub const fn selected(&self) -> configuration::DirectModelSelection;
+impl FrozenAliasDefinition {
+    pub const fn selecting(selected: DirectModelSelection) -> Self;
+    pub const fn selected(&self) -> DirectModelSelection;
 }
 ```
 
@@ -41,8 +41,8 @@ impl configuration::FrozenAliasDefinition {
 
 ```rust
 pub enum ModelSelectionRequest {
-    Direct(configuration::DirectModelSelection),
-    Alias(configuration::ModelAlias),
+    Direct(DirectModelSelection),
+    Alias(ModelAlias),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -51,15 +51,15 @@ pub enum ModelSelectionRequest {
 
 ```rust
 pub enum FrozenModelSelection {
-    Direct(configuration::DirectModelSelection),
+    Direct(DirectModelSelection),
     FrozenAlias {
-        alias: configuration::ModelAlias,
-        definition: configuration::FrozenAliasDefinition,
+        alias: ModelAlias,
+        definition: FrozenAliasDefinition,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl configuration::FrozenModelSelection {
-    pub const fn selected_direct(self) -> configuration::DirectModelSelection;
+impl FrozenModelSelection {
+    pub const fn selected_direct(self) -> DirectModelSelection;
 }
 ```
 
@@ -95,23 +95,23 @@ pub enum ModelFallback {
 ```rust
 pub struct EffectiveConfiguration {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl configuration::EffectiveConfiguration {
-    pub const fn baseline(model: configuration::FrozenModelSelection) -> Self;
+impl EffectiveConfiguration {
+    pub const fn baseline(model: FrozenModelSelection) -> Self;
     pub const fn with_dangerous_tool_auto_approval(
-        model: configuration::FrozenModelSelection,
-        dangerous_tool_auto_approval: tool::DangerousToolAutoApproval,
+        model: FrozenModelSelection,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
     ) -> Self;
     pub fn with_model_settings(
-        model: configuration::FrozenModelSelection,
-        dangerous_tool_auto_approval: tool::DangerousToolAutoApproval,
-        model_settings: model_settings::ValidatedModelSettings,
+        model: FrozenModelSelection,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        model_settings: ValidatedModelSettings,
     ) -> option::Option<Self>;
-    pub const fn model(&self) -> &configuration::FrozenModelSelection;
-    pub const fn parameters(&self) -> configuration::ModelParameters;
-    pub const fn known_provider_failure_retry(&self) -> configuration::KnownProviderFailureRetry;
-    pub const fn model_fallback(&self) -> configuration::ModelFallback;
-    pub const fn dangerous_tool_auto_approval(&self) -> tool::DangerousToolAutoApproval;
-    pub const fn model_settings(&self) -> model_settings::ValidatedModelSettings;
+    pub const fn model(&self) -> &FrozenModelSelection;
+    pub const fn parameters(&self) -> ModelParameters;
+    pub const fn known_provider_failure_retry(&self) -> KnownProviderFailureRetry;
+    pub const fn model_fallback(&self) -> ModelFallback;
+    pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval;
+    pub const fn model_settings(&self) -> ValidatedModelSettings;
 }
 ```
 
@@ -120,7 +120,7 @@ impl configuration::EffectiveConfiguration {
 ```rust
 pub struct SessionConfigurationDefaultsVersion(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl configuration::SessionConfigurationDefaultsVersion {
+impl SessionConfigurationDefaultsVersion {
     pub const fn try_from_u64(value: u64) -> option::Option<Self>;
     pub const fn as_u64(self) -> u64;
     pub const fn first() -> Self;
@@ -133,13 +133,11 @@ impl configuration::SessionConfigurationDefaultsVersion {
 ```rust
 pub struct SessionSystemPrompt(/* private */);
 // derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
-impl fmt::Debug for configuration::SessionSystemPrompt {
+impl fmt::Debug for SessionSystemPrompt {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl configuration::SessionSystemPrompt {
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, configuration::SessionSystemPromptError>;
+impl SessionSystemPrompt {
+    pub fn try_new(value: string::String) -> result::Result<Self, SessionSystemPromptError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -160,18 +158,18 @@ pub enum SessionSystemPromptFailure {
 ```rust
 pub struct SessionSystemPromptError {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl fmt::Debug for configuration::SessionSystemPromptError {
+impl fmt::Debug for SessionSystemPromptError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl configuration::SessionSystemPromptError {
+impl SessionSystemPromptError {
     pub fn value(&self) -> &str;
-    pub const fn failure(&self) -> configuration::SessionSystemPromptFailure;
-    pub fn into_parts(self) -> (string::String, configuration::SessionSystemPromptFailure);
+    pub const fn failure(&self) -> SessionSystemPromptFailure;
+    pub fn into_parts(self) -> (string::String, SessionSystemPromptFailure);
 }
-impl fmt::Display for configuration::SessionSystemPromptError {
+impl fmt::Display for SessionSystemPromptError {
     pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for configuration::SessionSystemPromptError {}
+impl error::Error for SessionSystemPromptError {}
 ```
 
 ## SessionConfigurationDefaults
@@ -179,27 +177,27 @@ impl error::Error for configuration::SessionSystemPromptError {}
 ```rust
 pub struct SessionConfigurationDefaults {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl configuration::SessionConfigurationDefaults {
-    pub const fn new(model: configuration::ModelSelectionRequest) -> Self;
+impl SessionConfigurationDefaults {
+    pub const fn new(model: ModelSelectionRequest) -> Self;
     pub const fn with_dangerous_tool_auto_approval(
-        model: configuration::ModelSelectionRequest,
-        dangerous_tool_auto_approval: tool::DangerousToolAutoApproval,
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
     ) -> Self;
     pub const fn complete(
-        model: configuration::ModelSelectionRequest,
-        dangerous_tool_auto_approval: tool::DangerousToolAutoApproval,
-        system_prompt: option::Option<configuration::SessionSystemPrompt>,
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        system_prompt: option::Option<SessionSystemPrompt>,
     ) -> Self;
     pub fn complete_with_model_settings(
-        model: configuration::ModelSelectionRequest,
-        dangerous_tool_auto_approval: tool::DangerousToolAutoApproval,
-        system_prompt: option::Option<configuration::SessionSystemPrompt>,
-        model_settings: model_settings::ValidatedModelSettings,
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        system_prompt: option::Option<SessionSystemPrompt>,
+        model_settings: ValidatedModelSettings,
     ) -> option::Option<Self>;
-    pub const fn model(&self) -> configuration::ModelSelectionRequest;
-    pub const fn dangerous_tool_auto_approval(&self) -> tool::DangerousToolAutoApproval;
-    pub const fn system_prompt(&self) -> option::Option<&configuration::SessionSystemPrompt>;
-    pub const fn model_settings(&self) -> model_settings::ValidatedModelSettings;
+    pub const fn model(&self) -> ModelSelectionRequest;
+    pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval;
+    pub const fn system_prompt(&self) -> option::Option<&SessionSystemPrompt>;
+    pub const fn model_settings(&self) -> ValidatedModelSettings;
 }
 ```
 
@@ -208,31 +206,22 @@ impl configuration::SessionConfigurationDefaults {
 ```rust
 pub struct VersionedSessionConfigurationDefaults {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl configuration::VersionedSessionConfigurationDefaults {
-    pub const fn establish(defaults: configuration::SessionConfigurationDefaults) -> Self;
-    pub fn replace(
-        &self,
-        defaults: configuration::SessionConfigurationDefaults,
-    ) -> option::Option<Self>;
-    pub const fn version(&self) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn defaults(&self) -> &configuration::SessionConfigurationDefaults;
+impl VersionedSessionConfigurationDefaults {
+    pub const fn establish(defaults: SessionConfigurationDefaults) -> Self;
+    pub fn replace(&self, defaults: SessionConfigurationDefaults) -> option::Option<Self>;
+    pub const fn version(&self) -> SessionConfigurationDefaultsVersion;
+    pub const fn defaults(&self) -> &SessionConfigurationDefaults;
     pub fn derive_request(
         &self,
-        expected: configuration::SessionConfigurationDefaultsVersion,
-        model: configuration::ModelSelectionOverride,
-    ) -> result::Result<
-        configuration::VersionCheckedConfigurationRequest,
-        configuration::SessionDefaultsVersionMismatch,
-    >;
+        expected: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+    ) -> result::Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch>;
     pub fn derive_request_with_model_settings(
         &self,
-        expected: configuration::SessionConfigurationDefaultsVersion,
-        model: configuration::ModelSelectionOverride,
-        per_call_model_settings: model_settings::ModelSettingsOverlay,
-    ) -> result::Result<
-        configuration::VersionCheckedConfigurationRequest,
-        configuration::SessionDefaultsVersionMismatch,
-    >;
+        expected: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+        per_call_model_settings: ModelSettingsOverlay,
+    ) -> result::Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch>;
 }
 ```
 
@@ -241,7 +230,7 @@ impl configuration::VersionedSessionConfigurationDefaults {
 ```rust
 pub enum ModelSelectionOverride {
     UseSessionDefault,
-    ReplaceWith(configuration::ModelSelectionRequest),
+    ReplaceWith(ModelSelectionRequest),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -251,11 +240,11 @@ pub enum ModelSelectionOverride {
 ```rust
 pub struct ConfigurationRequest {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl configuration::ConfigurationRequest {
-    pub const fn model(&self) -> configuration::ModelSelectionRequest;
-    pub const fn dangerous_tool_auto_approval(&self) -> tool::DangerousToolAutoApproval;
-    pub const fn model_settings(&self) -> model_settings::ValidatedModelSettings;
-    pub const fn per_call_model_settings(&self) -> model_settings::ModelSettingsOverlay;
+impl ConfigurationRequest {
+    pub const fn model(&self) -> ModelSelectionRequest;
+    pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval;
+    pub const fn model_settings(&self) -> ValidatedModelSettings;
+    pub const fn per_call_model_settings(&self) -> ModelSettingsOverlay;
 }
 ```
 
@@ -264,11 +253,9 @@ impl configuration::ConfigurationRequest {
 ```rust
 pub struct VersionCheckedConfigurationRequest {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl configuration::VersionCheckedConfigurationRequest {
-    pub const fn request(&self) -> &configuration::ConfigurationRequest;
-    pub const fn session_defaults_version(
-        &self,
-    ) -> configuration::SessionConfigurationDefaultsVersion;
+impl VersionCheckedConfigurationRequest {
+    pub const fn request(&self) -> &ConfigurationRequest;
+    pub const fn session_defaults_version(&self) -> SessionConfigurationDefaultsVersion;
 }
 ```
 
@@ -277,9 +264,9 @@ impl configuration::VersionCheckedConfigurationRequest {
 ```rust
 pub struct SessionDefaultsVersionMismatch {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl configuration::SessionDefaultsVersionMismatch {
-    pub const fn expected(&self) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn current(&self) -> configuration::SessionConfigurationDefaultsVersion;
+impl SessionDefaultsVersionMismatch {
+    pub const fn expected(&self) -> SessionConfigurationDefaultsVersion;
+    pub const fn current(&self) -> SessionConfigurationDefaultsVersion;
 }
 ```
 
@@ -288,37 +275,27 @@ impl configuration::SessionDefaultsVersionMismatch {
 ```rust
 pub struct OriginConfiguration {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl configuration::OriginConfiguration {
+impl OriginConfiguration {
     pub fn freeze(
-        checked: configuration::VersionCheckedConfigurationRequest,
-        select_definition: impl function::FnOnce(
-            configuration::ModelAlias,
-        )
-            -> option::Option<configuration::FrozenAliasDefinition>,
-    ) -> result::Result<Self, configuration::OriginModelSettingsError>;
+        checked: VersionCheckedConfigurationRequest,
+        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
+    ) -> result::Result<Self, OriginModelSettingsError>;
     pub fn freeze_with_model_settings(
-        checked: configuration::VersionCheckedConfigurationRequest,
-        select_definition: impl function::FnOnce(
-            configuration::ModelAlias,
-        )
-            -> option::Option<configuration::FrozenAliasDefinition>,
-        capabilities: &model_settings::ModelCapabilityCatalog,
-    ) -> result::Result<Self, configuration::OriginModelSettingsError>;
+        checked: VersionCheckedConfigurationRequest,
+        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> result::Result<Self, OriginModelSettingsError>;
     pub fn reconstitute_with_model_settings(
-        checked: configuration::VersionCheckedConfigurationRequest,
-        frozen_model: configuration::FrozenModelSelection,
-        stored_settings: model_settings::ValidatedModelSettings,
-        adjustments: vec::Vec<model_settings::ModelChangeAdjustment>,
+        checked: VersionCheckedConfigurationRequest,
+        frozen_model: FrozenModelSelection,
+        stored_settings: ValidatedModelSettings,
+        adjustments: vec::Vec<ModelChangeAdjustment>,
     ) -> option::Option<Self>;
-    pub const fn requested(&self) -> &configuration::ConfigurationRequest;
-    pub const fn session_defaults_version(
-        &self,
-    ) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn effective(&self) -> &configuration::EffectiveConfiguration;
-    pub const fn model_settings_adjusted_from(
-        &self,
-    ) -> option::Option<configuration::DirectModelSelection>;
-    pub fn model_settings_adjustments(&self) -> &[model_settings::ModelChangeAdjustment];
+    pub const fn requested(&self) -> &ConfigurationRequest;
+    pub const fn session_defaults_version(&self) -> SessionConfigurationDefaultsVersion;
+    pub const fn effective(&self) -> &EffectiveConfiguration;
+    pub const fn model_settings_adjusted_from(&self) -> option::Option<DirectModelSelection>;
+    pub fn model_settings_adjustments(&self) -> &[ModelChangeAdjustment];
 }
 ```
 
@@ -326,17 +303,15 @@ impl configuration::OriginConfiguration {
 
 ```rust
 pub enum OriginModelSettingsError {
-    UnknownAlias(configuration::UnknownModelAlias),
-    MissingCapabilities {
-        selection: configuration::DirectModelSelection,
-    },
-    Unsupported(model_settings::UnsupportedModelSetting),
+    UnknownAlias(UnknownModelAlias),
+    MissingCapabilities { selection: DirectModelSelection },
+    Unsupported(UnsupportedModelSetting),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for configuration::OriginModelSettingsError {
+impl fmt::Display for OriginModelSettingsError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for configuration::OriginModelSettingsError {
+impl error::Error for OriginModelSettingsError {
     pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
@@ -346,14 +321,14 @@ impl error::Error for configuration::OriginModelSettingsError {
 ```rust
 pub struct OriginConfigurationReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl configuration::OriginConfigurationReconstitutionInput {
+impl OriginConfigurationReconstitutionInput {
     pub const fn new(
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        defaults: configuration::SessionConfigurationDefaults,
-        requested_model: configuration::ModelSelectionRequest,
-        frozen_model: configuration::FrozenModelSelection,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        requested_model: ModelSelectionRequest,
+        frozen_model: FrozenModelSelection,
     ) -> Self;
-    pub fn reconstitute(self) -> option::Option<configuration::OriginConfiguration>;
+    pub fn reconstitute(self) -> option::Option<OriginConfiguration>;
 }
 ```
 
@@ -362,8 +337,8 @@ impl configuration::OriginConfigurationReconstitutionInput {
 ```rust
 pub struct UnknownModelAlias {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl configuration::UnknownModelAlias {
-    pub const fn alias(&self) -> configuration::ModelAlias;
+impl UnknownModelAlias {
+    pub const fn alias(&self) -> ModelAlias;
 }
 ```
 
@@ -371,8 +346,8 @@ impl configuration::UnknownModelAlias {
 
 ```rust
 pub enum TurnConfigurationProvenance {
-    ExplicitOrigin(configuration::OriginConfiguration),
-    InheritedForReclassifiedSteering(accepted_input::SteeringBinding),
+    ExplicitOrigin(OriginConfiguration),
+    InheritedForReclassifiedSteering(SteeringBinding),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```

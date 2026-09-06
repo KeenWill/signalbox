@@ -18,7 +18,7 @@ pub enum OperatorFailureClass {
 
 ```rust
 pub trait ClassifyOperatorFailure {
-    pub fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    pub fn operator_failure_class(&self) -> OperatorFailureClass;
     pub fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```

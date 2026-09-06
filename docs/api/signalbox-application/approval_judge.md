@@ -10,7 +10,7 @@ pub enum ApprovalJudgeDispatchProvenance {
     Commissioned(signalbox_domain::CommissionedDispatchId),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl approval_judge::ApprovalJudgeDispatchProvenance {
+impl ApprovalJudgeDispatchProvenance {
     pub const fn into_uuid(self) -> uuid::Uuid;
 }
 ```
@@ -19,12 +19,12 @@ impl approval_judge::ApprovalJudgeDispatchProvenance {
 
 ```rust
 pub enum ApprovalJudgeDispatchAuthority {
-    PullRequest(approval_judge::ApprovalJudgePullRequestAuthority),
-    Branch(approval_judge::ApprovalJudgeBranchAuthority),
+    PullRequest(ApprovalJudgePullRequestAuthority),
+    Branch(ApprovalJudgeBranchAuthority),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl approval_judge::ApprovalJudgeDispatchAuthority {
-    pub const fn dispatch(&self) -> approval_judge::ApprovalJudgeDispatchProvenance;
+impl ApprovalJudgeDispatchAuthority {
+    pub const fn dispatch(&self) -> ApprovalJudgeDispatchProvenance;
 }
 ```
 
@@ -32,7 +32,7 @@ impl approval_judge::ApprovalJudgeDispatchAuthority {
 
 ```rust
 pub struct ApprovalJudgePullRequestAuthorityInput {
-    pub dispatch: approval_judge::ApprovalJudgeDispatchProvenance,
+    pub dispatch: ApprovalJudgeDispatchProvenance,
     pub repository: repo_watch::RepositorySlug,
     pub pull_request: repo_watch::PullRequestNumber,
     pub head_sha: repo_watch::CommitSha,
@@ -48,9 +48,9 @@ pub struct ApprovalJudgePullRequestAuthorityInput {
 ```rust
 pub struct ApprovalJudgePullRequestAuthority {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl approval_judge::ApprovalJudgePullRequestAuthority {
-    pub const fn new(input: approval_judge::ApprovalJudgePullRequestAuthorityInput) -> Self;
-    pub const fn dispatch(&self) -> approval_judge::ApprovalJudgeDispatchProvenance;
+impl ApprovalJudgePullRequestAuthority {
+    pub const fn new(input: ApprovalJudgePullRequestAuthorityInput) -> Self;
+    pub const fn dispatch(&self) -> ApprovalJudgeDispatchProvenance;
     pub const fn repository(&self) -> &repo_watch::RepositorySlug;
     pub const fn pull_request(&self) -> repo_watch::PullRequestNumber;
     pub const fn head_sha(&self) -> &repo_watch::CommitSha;
@@ -64,7 +64,7 @@ impl approval_judge::ApprovalJudgePullRequestAuthority {
 
 ```rust
 pub struct ApprovalJudgeBranchAuthorityInput {
-    pub dispatch: approval_judge::ApprovalJudgeDispatchProvenance,
+    pub dispatch: ApprovalJudgeDispatchProvenance,
     pub repository: repo_watch::RepositorySlug,
     pub branch: repo_watch::BranchName,
 }
@@ -76,9 +76,9 @@ pub struct ApprovalJudgeBranchAuthorityInput {
 ```rust
 pub struct ApprovalJudgeBranchAuthority {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl approval_judge::ApprovalJudgeBranchAuthority {
-    pub const fn new(input: approval_judge::ApprovalJudgeBranchAuthorityInput) -> Self;
-    pub const fn dispatch(&self) -> approval_judge::ApprovalJudgeDispatchProvenance;
+impl ApprovalJudgeBranchAuthority {
+    pub const fn new(input: ApprovalJudgeBranchAuthorityInput) -> Self;
+    pub const fn dispatch(&self) -> ApprovalJudgeDispatchProvenance;
     pub const fn repository(&self) -> &repo_watch::RepositorySlug;
     pub const fn branch(&self) -> &repo_watch::BranchName;
 }
@@ -89,7 +89,7 @@ impl approval_judge::ApprovalJudgeBranchAuthority {
 ```rust
 pub struct ApprovalJudgeCompletionIdentities {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl approval_judge::ApprovalJudgeCompletionIdentities {
+impl ApprovalJudgeCompletionIdentities {
     pub const fn new(
         continuation_attempt: signalbox_domain::TurnAttemptId,
         failure_entry: context_frontier::SemanticTranscriptEntryId,

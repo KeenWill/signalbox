@@ -37,8 +37,8 @@ pub enum BoundChildAction {
 pub enum ChildRelationshipPolicy {
     Background,
     Bound {
-        on_parent_stopped: session_delegation::BoundChildAction,
-        on_parent_cancelled: session_delegation::BoundChildAction,
+        on_parent_stopped: BoundChildAction,
+        on_parent_cancelled: BoundChildAction,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
@@ -79,7 +79,7 @@ pub enum ParentTerminationKind {
 ```rust
 pub enum ParentTerminationCommandSource {
     Turn { turn: TurnId },
-    Goal { generation: goal::GoalGeneration },
+    Goal { generation: GoalGeneration },
     Lifecycle,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
@@ -90,14 +90,14 @@ pub enum ParentTerminationCommandSource {
 ```rust
 pub struct ParentTerminationAuthority {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_delegation::ParentTerminationAuthority {
+impl ParentTerminationAuthority {
     pub const fn parent(self) -> SessionId;
-    pub const fn source(self) -> session_delegation::ParentTerminationCommandSource;
+    pub const fn source(self) -> ParentTerminationCommandSource;
     pub const fn turn(self) -> option::Option<TurnId>;
-    pub const fn goal_generation(self) -> option::Option<goal::GoalGeneration>;
+    pub const fn goal_generation(self) -> option::Option<GoalGeneration>;
     pub const fn command(self) -> DurableCommandId;
-    pub const fn scope(self) -> session_delegation::DescendantTerminationScope;
-    pub const fn kind(self) -> session_delegation::ParentTerminationKind;
+    pub const fn scope(self) -> DescendantTerminationScope;
+    pub const fn kind(self) -> ParentTerminationKind;
 }
 ```
 
@@ -106,15 +106,13 @@ impl session_delegation::ParentTerminationAuthority {
 ```rust
 pub struct DelegationContent(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_delegation::DelegationContent {
-    const MAX_UTF8_BYTES: usize;
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, session_delegation::DelegationContentError>;
+impl DelegationContent {
+    pub const MAX_UTF8_BYTES: usize;
+    pub fn try_new(value: string::String) -> result::Result<Self, DelegationContentError>;
     pub fn as_str(&self) -> &str;
     pub fn from_assistant_text(
-        parts: &[semantic_entry::AssistantText],
-    ) -> result::Result<Self, session_delegation::DelegationContentError>;
+        parts: &[AssistantText],
+    ) -> result::Result<Self, DelegationContentError>;
 }
 ```
 
@@ -122,7 +120,7 @@ impl session_delegation::DelegationContent {
 
 ```rust
 pub enum DelegationContentFailure {
-    Invalid(user_content::NonEmptyUnicodeTextFailure),
+    Invalid(NonEmptyUnicodeTextFailure),
     Oversized { utf8_byte_length: usize },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -133,15 +131,15 @@ pub enum DelegationContentFailure {
 ```rust
 pub struct DelegationContentError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_delegation::DelegationContentError {
-    pub const fn failure(&self) -> session_delegation::DelegationContentFailure;
+impl DelegationContentError {
+    pub const fn failure(&self) -> DelegationContentFailure;
     pub fn value(&self) -> &str;
-    pub fn into_parts(self) -> (string::String, session_delegation::DelegationContentFailure);
+    pub fn into_parts(self) -> (string::String, DelegationContentFailure);
 }
-impl fmt::Display for session_delegation::DelegationContentError {
+impl fmt::Display for DelegationContentError {
     pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for session_delegation::DelegationContentError {}
+impl error::Error for DelegationContentError {}
 ```
 
 ## DelegationRequestFailure
@@ -149,7 +147,7 @@ impl error::Error for session_delegation::DelegationContentError {}
 ```rust
 pub enum DelegationRequestFailure {
     InvalidToolRequestPurpose,
-    InvalidContent(session_delegation::DelegationContentError),
+    InvalidContent(DelegationContentError),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -159,15 +157,15 @@ pub enum DelegationRequestFailure {
 ```rust
 pub struct DelegationRequestError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_delegation::DelegationRequestError {
-    pub const fn request(&self) -> &tool::ToolRequest;
-    pub const fn failure(&self) -> &session_delegation::DelegationRequestFailure;
-    pub fn into_request(self) -> tool::ToolRequest;
+impl DelegationRequestError {
+    pub const fn request(&self) -> &ToolRequest;
+    pub const fn failure(&self) -> &DelegationRequestFailure;
+    pub fn into_request(self) -> ToolRequest;
 }
-impl fmt::Display for session_delegation::DelegationRequestError {
+impl fmt::Display for DelegationRequestError {
     pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for session_delegation::DelegationRequestError {
+impl error::Error for DelegationRequestError {
     pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
@@ -177,15 +175,15 @@ impl error::Error for session_delegation::DelegationRequestError {
 ```rust
 pub struct DelegatedSpawnRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_delegation::DelegatedSpawnRequest {
+impl DelegatedSpawnRequest {
     pub fn parse(
-        request: tool::ToolRequest,
+        request: ToolRequest,
         task: string::String,
-        policy: session_delegation::ChildRelationshipPolicy,
-    ) -> result::Result<Self, session_delegation::DelegationRequestError>;
-    pub const fn request(&self) -> &tool::ToolRequest;
-    pub const fn task(&self) -> &session_delegation::DelegationContent;
-    pub const fn policy(&self) -> session_delegation::ChildRelationshipPolicy;
+        policy: ChildRelationshipPolicy,
+    ) -> result::Result<Self, DelegationRequestError>;
+    pub const fn request(&self) -> &ToolRequest;
+    pub const fn task(&self) -> &DelegationContent;
+    pub const fn policy(&self) -> ChildRelationshipPolicy;
 }
 ```
 
@@ -194,15 +192,15 @@ impl session_delegation::DelegatedSpawnRequest {
 ```rust
 pub struct DelegationAwaitRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_delegation::DelegationAwaitRequest {
+impl DelegationAwaitRequest {
     pub fn parse(
-        request: tool::ToolRequest,
+        request: ToolRequest,
         child: SessionId,
-        mode: session_delegation::DelegationWaitMode,
-    ) -> result::Result<Self, session_delegation::DelegationRequestError>;
-    pub const fn request(&self) -> &tool::ToolRequest;
+        mode: DelegationWaitMode,
+    ) -> result::Result<Self, DelegationRequestError>;
+    pub const fn request(&self) -> &ToolRequest;
     pub const fn child(&self) -> SessionId;
-    pub const fn mode(&self) -> session_delegation::DelegationWaitMode;
+    pub const fn mode(&self) -> DelegationWaitMode;
 }
 ```
 
@@ -211,15 +209,15 @@ impl session_delegation::DelegationAwaitRequest {
 ```rust
 pub struct DelegationMessageRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_delegation::DelegationMessageRequest {
+impl DelegationMessageRequest {
     pub fn parse(
-        request: tool::ToolRequest,
+        request: ToolRequest,
         peer: SessionId,
         content: string::String,
-    ) -> result::Result<Self, session_delegation::DelegationRequestError>;
-    pub const fn request(&self) -> &tool::ToolRequest;
+    ) -> result::Result<Self, DelegationRequestError>;
+    pub const fn request(&self) -> &ToolRequest;
     pub const fn peer(&self) -> SessionId;
-    pub const fn content(&self) -> &session_delegation::DelegationContent;
+    pub const fn content(&self) -> &DelegationContent;
 }
 ```
 
@@ -228,20 +226,16 @@ impl session_delegation::DelegationMessageRequest {
 ```rust
 pub struct TerminalChildTurn {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_delegation::TerminalChildTurn {
-    pub fn from_completed(value: &model_execution::CompletedModelCallTurn) -> option::Option<Self>;
-    pub const fn from_failed(value: &model_execution::FailedModelCallTurn) -> Self;
-    pub const fn from_reconciliation_required(
-        value: &model_execution::ReconciliationRequiredModelCallTurn,
-    ) -> Self;
-    pub const fn from_cancelled(value: &model_execution::CancelledModelCallTurn) -> Self;
-    pub const fn from_cancelled_tool_round(
-        value: &model_execution::CancelledToolRoundModelCallTurn,
-    ) -> Self;
-    pub const fn from_refused(value: &model_execution::RefusedModelCallTurn) -> Self;
+impl TerminalChildTurn {
+    pub fn from_completed(value: &CompletedModelCallTurn) -> option::Option<Self>;
+    pub const fn from_failed(value: &FailedModelCallTurn) -> Self;
+    pub const fn from_reconciliation_required(value: &ReconciliationRequiredModelCallTurn) -> Self;
+    pub const fn from_cancelled(value: &CancelledModelCallTurn) -> Self;
+    pub const fn from_cancelled_tool_round(value: &CancelledToolRoundModelCallTurn) -> Self;
+    pub const fn from_refused(value: &RefusedModelCallTurn) -> Self;
     pub const fn session(self) -> SessionId;
     pub const fn turn(self) -> TurnId;
-    pub const fn reason(self) -> session_delegation::DelegationOutcomeReason;
+    pub const fn reason(self) -> DelegationOutcomeReason;
 }
 ```
 
@@ -250,20 +244,16 @@ impl session_delegation::TerminalChildTurn {
 ```rust
 pub struct DelegationProvenance {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_delegation::DelegationProvenance {
-    pub fn from_spawn(request: &session_delegation::DelegatedSpawnRequest) -> Self;
-    pub fn from_await(request: &session_delegation::DelegationAwaitRequest) -> Self;
-    pub fn from_message(request: &session_delegation::DelegationMessageRequest) -> Self;
-    pub const fn from_terminal_child(terminal: session_delegation::TerminalChildTurn) -> Self;
-    pub const fn from_parent_termination(
-        authority: session_delegation::ParentTerminationAuthority,
-    ) -> Self;
-    pub const fn projection(self) -> session_delegation::DelegationProvenanceProjection;
+impl DelegationProvenance {
+    pub fn from_spawn(request: &DelegatedSpawnRequest) -> Self;
+    pub fn from_await(request: &DelegationAwaitRequest) -> Self;
+    pub fn from_message(request: &DelegationMessageRequest) -> Self;
+    pub const fn from_terminal_child(terminal: TerminalChildTurn) -> Self;
+    pub const fn from_parent_termination(authority: ParentTerminationAuthority) -> Self;
+    pub const fn projection(self) -> DelegationProvenanceProjection;
     pub const fn tool_request(&self) -> option::Option<(SessionId, TurnId, ToolRequestId)>;
     pub const fn child_turn(&self) -> option::Option<(SessionId, TurnId)>;
-    pub const fn parent_command(
-        &self,
-    ) -> option::Option<session_delegation::ParentTerminationAuthority>;
+    pub const fn parent_command(&self) -> option::Option<ParentTerminationAuthority>;
 }
 ```
 
@@ -277,10 +267,10 @@ pub enum DelegationProvenanceProjection {
         request: ToolRequestId,
     },
     ChildTurn {
-        terminal: session_delegation::TerminalChildTurn,
+        terminal: TerminalChildTurn,
     },
     ParentCommand {
-        authority: session_delegation::ParentTerminationAuthority,
+        authority: ParentTerminationAuthority,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
@@ -311,17 +301,17 @@ pub struct DelegationMessageEndpoints {
 ```rust
 pub struct DelegationMessage {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_delegation::DelegationMessage {
+impl DelegationMessage {
     pub fn reconstitute(
-        request: &session_delegation::DelegationMessageRequest,
+        request: &DelegationMessageRequest,
         id: DelegationMessageId,
-        direction: session_delegation::DelegationMessageDirection,
-        endpoints: session_delegation::DelegationMessageEndpoints,
+        direction: DelegationMessageDirection,
+        endpoints: DelegationMessageEndpoints,
     ) -> option::Option<Self>;
     pub const fn id(&self) -> DelegationMessageId;
-    pub const fn direction(&self) -> session_delegation::DelegationMessageDirection;
-    pub const fn content(&self) -> &session_delegation::DelegationContent;
-    pub const fn provenance(&self) -> session_delegation::DelegationProvenance;
+    pub const fn direction(&self) -> DelegationMessageDirection;
+    pub const fn content(&self) -> &DelegationContent;
+    pub const fn provenance(&self) -> DelegationProvenance;
 }
 ```
 
@@ -333,12 +323,8 @@ pub enum DelegationOutcomeReason {
     ChildExecutionFailed,
     ChildResultUnavailable,
     ChildCancelled,
-    ParentStopped {
-        scope: session_delegation::DescendantTerminationScope,
-    },
-    ParentCancelled {
-        scope: session_delegation::DescendantTerminationScope,
-    },
+    ParentStopped { scope: DescendantTerminationScope },
+    ParentCancelled { scope: DescendantTerminationScope },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -362,34 +348,28 @@ pub enum DelegationOutcomeKind {
 ```rust
 pub struct DelegationOutcome {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_delegation::DelegationOutcome {
-    pub fn from_completed_child(value: &model_execution::CompletedModelCallTurn) -> Self;
-    pub fn from_failed_child(value: &model_execution::FailedModelCallTurn) -> Self;
-    pub fn from_reconciliation_required_child(
-        value: &model_execution::ReconciliationRequiredModelCallTurn,
-    ) -> Self;
-    pub fn from_refused_child(value: &model_execution::RefusedModelCallTurn) -> Self;
-    pub fn from_cancelled_child(value: &model_execution::CancelledModelCallTurn) -> Self;
-    pub fn from_cancelled_tool_round_child(
-        value: &model_execution::CancelledToolRoundModelCallTurn,
-    ) -> Self;
+impl DelegationOutcome {
+    pub fn from_completed_child(value: &CompletedModelCallTurn) -> Self;
+    pub fn from_failed_child(value: &FailedModelCallTurn) -> Self;
+    pub fn from_reconciliation_required_child(value: &ReconciliationRequiredModelCallTurn) -> Self;
+    pub fn from_refused_child(value: &RefusedModelCallTurn) -> Self;
+    pub fn from_cancelled_child(value: &CancelledModelCallTurn) -> Self;
+    pub fn from_cancelled_tool_round_child(value: &CancelledToolRoundModelCallTurn) -> Self;
     pub fn from_terminal_child(
-        terminal: session_delegation::TerminalChildTurn,
-        content: option::Option<session_delegation::DelegationContent>,
+        terminal: TerminalChildTurn,
+        content: option::Option<DelegationContent>,
     ) -> option::Option<Self>;
     pub fn reconstitute(
-        kind: session_delegation::DelegationOutcomeKind,
-        content: option::Option<session_delegation::DelegationContent>,
-        reason: session_delegation::DelegationOutcomeReason,
-        provenance: session_delegation::DelegationProvenanceReconstitutionInput,
+        kind: DelegationOutcomeKind,
+        content: option::Option<DelegationContent>,
+        reason: DelegationOutcomeReason,
+        provenance: DelegationProvenanceReconstitutionInput,
     ) -> option::Option<Self>;
-    pub const fn kind(&self) -> session_delegation::DelegationOutcomeKind;
-    pub const fn content(&self) -> option::Option<&session_delegation::DelegationContent>;
-    pub const fn reason(&self) -> session_delegation::DelegationOutcomeReason;
-    pub const fn provenance(&self) -> session_delegation::DelegationProvenance;
-    pub const fn reconstitution_provenance(
-        &self,
-    ) -> session_delegation::DelegationProvenanceReconstitutionInput;
+    pub const fn kind(&self) -> DelegationOutcomeKind;
+    pub const fn content(&self) -> option::Option<&DelegationContent>;
+    pub const fn reason(&self) -> DelegationOutcomeReason;
+    pub const fn provenance(&self) -> DelegationProvenance;
+    pub const fn reconstitution_provenance(&self) -> DelegationProvenanceReconstitutionInput;
 }
 ```
 
@@ -408,7 +388,7 @@ pub enum DelegationProvenanceReconstitutionInput {
     },
     ParentGoalCommand {
         session: SessionId,
-        generation: goal::GoalGeneration,
+        generation: GoalGeneration,
         command: DurableCommandId,
     },
     ParentLifecycleCommand {
@@ -424,7 +404,7 @@ pub enum DelegationProvenanceReconstitutionInput {
 ```rust
 pub struct ChildWait {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_delegation::ChildWait {
+impl ChildWait {
     pub const fn awaiting_request(self) -> ToolRequestId;
     pub const fn spawning_request(self) -> ToolRequestId;
     pub const fn child(self) -> SessionId;
@@ -436,24 +416,24 @@ impl session_delegation::ChildWait {
 ```rust
 pub struct DelegationWait {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_delegation::DelegationWait {
+impl DelegationWait {
     pub fn reconstitute(
-        relation: &session_delegation::SessionDelegation,
-        awaiting_request: &session_delegation::DelegationAwaitRequest,
+        relation: &SessionDelegation,
+        awaiting_request: &DelegationAwaitRequest,
     ) -> option::Option<Self>;
     pub fn reconstitute_stored(
-        awaiting_request: &session_delegation::DelegationAwaitRequest,
+        awaiting_request: &DelegationAwaitRequest,
         spawning_request: ToolRequestId,
         parent: SessionId,
         child: SessionId,
-        mode: session_delegation::DelegationWaitMode,
+        mode: DelegationWaitMode,
     ) -> option::Option<Self>;
     pub const fn awaiting_request(self) -> ToolRequestId;
     pub const fn spawning_request(self) -> ToolRequestId;
     pub const fn parent(self) -> SessionId;
     pub const fn child(self) -> SessionId;
-    pub const fn mode(self) -> session_delegation::DelegationWaitMode;
-    pub const fn foreground_subject(self) -> option::Option<session_delegation::ChildWait>;
+    pub const fn mode(self) -> DelegationWaitMode;
+    pub const fn foreground_subject(self) -> option::Option<ChildWait>;
 }
 ```
 
@@ -462,7 +442,7 @@ impl session_delegation::DelegationWait {
 ```rust
 pub struct DelegationEventOrdinal(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl session_delegation::DelegationEventOrdinal {
+impl DelegationEventOrdinal {
     pub const fn new(value: nonzero::NonZeroU64) -> Self;
     pub const fn get(self) -> u64;
 }
@@ -473,23 +453,23 @@ impl session_delegation::DelegationEventOrdinal {
 ```rust
 pub enum DelegationEvent {
     Spawned {
-        ordinal: session_delegation::DelegationEventOrdinal,
-        provenance: session_delegation::DelegationProvenance,
+        ordinal: DelegationEventOrdinal,
+        provenance: DelegationProvenance,
     },
     MessageDelivered {
-        ordinal: session_delegation::DelegationEventOrdinal,
-        message: session_delegation::DelegationMessage,
+        ordinal: DelegationEventOrdinal,
+        message: DelegationMessage,
     },
     OutcomeRecorded {
-        ordinal: session_delegation::DelegationEventOrdinal,
-        outcome: session_delegation::DelegationOutcome,
+        ordinal: DelegationEventOrdinal,
+        outcome: DelegationOutcome,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_delegation::DelegationEvent {
-    pub const fn ordinal(&self) -> session_delegation::DelegationEventOrdinal;
-    pub const fn message(&self) -> option::Option<&session_delegation::DelegationMessage>;
-    pub const fn outcome(&self) -> option::Option<&session_delegation::DelegationOutcome>;
+impl DelegationEvent {
+    pub const fn ordinal(&self) -> DelegationEventOrdinal;
+    pub const fn message(&self) -> option::Option<&DelegationMessage>;
+    pub const fn outcome(&self) -> option::Option<&DelegationOutcome>;
 }
 ```
 
@@ -508,23 +488,20 @@ pub enum DelegationLifecycle {
 ```rust
 pub struct SessionDelegationReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_delegation::SessionDelegationReconstitutionInput {
+impl SessionDelegationReconstitutionInput {
     pub fn new(
-        spawning_request: session_delegation::DelegatedSpawnRequest,
+        spawning_request: DelegatedSpawnRequest,
         child: SessionId,
         child_turn: TurnId,
-        events: vec::Vec<session_delegation::DelegationEvent>,
+        events: vec::Vec<DelegationEvent>,
     ) -> Self;
-    pub const fn spawning_request(&self) -> &session_delegation::DelegatedSpawnRequest;
+    pub const fn spawning_request(&self) -> &DelegatedSpawnRequest;
     pub const fn child(&self) -> SessionId;
     pub const fn child_turn(&self) -> TurnId;
-    pub fn events(&self) -> &[session_delegation::DelegationEvent];
+    pub fn events(&self) -> &[DelegationEvent];
     pub fn reconstitute(
         self,
-    ) -> result::Result<
-        session_delegation::SessionDelegation,
-        session_delegation::SessionDelegationReconstitutionError,
-    >;
+    ) -> result::Result<SessionDelegation, SessionDelegationReconstitutionError>;
 }
 ```
 
@@ -551,20 +528,20 @@ pub enum SessionDelegationReconstitutionFailure {
 ```rust
 pub struct SessionDelegationReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_delegation::SessionDelegationReconstitutionError {
-    pub const fn input(&self) -> &session_delegation::SessionDelegationReconstitutionInput;
-    pub const fn failure(&self) -> session_delegation::SessionDelegationReconstitutionFailure;
+impl SessionDelegationReconstitutionError {
+    pub const fn input(&self) -> &SessionDelegationReconstitutionInput;
+    pub const fn failure(&self) -> SessionDelegationReconstitutionFailure;
     pub fn into_parts(
         self,
     ) -> (
-        session_delegation::SessionDelegationReconstitutionInput,
-        session_delegation::SessionDelegationReconstitutionFailure,
+        SessionDelegationReconstitutionInput,
+        SessionDelegationReconstitutionFailure,
     );
 }
-impl fmt::Display for session_delegation::SessionDelegationReconstitutionError {
+impl fmt::Display for SessionDelegationReconstitutionError {
     pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for session_delegation::SessionDelegationReconstitutionError {}
+impl error::Error for SessionDelegationReconstitutionError {}
 ```
 
 ## SessionDelegation
@@ -572,41 +549,35 @@ impl error::Error for session_delegation::SessionDelegationReconstitutionError {
 ```rust
 pub struct SessionDelegation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_delegation::SessionDelegation {
+impl SessionDelegation {
     pub const fn spawning_request(&self) -> ToolRequestId;
     pub const fn parent(&self) -> SessionId;
     pub const fn child(&self) -> SessionId;
     pub const fn child_turn(&self) -> TurnId;
-    pub const fn task(&self) -> &session_delegation::DelegationContent;
-    pub const fn policy(&self) -> session_delegation::ChildRelationshipPolicy;
-    pub const fn lifecycle(&self) -> session_delegation::DelegationLifecycle;
-    pub fn events(&self) -> &[session_delegation::DelegationEvent];
-    pub const fn child_creation_provenance(&self) -> session::SessionCreationProvenance;
+    pub const fn task(&self) -> &DelegationContent;
+    pub const fn policy(&self) -> ChildRelationshipPolicy;
+    pub const fn lifecycle(&self) -> DelegationLifecycle;
+    pub fn events(&self) -> &[DelegationEvent];
+    pub const fn child_creation_provenance(&self) -> SessionCreationProvenance;
     pub fn register_wait(
         &self,
-        awaiting_request: &session_delegation::DelegationAwaitRequest,
-        dispatch: &tool_attempt::ToolDispatchAuthority,
-    ) -> result::Result<
-        session_delegation::DelegationWait,
-        session_delegation::DelegationTransitionError,
-    >;
+        awaiting_request: &DelegationAwaitRequest,
+        dispatch: &ToolDispatchAuthority,
+    ) -> result::Result<DelegationWait, DelegationTransitionError>;
     pub fn deliver_message(
         self,
-        sending_request: session_delegation::DelegationMessageRequest,
+        sending_request: DelegationMessageRequest,
         id: DelegationMessageId,
-        dispatch: &tool_attempt::ToolDispatchAuthority,
-    ) -> result::Result<
-        (Self, session_delegation::DelegationEvent),
-        session_delegation::DelegationTransitionError,
-    >;
+        dispatch: &ToolDispatchAuthority,
+    ) -> result::Result<(Self, DelegationEvent), DelegationTransitionError>;
     pub fn record_outcome(
         self,
-        outcome: session_delegation::DelegationOutcome,
-    ) -> result::Result<Self, session_delegation::DelegationTransitionError>;
+        outcome: DelegationOutcome,
+    ) -> result::Result<Self, DelegationTransitionError>;
     pub fn record_parent_termination(
         self,
-        authority: session_delegation::ParentTerminationAuthority,
-    ) -> result::Result<Self, session_delegation::DelegationTransitionError>;
+        authority: ParentTerminationAuthority,
+    ) -> result::Result<Self, DelegationTransitionError>;
 }
 ```
 
@@ -633,22 +604,22 @@ pub enum DelegationTransitionFailure {
 ```rust
 pub enum RejectedDelegationTransition {
     Spawn {
-        request: session_delegation::DelegatedSpawnRequest,
+        request: DelegatedSpawnRequest,
         child: SessionId,
         child_turn: TurnId,
     },
     DeliverMessage {
-        relation: session_delegation::SessionDelegation,
-        request: session_delegation::DelegationMessageRequest,
+        relation: SessionDelegation,
+        request: DelegationMessageRequest,
         id: DelegationMessageId,
     },
     RecordOutcome {
-        relation: session_delegation::SessionDelegation,
-        outcome: session_delegation::DelegationOutcome,
+        relation: SessionDelegation,
+        outcome: DelegationOutcome,
     },
     RecordParentTermination {
-        relation: session_delegation::SessionDelegation,
-        authority: session_delegation::ParentTerminationAuthority,
+        relation: SessionDelegation,
+        authority: ParentTerminationAuthority,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -659,13 +630,13 @@ pub enum RejectedDelegationTransition {
 ```rust
 pub struct DelegationTransitionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_delegation::DelegationTransitionError {
-    pub const fn failure(&self) -> session_delegation::DelegationTransitionFailure;
+impl DelegationTransitionError {
+    pub const fn failure(&self) -> DelegationTransitionFailure;
     pub const fn spawning_request(&self) -> ToolRequestId;
-    pub fn into_rejected(self) -> option::Option<session_delegation::RejectedDelegationTransition>;
+    pub fn into_rejected(self) -> option::Option<RejectedDelegationTransition>;
 }
-impl fmt::Display for session_delegation::DelegationTransitionError {
+impl fmt::Display for DelegationTransitionError {
     pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for session_delegation::DelegationTransitionError {}
+impl error::Error for DelegationTransitionError {}
 ```

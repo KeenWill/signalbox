@@ -10,10 +10,10 @@ pub enum InvalidDurableCommandId {
     Max,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for create_session::InvalidDurableCommandId {
+impl fmt::Display for InvalidDurableCommandId {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for create_session::InvalidDurableCommandId {}
+impl error::Error for InvalidDurableCommandId {}
 ```
 
 ## CreateSessionRequest
@@ -21,16 +21,16 @@ impl error::Error for create_session::InvalidDurableCommandId {}
 ```rust
 pub struct CreateSessionRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl create_session::CreateSessionRequest {
+impl CreateSessionRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
         initial_configuration_defaults: configuration::SessionConfigurationDefaults,
-    ) -> result::Result<Self, create_session::InvalidDurableCommandId>;
+    ) -> result::Result<Self, InvalidDurableCommandId>;
     pub fn try_new_from_template(
         command_id: signalbox_domain::DurableCommandId,
         template_provenance: session_template::SessionTemplateProvenance,
         resolved_configuration_defaults: configuration::SessionConfigurationDefaults,
-    ) -> result::Result<Self, create_session::InvalidDurableCommandId>;
+    ) -> result::Result<Self, InvalidDurableCommandId>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn initial_configuration_defaults(
         &self,
@@ -67,7 +67,7 @@ pub trait SessionIdGenerator {
 ```rust
 pub struct UuidV7SessionIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl create_session::SessionIdGenerator for create_session::UuidV7SessionIdGenerator {
+impl SessionIdGenerator for UuidV7SessionIdGenerator {
     pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
 }
 ```
@@ -93,10 +93,7 @@ pub trait CreateSessionTransaction {
         &mut self,
         prepared: session::PreparedCreateSession,
     ) -> impl future::Future<
-        Output = result::Result<
-            create_session::CreateSessionOutcome,
-            <Self as create_session::CreateSessionTransaction>::Error,
-        >,
+        Output = result::Result<CreateSessionOutcome, <Self as CreateSessionTransaction>::Error>,
     > + marker::Send;
 }
 ```
@@ -109,13 +106,13 @@ pub enum CreateSessionError<TransactionError> {
     Transaction(TransactionError),
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<TransactionError> fmt::Display for create_session::CreateSessionError<TransactionError>
+impl<TransactionError> fmt::Display for CreateSessionError<TransactionError>
 where
     TransactionError: fmt::Display,
 {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl<TransactionError> error::Error for create_session::CreateSessionError<TransactionError> where
+impl<TransactionError> error::Error for CreateSessionError<TransactionError> where
     TransactionError: error::Error + 'static
 {
 }
@@ -126,23 +123,21 @@ impl<TransactionError> error::Error for create_session::CreateSessionError<Trans
 ```rust
 pub struct CreateSessionService<Generator, Transaction> {/* private */}
 // derives: fmt::Debug
-impl<Generator, Transaction> create_session::CreateSessionService<Generator, Transaction> {
+impl<Generator, Transaction> CreateSessionService<Generator, Transaction> {
     pub const fn new(session_ids: Generator, transaction: Transaction) -> Self;
     pub fn into_parts(self) -> (Generator, Transaction);
 }
-impl<Generator, Transaction> create_session::CreateSessionService<Generator, Transaction>
+impl<Generator, Transaction> CreateSessionService<Generator, Transaction>
 where
-    Generator: create_session::SessionIdGenerator,
-    Transaction: create_session::CreateSessionTransaction,
+    Generator: SessionIdGenerator,
+    Transaction: CreateSessionTransaction,
 {
     pub async fn execute(
         &mut self,
-        request: create_session::CreateSessionRequest,
+        request: CreateSessionRequest,
     ) -> result::Result<
-        create_session::CreateSessionOutcome,
-        create_session::CreateSessionError<
-            <Transaction as create_session::CreateSessionTransaction>::Error,
-        >,
+        CreateSessionOutcome,
+        CreateSessionError<<Transaction as CreateSessionTransaction>::Error>,
     >;
 }
 ```

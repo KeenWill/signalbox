@@ -93,17 +93,16 @@ pub struct RepoWatchRepositoryStatus {
     pub repository: repo_watch::RepositorySlug,
     pub cursor_generation: option::Option<u64>,
     pub observed_at: option::Option<time::SystemTime>,
-    pub latest_webhook: option::Option<repo_watch_operations::RepoWatchLatestWebhook>,
-    pub previous_five_minutes: repo_watch_operations::RepoWatchWebhookWindow,
-    pub previous_hour: repo_watch_operations::RepoWatchWebhookWindow,
+    pub latest_webhook: option::Option<RepoWatchLatestWebhook>,
+    pub previous_five_minutes: RepoWatchWebhookWindow,
+    pub previous_hour: RepoWatchWebhookWindow,
     pub latest_projection_latency_milliseconds: option::Option<u64>,
     pub maximum_projection_latency_milliseconds_previous_hour: option::Option<u64>,
-    pub event_kind_counts_previous_hour: vec::Vec<repo_watch_operations::RepoWatchEventKindCount>,
-    pub last_observed_event: option::Option<repo_watch_operations::RepoWatchOperatorEvent>,
-    pub last_actionable_event: option::Option<repo_watch_operations::RepoWatchOperatorEvent>,
-    pub last_dispatch_attempt: option::Option<repo_watch_operations::RepoWatchOperatorDispatch>,
-    pub last_automation_settlement:
-        option::Option<repo_watch_operations::RepoWatchOperatorSettlement>,
+    pub event_kind_counts_previous_hour: vec::Vec<RepoWatchEventKindCount>,
+    pub last_observed_event: option::Option<RepoWatchOperatorEvent>,
+    pub last_actionable_event: option::Option<RepoWatchOperatorEvent>,
+    pub last_dispatch_attempt: option::Option<RepoWatchOperatorDispatch>,
+    pub last_automation_settlement: option::Option<RepoWatchOperatorSettlement>,
     pub held_slot_count: u64,
     pub queued_obligation_count: u64,
 }
@@ -114,7 +113,7 @@ pub struct RepoWatchRepositoryStatus {
 
 ```rust
 pub struct RepoWatchRepositoryStatusPage {
-    pub repositories: vec::Vec<repo_watch_operations::RepoWatchRepositoryStatus>,
+    pub repositories: vec::Vec<RepoWatchRepositoryStatus>,
     pub continuation_after: option::Option<repo_watch::RepositorySlug>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -186,12 +185,11 @@ pub enum RepoWatchAutomationStatus {
 pub struct RepoWatchPullRequestOperationsFacts {
     pub open_parent: option::Option<repo_watch::PullRequestNumber>,
     pub open_child_count: u64,
-    pub automation: repo_watch_operations::RepoWatchAutomationStatus,
-    pub last_observed_event: option::Option<repo_watch_operations::RepoWatchOperatorEvent>,
-    pub last_actionable_event: option::Option<repo_watch_operations::RepoWatchOperatorEvent>,
-    pub last_dispatch_attempt: option::Option<repo_watch_operations::RepoWatchOperatorDispatch>,
-    pub last_automation_settlement:
-        option::Option<repo_watch_operations::RepoWatchOperatorSettlement>,
+    pub automation: RepoWatchAutomationStatus,
+    pub last_observed_event: option::Option<RepoWatchOperatorEvent>,
+    pub last_actionable_event: option::Option<RepoWatchOperatorEvent>,
+    pub last_dispatch_attempt: option::Option<RepoWatchOperatorDispatch>,
+    pub last_automation_settlement: option::Option<RepoWatchOperatorSettlement>,
     pub held_slot_count: u64,
     pub queued_obligation_count: u64,
     pub commissioned_session_count: u64,
@@ -209,30 +207,29 @@ pub struct RepoWatchPullRequestOperations {
     pub head_repository: repo_watch::RepositorySlug,
     pub head_branch: repo_watch::BranchName,
     pub base_branch: repo_watch::BranchName,
-    pub lifecycle: repo_watch::RepoWatchPullRequestLifecycle,
+    pub lifecycle: RepoWatchPullRequestLifecycle,
     pub mergeable: repo_watch::MergeableState,
-    pub draft: repo_watch_operations::RepoWatchDraftStatus,
-    pub checks: repo_watch_operations::RepoWatchChecksStatus,
-    pub review_decision: repo_watch_operations::RepoWatchReviewStatus,
+    pub draft: RepoWatchDraftStatus,
+    pub checks: RepoWatchChecksStatus,
+    pub review_decision: RepoWatchReviewStatus,
     pub stale_review_count: u64,
     pub unresolved_thread_count: u64,
     pub open_parent: option::Option<repo_watch::PullRequestNumber>,
     pub open_child_count: u64,
-    pub automation: repo_watch_operations::RepoWatchAutomationStatus,
-    pub last_observed_event: option::Option<repo_watch_operations::RepoWatchOperatorEvent>,
-    pub last_actionable_event: option::Option<repo_watch_operations::RepoWatchOperatorEvent>,
-    pub last_dispatch_attempt: option::Option<repo_watch_operations::RepoWatchOperatorDispatch>,
-    pub last_automation_settlement:
-        option::Option<repo_watch_operations::RepoWatchOperatorSettlement>,
+    pub automation: RepoWatchAutomationStatus,
+    pub last_observed_event: option::Option<RepoWatchOperatorEvent>,
+    pub last_actionable_event: option::Option<RepoWatchOperatorEvent>,
+    pub last_dispatch_attempt: option::Option<RepoWatchOperatorDispatch>,
+    pub last_automation_settlement: option::Option<RepoWatchOperatorSettlement>,
     pub held_slot_count: u64,
     pub queued_obligation_count: u64,
     pub commissioned_session_count: u64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl repo_watch_operations::RepoWatchPullRequestOperations {
+impl RepoWatchPullRequestOperations {
     pub fn from_state(
-        state: &repo_watch::RepoWatchPullRequestState,
-        facts: repo_watch_operations::RepoWatchPullRequestOperationsFacts,
+        state: &RepoWatchPullRequestState,
+        facts: RepoWatchPullRequestOperationsFacts,
     ) -> Self;
 }
 ```
@@ -242,7 +239,7 @@ impl repo_watch_operations::RepoWatchPullRequestOperations {
 ```rust
 pub struct RepoWatchPullRequestPage {
     pub repository: repo_watch::RepositorySlug,
-    pub pull_requests: vec::Vec<repo_watch_operations::RepoWatchPullRequestOperations>,
+    pub pull_requests: vec::Vec<RepoWatchPullRequestOperations>,
     pub continuation_after: option::Option<repo_watch::PullRequestNumber>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -265,11 +262,11 @@ pub enum RepoWatchHeldSlotBlocker {
 ```rust
 pub struct RepoWatchHeldSlot {
     pub dispatch: signalbox_domain::RepoWatchDispatchId,
-    pub singleton: repo_watch::RepoWatchSingletonKey,
+    pub singleton: RepoWatchSingletonKey,
     pub rule: repo_watch::RepoWatchRuleId,
     pub held_since: time::SystemTime,
     pub sessions: vec::Vec<signalbox_domain::SessionId>,
-    pub blockers: vec::Vec<repo_watch_operations::RepoWatchHeldSlotBlocker>,
+    pub blockers: vec::Vec<RepoWatchHeldSlotBlocker>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -301,7 +298,7 @@ pub enum RepoWatchObligationReadiness {
 ```rust
 pub struct RepoWatchObligationId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl repo_watch_operations::RepoWatchObligationId {
+impl RepoWatchObligationId {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
     pub const fn into_uuid(self) -> uuid::Uuid;
 }
@@ -311,8 +308,8 @@ impl repo_watch_operations::RepoWatchObligationId {
 
 ```rust
 pub struct RepoWatchQueuedObligation {
-    pub id: repo_watch_operations::RepoWatchObligationId,
-    pub singleton: repo_watch::RepoWatchSingletonKey,
+    pub id: RepoWatchObligationId,
+    pub singleton: RepoWatchSingletonKey,
     pub rule: repo_watch::RepoWatchRuleId,
     pub first_repository: repo_watch::RepositorySlug,
     pub first_event: signalbox_domain::RepoWatchEventId,
@@ -321,7 +318,7 @@ pub struct RepoWatchQueuedObligation {
     pub owed_since: time::SystemTime,
     pub latest_match_at: time::SystemTime,
     pub failed_attempts: u64,
-    pub readiness: repo_watch_operations::RepoWatchObligationReadiness,
+    pub readiness: RepoWatchObligationReadiness,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -341,7 +338,7 @@ pub struct RepoWatchHeldCursor {
 ```rust
 pub struct RepoWatchObligationCursor {
     pub owed_since: time::SystemTime,
-    pub obligation: repo_watch_operations::RepoWatchObligationId,
+    pub obligation: RepoWatchObligationId,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -361,13 +358,10 @@ pub enum RepoWatchPagePosition<T> {
 
 ```rust
 pub struct RepoWatchWorkPage {
-    pub held_slots: vec::Vec<repo_watch_operations::RepoWatchHeldSlot>,
-    pub held_continuation_after:
-        repo_watch_operations::RepoWatchPagePosition<repo_watch_operations::RepoWatchHeldCursor>,
-    pub queued_obligations: vec::Vec<repo_watch_operations::RepoWatchQueuedObligation>,
-    pub obligation_continuation_after: repo_watch_operations::RepoWatchPagePosition<
-        repo_watch_operations::RepoWatchObligationCursor,
-    >,
+    pub held_slots: vec::Vec<RepoWatchHeldSlot>,
+    pub held_continuation_after: RepoWatchPagePosition<RepoWatchHeldCursor>,
+    pub queued_obligations: vec::Vec<RepoWatchQueuedObligation>,
+    pub obligation_continuation_after: RepoWatchPagePosition<RepoWatchObligationCursor>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -395,8 +389,8 @@ pub enum RepoWatchSessionPurpose {
 ```rust
 pub struct RepoWatchPullRequestSession {
     pub commissioned_at: time::SystemTime,
-    pub purpose: repo_watch_operations::RepoWatchSessionPurpose,
-    pub attention: attention::AttentionSummary,
+    pub purpose: RepoWatchSessionPurpose,
+    pub attention: AttentionSummary,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -415,8 +409,8 @@ pub struct RepoWatchSessionCursor {
 
 ```rust
 pub struct RepoWatchPullRequestSessionPage {
-    pub sessions: vec::Vec<repo_watch_operations::RepoWatchPullRequestSession>,
-    pub continuation_before: option::Option<repo_watch_operations::RepoWatchSessionCursor>,
+    pub sessions: vec::Vec<RepoWatchPullRequestSession>,
+    pub continuation_before: option::Option<RepoWatchSessionCursor>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -455,7 +449,7 @@ pub struct RepoWatchWebhookActivity {
     pub received_at: time::SystemTime,
     pub projection_count: u64,
     pub latest_projected_at: option::Option<time::SystemTime>,
-    pub disposition: option::Option<repo_watch_operations::RepoWatchWebhookDisposition>,
+    pub disposition: option::Option<RepoWatchWebhookDisposition>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -464,11 +458,10 @@ pub struct RepoWatchWebhookActivity {
 
 ```rust
 pub struct RepoWatchActivityPage {
-    pub events: vec::Vec<repo_watch_operations::RepoWatchOperatorEvent>,
-    pub event_continuation_before:
-        repo_watch_operations::RepoWatchPagePosition<repo_watch_operations::RepoWatchEventCursor>,
-    pub webhooks: vec::Vec<repo_watch_operations::RepoWatchWebhookActivity>,
-    pub webhook_continuation_before: repo_watch_operations::RepoWatchPagePosition<u64>,
+    pub events: vec::Vec<RepoWatchOperatorEvent>,
+    pub event_continuation_before: RepoWatchPagePosition<RepoWatchEventCursor>,
+    pub webhooks: vec::Vec<RepoWatchWebhookActivity>,
+    pub webhook_continuation_before: RepoWatchPagePosition<u64>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -483,8 +476,8 @@ pub trait RepoWatchOperationsReader {
         after: option::Option<repo_watch::RepositorySlug>,
     ) -> impl future::Future<
         Output = result::Result<
-            repo_watch_operations::RepoWatchRepositoryStatusPage,
-            <Self as repo_watch_operations::RepoWatchOperationsReader>::Error,
+            RepoWatchRepositoryStatusPage,
+            <Self as RepoWatchOperationsReader>::Error,
         >,
     > + marker::Send;
     pub fn pull_requests(
@@ -493,48 +486,36 @@ pub trait RepoWatchOperationsReader {
         after: option::Option<repo_watch::PullRequestNumber>,
     ) -> impl future::Future<
         Output = result::Result<
-            repo_watch_operations::RepoWatchPullRequestPage,
-            <Self as repo_watch_operations::RepoWatchOperationsReader>::Error,
+            RepoWatchPullRequestPage,
+            <Self as RepoWatchOperationsReader>::Error,
         >,
     > + marker::Send;
     pub fn work(
         &self,
         repository: repo_watch::RepositorySlug,
-        held_after: repo_watch_operations::RepoWatchPagePosition<
-            repo_watch_operations::RepoWatchHeldCursor,
-        >,
-        obligation_after: repo_watch_operations::RepoWatchPagePosition<
-            repo_watch_operations::RepoWatchObligationCursor,
-        >,
+        held_after: RepoWatchPagePosition<RepoWatchHeldCursor>,
+        obligation_after: RepoWatchPagePosition<RepoWatchObligationCursor>,
     ) -> impl future::Future<
-        Output = result::Result<
-            repo_watch_operations::RepoWatchWorkPage,
-            <Self as repo_watch_operations::RepoWatchOperationsReader>::Error,
-        >,
+        Output = result::Result<RepoWatchWorkPage, <Self as RepoWatchOperationsReader>::Error>,
     > + marker::Send;
     pub fn pull_request_sessions(
         &self,
         repository: repo_watch::RepositorySlug,
         pull_request: repo_watch::PullRequestNumber,
-        before: option::Option<repo_watch_operations::RepoWatchSessionCursor>,
+        before: option::Option<RepoWatchSessionCursor>,
     ) -> impl future::Future<
         Output = result::Result<
-            repo_watch_operations::RepoWatchPullRequestSessionPage,
-            <Self as repo_watch_operations::RepoWatchOperationsReader>::Error,
+            RepoWatchPullRequestSessionPage,
+            <Self as RepoWatchOperationsReader>::Error,
         >,
     > + marker::Send;
     pub fn activity(
         &self,
         repository: repo_watch::RepositorySlug,
-        events_before: repo_watch_operations::RepoWatchPagePosition<
-            repo_watch_operations::RepoWatchEventCursor,
-        >,
-        webhooks_before: repo_watch_operations::RepoWatchPagePosition<u64>,
+        events_before: RepoWatchPagePosition<RepoWatchEventCursor>,
+        webhooks_before: RepoWatchPagePosition<u64>,
     ) -> impl future::Future<
-        Output = result::Result<
-            repo_watch_operations::RepoWatchActivityPage,
-            <Self as repo_watch_operations::RepoWatchOperationsReader>::Error,
-        >,
+        Output = result::Result<RepoWatchActivityPage, <Self as RepoWatchOperationsReader>::Error>,
     > + marker::Send;
 }
 ```

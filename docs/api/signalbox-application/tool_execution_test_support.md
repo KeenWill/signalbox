@@ -24,7 +24,7 @@ pub struct PreparedAttemptProposal {
     pub name: tool::ToolName,
     pub arguments: tool::NormalizedToolArguments,
     pub effect_class: tool::ToolEffectClass,
-    pub approval: tool_execution_test_support::PreparedAttemptApproval,
+    pub approval: PreparedAttemptApproval,
 }
 // derives: clone::Clone, fmt::Debug
 ```
@@ -45,8 +45,8 @@ pub enum PreparedAttemptApproval {
 
 ```rust
 pub fn prepared_single_attempt_batch(
-    identities: tool_execution_test_support::PreparedAttemptIdentities,
-    proposal: tool_execution_test_support::PreparedAttemptProposal,
+    identities: PreparedAttemptIdentities,
+    proposal: PreparedAttemptProposal,
 ) -> tool_execution::ToolBatch;
 ```
 
@@ -65,17 +65,16 @@ pub struct FixtureTransactionFailures<Error> {
 ```rust
 pub struct FixtureToolExecutionTransaction<Error> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<Error> tool_execution_test_support::FixtureToolExecutionTransaction<Error> {
+impl<Error> FixtureToolExecutionTransaction<Error> {
     pub const fn new(
         batch: tool_execution::ToolBatch,
-        failures: tool_execution_test_support::FixtureTransactionFailures<Error>,
+        failures: FixtureTransactionFailures<Error>,
     ) -> Self;
     pub const fn batch(&self) -> &tool_execution::ToolBatch;
 }
-impl<Error> tool_loop_ports::ToolExecutionTransaction
-    for tool_execution_test_support::FixtureToolExecutionTransaction<Error>
+impl<Error> ToolExecutionTransaction for FixtureToolExecutionTransaction<Error>
 where
-    Error: operator_failure::ClassifyOperatorFailure + clone::Clone + marker::Send,
+    Error: ClassifyOperatorFailure + clone::Clone + marker::Send,
 {
     type Error = Error;
     pub async fn resume_child_wait(
@@ -83,22 +82,22 @@ where
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _attempt: signalbox_domain::TurnAttemptId,
-    ) -> result::Result<bool, <Self as tool_loop_ports::ToolExecutionTransaction>::Error>;
+    ) -> result::Result<bool, <Self as ToolExecutionTransaction>::Error>;
     pub async fn reread_durable_child_wait(
         &mut self,
-        _wait: tool_loop::CorrelatedDurableChildWait,
-    ) -> result::Result<bool, <Self as tool_loop_ports::ToolExecutionTransaction>::Error>;
+        _wait: CorrelatedDurableChildWait,
+    ) -> result::Result<bool, <Self as ToolExecutionTransaction>::Error>;
     pub async fn reread_durable_completion(
         &mut self,
         _correlation: tool_attempt::ToolAttemptDispatchCorrelation,
-    ) -> result::Result<bool, <Self as tool_loop_ports::ToolExecutionTransaction>::Error>;
+    ) -> result::Result<bool, <Self as ToolExecutionTransaction>::Error>;
     pub async fn load_active_batch(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
     ) -> result::Result<
         option::Option<tool_execution::ToolBatch>,
-        <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+        <Self as ToolExecutionTransaction>::Error,
     >;
     pub async fn prepare_next_attempt(
         &mut self,
@@ -108,61 +107,49 @@ where
         _effect_class: tool::ToolEffectClass,
     ) -> result::Result<
         option::Option<tool_attempt::CurrentToolAttempt>,
-        <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+        <Self as ToolExecutionTransaction>::Error,
     >;
     pub async fn authorize_attempt(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         attempt: signalbox_domain::ToolAttemptId,
-        _preauthorization: tool_loop::ToolPreauthorization,
-    ) -> result::Result<
-        tool_loop_ports::ToolAttemptAuthorizationOutcome,
-        <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
-    >;
+        _preauthorization: ToolPreauthorization,
+    ) -> result::Result<ToolAttemptAuthorizationOutcome, <Self as ToolExecutionTransaction>::Error>;
     pub async fn reread_ambiguous_authorization(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _attempt: signalbox_domain::ToolAttemptId,
-    ) -> result::Result<
-        tool_loop_ports::ToolAttemptAuthorizationStatus,
-        <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
-    >;
+    ) -> result::Result<ToolAttemptAuthorizationStatus, <Self as ToolExecutionTransaction>::Error>;
     pub async fn commit_preflight_error(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _attempt: signalbox_domain::ToolAttemptId,
         _error: tool_attempt::ToolExecutionError,
-    ) -> result::Result<
-        tool_attempt::EndedToolAttempt,
-        <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
-    >;
+    ) -> result::Result<tool_attempt::EndedToolAttempt, <Self as ToolExecutionTransaction>::Error>;
     pub async fn commit_observation(
         &mut self,
         observation: tool_attempt::CorrelatedToolAttemptObservation,
-    ) -> result::Result<
-        tool_attempt::EndedToolAttempt,
-        <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
-    >;
+    ) -> result::Result<tool_attempt::EndedToolAttempt, <Self as ToolExecutionTransaction>::Error>;
     pub async fn reread_observation(
         &mut self,
         _observation: &tool_attempt::CorrelatedToolAttemptObservation,
     ) -> result::Result<
-        tool_loop_ports::RetainedToolAttemptObservationStatus,
-        <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+        RetainedToolAttemptObservationStatus,
+        <Self as ToolExecutionTransaction>::Error,
     >;
     pub async fn classify_crash_loss<NextTurn>(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _attempt: signalbox_domain::ToolAttemptId,
-        _identities: tool_loop_ports::ToolCrashClosureIdentities,
+        _identities: ToolCrashClosureIdentities,
         _next_turn: NextTurn,
     ) -> result::Result<
         tool_attempt::ToolAttemptCrashOutcome,
-        <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+        <Self as ToolExecutionTransaction>::Error,
     >
     where
         NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId
@@ -172,12 +159,9 @@ where
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _producing_call: signalbox_domain::ModelCallId,
-        _identities: tool_loop_ports::ToolContinuationIdentities,
+        _identities: ToolContinuationIdentities,
         _next_steering: NextSteering,
-    ) -> result::Result<
-        tool_loop_ports::PrepareToolContinuationOutcome,
-        <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
-    >
+    ) -> result::Result<PrepareToolContinuationOutcome, <Self as ToolExecutionTransaction>::Error>
     where
         NextSteering: function::FnMut(
                 signalbox_domain::AcceptedInputId,
@@ -193,26 +177,22 @@ where
 ```rust
 pub struct RecordingToolExecutor<Executor> {/* private */}
 // derives: fmt::Debug
-impl<Executor> tool_execution_test_support::RecordingToolExecutor<Executor> {
-    pub fn new(inner: Executor) -> (Self, tool_execution_test_support::RecordedEvidence);
+impl<Executor> RecordingToolExecutor<Executor> {
+    pub fn new(inner: Executor) -> (Self, RecordedEvidence);
 }
-impl<Executor> tool_loop::ToolExecutor
-    for tool_execution_test_support::RecordingToolExecutor<Executor>
+impl<Executor> ToolExecutor for RecordingToolExecutor<Executor>
 where
-    Executor: tool_loop::ToolExecutor + marker::Send,
+    Executor: ToolExecutor + marker::Send,
 {
-    type Error = <Executor as tool_loop::ToolExecutor>::Error;
+    type Error = <Executor as ToolExecutor>::Error;
     pub async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
-    ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
-    >;
+        invocation: ToolExecutionInvocation,
+    ) -> result::Result<CorrelatedToolExecutorEvidence, <Self as ToolExecutor>::Error>;
     pub async fn execute_with_scheduling(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
-    ) -> result::Result<tool_loop::ToolExecutorDisposition, <Self as tool_loop::ToolExecutor>::Error>
+        invocation: ToolExecutionInvocation,
+    ) -> result::Result<ToolExecutorDisposition, <Self as ToolExecutor>::Error>
     where
         Self: marker::Send;
 }
@@ -223,7 +203,7 @@ where
 ```rust
 pub struct RecordedEvidence {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl tool_execution_test_support::RecordedEvidence {
-    pub fn take(&self) -> option::Option<tool_loop::ToolExecutorEvidence>;
+impl RecordedEvidence {
+    pub fn take(&self) -> option::Option<ToolExecutorEvidence>;
 }
 ```

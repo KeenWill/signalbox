@@ -11,7 +11,7 @@ pub enum ConversationOriginFilter {
     All,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl list_conversations::ConversationOriginFilter {
+impl ConversationOriginFilter {
     pub const fn selects_native(self) -> bool;
     pub const fn selects_imported(self) -> bool;
 }
@@ -25,7 +25,7 @@ pub enum ConversationListCursor {
     ImportedConversation(signalbox_domain::ImportedConversationId),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl list_conversations::ConversationListCursor {
+impl ConversationListCursor {
     pub const fn identity_uuid(self) -> uuid::Uuid;
 }
 ```
@@ -35,29 +35,29 @@ impl list_conversations::ConversationListCursor {
 ```rust
 pub struct ConversationListQuery {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl list_conversations::ConversationListQuery {
+impl ConversationListQuery {
     pub fn default_page(page_size: u64) -> Self;
     pub fn try_new(
         title_contains: option::Option<string::String>,
-        origin: list_conversations::ConversationOriginFilter,
+        origin: ConversationOriginFilter,
         include_archived: bool,
         page_size: u64,
-        after: option::Option<list_conversations::ConversationListCursor>,
-    ) -> result::Result<Self, list_conversations::ConversationListQueryError>;
+        after: option::Option<ConversationListCursor>,
+    ) -> result::Result<Self, ConversationListQueryError>;
     pub fn try_new_with_page_limits(
         title_contains: option::Option<string::String>,
-        origin: list_conversations::ConversationOriginFilter,
+        origin: ConversationOriginFilter,
         include_archived: bool,
         page_size: u64,
-        after: option::Option<list_conversations::ConversationListCursor>,
+        after: option::Option<ConversationListCursor>,
         min_page_size: option::Option<u64>,
         max_page_size: option::Option<u64>,
-    ) -> result::Result<Self, list_conversations::ConversationListQueryError>;
+    ) -> result::Result<Self, ConversationListQueryError>;
     pub fn title_contains(&self) -> option::Option<&str>;
-    pub const fn origin(&self) -> list_conversations::ConversationOriginFilter;
+    pub const fn origin(&self) -> ConversationOriginFilter;
     pub const fn include_archived(&self) -> bool;
     pub const fn page_size(&self) -> u64;
-    pub const fn after(&self) -> option::Option<list_conversations::ConversationListCursor>;
+    pub const fn after(&self) -> option::Option<ConversationListCursor>;
 }
 ```
 
@@ -91,8 +91,8 @@ pub enum ConversationListItem {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl list_conversations::ConversationListItem {
-    pub const fn cursor(&self) -> list_conversations::ConversationListCursor;
+impl ConversationListItem {
+    pub const fn cursor(&self) -> ConversationListCursor;
     pub fn title(&self) -> option::Option<&str>;
 }
 ```
@@ -106,11 +106,11 @@ pub trait ConversationPageReader {
         &mut self,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<list_conversations::ConversationListItem>,
-            <Self as list_conversations::ConversationPageReader>::Error,
+            option::Option<ConversationListItem>,
+            <Self as ConversationPageReader>::Error,
         >,
     > + marker::Send;
-    pub fn next_after(&self) -> option::Option<list_conversations::ConversationListCursor>;
+    pub fn next_after(&self) -> option::Option<ConversationListCursor>;
 }
 ```
 
@@ -119,16 +119,14 @@ pub trait ConversationPageReader {
 ```rust
 pub trait ConversationLister {
     type Error;
-    type Page: list_conversations::ConversationPageReader<
-        Error = <Self as list_conversations::ConversationLister>::Error,
-    >;
+    type Page: ConversationPageReader<Error = <Self as ConversationLister>::Error>;
     pub fn open_conversation_page(
         &self,
-        query: list_conversations::ConversationListQuery,
+        query: ConversationListQuery,
     ) -> impl future::Future<
         Output = result::Result<
-            <Self as list_conversations::ConversationLister>::Page,
-            <Self as list_conversations::ConversationLister>::Error,
+            <Self as ConversationLister>::Page,
+            <Self as ConversationLister>::Error,
         >,
     > + marker::Send;
 }
@@ -139,20 +137,17 @@ pub trait ConversationLister {
 ```rust
 pub struct ListConversationsService<Lister> {/* private */}
 // derives: fmt::Debug
-impl<Lister> list_conversations::ListConversationsService<Lister> {
+impl<Lister> ListConversationsService<Lister> {
     pub const fn new(lister: Lister) -> Self;
     pub fn into_lister(self) -> Lister;
 }
-impl<Lister> list_conversations::ListConversationsService<Lister>
+impl<Lister> ListConversationsService<Lister>
 where
-    Lister: list_conversations::ConversationLister,
+    Lister: ConversationLister,
 {
     pub async fn execute(
         &self,
-        query: list_conversations::ConversationListQuery,
-    ) -> result::Result<
-        <Lister as list_conversations::ConversationLister>::Page,
-        <Lister as list_conversations::ConversationLister>::Error,
-    >;
+        query: ConversationListQuery,
+    ) -> result::Result<<Lister as ConversationLister>::Page, <Lister as ConversationLister>::Error>;
 }
 ```

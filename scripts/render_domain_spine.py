@@ -27,7 +27,7 @@ def build_json(crate, *, workspace=ROOT, target=None):
     target = target or Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
     target = target.resolve()
     subprocess.run([
-        'cargo', '+nightly', 'rustdoc', '--locked', '--manifest-path',
+        'cargo', '+' + configuration()['rustdoc_toolchain'], 'rustdoc', '--locked', '--manifest-path',
         str(workspace / 'Cargo.toml'), '--target-dir', str(target),
         '-p', crate, '--lib', '--all-features', '--',
         '-Z', 'unstable-options', '--output-format', 'json',
@@ -72,6 +72,21 @@ class Renderer:
         self.root = self.item(document['root'])
         self.crate_id = self.root['crate_id']
         self.crate = self.root['name']
+        self.root_exports = {}
+        for identity in self.root['inner']['module']['items']:
+            item = self.item(identity)
+            if item['visibility'] != 'public':
+                continue
+            export = item['inner'].get('use')
+            target = export['id'] if export else identity
+            if target is None or str(target) not in self.index:
+                continue
+            definition = self.item(target)
+            if definition['crate_id'] != self.crate_id or (export and export['is_glob']):
+                continue
+            name = export['name'] if export else item['name']
+            if str(target) not in self.root_exports or name == definition['name']:
+                self.root_exports[str(target)] = name
 
     def item(self, identity):
         return self.index[str(identity)]
@@ -81,6 +96,8 @@ class Renderer:
         return '::'.join(summary['path']) if summary else path['path']
 
     def path(self, path):
+        if str(path['id']) in self.root_exports:
+            return self.root_exports[str(path['id'])] + self.args(path.get('args'))
         parts = self.full_path(path).split('::')
         parts = parts[1:] if parts[0] == self.crate else parts[-2:]
         return '::'.join(parts) + self.args(path.get('args'))
@@ -301,7 +318,7 @@ class Renderer:
         if trait:
             header += ('!' if body['is_negative'] else '') + self.path(trait) + ' for '
         header += self.type(body['for']) + self.where(generics)
-        methods = [self.declaration(self.item(i), associated=True) for i in body['items']
+        methods = [self.declaration(self.item(i), associated=bool(trait)) for i in body['items']
                    if trait or self.item(i)['visibility'] == 'public']
         return header + ' {\n' + '\n'.join('    ' + m for m in methods) + '\n}' if methods else header + ' {}'
 

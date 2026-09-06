@@ -7,21 +7,19 @@
 ```rust
 pub struct PerInputConfigurationChoices {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl delivery_request::PerInputConfigurationChoices {
+impl PerInputConfigurationChoices {
     pub const fn new(
-        expected_session_defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        model: configuration::ModelSelectionOverride,
+        expected_session_defaults_version: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
     ) -> Self;
     pub const fn with_model_settings(
-        expected_session_defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        model: configuration::ModelSelectionOverride,
-        model_settings: model_settings::ModelSettingsOverlay,
+        expected_session_defaults_version: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+        model_settings: ModelSettingsOverlay,
     ) -> Self;
-    pub const fn expected_session_defaults_version(
-        &self,
-    ) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn model(&self) -> configuration::ModelSelectionOverride;
-    pub const fn model_settings(&self) -> model_settings::ModelSettingsOverlay;
+    pub const fn expected_session_defaults_version(&self) -> SessionConfigurationDefaultsVersion;
+    pub const fn model(&self) -> ModelSelectionOverride;
+    pub const fn model_settings(&self) -> ModelSettingsOverlay;
 }
 ```
 
@@ -30,19 +28,19 @@ impl delivery_request::PerInputConfigurationChoices {
 ```rust
 pub enum DeliveryRequest {
     StartWhenNoActiveTurn {
-        configuration: delivery_request::PerInputConfigurationChoices,
+        configuration: PerInputConfigurationChoices,
     },
     Interrupt {
         expected_active_turn: TurnId,
-        descendant_scope: session_delegation::DescendantTerminationScope,
-        configuration: delivery_request::PerInputConfigurationChoices,
+        descendant_scope: DescendantTerminationScope,
+        configuration: PerInputConfigurationChoices,
     },
     NextSafePoint {
         expected_active_turn: TurnId,
     },
     AfterCurrentTurn {
         expected_active_turn: TurnId,
-        configuration: delivery_request::PerInputConfigurationChoices,
+        configuration: PerInputConfigurationChoices,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq

@@ -37,9 +37,7 @@ pub trait CommissionedDispatchIdGenerator {
 ```rust
 pub struct UuidV7CommissionedDispatchIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl commissioned_dispatch::CommissionedDispatchIdGenerator
-    for commissioned_dispatch::UuidV7CommissionedDispatchIdGenerator
-{
+impl CommissionedDispatchIdGenerator for UuidV7CommissionedDispatchIdGenerator {
     pub fn next_dispatch_id(&mut self) -> signalbox_domain::CommissionedDispatchId;
     pub fn next_command_id(&mut self) -> signalbox_domain::DurableCommandId;
     pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
@@ -51,28 +49,25 @@ impl commissioned_dispatch::CommissionedDispatchIdGenerator
 ```rust
 pub struct CommissionDispatchRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl commissioned_dispatch::CommissionDispatchRequest {
+impl CommissionDispatchRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
         template: session_template::SessionTemplateName,
-        fence: commissioned_dispatch::CommissionedDispatchFence,
+        fence: CommissionedDispatchFence,
         statement: goal::GoalStatement,
         context: user_content::UserContent,
-    ) -> result::Result<Self, create_session::InvalidDurableCommandId>;
+    ) -> result::Result<Self, InvalidDurableCommandId>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn template(&self) -> &session_template::SessionTemplateName;
-    pub const fn fence(&self) -> &commissioned_dispatch::CommissionedDispatchFence;
+    pub const fn fence(&self) -> &CommissionedDispatchFence;
     pub const fn statement(&self) -> &goal::GoalStatement;
     pub fn initial_content_digest(&self) -> [u8; 32];
     pub fn prepare(
         self,
-        ids: &mut impl commissioned_dispatch::CommissionedDispatchIdGenerator,
+        ids: &mut impl CommissionedDispatchIdGenerator,
         template_provenance: session_template::SessionTemplateProvenance,
         resolved_defaults: configuration::SessionConfigurationDefaults,
-    ) -> result::Result<
-        commissioned_dispatch::PreparedCommissionedDispatch,
-        commissioned_dispatch::CommissionDispatchPreparationError,
-    >;
+    ) -> result::Result<PreparedCommissionedDispatch, CommissionDispatchPreparationError>;
 }
 ```
 
@@ -81,9 +76,9 @@ impl commissioned_dispatch::CommissionDispatchRequest {
 ```rust
 pub struct PreparedCommissionedDispatch {/* private */}
 // derives: fmt::Debug
-impl commissioned_dispatch::PreparedCommissionedDispatch {
+impl PreparedCommissionedDispatch {
     pub const fn dispatch_id(&self) -> signalbox_domain::CommissionedDispatchId;
-    pub const fn fence(&self) -> &commissioned_dispatch::CommissionedDispatchFence;
+    pub const fn fence(&self) -> &CommissionedDispatchFence;
     pub const fn prepared_session(&self) -> &session::PreparedCreateSession;
     pub const fn goal(&self) -> &goal_command::GoalUserCommand;
     pub fn initial_content_digest(&self) -> [u8; 32];
@@ -92,7 +87,7 @@ impl commissioned_dispatch::PreparedCommissionedDispatch {
         self,
     ) -> (
         signalbox_domain::CommissionedDispatchId,
-        commissioned_dispatch::CommissionedDispatchFence,
+        CommissionedDispatchFence,
         session::PreparedCreateSession,
         submit_input::SubmitInput,
         goal_command::GoalUserCommand,
@@ -108,8 +103,8 @@ pub enum CommissionDispatchPreparationError {
     SessionPreparation,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for commissioned_dispatch::CommissionDispatchPreparationError {
+impl fmt::Display for CommissionDispatchPreparationError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for commissioned_dispatch::CommissionDispatchPreparationError {}
+impl error::Error for CommissionDispatchPreparationError {}
 ```

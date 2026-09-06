@@ -6,12 +6,8 @@
 
 ```rust
 pub enum ProviderTargetObservation {
-    MatchesResolvedTarget {
-        reported: model_call::ProviderModelIdentity,
-    },
-    Mismatch {
-        reported: model_call::ProviderModelIdentity,
-    },
+    MatchesResolvedTarget { reported: ProviderModelIdentity },
+    Mismatch { reported: ProviderModelIdentity },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -21,10 +17,10 @@ pub enum ProviderTargetObservation {
 ```rust
 pub struct ProviderTargetEvidence {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl provider_evidence::ProviderTargetEvidence {
+impl ProviderTargetEvidence {
     pub const fn id(&self) -> ProviderTargetEvidenceId;
     pub const fn call(&self) -> ModelCallId;
-    pub const fn observation(&self) -> provider_evidence::ProviderTargetObservation;
+    pub const fn observation(&self) -> ProviderTargetObservation;
 }
 ```
 
@@ -33,12 +29,9 @@ impl provider_evidence::ProviderTargetEvidence {
 ```rust
 pub struct ProviderTargetEvidenceLog {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl provider_evidence::ProviderTargetEvidenceLog {
+impl ProviderTargetEvidenceLog {
     pub fn new() -> Self;
-    pub fn lookup(
-        &self,
-        id: ProviderTargetEvidenceId,
-    ) -> option::Option<&provider_evidence::ProviderTargetEvidence>;
+    pub fn lookup(&self, id: ProviderTargetEvidenceId) -> option::Option<&ProviderTargetEvidence>;
 }
 ```
 
@@ -47,7 +40,7 @@ impl provider_evidence::ProviderTargetEvidenceLog {
 ```rust
 pub struct ProviderTargetMismatchInvalidation {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl provider_evidence::ProviderTargetMismatchInvalidation {
+impl ProviderTargetMismatchInvalidation {
     pub const fn invalidated_call(&self) -> ModelCallId;
     pub const fn first_mismatch_evidence(&self) -> ProviderTargetEvidenceId;
 }
@@ -58,11 +51,8 @@ impl provider_evidence::ProviderTargetMismatchInvalidation {
 ```rust
 pub struct ProviderTargetMismatchInvalidationLog {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl provider_evidence::ProviderTargetMismatchInvalidationLog {
+impl ProviderTargetMismatchInvalidationLog {
     pub fn new() -> Self;
-    pub fn lookup(
-        &self,
-        call: ModelCallId,
-    ) -> option::Option<&provider_evidence::ProviderTargetMismatchInvalidation>;
+    pub fn lookup(&self, call: ModelCallId) -> option::Option<&ProviderTargetMismatchInvalidation>;
 }
 ```

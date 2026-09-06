@@ -394,10 +394,10 @@ pub fn sample::ToolArgumentValidator::validate(&self)
         document = {'root': 0, 'paths': {}, 'index': {
             '0': {'id': 0, 'crate_id': 0, 'name': 'sample',
                   'inner': {'module': {'items': [1, 2]}}},
-            '1': {'id': 1, 'crate_id': 0, 'name': 'Record',
+            '1': {'id': 1, 'crate_id': 0, 'name': 'Record', 'visibility': 'public',
                   'span': {'filename': 'src/example.rs', 'begin': [1, 1]},
                   'inner': {'struct': {}}},
-            '2': {'id': 2, 'crate_id': 0, 'name': 'Removed',
+            '2': {'id': 2, 'crate_id': 0, 'name': 'Removed', 'visibility': 'public',
                   'span': {'filename': 'src/example.rs', 'begin': [2, 1]},
                   'inner': {'struct': {}}},
         }}

@@ -16,9 +16,7 @@ pub trait ImportedConversationIdGenerator {
 ```rust
 pub struct UuidV7ImportedConversationIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl conversation_import::ImportedConversationIdGenerator
-    for conversation_import::UuidV7ImportedConversationIdGenerator
-{
+impl ImportedConversationIdGenerator for UuidV7ImportedConversationIdGenerator {
     pub fn next_conversation_id(&mut self) -> signalbox_domain::ImportedConversationId;
     pub fn next_entry_id(&mut self) -> signalbox_domain::ImportedTranscriptEntryId;
 }
@@ -37,7 +35,7 @@ pub trait ImportedConversationConverter {
         next_entry_id: NextEntryId,
     ) -> result::Result<
         imported_conversation::ImportedConversation,
-        <Self as conversation_import::ImportedConversationConverter>::Error,
+        <Self as ImportedConversationConverter>::Error,
     >
     where
         NextEntryId: function::FnMut() -> signalbox_domain::ImportedTranscriptEntryId;
@@ -49,7 +47,7 @@ pub trait ImportedConversationConverter {
 ```rust
 pub struct ImportedConversationSkippedRecord<Failure> {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<Failure> conversation_import::ImportedConversationSkippedRecord<Failure> {
+impl<Failure> ImportedConversationSkippedRecord<Failure> {
     pub const fn new(source_line: u64, failure: Failure) -> Self;
     pub const fn source_line(&self) -> u64;
     pub const fn failure(&self) -> &Failure;
@@ -63,12 +61,10 @@ impl<Failure> conversation_import::ImportedConversationSkippedRecord<Failure> {
 pub enum ImportedConversationConversionReport<Failure> {
     Converted {
         conversation: imported_conversation::ImportedConversation,
-        skipped_records:
-            boxed::Box<[conversation_import::ImportedConversationSkippedRecord<Failure>]>,
+        skipped_records: boxed::Box<[ImportedConversationSkippedRecord<Failure>]>,
     },
     NoValidRecords {
-        skipped_records:
-            boxed::Box<[conversation_import::ImportedConversationSkippedRecord<Failure>]>,
+        skipped_records: boxed::Box<[ImportedConversationSkippedRecord<Failure>]>,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -77,9 +73,7 @@ pub enum ImportedConversationConversionReport<Failure> {
 ## ResilientImportedConversationConverter
 
 ```rust
-pub trait ResilientImportedConversationConverter:
-    conversation_import::ImportedConversationConverter
-{
+pub trait ResilientImportedConversationConverter: ImportedConversationConverter {
     type RecordFailure;
     pub fn convert_resilient<NextEntryId>(
         &mut self,
@@ -87,10 +81,10 @@ pub trait ResilientImportedConversationConverter:
         source: &[u8],
         next_entry_id: NextEntryId,
     ) -> result::Result<
-        conversation_import::ImportedConversationConversionReport<
-            <Self as conversation_import::ResilientImportedConversationConverter>::RecordFailure,
+        ImportedConversationConversionReport<
+            <Self as ResilientImportedConversationConverter>::RecordFailure,
         >,
-        <Self as conversation_import::ImportedConversationConverter>::Error,
+        <Self as ImportedConversationConverter>::Error,
     >
     where
         NextEntryId: function::FnMut() -> signalbox_domain::ImportedTranscriptEntryId;
@@ -111,7 +105,7 @@ pub enum ImportedConversationStoreOutcome {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl conversation_import::ImportedConversationStoreOutcome {
+impl ImportedConversationStoreOutcome {
     pub const fn conversation(self) -> signalbox_domain::ImportedConversationId;
     pub const fn source_digest(self) -> imported_conversation::ImportedConversationSourceDigest;
 }
@@ -127,8 +121,8 @@ pub trait ImportedConversationStore {
         conversation: imported_conversation::ImportedConversation,
     ) -> impl future::Future<
         Output = result::Result<
-            conversation_import::ImportedConversationStoreOutcome,
-            <Self as conversation_import::ImportedConversationStore>::Error,
+            ImportedConversationStoreOutcome,
+            <Self as ImportedConversationStore>::Error,
         >,
     > + marker::Send;
 }
@@ -146,7 +140,7 @@ pub enum ImportConversationOutcome {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl conversation_import::ImportConversationOutcome {
+impl ImportConversationOutcome {
     pub const fn conversation(self) -> signalbox_domain::ImportedConversationId;
 }
 ```
@@ -157,17 +151,14 @@ impl conversation_import::ImportConversationOutcome {
 pub enum ImportConversationReport<Failure> {
     Converted {
         conversation: imported_conversation::ImportedConversation,
-        skipped_records:
-            boxed::Box<[conversation_import::ImportedConversationSkippedRecord<Failure>]>,
+        skipped_records: boxed::Box<[ImportedConversationSkippedRecord<Failure>]>,
     },
     Imported {
-        outcome: conversation_import::ImportConversationOutcome,
-        skipped_records:
-            boxed::Box<[conversation_import::ImportedConversationSkippedRecord<Failure>]>,
+        outcome: ImportConversationOutcome,
+        skipped_records: boxed::Box<[ImportedConversationSkippedRecord<Failure>]>,
     },
     NoValidRecords {
-        skipped_records:
-            boxed::Box<[conversation_import::ImportedConversationSkippedRecord<Failure>]>,
+        skipped_records: boxed::Box<[ImportedConversationSkippedRecord<Failure>]>,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -199,7 +190,7 @@ pub enum ImportConversationError<ConverterError, StoreError> {
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<ConverterError, StoreError> fmt::Display
-    for conversation_import::ImportConversationError<ConverterError, StoreError>
+    for ImportConversationError<ConverterError, StoreError>
 where
     ConverterError: fmt::Display,
     StoreError: fmt::Display,
@@ -207,7 +198,7 @@ where
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<ConverterError, StoreError> error::Error
-    for conversation_import::ImportConversationError<ConverterError, StoreError>
+    for ImportConversationError<ConverterError, StoreError>
 where
     ConverterError: error::Error + 'static,
     StoreError: error::Error + 'static,
@@ -220,42 +211,44 @@ where
 ```rust
 pub struct ImportConversationService<Generator, Converter, Store> {/* private */}
 // derives: fmt::Debug
-impl<Generator, Converter, Store>
-    conversation_import::ImportConversationService<Generator, Converter, Store>
-{
+impl<Generator, Converter, Store> ImportConversationService<Generator, Converter, Store> {
     pub const fn new(ids: Generator, converter: Converter, store: Store) -> Self;
     pub fn into_parts(self) -> (Generator, Converter, Store);
 }
-impl<Generator, Converter, Store>
-    conversation_import::ImportConversationService<Generator, Converter, Store>
+impl<Generator, Converter, Store> ImportConversationService<Generator, Converter, Store>
 where
-    Generator: conversation_import::ImportedConversationIdGenerator,
-    Converter: conversation_import::ImportedConversationConverter,
-    Store: conversation_import::ImportedConversationStore,
+    Generator: ImportedConversationIdGenerator,
+    Converter: ImportedConversationConverter,
+    Store: ImportedConversationStore,
 {
     pub async fn execute(
         &mut self,
         source: &[u8],
     ) -> result::Result<
-        conversation_import::ImportConversationOutcome,
-        conversation_import::ImportConversationError<
-            <Converter as conversation_import::ImportedConversationConverter>::Error,
-            <Store as conversation_import::ImportedConversationStore>::Error,
+        ImportConversationOutcome,
+        ImportConversationError<
+            <Converter as ImportedConversationConverter>::Error,
+            <Store as ImportedConversationStore>::Error,
         >,
     >;
 }
-impl<Generator, Converter, Store>
-    conversation_import::ImportConversationService<Generator, Converter, Store>
+impl<Generator, Converter, Store> ImportConversationService<Generator, Converter, Store>
 where
-    Generator: conversation_import::ImportedConversationIdGenerator,
-    Converter: conversation_import::ResilientImportedConversationConverter,
-    Store: conversation_import::ImportedConversationStore,
+    Generator: ImportedConversationIdGenerator,
+    Converter: ResilientImportedConversationConverter,
+    Store: ImportedConversationStore,
 {
-    pub async fn execute_resilient(&mut self, source: &[u8]) ->
-        result::Result<conversation_import::ImportConversationReport<<Converter as
-        conversation_import::ResilientImportedConversationConverter>::RecordFailure>,
-        conversation_import::ImportConversationError<<Converter as
-        conversation_import::ImportedConversationConverter>::Error, <Store as
-        conversation_import::ImportedConversationStore>::Error>>;
+    pub async fn execute_resilient(
+        &mut self,
+        source: &[u8],
+    ) -> result::Result<
+        ImportConversationReport<
+            <Converter as ResilientImportedConversationConverter>::RecordFailure,
+        >,
+        ImportConversationError<
+            <Converter as ImportedConversationConverter>::Error,
+            <Store as ImportedConversationStore>::Error,
+        >,
+    >;
 }
 ```

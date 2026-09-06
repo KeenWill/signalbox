@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from render_domain_spine import HEADER, MAX_LINES, Renderer, format_rust, write_files
+from render_domain_spine import HEADER, MAX_LINES, Renderer, build_json, format_rust, write_files
 
 
 EMPTY_GENERICS = {'params': [], 'where_predicates': []}
@@ -106,14 +106,47 @@ pub struct Record<T> {
     /* private */
 }
 // derives: fmt::Debug
-impl example::Record {
+impl Record {
     pub fn new(value: T) -> Self;
 }
-impl example::Read for example::Record {
+impl Read for Record {
     pub fn read(&self) -> T;
     type Output = T;
 }
 ```''')
+
+    def test_inherent_constants_keep_visibility_and_trait_constants_omit_it(self):
+        document = fixture()
+        constant = copy.deepcopy(document['index']['7'])
+        constant.update(name='LIMIT', inner={'assoc_const': {'type': {'primitive': 'usize'}}})
+        document['index']['7'] = constant
+        document['index']['4']['inner']['impl']['items'].append(7)
+        document['index']['15']['inner']['trait']['items'].append(7)
+        renderer = Renderer(document)
+        self.assertIn('    pub const LIMIT: usize;', renderer.impl_block(renderer.item(4)))
+        self.assertIn('    const LIMIT: usize;', renderer.impl_block(renderer.item(6)))
+        self.assertIn('    const LIMIT: usize;', renderer.declaration(renderer.item(15)))
+
+    def test_local_paths_use_public_root_reexports_and_preserve_arguments(self):
+        document = fixture()
+        root = document['index']['0']['inner']['module']['items']
+        root.remove(1)
+        document['index']['30']['inner']['use']['name'] = 'Record'
+        renderer = Renderer(document)
+        args = {'angle_bracketed': {'args': [{'type': {'primitive': 'u32'}}], 'constraints': []}}
+        self.assertEqual(renderer.path(path('sample::example::Record', 1, args)), 'Record<u32>')
+        self.assertEqual(renderer.path(path('core::fmt::Debug', 100)), 'fmt::Debug')
+        document['index']['30']['inner']['use']['name'] = 'PublicRecord'
+        self.assertEqual(Renderer(document).path(path('Record', 1)), 'PublicRecord')
+
+    def test_json_build_uses_configured_toolchain_for_baseline_workspace(self):
+        with patch('render_domain_spine.configuration', return_value={'rustdoc_toolchain': 'test-toolchain'}), \
+                patch('render_domain_spine.subprocess.run') as run:
+            result = build_json('sample-crate', workspace=Path('/tmp/baseline'), target=Path('/tmp/output'))
+        command = run.call_args.args[0]
+        self.assertEqual(command[:3], ['cargo', '+test-toolchain', 'rustdoc'])
+        self.assertEqual(command[command.index('--manifest-path') + 1], '/tmp/baseline/Cargo.toml')
+        self.assertEqual(result, Path('/tmp/output/doc/sample_crate.json'))
 
     def test_rustfmt_wraps_long_function_signatures(self):
         code = (
@@ -163,7 +196,7 @@ impl example::Read for example::Record {
         renderer = Renderer(fixture())
         self.assertEqual(renderer.declaration(renderer.item(15)), '''pub trait Read {
     type Output;
-    pub fn read() -> <Self as example::Read>::Output;
+    pub fn read() -> <Self as Read>::Output;
 }''')
 
     def test_derived_only_type_has_one_derive_line_and_no_blanket_noise(self):
@@ -197,7 +230,7 @@ pub struct Token;
         value = copy.deepcopy(renderer.item(20))
         value['inner']['function']['generics'] = generics
         self.assertEqual(renderer.declaration(value),
-            "pub fn fetch<'a, T, const N: usize = 4>() -> example::Record where T: fmt::Debug;")
+            "pub fn fetch<'a, T, const N: usize = 4>() -> Record where T: fmt::Debug;")
 
     def test_borrowed_trait_object_groups_its_lifetime_bound(self):
         renderer = Renderer(fixture())

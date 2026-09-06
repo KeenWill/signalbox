@@ -7,15 +7,13 @@
 ```rust
 pub struct SessionTemplateName(/* private */);
 // derives: clone::Clone, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl session_template::SessionTemplateName {
-    const MAX_UTF8_BYTES: usize;
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, session_template::SessionTemplateNameError>;
+impl SessionTemplateName {
+    pub const MAX_UTF8_BYTES: usize;
+    pub fn try_new(value: string::String) -> result::Result<Self, SessionTemplateNameError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
-impl fmt::Debug for session_template::SessionTemplateName {
+impl fmt::Debug for SessionTemplateName {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
@@ -37,15 +35,15 @@ pub enum SessionTemplateNameFailure {
 ```rust
 pub struct SessionTemplateNameError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_template::SessionTemplateNameError {
+impl SessionTemplateNameError {
     pub fn value(&self) -> &str;
-    pub const fn failure(&self) -> session_template::SessionTemplateNameFailure;
-    pub fn into_parts(self) -> (string::String, session_template::SessionTemplateNameFailure);
+    pub const fn failure(&self) -> SessionTemplateNameFailure;
+    pub fn into_parts(self) -> (string::String, SessionTemplateNameFailure);
 }
-impl fmt::Display for session_template::SessionTemplateNameError {
+impl fmt::Display for SessionTemplateNameError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for session_template::SessionTemplateNameError {}
+impl error::Error for SessionTemplateNameError {}
 ```
 
 ## SessionTemplateVersion
@@ -53,7 +51,7 @@ impl error::Error for session_template::SessionTemplateNameError {}
 ```rust
 pub struct SessionTemplateVersion(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl session_template::SessionTemplateVersion {
+impl SessionTemplateVersion {
     pub const fn try_from_u64(value: u64) -> option::Option<Self>;
     pub const fn as_u64(self) -> u64;
 }
@@ -64,15 +62,15 @@ impl session_template::SessionTemplateVersion {
 ```rust
 pub struct SessionTemplateContentDigest(/* private */);
 // derives: clone::Clone, marker::Copy, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_template::SessionTemplateContentDigest {
+impl SessionTemplateContentDigest {
     pub fn derive(
-        version: session_template::SessionTemplateVersion,
-        defaults: &configuration::SessionConfigurationDefaults,
+        version: SessionTemplateVersion,
+        defaults: &SessionConfigurationDefaults,
     ) -> option::Option<Self>;
     pub const fn from_bytes(bytes: [u8; 32]) -> Self;
     pub const fn as_bytes(&self) -> &[u8; 32];
 }
-impl fmt::Debug for session_template::SessionTemplateContentDigest {
+impl fmt::Debug for SessionTemplateContentDigest {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
@@ -82,12 +80,12 @@ impl fmt::Debug for session_template::SessionTemplateContentDigest {
 ```rust
 pub struct SessionTemplateProvenance {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_template::SessionTemplateProvenance {
+impl SessionTemplateProvenance {
     pub const fn new(
-        name: session_template::SessionTemplateName,
-        content_digest: session_template::SessionTemplateContentDigest,
+        name: SessionTemplateName,
+        content_digest: SessionTemplateContentDigest,
     ) -> Self;
-    pub const fn name(&self) -> &session_template::SessionTemplateName;
-    pub const fn content_digest(&self) -> session_template::SessionTemplateContentDigest;
+    pub const fn name(&self) -> &SessionTemplateName;
+    pub const fn content_digest(&self) -> SessionTemplateContentDigest;
 }
 ```

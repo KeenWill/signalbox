@@ -9,154 +9,154 @@ pub trait ReviewOrchestrationAttemptStore {
     type Error;
     pub fn record_attempt(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttempt,
+        attempt: ReviewOrchestrationAttempt,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewDurableSealOutcome,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            ReviewDurableSealOutcome,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn load_import(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: ReviewOrchestrationAttemptId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<review_orchestration::ReviewImportOutcome>,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            option::Option<ReviewImportOutcome>,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn record_import(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        outcome: review_orchestration::ReviewImportOutcome,
+        attempt: ReviewOrchestrationAttemptId,
+        outcome: ReviewImportOutcome,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewDurableSealOutcome,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            ReviewDurableSealOutcome,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn load_concern_claims(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: ReviewOrchestrationAttemptId,
     ) -> impl future::Future<
         Output = result::Result<
-            vec::Vec<review_orchestration::ReviewConcernClaim>,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            vec::Vec<ReviewConcernClaim>,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn record_concern_claim(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        claim: review_orchestration::ReviewConcernClaim,
+        attempt: ReviewOrchestrationAttemptId,
+        claim: ReviewConcernClaim,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewDurableSealOutcome,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            ReviewDurableSealOutcome,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn seal_complete_fanout(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        claims: vec::Vec<review_orchestration::ReviewConcernClaim>,
+        attempt: ReviewOrchestrationAttemptId,
+        claims: vec::Vec<ReviewConcernClaim>,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewDurableSealOutcome,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            ReviewDurableSealOutcome,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn seal_judgment_plan(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        plan: review_orchestration::ReviewJudgmentPlan,
+        attempt: ReviewOrchestrationAttemptId,
+        plan: ReviewJudgmentPlan,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewDurableSealOutcome,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            ReviewDurableSealOutcome,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn load_judgment_plan(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: ReviewOrchestrationAttemptId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<review_orchestration::ReviewJudgmentPlan>,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            option::Option<ReviewJudgmentPlan>,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn load_applied_judgment_effects(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: ReviewOrchestrationAttemptId,
     ) -> impl future::Future<
         Output = result::Result<
-            vec::Vec<review_orchestration::ReviewJudgmentEffectId>,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            vec::Vec<ReviewJudgmentEffectId>,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn record_applied_judgment_effect(
         &mut self,
-        effect: review_orchestration::ReviewJudgmentEffectId,
+        effect: ReviewJudgmentEffectId,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewDurableSealOutcome,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            ReviewDurableSealOutcome,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn seal_repair_inventory(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: ReviewOrchestrationAttemptId,
         findings: vec::Vec<review_workflow::ReviewFindingRef>,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewDurableSealOutcome,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            ReviewDurableSealOutcome,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn record_repair_outcomes(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        outcomes: vec::Vec<review_orchestration::ReviewRepairMemberOutcome>,
+        attempt: ReviewOrchestrationAttemptId,
+        outcomes: vec::Vec<ReviewRepairMemberOutcome>,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewDurableSealOutcome,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            ReviewDurableSealOutcome,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn load_repair_outcomes(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: ReviewOrchestrationAttemptId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<vec::Vec<review_orchestration::ReviewRepairMemberOutcome>>,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            option::Option<vec::Vec<ReviewRepairMemberOutcome>>,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn seal_publication_inventory(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: ReviewOrchestrationAttemptId,
         findings: vec::Vec<review_workflow::ReviewFindingRef>,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewDurableSealOutcome,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            ReviewDurableSealOutcome,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn record_publication_outcomes(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        outcomes: vec::Vec<review_orchestration::ReviewPublicationMemberOutcome>,
+        attempt: ReviewOrchestrationAttemptId,
+        outcomes: vec::Vec<ReviewPublicationMemberOutcome>,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewDurableSealOutcome,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            ReviewDurableSealOutcome,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
     pub fn load_publication_outcomes(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: ReviewOrchestrationAttemptId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<vec::Vec<review_orchestration::ReviewPublicationMemberOutcome>>,
-            <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+            option::Option<vec::Vec<ReviewPublicationMemberOutcome>>,
+            <Self as ReviewOrchestrationAttemptStore>::Error,
         >,
     > + marker::Send;
 }
@@ -169,58 +169,55 @@ pub trait ReviewOrchestrationPassRunner: marker::Send + marker::Sync + 'static {
     type Error: marker::Send + 'static;
     pub fn import_external_context(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttempt,
+        attempt: ReviewOrchestrationAttempt,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewImportOutcome,
-            <Self as review_orchestration::ReviewOrchestrationPassRunner>::Error,
+            ReviewImportOutcome,
+            <Self as ReviewOrchestrationPassRunner>::Error,
         >,
     > + marker::Send;
     pub fn run_concern(
         &self,
-        work: review_orchestration::ReviewConcernWork,
+        work: ReviewConcernWork,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewConcernOutcome,
-            <Self as review_orchestration::ReviewOrchestrationPassRunner>::Error,
+            ReviewConcernOutcome,
+            <Self as ReviewOrchestrationPassRunner>::Error,
         >,
     > + marker::Send
            + 'static;
     pub fn judge(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttempt,
+        attempt: ReviewOrchestrationAttempt,
         findings: vec::Vec<review_workflow::ReviewFinding>,
     ) -> impl future::Future<
-        Output = result::Result<
-            review_orchestration::ReviewJudgmentPlan,
-            <Self as review_orchestration::ReviewOrchestrationPassRunner>::Error,
-        >,
+        Output = result::Result<ReviewJudgmentPlan, <Self as ReviewOrchestrationPassRunner>::Error>,
     > + marker::Send;
     pub fn apply_judgment_effect(
         &self,
-        work: review_orchestration::ReviewJudgmentEffectWork,
+        work: ReviewJudgmentEffectWork,
     ) -> impl future::Future<
         Output = result::Result<
-            review_orchestration::ReviewJudgmentEffectOutcome,
-            <Self as review_orchestration::ReviewOrchestrationPassRunner>::Error,
+            ReviewJudgmentEffectOutcome,
+            <Self as ReviewOrchestrationPassRunner>::Error,
         >,
     > + marker::Send;
     pub fn repair(
         &self,
-        work: review_orchestration::ReviewRepairWork,
+        work: ReviewRepairWork,
     ) -> impl future::Future<
         Output = result::Result<
-            vec::Vec<review_orchestration::ReviewRepairMemberOutcome>,
-            <Self as review_orchestration::ReviewOrchestrationPassRunner>::Error,
+            vec::Vec<ReviewRepairMemberOutcome>,
+            <Self as ReviewOrchestrationPassRunner>::Error,
         >,
     > + marker::Send;
     pub fn publish(
         &self,
-        work: review_orchestration::ReviewPublicationWork,
+        work: ReviewPublicationWork,
     ) -> impl future::Future<
         Output = result::Result<
-            vec::Vec<review_orchestration::ReviewPublicationMemberOutcome>,
-            <Self as review_orchestration::ReviewOrchestrationPassRunner>::Error,
+            vec::Vec<ReviewPublicationMemberOutcome>,
+            <Self as ReviewOrchestrationPassRunner>::Error,
         >,
     > + marker::Send;
 }

@@ -6,7 +6,7 @@
 
 ```rust
 pub trait PrepareModelCallTransaction {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure;
     pub fn prepare<NextSteeringIdentities>(
         &mut self,
         session: signalbox_domain::SessionId,
@@ -16,8 +16,8 @@ pub trait PrepareModelCallTransaction {
         next_steering_identities: NextSteeringIdentities,
     ) -> impl future::Future<
         Output = result::Result<
-            model_execution::PrepareModelCallOutcome,
-            <Self as model_execution::PrepareModelCallTransaction>::Error,
+            PrepareModelCallOutcome,
+            <Self as PrepareModelCallTransaction>::Error,
         >,
     > + marker::Send
     where
@@ -34,19 +34,19 @@ pub trait PrepareModelCallTransaction {
 
 ```rust
 pub trait FailPreparedModelCallTransaction {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure;
     pub fn fail_prepared<NextTurn>(
         &mut self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
-        cause: model_execution::PreparedModelCallFailureCause,
-        attachment_failure: option::Option<model_execution::AttachmentPreparationFailure>,
+        cause: PreparedModelCallFailureCause,
+        attachment_failure: option::Option<AttachmentPreparationFailure>,
         identities: model_execution::FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> impl future::Future<
         Output = result::Result<
             model_execution::FailedModelCallTurn,
-            <Self as model_execution::FailPreparedModelCallTransaction>::Error,
+            <Self as FailPreparedModelCallTransaction>::Error,
         >,
     > + marker::Send
     where
@@ -56,11 +56,11 @@ pub trait FailPreparedModelCallTransaction {
         &mut self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
-        attachment_failure: option::Option<model_execution::AttachmentPreparationFailure>,
+        attachment_failure: option::Option<AttachmentPreparationFailure>,
     ) -> impl future::Future<
         Output = result::Result<
-            model_execution::RetainedPreparedFailureStatus,
-            <Self as model_execution::FailPreparedModelCallTransaction>::Error,
+            RetainedPreparedFailureStatus,
+            <Self as FailPreparedModelCallTransaction>::Error,
         >,
     > + marker::Send;
 }
@@ -70,15 +70,15 @@ pub trait FailPreparedModelCallTransaction {
 
 ```rust
 pub trait AuthorizeModelCallTransaction {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure;
     pub fn authorize(
         &mut self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
     ) -> impl future::Future<
         Output = result::Result<
-            model_execution::AuthorizeModelCallOutcome,
-            <Self as model_execution::AuthorizeModelCallTransaction>::Error,
+            AuthorizeModelCallOutcome,
+            <Self as AuthorizeModelCallTransaction>::Error,
         >,
     > + marker::Send;
     pub fn reread_after_ambiguous_commit(
@@ -87,8 +87,8 @@ pub trait AuthorizeModelCallTransaction {
         prepared: &model_execution::PreparedModelCallRequest,
     ) -> impl future::Future<
         Output = result::Result<
-            model_execution::ModelCallAuthorizationReread,
-            <Self as model_execution::AuthorizeModelCallTransaction>::Error,
+            ModelCallAuthorizationReread,
+            <Self as AuthorizeModelCallTransaction>::Error,
         >,
     > + marker::Send;
     pub fn cancellation_signal(
@@ -103,17 +103,17 @@ pub trait AuthorizeModelCallTransaction {
 
 ```rust
 pub trait CommitModelCallObservationTransaction {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure;
     pub fn commit_observation<NextTurn>(
         &mut self,
         session: signalbox_domain::SessionId,
         observation: model_execution::CorrelatedModelCallTerminalObservation,
-        identities: model_execution::ModelCallTerminalIdentityCandidates,
+        identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<model_execution::ModelCallObservationCommitOutcome>,
-            <Self as model_execution::CommitModelCallObservationTransaction>::Error,
+            option::Option<ModelCallObservationCommitOutcome>,
+            <Self as CommitModelCallObservationTransaction>::Error,
         >,
     > + marker::Send
     where
@@ -125,8 +125,8 @@ pub trait CommitModelCallObservationTransaction {
         observation: &model_execution::CorrelatedModelCallTerminalObservation,
     ) -> impl future::Future<
         Output = result::Result<
-            model_execution::RetainedModelCallObservationStatus,
-            <Self as model_execution::CommitModelCallObservationTransaction>::Error,
+            RetainedModelCallObservationStatus,
+            <Self as CommitModelCallObservationTransaction>::Error,
         >,
     > + marker::Send;
 }
@@ -136,15 +136,15 @@ pub trait CommitModelCallObservationTransaction {
 
 ```rust
 pub trait ModelCallInputTokenCounter {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure;
     pub fn count_input_tokens<Cancellation>(
         &self,
-        operation: model_execution::PreparedModelOperation,
+        operation: PreparedModelOperation,
         cancellation: Cancellation,
     ) -> impl future::Future<
         Output = result::Result<
-            model_execution::ModelCallInputTokenCount,
-            <Self as model_execution::ModelCallInputTokenCounter>::Error,
+            ModelCallInputTokenCount,
+            <Self as ModelCallInputTokenCounter>::Error,
         >,
     > + marker::Send
     where
@@ -157,17 +157,15 @@ pub trait ModelCallInputTokenCounter {
 ```rust
 pub trait ModelCallProvider {
     type Capability;
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure;
     pub fn prepare_capability<Cancellation>(
         &mut self,
-        operation: model_execution::PreparedModelOperation,
+        operation: PreparedModelOperation,
         cancellation: Cancellation,
     ) -> impl future::Future<
         Output = result::Result<
-            model_execution::ModelCallCapabilityPreparation<
-                <Self as model_execution::ModelCallProvider>::Capability,
-            >,
-            <Self as model_execution::ModelCallProvider>::Error,
+            ModelCallCapabilityPreparation<<Self as ModelCallProvider>::Capability>,
+            <Self as ModelCallProvider>::Error,
         >,
     > + marker::Send
     where
@@ -175,13 +173,13 @@ pub trait ModelCallProvider {
     pub fn invoke<AcceptancePossible, Cancellation>(
         &mut self,
         authorized: model_execution::AuthorizedModelCall,
-        capability: <Self as model_execution::ModelCallProvider>::Capability,
+        capability: <Self as ModelCallProvider>::Capability,
         acceptance_possible: AcceptancePossible,
         cancellation: Cancellation,
     ) -> impl future::Future<
         Output = result::Result<
             model_execution::CorrelatedModelCallTerminalObservation,
-            <Self as model_execution::ModelCallProvider>::Error,
+            <Self as ModelCallProvider>::Error,
         >,
     > + marker::Send
     where
@@ -211,7 +209,6 @@ pub trait AttemptDispatchGate {
     pub fn acquire(
         &self,
         attempt: signalbox_domain::TurnAttemptId,
-    ) -> impl future::Future<Output = <Self as model_execution::AttemptDispatchGate>::Permit>
-           + marker::Send;
+    ) -> impl future::Future<Output = <Self as AttemptDispatchGate>::Permit> + marker::Send;
 }
 ```

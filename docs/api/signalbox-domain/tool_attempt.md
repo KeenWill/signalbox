@@ -7,7 +7,7 @@
 ```rust
 pub struct ToolDispatchGeneration(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl tool_attempt::ToolDispatchGeneration {
+impl ToolDispatchGeneration {
     pub const fn try_from_u64(value: u64) -> option::Option<Self>;
     pub const fn first() -> Self;
     pub const fn checked_next(self) -> option::Option<Self>;
@@ -20,19 +20,19 @@ impl tool_attempt::ToolDispatchGeneration {
 ```rust
 pub struct ApprovedToolRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_attempt::ApprovedToolRequest {
+impl ApprovedToolRequest {
     pub fn try_from_resolution(
-        request: tool::ToolRequest,
-        approval: tool::ToolApprovalResolution,
-    ) -> result::Result<Self, tool_attempt::ApprovedToolRequestError>;
-    pub const fn request(&self) -> &tool::ToolRequest;
-    pub const fn approval(&self) -> &tool::ToolApprovalResolution;
+        request: ToolRequest,
+        approval: ToolApprovalResolution,
+    ) -> result::Result<Self, ApprovedToolRequestError>;
+    pub const fn request(&self) -> &ToolRequest;
+    pub const fn approval(&self) -> &ToolApprovalResolution;
     pub fn prepare_attempt(
         &self,
         attempt: ToolAttemptId,
         issuing_attempt: TurnAttemptId,
-        effect_class: tool::ToolEffectClass,
-    ) -> tool_attempt::CurrentToolAttempt;
+        effect_class: ToolEffectClass,
+    ) -> CurrentToolAttempt;
 }
 ```
 
@@ -41,10 +41,10 @@ impl tool_attempt::ApprovedToolRequest {
 ```rust
 pub struct ApprovedToolRequestError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_attempt::ApprovedToolRequestError {
-    pub fn request(&self) -> &tool::ToolRequest;
-    pub const fn approval(&self) -> &tool::ToolApprovalResolution;
-    pub fn into_parts(self) -> (tool::ToolRequest, tool::ToolApprovalResolution);
+impl ApprovedToolRequestError {
+    pub fn request(&self) -> &ToolRequest;
+    pub const fn approval(&self) -> &ToolApprovalResolution;
+    pub fn into_parts(self) -> (ToolRequest, ToolApprovalResolution);
 }
 ```
 
@@ -67,10 +67,8 @@ pub enum ToolExecutionErrorKind {
 ```rust
 pub struct ToolExecutionErrorDetail(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl tool_attempt::ToolExecutionErrorDetail {
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, tool_attempt::ToolExecutionErrorDetailError>;
+impl ToolExecutionErrorDetail {
+    pub fn try_new(value: string::String) -> result::Result<Self, ToolExecutionErrorDetailError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -93,15 +91,10 @@ pub enum ToolExecutionErrorDetailFailure {
 ```rust
 pub struct ToolExecutionErrorDetailError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_attempt::ToolExecutionErrorDetailError {
+impl ToolExecutionErrorDetailError {
     pub fn value(&self) -> &str;
-    pub const fn failure(&self) -> tool_attempt::ToolExecutionErrorDetailFailure;
-    pub fn into_parts(
-        self,
-    ) -> (
-        string::String,
-        tool_attempt::ToolExecutionErrorDetailFailure,
-    );
+    pub const fn failure(&self) -> ToolExecutionErrorDetailFailure;
+    pub fn into_parts(self) -> (string::String, ToolExecutionErrorDetailFailure);
 }
 ```
 
@@ -110,13 +103,13 @@ impl tool_attempt::ToolExecutionErrorDetailError {
 ```rust
 pub struct ToolExecutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl tool_attempt::ToolExecutionError {
+impl ToolExecutionError {
     pub const fn new(
-        kind: tool_attempt::ToolExecutionErrorKind,
-        detail: option::Option<tool_attempt::ToolExecutionErrorDetail>,
+        kind: ToolExecutionErrorKind,
+        detail: option::Option<ToolExecutionErrorDetail>,
     ) -> Self;
-    pub const fn kind(&self) -> tool_attempt::ToolExecutionErrorKind;
-    pub const fn detail(&self) -> option::Option<&tool_attempt::ToolExecutionErrorDetail>;
+    pub const fn kind(&self) -> ToolExecutionErrorKind;
+    pub const fn detail(&self) -> option::Option<&ToolExecutionErrorDetail>;
 }
 ```
 
@@ -135,10 +128,10 @@ pub enum CurrentToolAttemptState {
 ```rust
 pub enum ToolAttemptEnd {
     Completed {
-        result: tool::ToolResultContent,
+        result: ToolResultContent,
     },
     KnownFailed {
-        error: tool_attempt::ToolExecutionError,
+        error: ToolExecutionError,
     },
     AwaitingChild {
         spawning_request: ToolRequestId,
@@ -147,8 +140,8 @@ pub enum ToolAttemptEnd {
     Ambiguous,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl tool_attempt::ToolAttemptEnd {
-    pub const fn disposition(&self) -> tool_attempt::ToolAttemptDisposition;
+impl ToolAttemptEnd {
+    pub const fn disposition(&self) -> ToolAttemptDisposition;
 }
 ```
 
@@ -168,12 +161,8 @@ pub enum ToolAttemptDisposition {
 
 ```rust
 pub enum ToolAttemptObservation {
-    Completed {
-        result: tool::ToolResultContent,
-    },
-    KnownFailed {
-        error: tool_attempt::ToolExecutionError,
-    },
+    Completed { result: ToolResultContent },
+    KnownFailed { error: ToolExecutionError },
     Ambiguous,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
@@ -184,16 +173,14 @@ pub enum ToolAttemptObservation {
 ```rust
 pub struct ToolAttemptDispatchCorrelation {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl tool_attempt::ToolAttemptDispatchCorrelation {
-    pub const fn reconstitute(
-        input: tool_attempt::ToolAttemptDispatchCorrelationReconstitutionInput,
-    ) -> Self;
+impl ToolAttemptDispatchCorrelation {
+    pub const fn reconstitute(input: ToolAttemptDispatchCorrelationReconstitutionInput) -> Self;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
     pub const fn issuing_attempt(&self) -> TurnAttemptId;
     pub const fn request(&self) -> ToolRequestId;
     pub const fn attempt(&self) -> ToolAttemptId;
-    pub const fn generation(&self) -> tool_attempt::ToolDispatchGeneration;
+    pub const fn generation(&self) -> ToolDispatchGeneration;
 }
 ```
 
@@ -206,7 +193,7 @@ pub struct ToolAttemptDispatchCorrelationReconstitutionInput {
     pub issuing_attempt: TurnAttemptId,
     pub request: ToolRequestId,
     pub attempt: ToolAttemptId,
-    pub generation: tool_attempt::ToolDispatchGeneration,
+    pub generation: ToolDispatchGeneration,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -216,12 +203,12 @@ pub struct ToolAttemptDispatchCorrelationReconstitutionInput {
 ```rust
 pub struct IssuedExecutorFence {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl tool_attempt::IssuedExecutorFence {
-    pub const fn correlation(&self) -> tool_attempt::ToolAttemptDispatchCorrelation;
+impl IssuedExecutorFence {
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation;
     pub const fn bind(
         self,
-        observation: tool_attempt::ToolAttemptObservation,
-    ) -> tool_attempt::CorrelatedToolAttemptObservation;
+        observation: ToolAttemptObservation,
+    ) -> CorrelatedToolAttemptObservation;
 }
 ```
 
@@ -230,9 +217,9 @@ impl tool_attempt::IssuedExecutorFence {
 ```rust
 pub struct CorrelatedToolAttemptObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl tool_attempt::CorrelatedToolAttemptObservation {
-    pub const fn correlation(&self) -> &tool_attempt::ToolAttemptDispatchCorrelation;
-    pub const fn observation(&self) -> &tool_attempt::ToolAttemptObservation;
+impl CorrelatedToolAttemptObservation {
+    pub const fn correlation(&self) -> &ToolAttemptDispatchCorrelation;
+    pub const fn observation(&self) -> &ToolAttemptObservation;
 }
 ```
 
@@ -241,28 +228,28 @@ impl tool_attempt::CorrelatedToolAttemptObservation {
 ```rust
 pub struct CurrentToolAttempt {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_attempt::CurrentToolAttempt {
+impl CurrentToolAttempt {
     pub const fn attempt(&self) -> ToolAttemptId;
     pub const fn request(&self) -> ToolRequestId;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
     pub const fn issuing_attempt(&self) -> TurnAttemptId;
-    pub const fn effect_class(&self) -> tool::ToolEffectClass;
-    pub const fn generation(&self) -> tool_attempt::ToolDispatchGeneration;
-    pub const fn state(&self) -> tool_attempt::CurrentToolAttemptState;
+    pub const fn effect_class(&self) -> ToolEffectClass;
+    pub const fn generation(&self) -> ToolDispatchGeneration;
+    pub const fn state(&self) -> CurrentToolAttemptState;
     pub fn end_preflight_error(
         self,
-        error: tool_attempt::ToolExecutionError,
-    ) -> result::Result<tool_attempt::EndedToolAttempt, tool_attempt::ToolAttemptTransitionError>;
+        error: ToolExecutionError,
+    ) -> result::Result<EndedToolAttempt, ToolAttemptTransitionError>;
     pub fn apply_terminal_observation(
         self,
-        observation: tool_attempt::CorrelatedToolAttemptObservation,
-    ) -> result::Result<tool_attempt::EndedToolAttempt, tool_attempt::ToolAttemptTransitionError>;
+        observation: CorrelatedToolAttemptObservation,
+    ) -> result::Result<EndedToolAttempt, ToolAttemptTransitionError>;
     pub fn end_foreground_child_wait(
         self,
-        wait: session_delegation::ChildWait,
-    ) -> result::Result<tool_attempt::EndedToolAttempt, tool_attempt::ToolAttemptTransitionError>;
-    pub fn classify_crash_loss(self) -> tool_attempt::ToolAttemptCrashOutcome;
+        wait: ChildWait,
+    ) -> result::Result<EndedToolAttempt, ToolAttemptTransitionError>;
+    pub fn classify_crash_loss(self) -> ToolAttemptCrashOutcome;
 }
 ```
 
@@ -271,20 +258,15 @@ impl tool_attempt::CurrentToolAttempt {
 ```rust
 pub struct AuthorizedToolAttempt {/* private */}
 // derives: fmt::Debug
-impl cmp::PartialEq for tool_attempt::AuthorizedToolAttempt {
+impl cmp::PartialEq for AuthorizedToolAttempt {
     pub fn eq(&self, other: &Self) -> bool;
 }
-impl cmp::Eq for tool_attempt::AuthorizedToolAttempt {}
-impl tool_attempt::AuthorizedToolAttempt {
-    pub const fn attempt(&self) -> &tool_attempt::CurrentToolAttempt;
-    pub const fn correlation(&self) -> tool_attempt::ToolAttemptDispatchCorrelation;
-    pub const fn executor_fence(&self) -> tool_attempt::IssuedExecutorFence;
-    pub fn into_parts(
-        self,
-    ) -> (
-        tool_attempt::CurrentToolAttempt,
-        tool_attempt::ToolAttemptDispatchCorrelation,
-    );
+impl cmp::Eq for AuthorizedToolAttempt {}
+impl AuthorizedToolAttempt {
+    pub const fn attempt(&self) -> &CurrentToolAttempt;
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation;
+    pub const fn executor_fence(&self) -> IssuedExecutorFence;
+    pub fn into_parts(self) -> (CurrentToolAttempt, ToolAttemptDispatchCorrelation);
 }
 ```
 
@@ -293,11 +275,11 @@ impl tool_attempt::AuthorizedToolAttempt {
 ```rust
 pub struct ToolDispatchAuthority {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_attempt::ToolDispatchAuthority {
-    pub const fn request(&self) -> &tool::ToolRequest;
-    pub const fn attempt(&self) -> &tool_attempt::CurrentToolAttempt;
-    pub const fn correlation(&self) -> tool_attempt::ToolAttemptDispatchCorrelation;
-    pub const fn executor_fence(&self) -> tool_attempt::IssuedExecutorFence;
+impl ToolDispatchAuthority {
+    pub const fn request(&self) -> &ToolRequest;
+    pub const fn attempt(&self) -> &CurrentToolAttempt;
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation;
+    pub const fn executor_fence(&self) -> IssuedExecutorFence;
 }
 ```
 
@@ -306,15 +288,15 @@ impl tool_attempt::ToolDispatchAuthority {
 ```rust
 pub struct EndedToolAttempt {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_attempt::EndedToolAttempt {
+impl EndedToolAttempt {
     pub const fn attempt(&self) -> ToolAttemptId;
     pub const fn request(&self) -> ToolRequestId;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
     pub const fn issuing_attempt(&self) -> TurnAttemptId;
-    pub const fn effect_class(&self) -> tool::ToolEffectClass;
-    pub const fn generation(&self) -> tool_attempt::ToolDispatchGeneration;
-    pub const fn end(&self) -> &tool_attempt::ToolAttemptEnd;
+    pub const fn effect_class(&self) -> ToolEffectClass;
+    pub const fn generation(&self) -> ToolDispatchGeneration;
+    pub const fn end(&self) -> &ToolAttemptEnd;
 }
 ```
 
@@ -322,8 +304,8 @@ impl tool_attempt::EndedToolAttempt {
 
 ```rust
 pub enum ToolAttemptCrashOutcome {
-    KnownFailed(tool_attempt::EndedToolAttempt),
-    Ambiguous(tool_attempt::EndedToolAttempt),
+    KnownFailed(EndedToolAttempt),
+    Ambiguous(EndedToolAttempt),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -347,15 +329,10 @@ pub enum ToolAttemptTransitionFailure {
 ```rust
 pub struct ToolAttemptTransitionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_attempt::ToolAttemptTransitionError {
-    pub const fn attempt(&self) -> &tool_attempt::CurrentToolAttempt;
-    pub const fn failure(&self) -> tool_attempt::ToolAttemptTransitionFailure;
-    pub fn into_parts(
-        self,
-    ) -> (
-        tool_attempt::CurrentToolAttempt,
-        tool_attempt::ToolAttemptTransitionFailure,
-    );
+impl ToolAttemptTransitionError {
+    pub const fn attempt(&self) -> &CurrentToolAttempt;
+    pub const fn failure(&self) -> ToolAttemptTransitionFailure;
+    pub fn into_parts(self) -> (CurrentToolAttempt, ToolAttemptTransitionFailure);
 }
 ```
 
@@ -365,7 +342,7 @@ impl tool_attempt::ToolAttemptTransitionError {
 pub enum ToolAttemptReconstitutionState {
     Prepared,
     InFlight,
-    Ended(tool_attempt::ToolAttemptEnd),
+    Ended(ToolAttemptEnd),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -375,23 +352,20 @@ pub enum ToolAttemptReconstitutionState {
 ```rust
 pub struct ToolAttemptReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_attempt::ToolAttemptReconstitutionInput {
+impl ToolAttemptReconstitutionInput {
     pub const fn new(
         attempt: ToolAttemptId,
         request: ToolRequestId,
         session: SessionId,
         turn: TurnId,
         issuing_attempt: TurnAttemptId,
-        effect_class: tool::ToolEffectClass,
-        generation: tool_attempt::ToolDispatchGeneration,
-        state: tool_attempt::ToolAttemptReconstitutionState,
+        effect_class: ToolEffectClass,
+        generation: ToolDispatchGeneration,
+        state: ToolAttemptReconstitutionState,
     ) -> Self;
     pub fn reconstitute(
         self,
-    ) -> result::Result<
-        tool_attempt::ReconstitutedToolAttempt,
-        tool_attempt::ToolAttemptReconstitutionError,
-    >;
+    ) -> result::Result<ReconstitutedToolAttempt, ToolAttemptReconstitutionError>;
 }
 ```
 
@@ -400,9 +374,9 @@ impl tool_attempt::ToolAttemptReconstitutionInput {
 ```rust
 pub struct ToolAttemptReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_attempt::ToolAttemptReconstitutionError {
-    pub const fn input(&self) -> &tool_attempt::ToolAttemptReconstitutionInput;
-    pub fn into_input(self) -> tool_attempt::ToolAttemptReconstitutionInput;
+impl ToolAttemptReconstitutionError {
+    pub const fn input(&self) -> &ToolAttemptReconstitutionInput;
+    pub fn into_input(self) -> ToolAttemptReconstitutionInput;
 }
 ```
 
@@ -410,8 +384,8 @@ impl tool_attempt::ToolAttemptReconstitutionError {
 
 ```rust
 pub enum ReconstitutedToolAttempt {
-    Current(tool_attempt::CurrentToolAttempt),
-    Ended(tool_attempt::EndedToolAttempt),
+    Current(CurrentToolAttempt),
+    Ended(EndedToolAttempt),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

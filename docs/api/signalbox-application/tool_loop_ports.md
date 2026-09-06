@@ -26,7 +26,7 @@ pub enum ResolvedToolConversationEntry {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_loop_ports::ResolvedToolConversationEntry {
+impl ResolvedToolConversationEntry {
     pub const fn source(&self) -> context_frontier::SemanticTranscriptEntryRef;
 }
 ```
@@ -57,7 +57,7 @@ pub enum ToolAttemptAuthorizationOutcome {
 
 ```rust
 pub trait DecideToolRequestTransaction {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure;
     pub fn decide<NextAttempt>(
         &mut self,
         command: tool::DecideToolRequest,
@@ -65,7 +65,7 @@ pub trait DecideToolRequestTransaction {
     ) -> impl future::Future<
         Output = result::Result<
             tool::PreparedDecideToolRequest,
-            <Self as tool_loop_ports::DecideToolRequestTransaction>::Error,
+            <Self as DecideToolRequestTransaction>::Error,
         >,
     > + marker::Send
     where
@@ -77,14 +77,14 @@ pub trait DecideToolRequestTransaction {
 
 ```rust
 pub trait OverrideDeniedToolRequestTransaction {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure;
     pub fn override_denied(
         &mut self,
         command: tool::OverrideDeniedToolRequest,
     ) -> impl future::Future<
         Output = result::Result<
             tool::PreparedOverrideDeniedToolRequest,
-            <Self as tool_loop_ports::OverrideDeniedToolRequestTransaction>::Error,
+            <Self as OverrideDeniedToolRequestTransaction>::Error,
         >,
     > + marker::Send;
 }
@@ -95,7 +95,7 @@ pub trait OverrideDeniedToolRequestTransaction {
 ```rust
 pub struct ToolContinuationIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_loop_ports::ToolContinuationIdentities {
+impl ToolContinuationIdentities {
     pub fn new(
         result_entries: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
         result_frontier: context_frontier::ContextFrontierId,
@@ -116,7 +116,7 @@ impl tool_loop_ports::ToolContinuationIdentities {
 ```rust
 pub struct ToolCrashClosureIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_loop_ports::ToolCrashClosureIdentities {
+impl ToolCrashClosureIdentities {
     pub fn new(
         result_entries: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
         result_frontier: context_frontier::ContextFrontierId,
@@ -155,7 +155,7 @@ pub enum RetainedToolAttemptObservationStatus {
 
 ```rust
 pub trait ToolExecutionTransaction {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure;
     pub fn load_active_batch(
         &mut self,
         session: signalbox_domain::SessionId,
@@ -163,7 +163,7 @@ pub trait ToolExecutionTransaction {
     ) -> impl future::Future<
         Output = result::Result<
             option::Option<tool_execution::ToolBatch>,
-            <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+            <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
     pub fn resume_child_wait(
@@ -171,9 +171,8 @@ pub trait ToolExecutionTransaction {
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
         continuation: signalbox_domain::TurnAttemptId,
-    ) -> impl future::Future<
-        Output = result::Result<bool, <Self as tool_loop_ports::ToolExecutionTransaction>::Error>,
-    > + marker::Send;
+    ) -> impl future::Future<Output = result::Result<bool, <Self as ToolExecutionTransaction>::Error>>
+           + marker::Send;
     pub fn prepare_next_attempt(
         &mut self,
         session: signalbox_domain::SessionId,
@@ -183,7 +182,7 @@ pub trait ToolExecutionTransaction {
     ) -> impl future::Future<
         Output = result::Result<
             option::Option<tool_attempt::CurrentToolAttempt>,
-            <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+            <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
     pub fn authorize_attempt(
@@ -191,11 +190,11 @@ pub trait ToolExecutionTransaction {
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
         attempt: signalbox_domain::ToolAttemptId,
-        preauthorization: tool_loop::ToolPreauthorization,
+        preauthorization: ToolPreauthorization,
     ) -> impl future::Future<
         Output = result::Result<
-            tool_loop_ports::ToolAttemptAuthorizationOutcome,
-            <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+            ToolAttemptAuthorizationOutcome,
+            <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
     pub fn reread_ambiguous_authorization(
@@ -205,8 +204,8 @@ pub trait ToolExecutionTransaction {
         attempt: signalbox_domain::ToolAttemptId,
     ) -> impl future::Future<
         Output = result::Result<
-            tool_loop_ports::ToolAttemptAuthorizationStatus,
-            <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+            ToolAttemptAuthorizationStatus,
+            <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
     pub fn commit_preflight_error(
@@ -218,7 +217,7 @@ pub trait ToolExecutionTransaction {
     ) -> impl future::Future<
         Output = result::Result<
             tool_attempt::EndedToolAttempt,
-            <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+            <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
     pub fn commit_observation(
@@ -227,7 +226,7 @@ pub trait ToolExecutionTransaction {
     ) -> impl future::Future<
         Output = result::Result<
             tool_attempt::EndedToolAttempt,
-            <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+            <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
     pub fn reread_observation(
@@ -235,33 +234,31 @@ pub trait ToolExecutionTransaction {
         observation: &tool_attempt::CorrelatedToolAttemptObservation,
     ) -> impl future::Future<
         Output = result::Result<
-            tool_loop_ports::RetainedToolAttemptObservationStatus,
-            <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+            RetainedToolAttemptObservationStatus,
+            <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
     pub fn reread_durable_completion(
         &mut self,
         correlation: tool_attempt::ToolAttemptDispatchCorrelation,
-    ) -> impl future::Future<
-        Output = result::Result<bool, <Self as tool_loop_ports::ToolExecutionTransaction>::Error>,
-    > + marker::Send;
+    ) -> impl future::Future<Output = result::Result<bool, <Self as ToolExecutionTransaction>::Error>>
+           + marker::Send;
     pub fn reread_durable_child_wait(
         &mut self,
-        wait: tool_loop::CorrelatedDurableChildWait,
-    ) -> impl future::Future<
-        Output = result::Result<bool, <Self as tool_loop_ports::ToolExecutionTransaction>::Error>,
-    > + marker::Send;
+        wait: CorrelatedDurableChildWait,
+    ) -> impl future::Future<Output = result::Result<bool, <Self as ToolExecutionTransaction>::Error>>
+           + marker::Send;
     pub fn classify_crash_loss<NextTurn>(
         &mut self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
         attempt: signalbox_domain::ToolAttemptId,
-        identities: tool_loop_ports::ToolCrashClosureIdentities,
+        identities: ToolCrashClosureIdentities,
         next_turn: NextTurn,
     ) -> impl future::Future<
         Output = result::Result<
             tool_attempt::ToolAttemptCrashOutcome,
-            <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+            <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send
     where
@@ -272,12 +269,12 @@ pub trait ToolExecutionTransaction {
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
         producing_call: signalbox_domain::ModelCallId,
-        identities: tool_loop_ports::ToolContinuationIdentities,
+        identities: ToolContinuationIdentities,
         next_steering: NextSteering,
     ) -> impl future::Future<
         Output = result::Result<
-            tool_loop_ports::PrepareToolContinuationOutcome,
-            <Self as tool_loop_ports::ToolExecutionTransaction>::Error,
+            PrepareToolContinuationOutcome,
+            <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send
     where

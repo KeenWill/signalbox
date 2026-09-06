@@ -127,7 +127,8 @@ jobs:
         run: python3 scripts/generate_invariants.py --check
       - name: Check generated domain API declarations
         run: |
-          rustup toolchain install nightly --profile minimal
+          rustdoc_toolchain=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("docs/api/crates.toml").read_text())["rustdoc_toolchain"])')
+          rustup toolchain install "$rustdoc_toolchain" --profile minimal
           python3 scripts/render_domain_spine.py
           git diff --exit-code -- docs/api
           test -z "$(git ls-files --others --exclude-standard docs/api)"

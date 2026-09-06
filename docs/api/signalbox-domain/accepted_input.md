@@ -7,25 +7,21 @@
 ```rust
 pub struct AcceptedInputLifecycle {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl accepted_input::AcceptedInputLifecycle {
-    pub const fn new(
-        id: AcceptedInputId,
-        disposition: accepted_input::AcceptedInputDisposition,
-    ) -> Self;
+impl AcceptedInputLifecycle {
+    pub const fn new(id: AcceptedInputId, disposition: AcceptedInputDisposition) -> Self;
     pub const fn id(&self) -> AcceptedInputId;
-    pub const fn disposition(&self) -> &accepted_input::AcceptedInputDisposition;
+    pub const fn disposition(&self) -> &AcceptedInputDisposition;
     pub fn consume_as_steering(
         self,
         call: ModelCallId,
-    ) -> result::Result<Self, accepted_input::AcceptedInputLifecycleTransitionError>;
+    ) -> result::Result<Self, AcceptedInputLifecycleTransitionError>;
     pub fn reclassify_as_turn_origin(
         self,
         turn: TurnId,
-        reason: accepted_input::SteeringReclassificationReason,
-    ) -> result::Result<Self, accepted_input::AcceptedInputLifecycleTransitionError>;
-    pub fn close_not_delivered(
-        self,
-    ) -> result::Result<Self, accepted_input::AcceptedInputLifecycleTransitionError>;
+        reason: SteeringReclassificationReason,
+    ) -> result::Result<Self, AcceptedInputLifecycleTransitionError>;
+    pub fn close_not_delivered(self)
+        -> result::Result<Self, AcceptedInputLifecycleTransitionError>;
 }
 ```
 
@@ -33,20 +29,14 @@ impl accepted_input::AcceptedInputLifecycle {
 
 ```rust
 pub enum AcceptedInputLifecycleTransitionError {
-    CannotConsumeAsSteering {
-        lifecycle: accepted_input::AcceptedInputLifecycle,
-    },
-    CannotReclassifyAsTurnOrigin {
-        lifecycle: accepted_input::AcceptedInputLifecycle,
-    },
-    CannotCloseNotDelivered {
-        lifecycle: accepted_input::AcceptedInputLifecycle,
-    },
+    CannotConsumeAsSteering { lifecycle: AcceptedInputLifecycle },
+    CannotReclassifyAsTurnOrigin { lifecycle: AcceptedInputLifecycle },
+    CannotCloseNotDelivered { lifecycle: AcceptedInputLifecycle },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl accepted_input::AcceptedInputLifecycleTransitionError {
-    pub const fn lifecycle(&self) -> &accepted_input::AcceptedInputLifecycle;
-    pub fn into_lifecycle(self) -> accepted_input::AcceptedInputLifecycle;
+impl AcceptedInputLifecycleTransitionError {
+    pub const fn lifecycle(&self) -> &AcceptedInputLifecycle;
+    pub fn into_lifecycle(self) -> AcceptedInputLifecycle;
 }
 ```
 
@@ -55,7 +45,7 @@ impl accepted_input::AcceptedInputLifecycleTransitionError {
 ```rust
 pub struct SteeringBinding {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl accepted_input::SteeringBinding {
+impl SteeringBinding {
     pub const fn new(source_turn: TurnId) -> Self;
     pub const fn source_turn(&self) -> TurnId;
 }
@@ -67,14 +57,14 @@ impl accepted_input::SteeringBinding {
 pub enum AcceptedInputDisposition {
     OriginOf(TurnId),
     PendingSteering {
-        binding: accepted_input::SteeringBinding,
+        binding: SteeringBinding,
     },
     ConsumedAsSteering {
         call: ModelCallId,
     },
     ReclassifiedAsTurnOrigin {
         turn: TurnId,
-        reason: accepted_input::SteeringReclassificationReason,
+        reason: SteeringReclassificationReason,
     },
     ClosedNotDelivered,
 }

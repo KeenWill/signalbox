@@ -7,13 +7,11 @@
 ```rust
 pub struct NonEmptyUnicodeText(/* private */);
 // derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
-impl fmt::Debug for user_content::NonEmptyUnicodeText {
+impl fmt::Debug for NonEmptyUnicodeText {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl user_content::NonEmptyUnicodeText {
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, user_content::NonEmptyUnicodeTextError>;
+impl NonEmptyUnicodeText {
+    pub fn try_new(value: string::String) -> result::Result<Self, NonEmptyUnicodeTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -35,13 +33,13 @@ pub enum NonEmptyUnicodeTextFailure {
 ```rust
 pub struct NonEmptyUnicodeTextError {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl fmt::Debug for user_content::NonEmptyUnicodeTextError {
+impl fmt::Debug for NonEmptyUnicodeTextError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl user_content::NonEmptyUnicodeTextError {
-    pub const fn failure(&self) -> user_content::NonEmptyUnicodeTextFailure;
+impl NonEmptyUnicodeTextError {
+    pub const fn failure(&self) -> NonEmptyUnicodeTextFailure;
     pub fn value(&self) -> &str;
-    pub fn into_parts(self) -> (string::String, user_content::NonEmptyUnicodeTextFailure);
+    pub fn into_parts(self) -> (string::String, NonEmptyUnicodeTextFailure);
 }
 ```
 
@@ -61,9 +59,9 @@ pub enum AttachmentKind {
 ```rust
 pub struct AttachmentBlobFact {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl user_content::AttachmentBlobFact {
-    pub const fn new(digest: blob::BlobDigest, byte_length: nonzero::NonZeroU64) -> Self;
-    pub const fn digest(self) -> blob::BlobDigest;
+impl AttachmentBlobFact {
+    pub const fn new(digest: BlobDigest, byte_length: nonzero::NonZeroU64) -> Self;
+    pub const fn digest(self) -> BlobDigest;
     pub const fn byte_length(self) -> nonzero::NonZeroU64;
 }
 ```
@@ -73,11 +71,9 @@ impl user_content::AttachmentBlobFact {
 ```rust
 pub struct DeclaredMediaType(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl user_content::DeclaredMediaType {
-    const MAX_BYTES: usize;
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, user_content::DeclaredMediaTypeError>;
+impl DeclaredMediaType {
+    pub const MAX_BYTES: usize;
+    pub fn try_new(value: string::String) -> result::Result<Self, DeclaredMediaTypeError>;
     pub fn as_str(&self) -> &str;
 }
 ```
@@ -98,8 +94,8 @@ pub enum DeclaredMediaTypeFailure {
 ```rust
 pub struct DeclaredMediaTypeError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl user_content::DeclaredMediaTypeError {
-    pub const fn failure(&self) -> user_content::DeclaredMediaTypeFailure;
+impl DeclaredMediaTypeError {
+    pub const fn failure(&self) -> DeclaredMediaTypeFailure;
     pub fn value(&self) -> &str;
 }
 ```
@@ -109,14 +105,12 @@ impl user_content::DeclaredMediaTypeError {
 ```rust
 pub struct AttachmentDisplayFilename(/* private */);
 // derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
-impl user_content::AttachmentDisplayFilename {
-    const MAX_BYTES: usize;
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, user_content::AttachmentDisplayFilenameError>;
+impl AttachmentDisplayFilename {
+    pub const MAX_BYTES: usize;
+    pub fn try_new(value: string::String) -> result::Result<Self, AttachmentDisplayFilenameError>;
     pub fn as_str(&self) -> &str;
 }
-impl fmt::Debug for user_content::AttachmentDisplayFilename {
+impl fmt::Debug for AttachmentDisplayFilename {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
@@ -139,11 +133,11 @@ pub enum AttachmentDisplayFilenameFailure {
 ```rust
 pub struct AttachmentDisplayFilenameError {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl fmt::Debug for user_content::AttachmentDisplayFilenameError {
+impl fmt::Debug for AttachmentDisplayFilenameError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl user_content::AttachmentDisplayFilenameError {
-    pub const fn failure(&self) -> user_content::AttachmentDisplayFilenameFailure;
+impl AttachmentDisplayFilenameError {
+    pub const fn failure(&self) -> AttachmentDisplayFilenameFailure;
     pub fn value(&self) -> &str;
 }
 ```
@@ -153,20 +147,18 @@ impl user_content::AttachmentDisplayFilenameError {
 ```rust
 pub enum UserContentPart {
     Text {
-        value: user_content::NonEmptyUnicodeText,
+        value: NonEmptyUnicodeText,
     },
     Attachment {
-        digest: blob::BlobDigest,
-        kind: user_content::AttachmentKind,
-        media_type: user_content::DeclaredMediaType,
-        display_filename: option::Option<user_content::AttachmentDisplayFilename>,
+        digest: BlobDigest,
+        kind: AttachmentKind,
+        media_type: DeclaredMediaType,
+        display_filename: option::Option<AttachmentDisplayFilename>,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl user_content::UserContentPart {
-    pub fn try_text(
-        value: string::String,
-    ) -> result::Result<Self, user_content::NonEmptyUnicodeTextError>;
+impl UserContentPart {
+    pub fn try_text(value: string::String) -> result::Result<Self, NonEmptyUnicodeTextError>;
 }
 ```
 
@@ -175,18 +167,14 @@ impl user_content::UserContentPart {
 ```rust
 pub struct UserContent {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl user_content::UserContent {
-    const MAX_PARTS: usize;
-    const MAX_TEXT_BYTES: usize;
-    pub fn try_text(
-        value: string::String,
-    ) -> result::Result<Self, user_content::NonEmptyUnicodeTextError>;
-    pub fn try_parts(
-        parts: vec::Vec<user_content::UserContentPart>,
-    ) -> result::Result<Self, user_content::UserContentError>;
-    pub fn parts(&self) -> &[user_content::UserContentPart];
-    pub fn into_parts(self) -> vec::Vec<user_content::UserContentPart>;
-    pub fn single_text(&self) -> option::Option<&user_content::NonEmptyUnicodeText>;
+impl UserContent {
+    pub const MAX_PARTS: usize;
+    pub const MAX_TEXT_BYTES: usize;
+    pub fn try_text(value: string::String) -> result::Result<Self, NonEmptyUnicodeTextError>;
+    pub fn try_parts(parts: vec::Vec<UserContentPart>) -> result::Result<Self, UserContentError>;
+    pub fn parts(&self) -> &[UserContentPart];
+    pub fn into_parts(self) -> vec::Vec<UserContentPart>;
+    pub fn single_text(&self) -> option::Option<&NonEmptyUnicodeText>;
 }
 ```
 
@@ -195,15 +183,10 @@ impl user_content::UserContent {
 ```rust
 pub struct UserContentError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl user_content::UserContentError {
-    pub const fn failure(&self) -> user_content::UserContentFailure;
-    pub fn parts(&self) -> &[user_content::UserContentPart];
-    pub fn into_parts(
-        self,
-    ) -> (
-        vec::Vec<user_content::UserContentPart>,
-        user_content::UserContentFailure,
-    );
+impl UserContentError {
+    pub const fn failure(&self) -> UserContentFailure;
+    pub fn parts(&self) -> &[UserContentPart];
+    pub fn into_parts(self) -> (vec::Vec<UserContentPart>, UserContentFailure);
 }
 ```
 

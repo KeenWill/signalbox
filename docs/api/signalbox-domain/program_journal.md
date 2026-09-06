@@ -7,7 +7,7 @@
 ```rust
 pub struct JournalPosition(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl program_journal::JournalPosition {
+impl JournalPosition {
     pub const fn try_from_u64(value: u64) -> option::Option<Self>;
     pub const fn as_u64(self) -> u64;
 }
@@ -18,7 +18,7 @@ impl program_journal::JournalPosition {
 ```rust
 pub struct RequestOrdinal(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl program_journal::RequestOrdinal {
+impl RequestOrdinal {
     pub const fn try_from_u64(value: u64) -> option::Option<Self>;
     pub const fn as_u64(self) -> u64;
 }
@@ -29,7 +29,7 @@ impl program_journal::RequestOrdinal {
 ```rust
 pub struct DeliveryOrdinal(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl program_journal::DeliveryOrdinal {
+impl DeliveryOrdinal {
     pub const fn try_from_u64(value: u64) -> option::Option<Self>;
     pub const fn as_u64(self) -> u64;
 }
@@ -40,7 +40,7 @@ impl program_journal::DeliveryOrdinal {
 ```rust
 pub struct ScopeOrdinal(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl program_journal::ScopeOrdinal {
+impl ScopeOrdinal {
     pub const fn try_from_u64(value: u64) -> option::Option<Self>;
     pub const fn as_u64(self) -> u64;
 }
@@ -51,7 +51,7 @@ impl program_journal::ScopeOrdinal {
 ```rust
 pub struct InlineFramePayload(/* private */);
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl program_journal::InlineFramePayload {
+impl InlineFramePayload {
     pub fn new(bytes: impl convert::Into<boxed::Box<[u8]>>) -> Self;
     pub fn as_bytes(&self) -> &[u8];
 }
@@ -91,15 +91,15 @@ pub enum ScopeOperation {
 ```rust
 pub struct ScopeRequest {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl program_journal::ScopeRequest {
+impl ScopeRequest {
     pub const fn new(
-        operation: program_journal::ScopeOperation,
-        scope: program_journal::ScopeOrdinal,
-        parent: option::Option<program_journal::ScopeOrdinal>,
+        operation: ScopeOperation,
+        scope: ScopeOrdinal,
+        parent: option::Option<ScopeOrdinal>,
     ) -> Self;
-    pub const fn operation(self) -> program_journal::ScopeOperation;
-    pub const fn scope(self) -> program_journal::ScopeOrdinal;
-    pub const fn parent(self) -> option::Option<program_journal::ScopeOrdinal>;
+    pub const fn operation(self) -> ScopeOperation;
+    pub const fn scope(self) -> ScopeOrdinal;
+    pub const fn parent(self) -> option::Option<ScopeOrdinal>;
 }
 ```
 
@@ -108,15 +108,15 @@ impl program_journal::ScopeRequest {
 ```rust
 pub struct EffectRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl program_journal::EffectRequest {
+impl EffectRequest {
     pub fn new(
-        capability: program_journal::ProgramCapability,
+        capability: ProgramCapability,
         method: string::String,
-        payload: program_journal::InlineFramePayload,
+        payload: InlineFramePayload,
     ) -> Self;
-    pub const fn capability(&self) -> program_journal::ProgramCapability;
+    pub const fn capability(&self) -> ProgramCapability;
     pub fn method(&self) -> &str;
-    pub const fn payload(&self) -> &program_journal::InlineFramePayload;
+    pub const fn payload(&self) -> &InlineFramePayload;
 }
 ```
 
@@ -124,13 +124,13 @@ impl program_journal::EffectRequest {
 
 ```rust
 pub enum RequestKind {
-    Now(program_journal::InlineFramePayload),
-    Random(program_journal::InlineFramePayload),
-    Sleep(program_journal::InlineFramePayload),
-    AwaitEvent(program_journal::InlineFramePayload),
-    Effect(program_journal::EffectRequest),
-    Scope(program_journal::ScopeRequest),
-    Terminal(program_journal::InlineFramePayload),
+    Now(InlineFramePayload),
+    Random(InlineFramePayload),
+    Sleep(InlineFramePayload),
+    AwaitEvent(InlineFramePayload),
+    Effect(EffectRequest),
+    Scope(ScopeRequest),
+    Terminal(InlineFramePayload),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -140,15 +140,15 @@ pub enum RequestKind {
 ```rust
 pub struct RequestFrame {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl program_journal::RequestFrame {
+impl RequestFrame {
     pub const fn new(
-        ordinal: program_journal::RequestOrdinal,
-        scope: option::Option<program_journal::ScopeOrdinal>,
-        kind: program_journal::RequestKind,
+        ordinal: RequestOrdinal,
+        scope: option::Option<ScopeOrdinal>,
+        kind: RequestKind,
     ) -> Self;
-    pub const fn ordinal(&self) -> program_journal::RequestOrdinal;
-    pub const fn scope(&self) -> option::Option<program_journal::ScopeOrdinal>;
-    pub const fn kind(&self) -> &program_journal::RequestKind;
+    pub const fn ordinal(&self) -> RequestOrdinal;
+    pub const fn scope(&self) -> option::Option<ScopeOrdinal>;
+    pub const fn kind(&self) -> &RequestKind;
 }
 ```
 
@@ -180,21 +180,21 @@ pub enum FaultCause {
 
 ```rust
 pub enum ProgramFault {
-    Timeout(program_journal::InlineFramePayload),
-    Memory(program_journal::InlineFramePayload),
+    Timeout(InlineFramePayload),
+    Memory(InlineFramePayload),
     Nondeterminism {
-        expected: program_journal::RequestFrame,
-        observed: program_journal::RequestFrame,
+        expected: RequestFrame,
+        observed: RequestFrame,
     },
-    ProgramError(program_journal::InlineFramePayload),
-    ContractRetired(program_journal::InlineFramePayload),
-    JournalBound(program_journal::InlineFramePayload),
-    PayloadTooLarge(program_journal::InlineFramePayload),
+    ProgramError(InlineFramePayload),
+    ContractRetired(InlineFramePayload),
+    JournalBound(InlineFramePayload),
+    PayloadTooLarge(InlineFramePayload),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl program_journal::ProgramFault {
-    pub const fn cause(&self) -> program_journal::FaultCause;
-    pub const fn evidence(&self) -> program_journal::FaultEvidenceRef<'_>;
+impl ProgramFault {
+    pub const fn cause(&self) -> FaultCause;
+    pub const fn evidence(&self) -> FaultEvidenceRef<'_>;
 }
 ```
 
@@ -202,10 +202,10 @@ impl program_journal::ProgramFault {
 
 ```rust
 pub enum FaultEvidenceRef<'a> {
-    Ordinary(&'a program_journal::InlineFramePayload),
+    Ordinary(&'a InlineFramePayload),
     Nondeterminism {
-        expected: &'a program_journal::RequestFrame,
-        observed: &'a program_journal::RequestFrame,
+        expected: &'a RequestFrame,
+        observed: &'a RequestFrame,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -216,27 +216,27 @@ pub enum FaultEvidenceRef<'a> {
 ```rust
 pub enum DeliveryKind {
     Answer {
-        resolves: program_journal::RequestOrdinal,
-        payload: program_journal::InlineFramePayload,
+        resolves: RequestOrdinal,
+        payload: InlineFramePayload,
     },
     Wake {
-        resolves: program_journal::RequestOrdinal,
-        payload: program_journal::InlineFramePayload,
+        resolves: RequestOrdinal,
+        payload: InlineFramePayload,
     },
     Reject {
-        resolves: program_journal::RequestOrdinal,
-        reason: program_journal::RejectReason,
+        resolves: RequestOrdinal,
+        reason: RejectReason,
     },
     Cancel {
-        resolves: program_journal::RequestOrdinal,
-        payload: program_journal::InlineFramePayload,
+        resolves: RequestOrdinal,
+        payload: InlineFramePayload,
     },
-    RunCancel(program_journal::InlineFramePayload),
-    Fault(program_journal::ProgramFault),
+    RunCancel(InlineFramePayload),
+    Fault(ProgramFault),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl program_journal::DeliveryKind {
-    pub const fn resolves(&self) -> option::Option<program_journal::RequestOrdinal>;
+impl DeliveryKind {
+    pub const fn resolves(&self) -> option::Option<RequestOrdinal>;
 }
 ```
 
@@ -245,13 +245,10 @@ impl program_journal::DeliveryKind {
 ```rust
 pub struct DeliveryFrame {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl program_journal::DeliveryFrame {
-    pub const fn new(
-        ordinal: program_journal::DeliveryOrdinal,
-        kind: program_journal::DeliveryKind,
-    ) -> Self;
-    pub const fn ordinal(&self) -> program_journal::DeliveryOrdinal;
-    pub const fn kind(&self) -> &program_journal::DeliveryKind;
+impl DeliveryFrame {
+    pub const fn new(ordinal: DeliveryOrdinal, kind: DeliveryKind) -> Self;
+    pub const fn ordinal(&self) -> DeliveryOrdinal;
+    pub const fn kind(&self) -> &DeliveryKind;
 }
 ```
 
@@ -259,8 +256,8 @@ impl program_journal::DeliveryFrame {
 
 ```rust
 pub enum JournalFrame {
-    Request(program_journal::RequestFrame),
-    Delivery(program_journal::DeliveryFrame),
+    Request(RequestFrame),
+    Delivery(DeliveryFrame),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -270,13 +267,10 @@ pub enum JournalFrame {
 ```rust
 pub struct JournalEntry {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl program_journal::JournalEntry {
-    pub const fn new(
-        position: program_journal::JournalPosition,
-        frame: program_journal::JournalFrame,
-    ) -> Self;
-    pub const fn position(&self) -> program_journal::JournalPosition;
-    pub const fn frame(&self) -> &program_journal::JournalFrame;
+impl JournalEntry {
+    pub const fn new(position: JournalPosition, frame: JournalFrame) -> Self;
+    pub const fn position(&self) -> JournalPosition;
+    pub const fn frame(&self) -> &JournalFrame;
 }
 ```
 
@@ -285,14 +279,14 @@ impl program_journal::JournalEntry {
 ```rust
 pub struct ProgramJournal {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl program_journal::ProgramJournal {
-    pub fn terminal_delivery(&self) -> option::Option<&program_journal::DeliveryFrame>;
+impl ProgramJournal {
+    pub fn terminal_delivery(&self) -> option::Option<&DeliveryFrame>;
     pub fn try_new(
         run: ProgramRunId,
-        entries: vec::Vec<program_journal::JournalEntry>,
-    ) -> result::Result<Self, program_journal::ProgramJournalError>;
+        entries: vec::Vec<JournalEntry>,
+    ) -> result::Result<Self, ProgramJournalError>;
     pub const fn run(&self) -> ProgramRunId;
-    pub fn entries(&self) -> &[program_journal::JournalEntry];
+    pub fn entries(&self) -> &[JournalEntry];
 }
 ```
 
@@ -308,10 +302,10 @@ pub enum ProgramJournalError {
     OrdinalExhausted,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for program_journal::ProgramJournalError {
+impl fmt::Display for ProgramJournalError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for program_journal::ProgramJournalError {}
+impl error::Error for ProgramJournalError {}
 ```
 
 ## ReplayInstruction
@@ -319,7 +313,7 @@ impl error::Error for program_journal::ProgramJournalError {}
 ```rust
 pub enum ReplayInstruction {
     AwaitRequest,
-    Deliver(program_journal::DeliveryFrame),
+    Deliver(DeliveryFrame),
     Live,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -341,16 +335,16 @@ pub enum ReplayedRequest {
 ```rust
 pub struct NondeterminismError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl program_journal::NondeterminismError {
+impl NondeterminismError {
     pub const fn run(&self) -> ProgramRunId;
-    pub const fn expected(&self) -> &program_journal::RequestFrame;
-    pub const fn observed(&self) -> &program_journal::RequestFrame;
-    pub fn into_fault(self) -> program_journal::ProgramFault;
+    pub const fn expected(&self) -> &RequestFrame;
+    pub const fn observed(&self) -> &RequestFrame;
+    pub fn into_fault(self) -> ProgramFault;
 }
-impl fmt::Display for program_journal::NondeterminismError {
+impl fmt::Display for NondeterminismError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for program_journal::NondeterminismError {}
+impl error::Error for NondeterminismError {}
 ```
 
 ## ReplayCursor
@@ -358,12 +352,12 @@ impl error::Error for program_journal::NondeterminismError {}
 ```rust
 pub struct ReplayCursor {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl program_journal::ReplayCursor {
-    pub fn new(journal: program_journal::ProgramJournal) -> Self;
-    pub fn next_instruction(&mut self) -> program_journal::ReplayInstruction;
+impl ReplayCursor {
+    pub fn new(journal: ProgramJournal) -> Self;
+    pub fn next_instruction(&mut self) -> ReplayInstruction;
     pub fn submit_request(
         &mut self,
-        observed: program_journal::RequestFrame,
-    ) -> result::Result<program_journal::ReplayedRequest, program_journal::NondeterminismError>;
+        observed: RequestFrame,
+    ) -> result::Result<ReplayedRequest, NondeterminismError>;
 }
 ```

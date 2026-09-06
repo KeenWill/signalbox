@@ -7,7 +7,7 @@
 ```rust
 pub struct ModelCallCredentialReference(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelCallCredentialReference {
+impl ModelCallCredentialReference {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;
 }
@@ -18,10 +18,10 @@ impl model_execution::ModelCallCredentialReference {
 ```rust
 pub enum ModelUserContentPart {
     Text(user_content::NonEmptyUnicodeText),
-    AttachmentStub(model_execution::ModelAttachmentStub),
+    AttachmentStub(ModelAttachmentStub),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelUserContentPart {
+impl ModelUserContentPart {
     pub fn as_str(&self) -> &str;
 }
 ```
@@ -31,11 +31,11 @@ impl model_execution::ModelUserContentPart {
 ```rust
 pub struct ModelUserContent {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelUserContent {
-    pub fn parts(&self) -> &[model_execution::ModelUserContentPart];
+impl ModelUserContent {
+    pub fn parts(&self) -> &[ModelUserContentPart];
     pub fn single_text(&self) -> option::Option<&user_content::NonEmptyUnicodeText>;
 }
-impl cmp::PartialEq<user_content::UserContent> for model_execution::ModelUserContent {
+impl cmp::PartialEq<user_content::UserContent> for ModelUserContent {
     pub fn eq(&self, other: &user_content::UserContent) -> bool;
 }
 ```
@@ -45,10 +45,10 @@ impl cmp::PartialEq<user_content::UserContent> for model_execution::ModelUserCon
 ```rust
 pub struct ModelAttachmentStub {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelAttachmentStub {
+impl ModelAttachmentStub {
     pub fn as_str(&self) -> &str;
 }
-impl fmt::Debug for model_execution::ModelAttachmentStub {
+impl fmt::Debug for ModelAttachmentStub {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
@@ -71,7 +71,7 @@ pub enum ModelConversationMessage {
     User {
         source: context_frontier::SemanticTranscriptEntryRef,
         accepted_input: signalbox_domain::AcceptedInputId,
-        content: model_execution::ModelUserContent,
+        content: ModelUserContent,
     },
     DelegatedTask {
         source: context_frontier::SemanticTranscriptEntryRef,
@@ -110,7 +110,7 @@ pub enum ModelConversationMessage {
     ToolResult {
         source: context_frontier::SemanticTranscriptEntryRef,
         request: signalbox_domain::ToolRequestId,
-        content: model_execution::ModelToolResultContent,
+        content: ModelToolResultContent,
     },
     ImportedUser {
         source: context_frontier::SemanticTranscriptEntryRef,
@@ -146,19 +146,19 @@ pub enum ModelToolResultContent {
 ```rust
 pub struct PreparedModelOperation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::PreparedModelOperation {
+impl PreparedModelOperation {
     pub fn render(
         request: model_execution::PreparedModelCallRequest,
-        credential_reference: model_execution::ModelCallCredentialReference,
+        credential_reference: ModelCallCredentialReference,
         system_prompt: option::Option<configuration::SessionSystemPrompt>,
-        tools: boxed::Box<[tool_loop::ToolDefinition]>,
-        tool_entries: &[tool_loop_ports::ResolvedToolConversationEntry],
-    ) -> result::Result<Self, model_execution::ModelFrontierRenderingError>;
+        tools: boxed::Box<[ToolDefinition]>,
+        tool_entries: &[ResolvedToolConversationEntry],
+    ) -> result::Result<Self, ModelFrontierRenderingError>;
     pub const fn request(&self) -> &model_execution::PreparedModelCallRequest;
-    pub const fn credential_reference(&self) -> &model_execution::ModelCallCredentialReference;
+    pub const fn credential_reference(&self) -> &ModelCallCredentialReference;
     pub fn system_prompt(&self) -> option::Option<&str>;
-    pub fn messages(&self) -> &[model_execution::ModelConversationMessage];
-    pub fn tools(&self) -> &[tool_loop::ToolDefinition];
+    pub fn messages(&self) -> &[ModelConversationMessage];
+    pub fn tools(&self) -> &[ToolDefinition];
     pub fn attachment_digests(&self) -> impl iterator::Iterator<Item = blob::BlobDigest> + '_;
 }
 ```
@@ -201,12 +201,12 @@ pub enum ModelFrontierRenderingError {
     InvalidContextProjection(context_compaction::ContextFrontierProjectionFailure),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for model_execution::ModelFrontierRenderingError {
+impl fmt::Display for ModelFrontierRenderingError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for model_execution::ModelFrontierRenderingError {}
-impl operator_failure::ClassifyOperatorFailure for model_execution::ModelFrontierRenderingError {
-    pub fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl error::Error for ModelFrontierRenderingError {}
+impl ClassifyOperatorFailure for ModelFrontierRenderingError {
+    pub fn operator_failure_class(&self) -> OperatorFailureClass;
 }
 ```
 
@@ -220,11 +220,11 @@ pub enum PrepareModelCallOutcome {
     Checkpointed(signalbox_domain::ModelCallId),
     Ready {
         request: boxed::Box<model_execution::PreparedModelCallRequest>,
-        credential_reference: model_execution::ModelCallCredentialReference,
+        credential_reference: ModelCallCredentialReference,
         dangerous_tool_auto_approval: tool::DangerousToolAutoApproval,
         recorded_user_overrides: boxed::Box<[tool::RecordedUserOverride]>,
         system_prompt: option::Option<configuration::SessionSystemPrompt>,
-        tool_entries: boxed::Box<[tool_loop_ports::ResolvedToolConversationEntry]>,
+        tool_entries: boxed::Box<[ResolvedToolConversationEntry]>,
     },
     TargetUnavailable(boxed::Box<model_execution::FailedModelCallTurn>),
 }
@@ -329,7 +329,7 @@ pub enum ModelCallCapabilityPreparation<Capability> {
     Ready(Capability),
     Cancelled,
     KnownFailure,
-    AttachmentFailure(model_execution::AttachmentPreparationFailure),
+    AttachmentFailure(AttachmentPreparationFailure),
 }
 ```
 
@@ -340,7 +340,7 @@ pub enum ModelCallInputTokenCount {
     Counted(u64),
     Cancelled,
     AttachmentUnavailable,
-    AttachmentFailure(model_execution::AttachmentPreparationFailure),
+    AttachmentFailure(AttachmentPreparationFailure),
     Unavailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -351,9 +351,7 @@ pub enum ModelCallInputTokenCount {
 ```rust
 pub struct UuidV7ModelCallExecutionIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl model_execution::ModelCallExecutionIdGenerator
-    for model_execution::UuidV7ModelCallExecutionIdGenerator
-{
+impl ModelCallExecutionIdGenerator for UuidV7ModelCallExecutionIdGenerator {
     pub fn next_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
     pub fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
     pub fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
@@ -368,13 +366,12 @@ impl model_execution::ModelCallExecutionIdGenerator
 ```rust
 pub struct InProcessAttemptDispatchGate {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default
-impl model_execution::AttemptDispatchGate for model_execution::InProcessAttemptDispatchGate {
-    type Permit = model_execution::InProcessAttemptDispatchPermit;
+impl AttemptDispatchGate for InProcessAttemptDispatchGate {
+    type Permit = InProcessAttemptDispatchPermit;
     pub fn acquire(
         &self,
         attempt: signalbox_domain::TurnAttemptId,
-    ) -> impl future::Future<Output = <Self as model_execution::AttemptDispatchGate>::Permit>
-           + marker::Send;
+    ) -> impl future::Future<Output = <Self as AttemptDispatchGate>::Permit> + marker::Send;
 }
 ```
 
@@ -390,7 +387,7 @@ pub struct InProcessAttemptDispatchPermit {/* private */}
 pub enum ModelCallExecutionOutcome {
     NoWork,
     RetryBackoff(time::Duration),
-    PoolExhausted(boxed::Box<model_execution::CredentialPoolExhaustedOutcome>),
+    PoolExhausted(boxed::Box<CredentialPoolExhaustedOutcome>),
     Checkpointed(signalbox_domain::ModelCallId),
     TargetUnavailable(boxed::Box<model_execution::FailedModelCallTurn>),
     CapabilityKnownFailure(boxed::Box<model_execution::FailedModelCallTurn>),
@@ -399,7 +396,7 @@ pub enum ModelCallExecutionOutcome {
     ToolRoundLimitReached(boxed::Box<model_execution::FailedModelCallTurn>),
     ToolRoundLimitAlreadyCommitted(signalbox_domain::ModelCallId),
     ObservationCommitted(boxed::Box<model_execution::ModelCallTerminalOutcome>),
-    AvailabilitySuccessor(boxed::Box<model_execution::AvailabilitySuccessorOutcome>),
+    AvailabilitySuccessor(boxed::Box<AvailabilitySuccessorOutcome>),
     ObservationAlreadyCommitted(signalbox_domain::ModelCallId),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -416,7 +413,7 @@ pub enum ModelCallExecutionError<
     ObservationError,
 > {
     Prepare(PrepareError),
-    Render(model_execution::ModelFrontierRenderingError),
+    Render(ModelFrontierRenderingError),
     CapabilityPreparation(ProviderError),
     PreparedFailureCommit(FailureError),
     PreparedFailureReread(FailureError),
@@ -434,7 +431,7 @@ pub enum ModelCallExecutionError<
 }
 // derives: fmt::Debug
 impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> fmt::Display
-    for model_execution::ModelCallExecutionError<
+    for ModelCallExecutionError<
         PrepareError,
         FailureError,
         AuthorizationError,
@@ -451,7 +448,7 @@ where
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> error::Error
-    for model_execution::ModelCallExecutionError<
+    for ModelCallExecutionError<
         PrepareError,
         FailureError,
         AuthorizationError,
@@ -467,8 +464,8 @@ where
 {
 }
 impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError>
-    operator_failure::ClassifyOperatorFailure
-    for model_execution::ModelCallExecutionError<
+    ClassifyOperatorFailure
+    for ModelCallExecutionError<
         PrepareError,
         FailureError,
         AuthorizationError,
@@ -476,13 +473,13 @@ impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationE
         ObservationError,
     >
 where
-    PrepareError: operator_failure::ClassifyOperatorFailure,
-    FailureError: operator_failure::ClassifyOperatorFailure,
-    AuthorizationError: operator_failure::ClassifyOperatorFailure,
-    ProviderError: operator_failure::ClassifyOperatorFailure,
-    ObservationError: operator_failure::ClassifyOperatorFailure,
+    PrepareError: ClassifyOperatorFailure,
+    FailureError: ClassifyOperatorFailure,
+    AuthorizationError: ClassifyOperatorFailure,
+    ProviderError: ClassifyOperatorFailure,
+    ObservationError: ClassifyOperatorFailure,
 {
-    pub fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    pub fn operator_failure_class(&self) -> OperatorFailureClass;
     pub fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```
@@ -500,15 +497,7 @@ pub struct ModelCallExecutionService<
     Gate,
 > {/* private */}
 impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
-    model_execution::ModelCallExecutionService<
-        Ids,
-        Prepare,
-        Failure,
-        Authorization,
-        Observation,
-        Provider,
-        Gate,
-    >
+    ModelCallExecutionService<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
 {
     pub fn new(
         ids: Ids,
@@ -520,7 +509,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         gate: Gate,
         max_automatic_tool_rounds_per_turn: option::Option<usize>,
     ) -> Self;
-    pub fn with_tool_catalog(self, catalog: impl tool_loop::ToolCatalog + 'static) -> Self;
+    pub fn with_tool_catalog(self, catalog: impl ToolCatalog + 'static) -> Self;
     pub fn from_parts(
         ids: Ids,
         prepare: Prepare,
@@ -529,8 +518,8 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
-        catalog: sync::Arc<dyn tool_loop::ToolCatalog>,
-        retained_state: option::Option<model_execution::RetainedModelCallExecutionState>,
+        catalog: sync::Arc<dyn ToolCatalog>,
+        retained_state: option::Option<RetainedModelCallExecutionState>,
         max_automatic_tool_rounds_per_turn: option::Option<usize>,
     ) -> Self;
     pub fn into_parts(
@@ -543,47 +532,37 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Observation,
         Provider,
         Gate,
-        sync::Arc<dyn tool_loop::ToolCatalog>,
-        option::Option<model_execution::RetainedModelCallExecutionState>,
+        sync::Arc<dyn ToolCatalog>,
+        option::Option<RetainedModelCallExecutionState>,
         option::Option<usize>,
     );
-    pub const fn retained_state(
-        &self,
-    ) -> option::Option<&model_execution::RetainedModelCallExecutionState>;
+    pub const fn retained_state(&self) -> option::Option<&RetainedModelCallExecutionState>;
     pub fn retained_observation(
         &self,
     ) -> option::Option<&model_execution::CorrelatedModelCallTerminalObservation>;
 }
 impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
-    model_execution::ModelCallExecutionService<
-        Ids,
-        Prepare,
-        Failure,
-        Authorization,
-        Observation,
-        Provider,
-        Gate,
-    >
+    ModelCallExecutionService<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
 where
-    Ids: model_execution::ModelCallExecutionIdGenerator + marker::Send,
-    Prepare: model_execution::PrepareModelCallTransaction,
-    Failure: model_execution::FailPreparedModelCallTransaction,
-    Authorization: model_execution::AuthorizeModelCallTransaction,
-    Observation: model_execution::CommitModelCallObservationTransaction,
-    Provider: model_execution::ModelCallProvider,
-    Gate: model_execution::AttemptDispatchGate,
+    Ids: ModelCallExecutionIdGenerator + marker::Send,
+    Prepare: PrepareModelCallTransaction,
+    Failure: FailPreparedModelCallTransaction,
+    Authorization: AuthorizeModelCallTransaction,
+    Observation: CommitModelCallObservationTransaction,
+    Provider: ModelCallProvider,
+    Gate: AttemptDispatchGate,
 {
     pub async fn execute(
         &mut self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        model_execution::ModelCallExecutionOutcome,
-        model_execution::ModelCallExecutionError<
-            <Prepare as model_execution::PrepareModelCallTransaction>::Error,
-            <Failure as model_execution::FailPreparedModelCallTransaction>::Error,
-            <Authorization as model_execution::AuthorizeModelCallTransaction>::Error,
-            <Provider as model_execution::ModelCallProvider>::Error,
-            <Observation as model_execution::CommitModelCallObservationTransaction>::Error,
+        ModelCallExecutionOutcome,
+        ModelCallExecutionError<
+            <Prepare as PrepareModelCallTransaction>::Error,
+            <Failure as FailPreparedModelCallTransaction>::Error,
+            <Authorization as AuthorizeModelCallTransaction>::Error,
+            <Provider as ModelCallProvider>::Error,
+            <Observation as CommitModelCallObservationTransaction>::Error,
         >,
     >;
 }
@@ -594,8 +573,8 @@ where
 ```rust
 pub enum ModelCallObservationCommitOutcome {
     Terminal(boxed::Box<model_execution::ModelCallTerminalOutcome>),
-    AvailabilitySuccessor(boxed::Box<model_execution::AvailabilitySuccessorOutcome>),
-    PoolExhausted(model_execution::CredentialPoolExhaustedOutcome),
+    AvailabilitySuccessor(boxed::Box<AvailabilitySuccessorOutcome>),
+    PoolExhausted(CredentialPoolExhaustedOutcome),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -618,7 +597,7 @@ pub enum CredentialPoolExhaustedOutcome {
 ```rust
 pub struct AvailabilitySuccessorOutcome {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::AvailabilitySuccessorOutcome {
+impl AvailabilitySuccessorOutcome {
     pub const fn new(
         successor: model_execution::AvailabilitySuccessorModelCallTurn,
         backoff: time::Duration,
@@ -651,12 +630,12 @@ pub enum ScriptedModelCallError {
     AuthorizationMismatch,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for model_execution::ScriptedModelCallError {
+impl fmt::Display for ScriptedModelCallError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for model_execution::ScriptedModelCallError {}
-impl operator_failure::ClassifyOperatorFailure for model_execution::ScriptedModelCallError {
-    pub fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl error::Error for ScriptedModelCallError {}
+impl ClassifyOperatorFailure for ScriptedModelCallError {
+    pub fn operator_failure_class(&self) -> OperatorFailureClass;
 }
 ```
 
@@ -671,32 +650,26 @@ pub struct ScriptedModelCallCapability {/* private */}
 ```rust
 pub struct ScriptedModelCallProvider {/* private */}
 // derives: fmt::Debug
-impl model_execution::ScriptedModelCallProvider {
-    pub fn new(
-        steps: impl collect::IntoIterator<Item = model_execution::ScriptedModelCallStep>,
-    ) -> Self;
+impl ScriptedModelCallProvider {
+    pub fn new(steps: impl collect::IntoIterator<Item = ScriptedModelCallStep>) -> Self;
     pub const fn capability_preparation_count(&self) -> usize;
     pub const fn interaction_count(&self) -> usize;
     pub fn remaining_step_count(&self) -> usize;
-    pub fn last_prepared_messages(
-        &self,
-    ) -> option::Option<&[model_execution::ModelConversationMessage]>;
-    pub fn last_prepared_tools(&self) -> option::Option<&[tool_loop::ToolDefinition]>;
+    pub fn last_prepared_messages(&self) -> option::Option<&[ModelConversationMessage]>;
+    pub fn last_prepared_tools(&self) -> option::Option<&[ToolDefinition]>;
     pub fn last_prepared_system_prompt(&self) -> option::Option<option::Option<&str>>;
 }
-impl model_execution::ModelCallProvider for model_execution::ScriptedModelCallProvider {
-    type Capability = model_execution::ScriptedModelCallCapability;
-    type Error = model_execution::ScriptedModelCallError;
+impl ModelCallProvider for ScriptedModelCallProvider {
+    type Capability = ScriptedModelCallCapability;
+    type Error = ScriptedModelCallError;
     pub fn prepare_capability<Cancellation>(
         &mut self,
-        operation: model_execution::PreparedModelOperation,
+        operation: PreparedModelOperation,
         cancellation: Cancellation,
     ) -> impl future::Future<
         Output = result::Result<
-            model_execution::ModelCallCapabilityPreparation<
-                <Self as model_execution::ModelCallProvider>::Capability,
-            >,
-            <Self as model_execution::ModelCallProvider>::Error,
+            ModelCallCapabilityPreparation<<Self as ModelCallProvider>::Capability>,
+            <Self as ModelCallProvider>::Error,
         >,
     > + marker::Send
     where
@@ -704,13 +677,13 @@ impl model_execution::ModelCallProvider for model_execution::ScriptedModelCallPr
     pub fn invoke<AcceptancePossible, Cancellation>(
         &mut self,
         authorized: model_execution::AuthorizedModelCall,
-        capability: <Self as model_execution::ModelCallProvider>::Capability,
+        capability: <Self as ModelCallProvider>::Capability,
         acceptance_possible: AcceptancePossible,
         cancellation: Cancellation,
     ) -> impl future::Future<
         Output = result::Result<
             model_execution::CorrelatedModelCallTerminalObservation,
-            <Self as model_execution::ModelCallProvider>::Error,
+            <Self as ModelCallProvider>::Error,
         >,
     > + marker::Send
     where

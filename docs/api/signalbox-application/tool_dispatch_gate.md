@@ -7,11 +7,11 @@
 ```rust
 pub struct InProcessToolDispatchGate {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default
-impl tool_dispatch_gate::InProcessToolDispatchGate {
+impl InProcessToolDispatchGate {
     pub fn acquire(
         &self,
         turn: signalbox_domain::TurnId,
-    ) -> impl future::Future<Output = tool_dispatch_gate::InProcessToolDispatchPermit> + marker::Send;
+    ) -> impl future::Future<Output = InProcessToolDispatchPermit> + marker::Send;
 }
 ```
 

@@ -7,13 +7,10 @@
 ```rust
 pub struct ModelTargetDefinition {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelTargetDefinition {
-    pub const fn new(
-        selection: configuration::DirectModelSelection,
-        target: model_call::ResolvedProviderTarget,
-    ) -> Self;
-    pub const fn selection(&self) -> configuration::DirectModelSelection;
-    pub const fn target(&self) -> model_call::ResolvedProviderTarget;
+impl ModelTargetDefinition {
+    pub const fn new(selection: DirectModelSelection, target: ResolvedProviderTarget) -> Self;
+    pub const fn selection(&self) -> DirectModelSelection;
+    pub const fn target(&self) -> ResolvedProviderTarget;
 }
 ```
 
@@ -22,17 +19,14 @@ impl model_execution::ModelTargetDefinition {
 ```rust
 pub struct ModelTargetCatalog {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelTargetCatalog {
+impl ModelTargetCatalog {
     pub fn try_from_definitions(
-        definitions: impl collect::IntoIterator<Item = model_execution::ModelTargetDefinition>,
-    ) -> result::Result<Self, model_execution::ModelTargetCatalogError>;
+        definitions: impl collect::IntoIterator<Item = ModelTargetDefinition>,
+    ) -> result::Result<Self, ModelTargetCatalogError>;
     pub fn resolve(
         &self,
-        selection: configuration::FrozenModelSelection,
-    ) -> result::Result<
-        model_execution::ResolvedModelSelection,
-        model_execution::ModelTargetResolutionError,
-    >;
+        selection: FrozenModelSelection,
+    ) -> result::Result<ResolvedModelSelection, ModelTargetResolutionError>;
 }
 ```
 
@@ -40,9 +34,7 @@ impl model_execution::ModelTargetCatalog {
 
 ```rust
 pub enum ModelTargetCatalogError {
-    DuplicateSelection {
-        selection: configuration::DirectModelSelection,
-    },
+    DuplicateSelection { selection: DirectModelSelection },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -52,9 +44,9 @@ pub enum ModelTargetCatalogError {
 ```rust
 pub struct ResolvedModelSelection {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ResolvedModelSelection {
-    pub const fn selection(&self) -> configuration::FrozenModelSelection;
-    pub const fn target(&self) -> model_call::ResolvedProviderTarget;
+impl ResolvedModelSelection {
+    pub const fn selection(&self) -> FrozenModelSelection;
+    pub const fn target(&self) -> ResolvedProviderTarget;
 }
 ```
 
@@ -63,9 +55,9 @@ impl model_execution::ResolvedModelSelection {
 ```rust
 pub struct ModelTargetResolutionError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelTargetResolutionError {
-    pub const fn selection(&self) -> configuration::FrozenModelSelection;
-    pub const fn direct_selection(&self) -> configuration::DirectModelSelection;
+impl ModelTargetResolutionError {
+    pub const fn selection(&self) -> FrozenModelSelection;
+    pub const fn direct_selection(&self) -> DirectModelSelection;
 }
 ```
 
@@ -74,27 +66,16 @@ impl model_execution::ModelTargetResolutionError {
 ```rust
 pub struct ModelCallOriginContent {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelCallOriginContent {
-    pub const fn from_goal_turn(
-        accepted_input: AcceptedInputId,
-        content: user_content::UserContent,
-    ) -> Self;
-    pub fn from_pending_steering(
-        pending: &turn_eligibility::PendingSteeringInput,
-        content: user_content::UserContent,
-    ) -> Self;
-    pub fn from_consumed_steering(
-        consumed: &turn_eligibility::ConsumedSteeringInput,
-        content: user_content::UserContent,
-    ) -> Self;
-    pub fn from_recorded_submit(
-        recorded: &submit_input::ReconstitutedSubmitInput,
-    ) -> option::Option<Self>;
+impl ModelCallOriginContent {
+    pub const fn from_goal_turn(accepted_input: AcceptedInputId, content: UserContent) -> Self;
+    pub fn from_pending_steering(pending: &PendingSteeringInput, content: UserContent) -> Self;
+    pub fn from_consumed_steering(consumed: &ConsumedSteeringInput, content: UserContent) -> Self;
+    pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> option::Option<Self>;
     pub fn from_reconstituted_turn_origin(
-        origin: &submit_input::SubmitInputTurnOriginReconstitutionInput,
+        origin: &SubmitInputTurnOriginReconstitutionInput,
     ) -> option::Option<Self>;
     pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn content(&self) -> &user_content::UserContent;
+    pub const fn content(&self) -> &UserContent;
 }
 ```
 
@@ -103,47 +84,41 @@ impl model_execution::ModelCallOriginContent {
 ```rust
 pub struct ModelCallExecutionReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelCallExecutionReconstitutionInput {
+impl ModelCallExecutionReconstitutionInput {
     pub fn new(
-        active_turn: impl convert::Into<turn_eligibility::ActivatedTurn>,
-        targets: model_execution::ModelTargetCatalog,
-        starting_snapshot: context_frontier::ResolvedContextFrontierSnapshot,
-        frontier_entries: vec::Vec<semantic_entry::SemanticTranscriptEntry>,
-        origin_contents: vec::Vec<model_execution::ModelCallOriginContent>,
-        pinned_target: option::Option<model_call::PinnedProviderTargetReconstitutionInput>,
-        calls: vec::Vec<model_call::ModelCallReconstitutionInput>,
+        active_turn: impl convert::Into<ActivatedTurn>,
+        targets: ModelTargetCatalog,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        frontier_entries: vec::Vec<SemanticTranscriptEntry>,
+        origin_contents: vec::Vec<ModelCallOriginContent>,
+        pinned_target: option::Option<PinnedProviderTargetReconstitutionInput>,
+        calls: vec::Vec<ModelCallReconstitutionInput>,
     ) -> Self;
-    pub fn with_attachment_blob_facts(
-        self,
-        facts: vec::Vec<user_content::AttachmentBlobFact>,
-    ) -> Self;
+    pub fn with_attachment_blob_facts(self, facts: vec::Vec<AttachmentBlobFact>) -> Self;
     pub fn with_tool_result_correlations(
         self,
-        correlations: vec::Vec<model_execution::ToolResultAttemptCorrelation>,
+        correlations: vec::Vec<ToolResultAttemptCorrelation>,
     ) -> Self;
     pub fn with_tool_denial_correlations(
         self,
-        correlations: vec::Vec<tool::ToolApprovalResolution>,
+        correlations: vec::Vec<ToolApprovalResolution>,
     ) -> Self;
     pub fn with_uncommitted_tool_result_projection(
         self,
-        projection: tool_execution::PreparedToolResultProjection,
+        projection: PreparedToolResultProjection,
     ) -> Self;
     pub fn with_call_snapshot(
         self,
-        call_snapshot: context_frontier::ResolvedContextFrontierReconstitutionInput,
+        call_snapshot: ResolvedContextFrontierReconstitutionInput,
     ) -> Self;
     pub fn with_continuation_snapshot(
         self,
-        continuation_snapshot: context_frontier::ResolvedContextFrontierReconstitutionInput,
+        continuation_snapshot: ResolvedContextFrontierReconstitutionInput,
     ) -> Self;
     pub fn with_availability_successor(self) -> Self;
     pub fn reconstitute(
         self,
-    ) -> result::Result<
-        model_execution::ModelCallExecution,
-        model_execution::ModelCallExecutionReconstitutionError,
-    >;
+    ) -> result::Result<ModelCallExecution, ModelCallExecutionReconstitutionError>;
 }
 ```
 
@@ -152,7 +127,7 @@ impl model_execution::ModelCallExecutionReconstitutionInput {
 ```rust
 pub struct ToolResultAttemptCorrelation {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ToolResultAttemptCorrelation {
+impl ToolResultAttemptCorrelation {
     pub const fn new(
         attempt: ToolAttemptId,
         request: ToolRequestId,
@@ -202,14 +177,14 @@ pub enum ModelCallExecutionReconstitutionFailure {
 ```rust
 pub struct ModelCallExecutionReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelCallExecutionReconstitutionError {
-    pub const fn failure(&self) -> model_execution::ModelCallExecutionReconstitutionFailure;
-    pub const fn input(&self) -> &model_execution::ModelCallExecutionReconstitutionInput;
+impl ModelCallExecutionReconstitutionError {
+    pub const fn failure(&self) -> ModelCallExecutionReconstitutionFailure;
+    pub const fn input(&self) -> &ModelCallExecutionReconstitutionInput;
     pub fn into_parts(
         self,
     ) -> (
-        model_execution::ModelCallExecutionReconstitutionInput,
-        model_execution::ModelCallExecutionReconstitutionFailure,
+        ModelCallExecutionReconstitutionInput,
+        ModelCallExecutionReconstitutionFailure,
     );
 }
 ```
@@ -219,137 +194,95 @@ impl model_execution::ModelCallExecutionReconstitutionError {
 ```rust
 pub struct ModelCallExecution {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelCallExecution {
-    pub const fn active_turn(&self) -> &turn_eligibility::ActivatedTurn;
+impl ModelCallExecution {
+    pub const fn active_turn(&self) -> &ActivatedTurn;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
-    pub const fn configuration(&self) -> &configuration::OriginConfiguration;
-    pub const fn start(&self) -> turn_lifecycle::AcceptedInputTurnStart;
-    pub const fn current_attempt(&self) -> &turn_attempt::CurrentTurnAttempt;
-    pub const fn current_call(&self) -> option::Option<&model_call::CurrentModelCall>;
+    pub const fn configuration(&self) -> &OriginConfiguration;
+    pub const fn start(&self) -> AcceptedInputTurnStart;
+    pub const fn current_attempt(&self) -> &CurrentTurnAttempt;
+    pub const fn current_call(&self) -> option::Option<&CurrentModelCall>;
     pub fn frontier_entries(
         &self,
-    ) -> impl exact_size::ExactSizeIterator<Item = &semantic_entry::SemanticTranscriptEntry>;
-    pub fn origin_content(
-        &self,
-        accepted_input: AcceptedInputId,
-    ) -> option::Option<&user_content::UserContent>;
+    ) -> impl exact_size::ExactSizeIterator<Item = &SemanticTranscriptEntry>;
+    pub fn origin_content(&self, accepted_input: AcceptedInputId) -> option::Option<&UserContent>;
     pub fn preview_initial_call(
         &self,
         call: ModelCallId,
-    ) -> result::Result<
-        model_execution::PreparedModelCallRequest,
-        model_execution::ModelCallPreparationError,
-    >;
+    ) -> result::Result<PreparedModelCallRequest, ModelCallPreparationError>;
     pub fn prepare_initial_call(
         self,
         call: ModelCallId,
-    ) -> result::Result<
-        model_execution::PreparedInitialModelCall,
-        model_execution::ModelCallPreparationError,
-    >;
+    ) -> result::Result<PreparedInitialModelCall, ModelCallPreparationError>;
     pub fn prepare_initial_call_consuming_steering(
         self,
         call: ModelCallId,
-        steering_entries: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
-        steering_frontier: option::Option<context_frontier::ContextFrontierId>,
-    ) -> result::Result<
-        model_execution::PreparedInitialModelCall,
-        model_execution::ModelCallPreparationError,
-    >;
+        steering_entries: vec::Vec<SemanticTranscriptEntryId>,
+        steering_frontier: option::Option<ContextFrontierId>,
+    ) -> result::Result<PreparedInitialModelCall, ModelCallPreparationError>;
     pub fn resume_prepared_call(
         &self,
-    ) -> result::Result<
-        model_execution::PreparedModelCallRequest,
-        model_execution::ModelCallResumeFailure,
-    >;
-    pub fn authorize_send(
-        self,
-    ) -> result::Result<
-        model_execution::AuthorizedModelCall,
-        model_execution::ModelCallAuthorizationError,
-    >;
-    pub fn resume_in_flight_call(&self) -> option::Option<model_execution::AuthorizedModelCall>;
-    pub fn resume_cancellation_requested_call(
-        &self,
-    ) -> option::Option<model_execution::StopRequestedModelCallTurn>;
+    ) -> result::Result<PreparedModelCallRequest, ModelCallResumeFailure>;
+    pub fn authorize_send(self)
+        -> result::Result<AuthorizedModelCall, ModelCallAuthorizationError>;
+    pub fn resume_in_flight_call(&self) -> option::Option<AuthorizedModelCall>;
+    pub fn resume_cancellation_requested_call(&self) -> option::Option<StopRequestedModelCallTurn>;
     pub fn apply_interrupt(
         self,
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
-        identities: model_execution::CancelledModelCallTurnIdentities,
-    ) -> result::Result<
-        model_execution::ModelCallInterruptOutcome,
-        model_execution::ModelCallClosureError,
-    >;
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> result::Result<ModelCallInterruptOutcome, ModelCallClosureError>;
     pub fn apply_interrupt_to_tool_batch(
         self,
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
-        result_projection: tool_execution::PreparedToolResultProjection,
-        identities: model_execution::CancelledModelCallTurnIdentities,
-    ) -> result::Result<
-        model_execution::CancelledModelCallTurn,
-        model_execution::ModelCallClosureError,
-    >;
+        interrupt: AppliedInterruptCommandResult,
+        result_projection: PreparedToolResultProjection,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> result::Result<CancelledModelCallTurn, ModelCallClosureError>;
     pub fn apply_terminal_observation(
         self,
-        observation: model_execution::CorrelatedModelCallTerminalObservation,
-        identities: model_execution::ModelCallTerminalIdentities,
-    ) -> result::Result<
-        model_execution::ModelCallTerminalOutcome,
-        model_execution::ModelCallClosureError,
-    >;
+        observation: CorrelatedModelCallTerminalObservation,
+        identities: ModelCallTerminalIdentities,
+    ) -> result::Result<ModelCallTerminalOutcome, ModelCallClosureError>;
     pub fn apply_availability_successor(
         self,
-        observation: model_execution::CorrelatedModelCallTerminalObservation,
+        observation: CorrelatedModelCallTerminalObservation,
         successor_attempt: TurnAttemptId,
-    ) -> result::Result<
-        model_execution::AvailabilitySuccessorModelCallTurn,
-        model_execution::ModelCallClosureError,
-    >;
+    ) -> result::Result<AvailabilitySuccessorModelCallTurn, ModelCallClosureError>;
     pub fn fail_target_resolution(
         self,
-        resolution_error: model_execution::ModelTargetResolutionError,
-        identities: model_execution::FailedModelCallTurnIdentities,
-    ) -> result::Result<model_execution::FailedModelCallTurn, model_execution::ModelCallClosureError>;
+        resolution_error: ModelTargetResolutionError,
+        identities: FailedModelCallTurnIdentities,
+    ) -> result::Result<FailedModelCallTurn, ModelCallClosureError>;
     pub fn fail_credential_pool_exhausted(
         self,
         pool_name: string::String,
-        identities: model_execution::FailedModelCallTurnIdentities,
-    ) -> result::Result<
-        model_execution::CredentialPoolExhaustedModelCallTurn,
-        model_execution::ModelCallClosureError,
-    >;
+        identities: FailedModelCallTurnIdentities,
+    ) -> result::Result<CredentialPoolExhaustedModelCallTurn, ModelCallClosureError>;
     pub fn fail_automatic_context_compaction(
         self,
-        identities: model_execution::FailedModelCallTurnIdentities,
-    ) -> result::Result<model_execution::FailedModelCallTurn, model_execution::ModelCallClosureError>;
+        identities: FailedModelCallTurnIdentities,
+    ) -> result::Result<FailedModelCallTurn, ModelCallClosureError>;
     pub fn fail_prepared_call(
         self,
-        identities: model_execution::FailedModelCallTurnIdentities,
-    ) -> result::Result<model_execution::FailedModelCallTurn, model_execution::ModelCallClosureError>;
+        identities: FailedModelCallTurnIdentities,
+    ) -> result::Result<FailedModelCallTurn, ModelCallClosureError>;
     pub fn recover_after_restart(
         self,
-        failure_identities: model_execution::FailedModelCallTurnIdentities,
-    ) -> result::Result<
-        model_execution::ModelCallTerminalOutcome,
-        model_execution::ModelCallClosureError,
-    >;
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> result::Result<ModelCallTerminalOutcome, ModelCallClosureError>;
     pub fn recover_evidence_free_after_restart(
         self,
-        failure_identities: model_execution::FailedModelCallTurnIdentities,
-    ) -> result::Result<model_execution::FailedModelCallTurn, model_execution::ModelCallClosureError>;
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> result::Result<FailedModelCallTurn, ModelCallClosureError>;
     pub fn recover_tool_crash_after_restart(
         self,
-        failure_identities: model_execution::FailedModelCallTurnIdentities,
-    ) -> result::Result<model_execution::FailedModelCallTurn, model_execution::ModelCallClosureError>;
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> result::Result<FailedModelCallTurn, ModelCallClosureError>;
     pub fn require_context_compaction_after_tool_results(
         self,
         producing_call: ModelCallId,
-        failure_identities: model_execution::FailedModelCallTurnIdentities,
-    ) -> result::Result<
-        model_execution::ContextHeadroomExhaustedModelCallTurn,
-        model_execution::ModelCallClosureError,
-    >;
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> result::Result<ContextHeadroomExhaustedModelCallTurn, ModelCallClosureError>;
 }
 ```
 
@@ -372,12 +305,10 @@ pub enum ModelCallPreparationFailure {
 ```rust
 pub struct ModelCallPreparationError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelCallPreparationError {
-    pub const fn failure(&self) -> model_execution::ModelCallPreparationFailure;
-    pub const fn execution(&self) -> &model_execution::ModelCallExecution;
-    pub const fn target_resolution_error(
-        &self,
-    ) -> option::Option<model_execution::ModelTargetResolutionError>;
+impl ModelCallPreparationError {
+    pub const fn failure(&self) -> ModelCallPreparationFailure;
+    pub const fn execution(&self) -> &ModelCallExecution;
+    pub const fn target_resolution_error(&self) -> option::Option<ModelTargetResolutionError>;
 }
 ```
 
@@ -386,15 +317,13 @@ impl model_execution::ModelCallPreparationError {
 ```rust
 pub struct PreparedInitialModelCall {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::PreparedInitialModelCall {
+impl PreparedInitialModelCall {
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
     pub const fn attempt(&self) -> TurnAttemptId;
-    pub const fn call(&self) -> &model_call::CurrentModelCall;
-    pub fn consumed_steering(&self) -> &[model_execution::PreparedSteeringConsumption];
-    pub const fn steering_snapshot(
-        &self,
-    ) -> option::Option<&context_frontier::ResolvedContextFrontierSnapshot>;
+    pub const fn call(&self) -> &CurrentModelCall;
+    pub fn consumed_steering(&self) -> &[PreparedSteeringConsumption];
+    pub const fn steering_snapshot(&self) -> option::Option<&ResolvedContextFrontierSnapshot>;
 }
 ```
 
@@ -403,9 +332,9 @@ impl model_execution::PreparedInitialModelCall {
 ```rust
 pub struct PreparedSteeringConsumption {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::PreparedSteeringConsumption {
-    pub const fn accepted_input(&self) -> &accepted_input::AcceptedInputLifecycle;
-    pub const fn semantic_entry(&self) -> &semantic_entry::SemanticTranscriptEntry;
+impl PreparedSteeringConsumption {
+    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle;
+    pub const fn semantic_entry(&self) -> &SemanticTranscriptEntry;
 }
 ```
 
@@ -414,25 +343,20 @@ impl model_execution::PreparedSteeringConsumption {
 ```rust
 pub struct PreparedModelCallRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::PreparedModelCallRequest {
+impl PreparedModelCallRequest {
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
     pub const fn attempt(&self) -> TurnAttemptId;
-    pub const fn dangerous_tool_auto_approval(&self) -> tool::DangerousToolAutoApproval;
-    pub const fn model_settings(&self) -> model_settings::ValidatedModelSettings;
-    pub const fn call(&self) -> &model_call::CurrentModelCall;
+    pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval;
+    pub const fn model_settings(&self) -> ValidatedModelSettings;
+    pub const fn call(&self) -> &CurrentModelCall;
     pub fn frontier_entries(
         &self,
-    ) -> impl exact_size::ExactSizeIterator<Item = &semantic_entry::SemanticTranscriptEntry>;
-    pub const fn frontier_entry_slice(&self) -> &[semantic_entry::SemanticTranscriptEntry];
-    pub fn origin_content(
-        &self,
-        accepted_input: AcceptedInputId,
-    ) -> option::Option<&user_content::UserContent>;
-    pub fn attachment_byte_length(
-        &self,
-        digest: blob::BlobDigest,
-    ) -> option::Option<nonzero::NonZeroU64>;
+    ) -> impl exact_size::ExactSizeIterator<Item = &SemanticTranscriptEntry>;
+    pub const fn frontier_entry_slice(&self) -> &[SemanticTranscriptEntry];
+    pub fn origin_content(&self, accepted_input: AcceptedInputId) -> option::Option<&UserContent>;
+    pub fn attachment_byte_length(&self, digest: BlobDigest)
+        -> option::Option<nonzero::NonZeroU64>;
 }
 ```
 
@@ -463,9 +387,9 @@ pub enum ModelCallAuthorizationFailure {
 ```rust
 pub struct ModelCallAuthorizationError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelCallAuthorizationError {
-    pub const fn failure(&self) -> model_execution::ModelCallAuthorizationFailure;
-    pub const fn execution(&self) -> &model_execution::ModelCallExecution;
+impl ModelCallAuthorizationError {
+    pub const fn failure(&self) -> ModelCallAuthorizationFailure;
+    pub const fn execution(&self) -> &ModelCallExecution;
 }
 ```
 
@@ -474,19 +398,16 @@ impl model_execution::ModelCallAuthorizationError {
 ```rust
 pub struct AuthorizedModelCall {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::AuthorizedModelCall {
+impl AuthorizedModelCall {
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
-    pub const fn attempt(&self) -> &turn_attempt::CurrentTurnAttempt;
-    pub const fn call(&self) -> &model_call::CurrentModelCall;
+    pub const fn attempt(&self) -> &CurrentTurnAttempt;
+    pub const fn call(&self) -> &CurrentModelCall;
     pub fn frontier_entries(
         &self,
-    ) -> impl exact_size::ExactSizeIterator<Item = &semantic_entry::SemanticTranscriptEntry>;
-    pub fn origin_content(
-        &self,
-        accepted_input: AcceptedInputId,
-    ) -> option::Option<&user_content::UserContent>;
-    pub const fn observation_correlation(&self) -> model_execution::IssuedModelCallCorrelation;
+    ) -> impl exact_size::ExactSizeIterator<Item = &SemanticTranscriptEntry>;
+    pub fn origin_content(&self, accepted_input: AcceptedInputId) -> option::Option<&UserContent>;
+    pub const fn observation_correlation(&self) -> IssuedModelCallCorrelation;
 }
 ```
 
@@ -495,34 +416,34 @@ impl model_execution::AuthorizedModelCall {
 ```rust
 pub struct IssuedModelCallCorrelation {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::IssuedModelCallCorrelation {
+impl IssuedModelCallCorrelation {
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
     pub const fn attempt(&self) -> TurnAttemptId;
     pub const fn call(&self) -> ModelCallId;
-    pub const fn target(&self) -> model_call::ResolvedProviderTarget;
-    pub const fn frontier(&self) -> context_frontier::ContextFrontierId;
+    pub const fn target(&self) -> ResolvedProviderTarget;
+    pub const fn frontier(&self) -> ContextFrontierId;
     pub fn bind_terminal_observation(
         self,
-        observation: model_execution::ModelCallTerminalObservation,
-    ) -> model_execution::CorrelatedModelCallTerminalObservation;
+        observation: ModelCallTerminalObservation,
+    ) -> CorrelatedModelCallTerminalObservation;
     pub fn bind_terminal_observation_with_usage(
         self,
-        observation: model_execution::ModelCallTerminalObservation,
-        usage: model_execution::ProviderReportedTokenUsage,
-    ) -> model_execution::CorrelatedModelCallTerminalObservation;
+        observation: ModelCallTerminalObservation,
+        usage: ProviderReportedTokenUsage,
+    ) -> CorrelatedModelCallTerminalObservation;
     pub fn bind_provider_failure_observation_with_usage(
         self,
-        cause: model_execution::ProviderModelCallFailureCause,
-        usage: model_execution::ProviderReportedTokenUsage,
-    ) -> model_execution::CorrelatedModelCallTerminalObservation;
+        cause: ProviderModelCallFailureCause,
+        usage: ProviderReportedTokenUsage,
+    ) -> CorrelatedModelCallTerminalObservation;
     pub fn bind_provider_failure_observation_with_retry_after(
         self,
-        cause: model_execution::ProviderModelCallFailureCause,
-        usage: model_execution::ProviderReportedTokenUsage,
+        cause: ProviderModelCallFailureCause,
+        usage: ProviderReportedTokenUsage,
         retry_after: option::Option<time::Duration>,
         non_acceptance_proven: bool,
-    ) -> model_execution::CorrelatedModelCallTerminalObservation;
+    ) -> CorrelatedModelCallTerminalObservation;
 }
 ```
 
@@ -531,7 +452,7 @@ impl model_execution::IssuedModelCallCorrelation {
 ```rust
 pub struct ProviderReportedTokenUsage {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl model_execution::ProviderReportedTokenUsage {
+impl ProviderReportedTokenUsage {
     pub const fn unreported() -> Self;
     pub const fn with_input_tokens(self, input_tokens: option::Option<u64>) -> Self;
     pub const fn with_output_tokens(self, output_tokens: option::Option<u64>) -> Self;
@@ -573,14 +494,12 @@ pub enum ProviderModelCallFailureCause {
 ```rust
 pub struct CorrelatedModelCallTerminalObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::CorrelatedModelCallTerminalObservation {
+impl CorrelatedModelCallTerminalObservation {
     pub const fn call(&self) -> ModelCallId;
-    pub const fn correlation(&self) -> &model_execution::IssuedModelCallCorrelation;
-    pub const fn observation(&self) -> &model_execution::ModelCallTerminalObservation;
-    pub const fn usage(&self) -> model_execution::ProviderReportedTokenUsage;
-    pub const fn provider_failure_cause(
-        &self,
-    ) -> option::Option<model_execution::ProviderModelCallFailureCause>;
+    pub const fn correlation(&self) -> &IssuedModelCallCorrelation;
+    pub const fn observation(&self) -> &ModelCallTerminalObservation;
+    pub const fn usage(&self) -> ProviderReportedTokenUsage;
+    pub const fn provider_failure_cause(&self) -> option::Option<ProviderModelCallFailureCause>;
     pub const fn retry_after(&self) -> option::Option<time::Duration>;
     pub const fn non_acceptance_proven(&self) -> bool;
 }
@@ -591,10 +510,10 @@ impl model_execution::CorrelatedModelCallTerminalObservation {
 ```rust
 pub enum ModelCallTerminalObservation {
     Completed {
-        assistant_text: vec::Vec<semantic_entry::AssistantText>,
+        assistant_text: vec::Vec<AssistantText>,
     },
     CompletedWithTools {
-        response: tool::ToolUsingAssistantResponse,
+        response: ToolUsingAssistantResponse,
     },
     KnownFailed,
     Refused,
@@ -602,8 +521,8 @@ pub enum ModelCallTerminalObservation {
     Ambiguous,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ModelCallTerminalObservation {
-    pub const fn disposition(&self) -> model_call::ModelCallDisposition;
+impl ModelCallTerminalObservation {
+    pub const fn disposition(&self) -> ModelCallDisposition;
 }
 ```
 
@@ -612,7 +531,7 @@ impl model_execution::ModelCallTerminalObservation {
 ```rust
 pub struct PendingSteeringReclassificationIdentity {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::PendingSteeringReclassificationIdentity {
+impl PendingSteeringReclassificationIdentity {
     pub const fn new(accepted_input: AcceptedInputId, turn: TurnId) -> Self;
     pub const fn accepted_input(&self) -> AcceptedInputId;
     pub const fn turn(&self) -> TurnId;
@@ -624,15 +543,15 @@ impl model_execution::PendingSteeringReclassificationIdentity {
 ```rust
 pub struct CompletedModelCallIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::CompletedModelCallIdentities {
+impl CompletedModelCallIdentities {
     pub fn new(
-        assistant_entries: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
-        completion_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        assistant_entries: vec::Vec<SemanticTranscriptEntryId>,
+        completion_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
     ) -> Self;
     pub fn with_pending_steering_reclassifications(
         self,
-        identities: vec::Vec<model_execution::PendingSteeringReclassificationIdentity>,
+        identities: vec::Vec<PendingSteeringReclassificationIdentity>,
     ) -> Self;
 }
 ```
@@ -642,21 +561,21 @@ impl model_execution::CompletedModelCallIdentities {
 ```rust
 pub enum ToolResponsePartIdentity {
     Text {
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: SemanticTranscriptEntryId,
     },
     ToolCall {
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
-        approval: tool::InitialToolApproval,
+        approval: InitialToolApproval,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ToolResponsePartIdentity {
-    pub const fn text(entry: context_frontier::SemanticTranscriptEntryId) -> Self;
+impl ToolResponsePartIdentity {
+    pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn tool_call(
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
-        approval: tool::InitialToolApproval,
+        approval: InitialToolApproval,
     ) -> Self;
 }
 ```
@@ -666,14 +585,14 @@ impl model_execution::ToolResponsePartIdentity {
 ```rust
 pub struct ToolRoundModelCallIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::ToolRoundModelCallIdentities {
+impl ToolRoundModelCallIdentities {
     pub fn new(
-        response_parts: vec::Vec<model_execution::ToolResponsePartIdentity>,
-        yielded_frontier: context_frontier::ContextFrontierId,
+        response_parts: vec::Vec<ToolResponsePartIdentity>,
+        yielded_frontier: ContextFrontierId,
         continuation_attempt: option::Option<TurnAttemptId>,
     ) -> Self;
-    pub fn response_parts(&self) -> &[model_execution::ToolResponsePartIdentity];
-    pub const fn yielded_frontier(&self) -> context_frontier::ContextFrontierId;
+    pub fn response_parts(&self) -> &[ToolResponsePartIdentity];
+    pub const fn yielded_frontier(&self) -> ContextFrontierId;
     pub const fn continuation_attempt(&self) -> option::Option<TurnAttemptId>;
 }
 ```
@@ -683,23 +602,23 @@ impl model_execution::ToolRoundModelCallIdentities {
 ```rust
 pub enum StoppedToolResponsePartIdentity {
     Text {
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: SemanticTranscriptEntryId,
     },
     ToolCall {
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
-        closed_result_entry: context_frontier::SemanticTranscriptEntryId,
-        approval: tool::InitialToolApproval,
+        closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::StoppedToolResponsePartIdentity {
-    pub const fn text(entry: context_frontier::SemanticTranscriptEntryId) -> Self;
+impl StoppedToolResponsePartIdentity {
+    pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn tool_call(
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
-        closed_result_entry: context_frontier::SemanticTranscriptEntryId,
-        approval: tool::InitialToolApproval,
+        closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
     ) -> Self;
 }
 ```
@@ -709,15 +628,15 @@ impl model_execution::StoppedToolResponsePartIdentity {
 ```rust
 pub struct StoppedToolRoundModelCallIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::StoppedToolRoundModelCallIdentities {
+impl StoppedToolRoundModelCallIdentities {
     pub fn new(
-        response_parts: vec::Vec<model_execution::StoppedToolResponsePartIdentity>,
-        cancellation_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        response_parts: vec::Vec<StoppedToolResponsePartIdentity>,
+        cancellation_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
     ) -> Self;
     pub fn with_pending_steering_reclassifications(
         self,
-        identities: vec::Vec<model_execution::PendingSteeringReclassificationIdentity>,
+        identities: vec::Vec<PendingSteeringReclassificationIdentity>,
     ) -> Self;
 }
 ```
@@ -727,17 +646,17 @@ impl model_execution::StoppedToolRoundModelCallIdentities {
 ```rust
 pub struct FailedModelCallTurnIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::FailedModelCallTurnIdentities {
+impl FailedModelCallTurnIdentities {
     pub fn new(
-        failure_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        failure_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
     ) -> Self;
     pub fn with_pending_steering_reclassifications(
         self,
-        identities: vec::Vec<model_execution::PendingSteeringReclassificationIdentity>,
+        identities: vec::Vec<PendingSteeringReclassificationIdentity>,
     ) -> Self;
-    pub const fn failure_entry(&self) -> context_frontier::SemanticTranscriptEntryId;
-    pub const fn terminal_frontier(&self) -> context_frontier::ContextFrontierId;
+    pub const fn failure_entry(&self) -> SemanticTranscriptEntryId;
+    pub const fn terminal_frontier(&self) -> ContextFrontierId;
 }
 ```
 
@@ -746,16 +665,16 @@ impl model_execution::FailedModelCallTurnIdentities {
 ```rust
 pub struct CancelledModelCallTurnIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::CancelledModelCallTurnIdentities {
+impl CancelledModelCallTurnIdentities {
     pub fn new(
-        cancellation_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        cancellation_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
     ) -> Self;
     pub fn with_pending_steering_reclassifications(
         self,
-        identities: vec::Vec<model_execution::PendingSteeringReclassificationIdentity>,
+        identities: vec::Vec<PendingSteeringReclassificationIdentity>,
     ) -> Self;
-    pub fn into_ambiguous(self) -> model_execution::AmbiguousModelCallTurnIdentities;
+    pub fn into_ambiguous(self) -> AmbiguousModelCallTurnIdentities;
 }
 ```
 
@@ -764,14 +683,14 @@ impl model_execution::CancelledModelCallTurnIdentities {
 ```rust
 pub struct PhysicalCancellationModelCallTurnIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::PhysicalCancellationModelCallTurnIdentities {
+impl PhysicalCancellationModelCallTurnIdentities {
     pub fn new(
-        terminal_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
     ) -> Self;
     pub fn with_pending_steering_reclassifications(
         self,
-        identities: vec::Vec<model_execution::PendingSteeringReclassificationIdentity>,
+        identities: vec::Vec<PendingSteeringReclassificationIdentity>,
     ) -> Self;
 }
 ```
@@ -781,11 +700,84 @@ impl model_execution::PhysicalCancellationModelCallTurnIdentities {
 ```rust
 pub struct RefusedModelCallTurnIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_execution::RefusedModelCallTurnIdentities {
-    pub fn new(terminal_frontier: context_frontier::ContextFrontierId) -> Self;
+impl RefusedModelCallTurnIdentities {
+    pub fn new(terminal_frontier: ContextFrontierId) -> Self;
     pub fn with_pending_steering_reclassifications(
         self,
-        identities: vec::Vec<model_execution::PendingSteeringReclassificationIdentity>,
+        identities: vec::Vec<PendingSteeringReclassificationIdentity>,
     ) -> Self;
+}
+```
+
+## ModelCallTerminalIdentities
+
+```rust
+pub enum ModelCallTerminalIdentities {
+    Completed(CompletedModelCallIdentities),
+    ToolRound(ToolRoundModelCallIdentities),
+    StoppedToolRound(StoppedToolRoundModelCallIdentities),
+    Failed(FailedModelCallTurnIdentities),
+    PhysicalCancellation(PhysicalCancellationModelCallTurnIdentities),
+    Refused(RefusedModelCallTurnIdentities),
+    Ambiguous(AmbiguousModelCallTurnIdentities),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelCallTerminalOutcome
+
+```rust
+pub enum ModelCallTerminalOutcome {
+    Completed(CompletedModelCallTurn),
+    ToolRound(ToolRoundModelCallTurn),
+    CancelledWithToolResponse(CancelledToolRoundModelCallTurn),
+    Failed(FailedModelCallTurn),
+    Cancelled(CancelledModelCallTurn),
+    Refused(RefusedModelCallTurn),
+    ReconciliationRequired(ReconciliationRequiredModelCallTurn),
+    AwaitingRecovery(AmbiguousModelCallTurn),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelCallInterruptOutcome
+
+```rust
+pub enum ModelCallInterruptOutcome {
+    Cancelled(CancelledModelCallTurn),
+    CancellationRequested(StopRequestedModelCallTurn),
+    ReconciliationRequired(ReconciliationRequiredModelCallTurn),
+    ToolReconciliationRequired(ReconciliationRequiredToolTurn),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## AmbiguousModelCallTurnIdentities
+
+```rust
+pub struct AmbiguousModelCallTurnIdentities {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl AmbiguousModelCallTurnIdentities {
+    pub const fn new(terminal_frontier: ContextFrontierId) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: vec::Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+}
+```
+
+## ReclassifiedPendingSteeringTurn
+
+```rust
+pub struct ReclassifiedPendingSteeringTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReclassifiedPendingSteeringTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn source_turn(&self) -> TurnId;
+    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn order(&self) -> AcceptedInputQueueOrder;
+    pub const fn binding(&self) -> SteeringBinding;
+    pub const fn effective_configuration(&self) -> &EffectiveConfiguration;
 }
 ```

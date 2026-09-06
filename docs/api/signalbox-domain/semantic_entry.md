@@ -7,10 +7,8 @@
 ```rust
 pub struct AssistantText(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl semantic_entry::AssistantText {
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, user_content::NonEmptyUnicodeTextError>;
+impl AssistantText {
+    pub fn try_new(value: string::String) -> result::Result<Self, NonEmptyUnicodeTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -22,10 +20,8 @@ impl semantic_entry::AssistantText {
 pub enum SemanticTranscriptEntryPayload {
     Imported {
         imported_entry: ImportedTranscriptEntryId,
-        source_speaker: imported_conversation::ImportedSourceAttestation<
-            imported_conversation::ImportedSpeaker,
-        >,
-        content: imported_conversation::ImportedTranscriptContent,
+        source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
+        content: ImportedTranscriptContent,
     },
     OriginAcceptedInput {
         accepted_input: AcceptedInputId,
@@ -38,7 +34,7 @@ pub enum SemanticTranscriptEntryPayload {
         spawning_request: ToolRequestId,
         parent_session: SessionId,
         parent_turn: TurnId,
-        content: session_delegation::DelegationContent,
+        content: DelegationContent,
     },
     DelegationMessage {
         spawning_request: ToolRequestId,
@@ -46,32 +42,32 @@ pub enum SemanticTranscriptEntryPayload {
         sender: SessionId,
         recipient: SessionId,
         delivery_sequence: nonzero::NonZeroU64,
-        content: session_delegation::DelegationContent,
+        content: DelegationContent,
     },
     DelegationResult {
         awaiting_request: ToolRequestId,
         spawning_request: ToolRequestId,
         child: SessionId,
-        mode: session_delegation::DelegationWaitMode,
+        mode: DelegationWaitMode,
         delivery_sequence: option::Option<nonzero::NonZeroU64>,
-        outcome: boxed::Box<session_delegation::DelegationOutcome>,
+        outcome: boxed::Box<DelegationOutcome>,
     },
     ModelIdentityChanged {
         turn: TurnId,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        selected: configuration::DirectModelSelection,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selected: DirectModelSelection,
     },
     ContextSummary {
         producing_call: ModelCallId,
-        summarized: context_compaction::ContextCompactionRange,
-        value: semantic_entry::AssistantText,
+        summarized: ContextCompactionRange,
+        value: AssistantText,
     },
     TurnFailed {
         turn: TurnId,
     },
     AssistantText {
         producing_call: ModelCallId,
-        value: semantic_entry::AssistantText,
+        value: AssistantText,
     },
     AssistantToolUse {
         producing_call: ModelCallId,
@@ -101,11 +97,11 @@ pub enum SemanticTranscriptEntryPayload {
 ```rust
 pub struct SemanticTranscriptEntry {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl semantic_entry::SemanticTranscriptEntry {
-    pub const fn identity(&self) -> context_frontier::SemanticTranscriptEntryId;
+impl SemanticTranscriptEntry {
+    pub const fn identity(&self) -> SemanticTranscriptEntryId;
     pub const fn source_session(&self) -> SessionId;
-    pub const fn payload(&self) -> &semantic_entry::SemanticTranscriptEntryPayload;
-    pub const fn reference(&self) -> context_frontier::SemanticTranscriptEntryRef;
+    pub const fn payload(&self) -> &SemanticTranscriptEntryPayload;
+    pub const fn reference(&self) -> SemanticTranscriptEntryRef;
 }
 ```
 
@@ -114,14 +110,14 @@ impl semantic_entry::SemanticTranscriptEntry {
 ```rust
 pub struct SemanticTranscriptEntryReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl semantic_entry::SemanticTranscriptEntryReconstitutionInput {
+impl SemanticTranscriptEntryReconstitutionInput {
     pub fn new(
-        identity: context_frontier::SemanticTranscriptEntryId,
+        identity: SemanticTranscriptEntryId,
         source_session: SessionId,
-        payload: semantic_entry::SemanticTranscriptEntryPayload,
+        payload: SemanticTranscriptEntryPayload,
     ) -> Self;
-    pub const fn identity(&self) -> context_frontier::SemanticTranscriptEntryId;
+    pub const fn identity(&self) -> SemanticTranscriptEntryId;
     pub const fn source_session(&self) -> SessionId;
-    pub const fn payload(&self) -> &semantic_entry::SemanticTranscriptEntryPayload;
+    pub const fn payload(&self) -> &SemanticTranscriptEntryPayload;
 }
 ```

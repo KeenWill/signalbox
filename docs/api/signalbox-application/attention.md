@@ -43,7 +43,7 @@ pub const fn max_attention_filter_utf8_bytes() -> u16;
 ```rust
 pub struct AttentionCursor(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl attention::AttentionCursor {
+impl AttentionCursor {
     pub const fn new(value: u64) -> Self;
     pub const fn value(self) -> u64;
 }
@@ -111,21 +111,21 @@ pub enum AttentionContinuation {
 ```rust
 pub struct AttentionQuery {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl attention::AttentionQuery {
+impl AttentionQuery {
     pub fn hot_page() -> Self;
     pub fn identity_page(after: option::Option<signalbox_domain::SessionId>) -> Self;
     pub fn try_new(
         search: option::Option<string::String>,
         required_tags: vec::Vec<string::String>,
         include_archived: bool,
-        sort: attention::AttentionSort,
-        continuation: option::Option<attention::AttentionContinuation>,
-    ) -> result::Result<Self, attention::AttentionQueryError>;
+        sort: AttentionSort,
+        continuation: option::Option<AttentionContinuation>,
+    ) -> result::Result<Self, AttentionQueryError>;
     pub fn search(&self) -> option::Option<&str>;
     pub fn required_tags(&self) -> impl exact_size::ExactSizeIterator<Item = &str>;
     pub const fn include_archived(&self) -> bool;
-    pub const fn sort(&self) -> attention::AttentionSort;
-    pub const fn continuation(&self) -> option::Option<&attention::AttentionContinuation>;
+    pub const fn sort(&self) -> AttentionSort;
+    pub const fn continuation(&self) -> option::Option<&AttentionContinuation>;
 }
 ```
 
@@ -141,10 +141,10 @@ pub enum AttentionQueryError {
     ContinuationSortMismatch,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for attention::AttentionQueryError {
+impl fmt::Display for AttentionQueryError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for attention::AttentionQueryError {}
+impl error::Error for AttentionQueryError {}
 ```
 
 ## AttentionAction
@@ -176,7 +176,7 @@ pub enum AttentionBlockedReason {
 ```rust
 pub struct AttentionGoalBlock {
     pub generation: u64,
-    pub reason: attention::AttentionBlockedReason,
+    pub reason: AttentionBlockedReason,
     pub need_summary: string::String,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -199,7 +199,7 @@ pub struct AttentionJudgeFacts {
 ```rust
 pub struct AttentionActivity {
     pub recorded_at: time::SystemTime,
-    pub kind: attention::AttentionActivityKind,
+    pub kind: AttentionActivityKind,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -228,12 +228,12 @@ pub struct AttentionSummary {
     pub current_turn: option::Option<signalbox_domain::TurnId>,
     pub active_turn_count: u64,
     pub queued_turn_count: u64,
-    pub state: attention::AttentionState,
-    pub lifecycle_state: attention::AttentionLifecycleState,
-    pub action: option::Option<attention::AttentionAction>,
-    pub goal_block: option::Option<attention::AttentionGoalBlock>,
-    pub judge: attention::AttentionJudgeFacts,
-    pub last_activity: attention::AttentionActivity,
+    pub state: AttentionState,
+    pub lifecycle_state: AttentionLifecycleState,
+    pub action: option::Option<AttentionAction>,
+    pub goal_block: option::Option<AttentionGoalBlock>,
+    pub judge: AttentionJudgeFacts,
+    pub last_activity: AttentionActivity,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -242,11 +242,11 @@ pub struct AttentionSummary {
 
 ```rust
 pub struct AttentionSnapshot {
-    pub cursor: attention::AttentionCursor,
+    pub cursor: AttentionCursor,
     pub total: u64,
-    pub sort: attention::AttentionSort,
-    pub summaries: vec::Vec<attention::AttentionSummary>,
-    pub continuation: option::Option<attention::AttentionContinuation>,
+    pub sort: AttentionSort,
+    pub summaries: vec::Vec<AttentionSummary>,
+    pub continuation: option::Option<AttentionContinuation>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -256,11 +256,11 @@ pub struct AttentionSnapshot {
 ```rust
 pub enum AttentionChanges {
     Updated {
-        cursor: attention::AttentionCursor,
-        summaries: vec::Vec<attention::AttentionSummary>,
+        cursor: AttentionCursor,
+        summaries: vec::Vec<AttentionSummary>,
     },
     ResyncRequired {
-        cursor: attention::AttentionCursor,
+        cursor: AttentionCursor,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -273,21 +273,15 @@ pub trait AttentionReader {
     type Error;
     pub fn snapshot(
         &self,
-        query: attention::AttentionQuery,
+        query: AttentionQuery,
     ) -> impl future::Future<
-        Output = result::Result<
-            attention::AttentionSnapshot,
-            <Self as attention::AttentionReader>::Error,
-        >,
+        Output = result::Result<AttentionSnapshot, <Self as AttentionReader>::Error>,
     > + marker::Send;
     pub fn changes_after(
         &self,
-        cursor: attention::AttentionCursor,
+        cursor: AttentionCursor,
     ) -> impl future::Future<
-        Output = result::Result<
-            attention::AttentionChanges,
-            <Self as attention::AttentionReader>::Error,
-        >,
+        Output = result::Result<AttentionChanges, <Self as AttentionReader>::Error>,
     > + marker::Send;
 }
 ```

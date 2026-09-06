@@ -41,7 +41,7 @@ pub enum SessionLiveActiveState {
 ```rust
 pub struct SessionLiveActiveTurn {
     pub turn: signalbox_domain::TurnId,
-    pub state: session_live::SessionLiveActiveState,
+    pub state: SessionLiveActiveState,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -93,8 +93,8 @@ pub enum SessionLiveRunnerConnectionHealth {
 pub struct SessionLiveRunner {
     pub runner: option::Option<signalbox_domain::RunnerId>,
     pub placement_revision: u64,
-    pub state: session_live::SessionLiveRunnerState,
-    pub connection_health: option::Option<session_live::SessionLiveRunnerConnectionHealth>,
+    pub state: SessionLiveRunnerState,
+    pub connection_health: option::Option<SessionLiveRunnerConnectionHealth>,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -105,11 +105,11 @@ pub struct SessionLiveRunner {
 pub struct SessionLiveSnapshot {
     pub session: signalbox_domain::SessionId,
     pub observed_through: u64,
-    pub active: option::Option<session_live::SessionLiveActiveTurn>,
+    pub active: option::Option<SessionLiveActiveTurn>,
     pub queued_turn_count: u64,
     pub queued_turns: vec::Vec<signalbox_domain::TurnId>,
-    pub reconciliation: option::Option<session_live::SessionLiveReconciliation>,
-    pub runner: option::Option<session_live::SessionLiveRunner>,
+    pub reconciliation: option::Option<SessionLiveReconciliation>,
+    pub runner: option::Option<SessionLiveRunner>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -124,8 +124,8 @@ pub trait SessionLiveReader {
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<session_live::SessionLiveSnapshot>,
-            <Self as session_live::SessionLiveReader>::Error,
+            option::Option<SessionLiveSnapshot>,
+            <Self as SessionLiveReader>::Error,
         >,
     > + marker::Send;
 }
@@ -136,16 +136,13 @@ pub trait SessionLiveReader {
 ```rust
 pub struct ReadSessionLiveService<Reader> {/* private */}
 // derives: fmt::Debug
-impl<Reader> session_live::ReadSessionLiveService<Reader> {
+impl<Reader> ReadSessionLiveService<Reader> {
     pub const fn new(reader: Reader) -> Self;
 }
-impl<Reader: session_live::SessionLiveReader> session_live::ReadSessionLiveService<Reader> {
+impl<Reader: SessionLiveReader> ReadSessionLiveService<Reader> {
     pub async fn snapshot(
         &self,
         session: signalbox_domain::SessionId,
-    ) -> result::Result<
-        option::Option<session_live::SessionLiveSnapshot>,
-        <Reader as session_live::SessionLiveReader>::Error,
-    >;
+    ) -> result::Result<option::Option<SessionLiveSnapshot>, <Reader as SessionLiveReader>::Error>;
 }
 ```

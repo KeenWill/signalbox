@@ -2,48 +2,6 @@
 
 # repo_watch: types-2
 
-## RepoWatchRule
-
-```rust
-pub struct RepoWatchRule {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl repo_watch::RepoWatchRule {
-    pub fn try_new(
-        id: repo_watch::RepoWatchRuleId,
-        version: repo_watch::RepoWatchRuleVersion,
-        matcher: repo_watch::RepoWatchMatcherV1,
-        actions: vec::Vec<repo_watch::RepoWatchRuleActionV1>,
-        singleton_per: repo_watch::RepoWatchSingletonScope,
-        cooldown: time::Duration,
-    ) -> result::Result<Self, repo_watch::RepoWatchRuleValidationError>;
-    pub const fn id(&self) -> &repo_watch::RepoWatchRuleId;
-    pub const fn version(&self) -> repo_watch::RepoWatchRuleVersion;
-    pub const fn matcher(&self) -> &repo_watch::RepoWatchMatcherV1;
-    pub fn actions(&self) -> &[repo_watch::RepoWatchRuleActionV1];
-    pub const fn singleton_per(&self) -> repo_watch::RepoWatchSingletonScope;
-    pub const fn cooldown(&self) -> time::Duration;
-    pub fn content_digest(&self) -> repo_watch::RepoWatchRuleContentDigest;
-    pub fn identity_field_digests(
-        &self,
-    ) -> vec::Vec<(
-        repo_watch::RepoWatchRuleIdentityField,
-        repo_watch::RepoWatchRuleIdentityFieldDigest,
-    )>;
-    pub fn required_context_shapes(&self) -> vec::Vec<repo_watch::RepoWatchDispatchContextShape>;
-    pub fn validate_template_contexts(
-        &self,
-        declarations: &[repo_watch::RepoWatchTemplateContextDeclaration],
-    ) -> result::Result<(), repo_watch::RepoWatchRuleValidationError>;
-    pub fn actions_for_event(
-        &self,
-        event: &repo_watch::RepoWatchEvent,
-    ) -> result::Result<
-        vec::Vec<repo_watch::RepoWatchActionV1>,
-        repo_watch::RepoWatchDispatchContextError,
-    >;
-}
-```
-
 ## RepoWatchRuleValidationError
 
 ```rust
@@ -51,19 +9,19 @@ pub enum RepoWatchRuleValidationError {
     NoActions,
     SubsecondCooldown,
     BranchEventWithPullRequestSingleton {
-        scope: repo_watch::RepoWatchSingletonScope,
+        scope: RepoWatchSingletonScope,
     },
     TemplateNotDeclared {
-        template: session_template::SessionTemplateName,
+        template: SessionTemplateName,
     },
     TemplateRejectsContext {
-        template: session_template::SessionTemplateName,
-        shape: repo_watch::RepoWatchDispatchContextShape,
+        template: SessionTemplateName,
+        shape: RepoWatchDispatchContextShape,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for repo_watch::RepoWatchRuleValidationError {
+impl fmt::Display for RepoWatchRuleValidationError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for repo_watch::RepoWatchRuleValidationError {}
+impl error::Error for RepoWatchRuleValidationError {}
 ```

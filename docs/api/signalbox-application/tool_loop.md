@@ -7,8 +7,8 @@
 ```rust
 pub struct ToolInputSchema(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_loop::ToolInputSchema {
-    pub fn try_new(value: string::String) -> result::Result<Self, tool_loop::ToolInputSchemaError>;
+impl ToolInputSchema {
+    pub fn try_new(value: string::String) -> result::Result<Self, ToolInputSchemaError>;
     pub fn as_str(&self) -> &str;
 }
 ```
@@ -29,10 +29,10 @@ pub enum ToolInputSchemaFailure {
 ```rust
 pub struct ToolInputSchemaError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_loop::ToolInputSchemaError {
+impl ToolInputSchemaError {
     pub fn value(&self) -> &str;
-    pub const fn failure(&self) -> tool_loop::ToolInputSchemaFailure;
-    pub fn into_parts(self) -> (string::String, tool_loop::ToolInputSchemaFailure);
+    pub const fn failure(&self) -> ToolInputSchemaFailure;
+    pub fn into_parts(self) -> (string::String, ToolInputSchemaFailure);
 }
 ```
 
@@ -41,17 +41,17 @@ impl tool_loop::ToolInputSchemaError {
 ```rust
 pub struct ToolDefinition {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_loop::ToolDefinition {
+impl ToolDefinition {
     pub const fn new(
         name: tool::ToolName,
         description: string::String,
-        input_schema: tool_loop::ToolInputSchema,
+        input_schema: ToolInputSchema,
         permission_default: tool::ToolPermissionDefault,
         effect_class: tool::ToolEffectClass,
     ) -> Self;
     pub const fn name(&self) -> &tool::ToolName;
     pub fn description(&self) -> &str;
-    pub const fn input_schema(&self) -> &tool_loop::ToolInputSchema;
+    pub const fn input_schema(&self) -> &ToolInputSchema;
     pub const fn permission_default(&self) -> tool::ToolPermissionDefault;
     pub const fn with_approval_posture(self, posture: tool::ToolApprovalPosture) -> Self;
     pub const fn approval_posture(&self) -> option::Option<tool::ToolApprovalPosture>;
@@ -70,9 +70,9 @@ pub trait ToolArgumentValidator: marker::Send + marker::Sync {
     pub fn preauthorization(
         &self,
         _arguments: &tool::NormalizedToolArguments,
-    ) -> result::Result<tool_loop::ToolPreauthorization, tool_attempt::ToolExecutionErrorDetail>;
+    ) -> result::Result<ToolPreauthorization, tool_attempt::ToolExecutionErrorDetail>;
 }
-impl<Validate> tool_loop::ToolArgumentValidator for Validate
+impl<Validate> ToolArgumentValidator for Validate
 where
     Validate: function::Fn(
             &tool::NormalizedToolArguments,
@@ -108,15 +108,13 @@ pub enum ToolPreauthorization {
 ```rust
 pub struct CompiledTool {/* private */}
 // derives: clone::Clone
-impl fmt::Debug for tool_loop::CompiledTool {
+impl fmt::Debug for CompiledTool {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl tool_loop::CompiledTool {
-    pub fn new(
-        definition: tool_loop::ToolDefinition,
-        validator: impl tool_loop::ToolArgumentValidator + 'static,
-    ) -> Self;
-    pub const fn definition(&self) -> &tool_loop::ToolDefinition;
+impl CompiledTool {
+    pub fn new(definition: ToolDefinition, validator: impl ToolArgumentValidator + 'static)
+        -> Self;
+    pub const fn definition(&self) -> &ToolDefinition;
 }
 ```
 
@@ -125,7 +123,7 @@ impl tool_loop::CompiledTool {
 ```rust
 pub struct DuplicateToolDefinition {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_loop::DuplicateToolDefinition {
+impl DuplicateToolDefinition {
     pub const fn name(&self) -> &tool::ToolName;
 }
 ```
@@ -135,24 +133,24 @@ impl tool_loop::DuplicateToolDefinition {
 ```rust
 pub struct CompiledToolCatalog {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default
-impl tool_loop::CompiledToolCatalog {
+impl CompiledToolCatalog {
     pub fn try_new(
-        tools: impl collect::IntoIterator<Item = tool_loop::CompiledTool>,
-    ) -> result::Result<Self, tool_loop::DuplicateToolDefinition>;
+        tools: impl collect::IntoIterator<Item = CompiledTool>,
+    ) -> result::Result<Self, DuplicateToolDefinition>;
 }
-impl tool_loop::ToolCatalog for tool_loop::CompiledToolCatalog {
-    pub fn definitions(&self) -> boxed::Box<[tool_loop::ToolDefinition]>;
-    pub fn definition(&self, name: &tool::ToolName) -> option::Option<tool_loop::ToolDefinition>;
+impl ToolCatalog for CompiledToolCatalog {
+    pub fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
+    pub fn definition(&self, name: &tool::ToolName) -> option::Option<ToolDefinition>;
     pub fn validate_arguments(
         &self,
         name: &tool::ToolName,
         arguments: &tool::NormalizedToolArguments,
-    ) -> result::Result<(), tool_loop::ToolCatalogValidationFailure>;
+    ) -> result::Result<(), ToolCatalogValidationFailure>;
     pub fn preauthorization(
         &self,
         name: &tool::ToolName,
         arguments: &tool::NormalizedToolArguments,
-    ) -> result::Result<tool_loop::ToolPreauthorization, tool_loop::ToolCatalogValidationFailure>;
+    ) -> result::Result<ToolPreauthorization, ToolCatalogValidationFailure>;
 }
 ```
 
@@ -160,18 +158,18 @@ impl tool_loop::ToolCatalog for tool_loop::CompiledToolCatalog {
 
 ```rust
 pub trait ToolCatalog: marker::Send + marker::Sync {
-    pub fn definitions(&self) -> boxed::Box<[tool_loop::ToolDefinition]>;
-    pub fn definition(&self, name: &tool::ToolName) -> option::Option<tool_loop::ToolDefinition>;
+    pub fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
+    pub fn definition(&self, name: &tool::ToolName) -> option::Option<ToolDefinition>;
     pub fn validate_arguments(
         &self,
         name: &tool::ToolName,
         arguments: &tool::NormalizedToolArguments,
-    ) -> result::Result<(), tool_loop::ToolCatalogValidationFailure>;
+    ) -> result::Result<(), ToolCatalogValidationFailure>;
     pub fn preauthorization(
         &self,
         _name: &tool::ToolName,
         _arguments: &tool::NormalizedToolArguments,
-    ) -> result::Result<tool_loop::ToolPreauthorization, tool_loop::ToolCatalogValidationFailure>;
+    ) -> result::Result<ToolPreauthorization, ToolCatalogValidationFailure>;
 }
 ```
 
@@ -180,14 +178,14 @@ pub trait ToolCatalog: marker::Send + marker::Sync {
 ```rust
 pub struct NoToolCatalog;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl tool_loop::ToolCatalog for tool_loop::NoToolCatalog {
-    pub fn definitions(&self) -> boxed::Box<[tool_loop::ToolDefinition]>;
-    pub fn definition(&self, _name: &tool::ToolName) -> option::Option<tool_loop::ToolDefinition>;
+impl ToolCatalog for NoToolCatalog {
+    pub fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
+    pub fn definition(&self, _name: &tool::ToolName) -> option::Option<ToolDefinition>;
     pub fn validate_arguments(
         &self,
         _name: &tool::ToolName,
         _arguments: &tool::NormalizedToolArguments,
-    ) -> result::Result<(), tool_loop::ToolCatalogValidationFailure>;
+    ) -> result::Result<(), ToolCatalogValidationFailure>;
 }
 ```
 
@@ -208,16 +206,13 @@ pub enum ToolCatalogValidationFailure {
 ```rust
 pub struct ToolExecutionInvocation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_loop::ToolExecutionInvocation {
+impl ToolExecutionInvocation {
     pub const fn request(&self) -> &tool::ToolRequest;
     pub const fn dispatch_authority(&self) -> &tool_attempt::ToolDispatchAuthority;
-    pub const fn definition(&self) -> &tool_loop::ToolDefinition;
+    pub const fn definition(&self) -> &ToolDefinition;
     pub const fn correlation(&self) -> tool_attempt::ToolAttemptDispatchCorrelation;
-    pub fn bind(
-        self,
-        evidence: tool_loop::ToolExecutorEvidence,
-    ) -> tool_loop::CorrelatedToolExecutorEvidence;
-    pub fn durable_completion(self) -> tool_loop::CorrelatedDurableToolCompletion;
+    pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence;
+    pub fn durable_completion(self) -> CorrelatedDurableToolCompletion;
 }
 ```
 
@@ -239,9 +234,9 @@ pub enum ToolExecutorEvidence {
 ```rust
 pub struct CorrelatedToolExecutorEvidence {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_loop::CorrelatedToolExecutorEvidence {
+impl CorrelatedToolExecutorEvidence {
     pub const fn correlation(&self) -> tool_attempt::ToolAttemptDispatchCorrelation;
-    pub const fn evidence(&self) -> &tool_loop::ToolExecutorEvidence;
+    pub const fn evidence(&self) -> &ToolExecutorEvidence;
 }
 ```
 
@@ -250,7 +245,7 @@ impl tool_loop::CorrelatedToolExecutorEvidence {
 ```rust
 pub struct CorrelatedDurableToolCompletion {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_loop::CorrelatedDurableToolCompletion {
+impl CorrelatedDurableToolCompletion {
     pub const fn correlation(self) -> tool_attempt::ToolAttemptDispatchCorrelation;
 }
 ```
@@ -260,7 +255,7 @@ impl tool_loop::CorrelatedDurableToolCompletion {
 ```rust
 pub struct CorrelatedDurableChildWait {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl tool_loop::CorrelatedDurableChildWait {
+impl CorrelatedDurableChildWait {
     pub fn try_new(
         correlation: tool_attempt::ToolAttemptDispatchCorrelation,
         wait: session_delegation::DelegationWait,
@@ -275,9 +270,9 @@ impl tool_loop::CorrelatedDurableChildWait {
 
 ```rust
 pub enum ToolExecutorDisposition {
-    Completed(tool_loop::CorrelatedToolExecutorEvidence),
-    DurableCompletion(tool_loop::CorrelatedDurableToolCompletion),
-    DurableChildWait(tool_loop::CorrelatedDurableChildWait),
+    Completed(CorrelatedToolExecutorEvidence),
+    DurableCompletion(CorrelatedDurableToolCompletion),
+    DurableChildWait(CorrelatedDurableChildWait),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -286,24 +281,18 @@ pub enum ToolExecutorDisposition {
 
 ```rust
 pub trait ToolExecutor {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure;
     pub fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: ToolExecutionInvocation,
     ) -> impl future::Future<
-        Output = result::Result<
-            tool_loop::CorrelatedToolExecutorEvidence,
-            <Self as tool_loop::ToolExecutor>::Error,
-        >,
+        Output = result::Result<CorrelatedToolExecutorEvidence, <Self as ToolExecutor>::Error>,
     > + marker::Send;
     pub fn execute_with_scheduling(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: ToolExecutionInvocation,
     ) -> impl future::Future<
-        Output = result::Result<
-            tool_loop::ToolExecutorDisposition,
-            <Self as tool_loop::ToolExecutor>::Error,
-        >,
+        Output = result::Result<ToolExecutorDisposition, <Self as ToolExecutor>::Error>,
     > + marker::Send
     where
         Self: marker::Send;
@@ -336,10 +325,10 @@ pub trait ToolExecutionIdGenerator {
 ```rust
 pub struct UuidV7ToolLoopIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl tool_loop::ToolApprovalIdGenerator for tool_loop::UuidV7ToolLoopIdGenerator {
+impl ToolApprovalIdGenerator for UuidV7ToolLoopIdGenerator {
     pub fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
-impl tool_loop::ToolExecutionIdGenerator for tool_loop::UuidV7ToolLoopIdGenerator {
+impl ToolExecutionIdGenerator for UuidV7ToolLoopIdGenerator {
     pub fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
     pub fn next_tool_attempt_id(&mut self) -> signalbox_domain::ToolAttemptId;
     pub fn next_tool_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
@@ -353,21 +342,21 @@ impl tool_loop::ToolExecutionIdGenerator for tool_loop::UuidV7ToolLoopIdGenerato
 
 ```rust
 pub struct DecideToolRequestService<Ids, Transaction> {/* private */}
-impl<Ids, Transaction> tool_loop::DecideToolRequestService<Ids, Transaction> {
+impl<Ids, Transaction> DecideToolRequestService<Ids, Transaction> {
     pub const fn new(ids: Ids, transaction: Transaction) -> Self;
     pub fn into_parts(self) -> (Ids, Transaction);
 }
-impl<Ids, Transaction> tool_loop::DecideToolRequestService<Ids, Transaction>
+impl<Ids, Transaction> DecideToolRequestService<Ids, Transaction>
 where
-    Ids: tool_loop::ToolApprovalIdGenerator + marker::Send,
-    Transaction: tool_loop_ports::DecideToolRequestTransaction,
+    Ids: ToolApprovalIdGenerator + marker::Send,
+    Transaction: DecideToolRequestTransaction,
 {
     pub async fn execute(
         &mut self,
         command: tool::DecideToolRequest,
     ) -> result::Result<
         tool::PreparedDecideToolRequest,
-        <Transaction as tool_loop_ports::DecideToolRequestTransaction>::Error,
+        <Transaction as DecideToolRequestTransaction>::Error,
     >;
 }
 ```
@@ -376,20 +365,20 @@ where
 
 ```rust
 pub struct OverrideDeniedToolRequestService<Transaction> {/* private */}
-impl<Transaction> tool_loop::OverrideDeniedToolRequestService<Transaction> {
+impl<Transaction> OverrideDeniedToolRequestService<Transaction> {
     pub const fn new(transaction: Transaction) -> Self;
     pub fn into_transaction(self) -> Transaction;
 }
-impl<Transaction> tool_loop::OverrideDeniedToolRequestService<Transaction>
+impl<Transaction> OverrideDeniedToolRequestService<Transaction>
 where
-    Transaction: tool_loop_ports::OverrideDeniedToolRequestTransaction,
+    Transaction: OverrideDeniedToolRequestTransaction,
 {
     pub async fn execute(
         &mut self,
         command: tool::OverrideDeniedToolRequest,
     ) -> result::Result<
         tool::PreparedOverrideDeniedToolRequest,
-        <Transaction as tool_loop_ports::OverrideDeniedToolRequestTransaction>::Error,
+        <Transaction as OverrideDeniedToolRequestTransaction>::Error,
     >;
 }
 ```
@@ -398,7 +387,7 @@ where
 
 ```rust
 pub struct RetainedToolExecutionState {/* private */}
-impl fmt::Debug for tool_loop::RetainedToolExecutionState {
+impl fmt::Debug for RetainedToolExecutionState {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
@@ -455,7 +444,7 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     ChildWaitMismatch,
     CrashClassification(TransactionError),
     RecoveredFatalExecutorFailure {
-        failure_class: operator_failure::OperatorFailureClass,
+        failure_class: OperatorFailureClass,
         cause_code: &'static str,
     },
     Continuation(TransactionError),
@@ -463,7 +452,7 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
 }
 // derives: fmt::Debug
 impl<TransactionError, ExecutorError> fmt::Display
-    for tool_loop::ToolExecutionServiceError<TransactionError, ExecutorError>
+    for ToolExecutionServiceError<TransactionError, ExecutorError>
 where
     TransactionError: fmt::Display,
     ExecutorError: fmt::Display,
@@ -471,20 +460,20 @@ where
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<TransactionError, ExecutorError> error::Error
-    for tool_loop::ToolExecutionServiceError<TransactionError, ExecutorError>
+    for ToolExecutionServiceError<TransactionError, ExecutorError>
 where
     TransactionError: error::Error + 'static,
     ExecutorError: error::Error + 'static,
 {
     pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl<TransactionError, ExecutorError> operator_failure::ClassifyOperatorFailure
-    for tool_loop::ToolExecutionServiceError<TransactionError, ExecutorError>
+impl<TransactionError, ExecutorError> ClassifyOperatorFailure
+    for ToolExecutionServiceError<TransactionError, ExecutorError>
 where
-    TransactionError: operator_failure::ClassifyOperatorFailure,
-    ExecutorError: operator_failure::ClassifyOperatorFailure,
+    TransactionError: ClassifyOperatorFailure,
+    ExecutorError: ClassifyOperatorFailure,
 {
-    pub fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    pub fn operator_failure_class(&self) -> OperatorFailureClass;
     pub fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```
@@ -494,22 +483,22 @@ where
 ```rust
 pub struct ToolExecutionService<Ids, Transaction, Catalog, Executor> {/* private */}
 impl<Ids, Transaction, Catalog, Executor>
-    tool_loop::ToolExecutionService<Ids, Transaction, Catalog, Executor>
+    ToolExecutionService<Ids, Transaction, Catalog, Executor>
 {
     pub const fn new(
         ids: Ids,
         transaction: Transaction,
         catalog: Catalog,
         executor: Executor,
-        gate: tool_dispatch_gate::InProcessToolDispatchGate,
+        gate: InProcessToolDispatchGate,
     ) -> Self;
     pub const fn from_parts(
         ids: Ids,
         transaction: Transaction,
         catalog: Catalog,
         executor: Executor,
-        gate: tool_dispatch_gate::InProcessToolDispatchGate,
-        retained_state: option::Option<tool_loop::RetainedToolExecutionState>,
+        gate: InProcessToolDispatchGate,
+        retained_state: option::Option<RetainedToolExecutionState>,
     ) -> Self;
     pub fn into_parts(
         self,
@@ -518,28 +507,27 @@ impl<Ids, Transaction, Catalog, Executor>
         Transaction,
         Catalog,
         Executor,
-        tool_dispatch_gate::InProcessToolDispatchGate,
-        option::Option<tool_loop::RetainedToolExecutionState>,
+        InProcessToolDispatchGate,
+        option::Option<RetainedToolExecutionState>,
     );
-    pub const fn retained_state(&self) -> option::Option<&tool_loop::RetainedToolExecutionState>;
+    pub const fn retained_state(&self) -> option::Option<&RetainedToolExecutionState>;
 }
-impl<Ids, Transaction, Catalog, Executor>
-    tool_loop::ToolExecutionService<Ids, Transaction, Catalog, Executor>
+impl<Ids, Transaction, Catalog, Executor> ToolExecutionService<Ids, Transaction, Catalog, Executor>
 where
-    Ids: tool_loop::ToolExecutionIdGenerator + marker::Send,
-    Transaction: tool_loop_ports::ToolExecutionTransaction,
-    Catalog: tool_loop::ToolCatalog,
-    Executor: tool_loop::ToolExecutor + marker::Send,
+    Ids: ToolExecutionIdGenerator + marker::Send,
+    Transaction: ToolExecutionTransaction,
+    Catalog: ToolCatalog,
+    Executor: ToolExecutor + marker::Send,
 {
     pub async fn execute(
         &mut self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
     ) -> result::Result<
-        tool_loop::ToolExecutionServiceOutcome,
-        tool_loop::ToolExecutionServiceError<
-            <Transaction as tool_loop_ports::ToolExecutionTransaction>::Error,
-            <Executor as tool_loop::ToolExecutor>::Error,
+        ToolExecutionServiceOutcome,
+        ToolExecutionServiceError<
+            <Transaction as ToolExecutionTransaction>::Error,
+            <Executor as ToolExecutor>::Error,
         >,
     >;
 }

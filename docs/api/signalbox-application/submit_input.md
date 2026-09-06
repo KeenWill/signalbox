@@ -6,17 +6,17 @@
 
 ```rust
 pub enum SubmitInputRequestError {
-    InvalidCommandId(create_session::InvalidDurableCommandId),
+    InvalidCommandId(InvalidDurableCommandId),
     OversizedContent {
         utf8_byte_length: usize,
         max_utf8_bytes: usize,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for submit_input::SubmitInputRequestError {
+impl fmt::Display for SubmitInputRequestError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for submit_input::SubmitInputRequestError {}
+impl error::Error for SubmitInputRequestError {}
 ```
 
 ## SubmitInputRequest
@@ -24,20 +24,20 @@ impl error::Error for submit_input::SubmitInputRequestError {}
 ```rust
 pub struct SubmitInputRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl submit_input::SubmitInputRequest {
+impl SubmitInputRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
         content: user_content::UserContent,
         delivery: delivery_request::DeliveryRequest,
-    ) -> result::Result<Self, submit_input::SubmitInputRequestError>;
+    ) -> result::Result<Self, SubmitInputRequestError>;
     pub fn try_new_with_content_limit(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
         content: user_content::UserContent,
         delivery: delivery_request::DeliveryRequest,
         max_content_utf8_bytes: option::Option<usize>,
-    ) -> result::Result<Self, submit_input::SubmitInputRequestError>;
+    ) -> result::Result<Self, SubmitInputRequestError>;
     pub fn try_new_core_interrupt(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
@@ -45,7 +45,7 @@ impl submit_input::SubmitInputRequest {
         expected_active_turn: signalbox_domain::TurnId,
         descendant_scope: session_delegation::DescendantTerminationScope,
         configuration: delivery_request::PerInputConfigurationChoices,
-    ) -> result::Result<Self, submit_input::SubmitInputRequestError>;
+    ) -> result::Result<Self, SubmitInputRequestError>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn content(&self) -> &user_content::UserContent;
@@ -71,7 +71,7 @@ pub trait SubmitInputIdGenerator {
 ```rust
 pub struct UuidV7SubmitInputIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl submit_input::SubmitInputIdGenerator for submit_input::UuidV7SubmitInputIdGenerator {
+impl SubmitInputIdGenerator for UuidV7SubmitInputIdGenerator {
     pub fn next_accepted_input_id(&mut self) -> signalbox_domain::AcceptedInputId;
     pub fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
     pub fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
@@ -109,10 +109,7 @@ pub trait SubmitInputTransaction {
         next_closure_decision: NextClosureDecision,
         next_closure_attempt: NextClosureAttempt,
     ) -> impl future::Future<
-        Output = result::Result<
-            submit_input::SubmitInputOutcome,
-            <Self as submit_input::SubmitInputTransaction>::Error,
-        >,
+        Output = result::Result<SubmitInputOutcome, <Self as SubmitInputTransaction>::Error>,
     > + marker::Send
     where
         NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId
@@ -133,36 +130,24 @@ pub trait SubmitInputTransaction {
 ```rust
 pub struct SubmitInputService<Generator, Transaction, Nudge> {/* private */}
 // derives: fmt::Debug
-impl<Generator, Transaction, Nudge>
-    submit_input::SubmitInputService<Generator, Transaction, Nudge>
-{
+impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge> {
     pub const fn new(
         ids: Generator,
         transaction: Transaction,
         nudge: Nudge,
-        tool_dispatch_gate: tool_dispatch_gate::InProcessToolDispatchGate,
+        tool_dispatch_gate: InProcessToolDispatchGate,
     ) -> Self;
-    pub fn into_parts(
-        self,
-    ) -> (
-        Generator,
-        Transaction,
-        Nudge,
-        tool_dispatch_gate::InProcessToolDispatchGate,
-    );
+    pub fn into_parts(self) -> (Generator, Transaction, Nudge, InProcessToolDispatchGate);
 }
-impl<Generator, Transaction, Nudge> submit_input::SubmitInputService<Generator, Transaction, Nudge>
+impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge>
 where
-    Generator: submit_input::SubmitInputIdGenerator + marker::Send,
-    Transaction: submit_input::SubmitInputTransaction,
-    Nudge: scheduler::EligibilityNudge,
+    Generator: SubmitInputIdGenerator + marker::Send,
+    Transaction: SubmitInputTransaction,
+    Nudge: EligibilityNudge,
 {
     pub async fn execute(
         &mut self,
-        request: submit_input::SubmitInputRequest,
-    ) -> result::Result<
-        submit_input::SubmitInputOutcome,
-        <Transaction as submit_input::SubmitInputTransaction>::Error,
-    >;
+        request: SubmitInputRequest,
+    ) -> result::Result<SubmitInputOutcome, <Transaction as SubmitInputTransaction>::Error>;
 }
 ```

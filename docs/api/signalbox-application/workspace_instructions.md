@@ -7,7 +7,7 @@
 ```rust
 pub struct InstructionDiscoveryRoot {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl workspace_instructions::InstructionDiscoveryRoot {
+impl InstructionDiscoveryRoot {
     pub const fn new(
         kind: workspace_instruction::InstructionDiscoveryRootKind,
         path: workspace_instruction::InstructionPath,
@@ -26,7 +26,7 @@ pub enum InstructionDiscoveryFindingKind {
     NonUtf8SourcePath,
     NonUtf8Source,
     InvalidSkill,
-    LimitReached(workspace_instructions::InstructionDiscoveryLimitKind),
+    LimitReached(InstructionDiscoveryLimitKind),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -48,9 +48,9 @@ pub enum InstructionDiscoveryLimitKind {
 ```rust
 pub struct InstructionDiscoveryFinding {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl workspace_instructions::InstructionDiscoveryFinding {
+impl InstructionDiscoveryFinding {
     pub const fn path(&self) -> &workspace_instruction::InstructionPath;
-    pub const fn kind(&self) -> workspace_instructions::InstructionDiscoveryFindingKind;
+    pub const fn kind(&self) -> InstructionDiscoveryFindingKind;
 }
 ```
 
@@ -59,10 +59,10 @@ impl workspace_instructions::InstructionDiscoveryFinding {
 ```rust
 pub struct InstructionDiscoverySnapshot {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl workspace_instructions::InstructionDiscoverySnapshot {
-    pub fn roots(&self) -> &[workspace_instructions::InstructionDiscoveryRoot];
+impl InstructionDiscoverySnapshot {
+    pub fn roots(&self) -> &[InstructionDiscoveryRoot];
     pub fn bundles(&self) -> &[workspace_instruction::InstructionBundleRegistration];
-    pub fn findings(&self) -> &[workspace_instructions::InstructionDiscoveryFinding];
+    pub fn findings(&self) -> &[InstructionDiscoveryFinding];
     pub const fn limit_set_version(&self) -> u16;
     pub const fn classified_entries(&self) -> u64;
     pub const fn candidate_source_bytes(&self) -> u64;
@@ -75,6 +75,6 @@ impl workspace_instructions::InstructionDiscoverySnapshot {
 
 ```rust
 pub fn discover_workspace_instructions(
-    roots: vec::Vec<workspace_instructions::InstructionDiscoveryRoot>,
-) -> workspace_instructions::InstructionDiscoverySnapshot;
+    roots: vec::Vec<InstructionDiscoveryRoot>,
+) -> InstructionDiscoverySnapshot;
 ```

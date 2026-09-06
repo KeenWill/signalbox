@@ -7,16 +7,16 @@
 ```rust
 pub struct BlobDigest(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl blob::BlobDigest {
+impl BlobDigest {
     pub const fn from_bytes(bytes: [u8; 32]) -> Self;
     pub const fn as_bytes(&self) -> &[u8; 32];
     pub fn digest(bytes: &[u8]) -> Self;
 }
-impl fmt::Display for blob::BlobDigest {
+impl fmt::Display for BlobDigest {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl traits::FromStr for blob::BlobDigest {
-    type Err = blob::BlobDigestParseError;
+impl traits::FromStr for BlobDigest {
+    type Err = BlobDigestParseError;
     pub fn from_str(value: &str) -> result::Result<Self, <Self as traits::FromStr>::Err>;
 }
 ```
@@ -30,7 +30,7 @@ pub enum BlobDigestParseFailure {
     InvalidHex,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for blob::BlobDigestParseFailure {
+impl fmt::Display for BlobDigestParseFailure {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
@@ -40,14 +40,14 @@ impl fmt::Display for blob::BlobDigestParseFailure {
 ```rust
 pub struct BlobDigestParseError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl blob::BlobDigestParseError {
+impl BlobDigestParseError {
     pub fn rejected(&self) -> &str;
-    pub const fn failure(&self) -> blob::BlobDigestParseFailure;
+    pub const fn failure(&self) -> BlobDigestParseFailure;
 }
-impl fmt::Display for blob::BlobDigestParseError {
+impl fmt::Display for BlobDigestParseError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for blob::BlobDigestParseError {}
+impl error::Error for BlobDigestParseError {}
 ```
 
 ## BlobTransformationName
@@ -55,10 +55,10 @@ impl error::Error for blob::BlobDigestParseError {}
 ```rust
 pub struct BlobTransformationName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl blob::BlobTransformationName {
+impl BlobTransformationName {
     pub fn try_new(
         value: impl convert::Into<sync::Arc<str>>,
-    ) -> result::Result<Self, blob::BlobTransformationError>;
+    ) -> result::Result<Self, BlobTransformationError>;
     pub fn as_str(&self) -> &str;
 }
 ```
@@ -68,13 +68,13 @@ impl blob::BlobTransformationName {
 ```rust
 pub struct BlobTransformation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl blob::BlobTransformation {
+impl BlobTransformation {
     pub fn try_new(
-        name: blob::BlobTransformationName,
+        name: BlobTransformationName,
         version: u32,
         parameters: &value::Value,
-    ) -> result::Result<Self, blob::BlobTransformationError>;
-    pub const fn name(&self) -> &blob::BlobTransformationName;
+    ) -> result::Result<Self, BlobTransformationError>;
+    pub const fn name(&self) -> &BlobTransformationName;
     pub const fn version(&self) -> nonzero::NonZeroU32;
     pub fn parameters_json(&self) -> &str;
 }
@@ -90,10 +90,10 @@ pub enum BlobTransformationError {
     ParametersTooLarge,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for blob::BlobTransformationError {
+impl fmt::Display for BlobTransformationError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for blob::BlobTransformationError {}
+impl error::Error for BlobTransformationError {}
 ```
 
 ## BlobDerivationProducer
@@ -101,11 +101,11 @@ impl error::Error for blob::BlobTransformationError {}
 ```rust
 pub enum BlobDerivationProducer {
     Deterministic {
-        implementation: blob::BlobDigest,
+        implementation: BlobDigest,
     },
     Executed {
         execution_id: uuid::Uuid,
-        implementation: blob::BlobDigest,
+        implementation: BlobDigest,
     },
     ModelDerived {
         model_call: ModelCallId,
@@ -119,13 +119,13 @@ pub enum BlobDerivationProducer {
 ```rust
 pub struct DeterministicBlobDerivationKey(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl blob::DeterministicBlobDerivationKey {
+impl DeterministicBlobDerivationKey {
     pub fn try_derive(
-        inputs: &[blob::BlobDigest],
-        transformation: &blob::BlobTransformation,
-        implementation: blob::BlobDigest,
-    ) -> result::Result<Self, blob::BlobDerivationError>;
-    pub const fn digest(self) -> blob::BlobDigest;
+        inputs: &[BlobDigest],
+        transformation: &BlobTransformation,
+        implementation: BlobDigest,
+    ) -> result::Result<Self, BlobDerivationError>;
+    pub const fn digest(self) -> BlobDigest;
 }
 ```
 
@@ -134,20 +134,20 @@ impl blob::DeterministicBlobDerivationKey {
 ```rust
 pub struct BlobDerivation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl blob::BlobDerivation {
+impl BlobDerivation {
     pub fn try_new(
         id: BlobDerivationId,
-        inputs: impl convert::Into<boxed::Box<[blob::BlobDigest]>>,
-        transformation: blob::BlobTransformation,
-        producer: blob::BlobDerivationProducer,
-        outputs: impl convert::Into<boxed::Box<[blob::BlobDigest]>>,
-    ) -> result::Result<Self, blob::BlobDerivationError>;
+        inputs: impl convert::Into<boxed::Box<[BlobDigest]>>,
+        transformation: BlobTransformation,
+        producer: BlobDerivationProducer,
+        outputs: impl convert::Into<boxed::Box<[BlobDigest]>>,
+    ) -> result::Result<Self, BlobDerivationError>;
     pub const fn id(&self) -> BlobDerivationId;
-    pub fn inputs(&self) -> &[blob::BlobDigest];
-    pub const fn transformation(&self) -> &blob::BlobTransformation;
-    pub const fn producer(&self) -> blob::BlobDerivationProducer;
-    pub fn outputs(&self) -> &[blob::BlobDigest];
-    pub fn deterministic_key(&self) -> option::Option<blob::DeterministicBlobDerivationKey>;
+    pub fn inputs(&self) -> &[BlobDigest];
+    pub const fn transformation(&self) -> &BlobTransformation;
+    pub const fn producer(&self) -> BlobDerivationProducer;
+    pub fn outputs(&self) -> &[BlobDigest];
+    pub fn deterministic_key(&self) -> option::Option<DeterministicBlobDerivationKey>;
 }
 ```
 
@@ -161,8 +161,8 @@ pub enum BlobDerivationError {
     TooManyOutputs,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for blob::BlobDerivationError {
+impl fmt::Display for BlobDerivationError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for blob::BlobDerivationError {}
+impl error::Error for BlobDerivationError {}
 ```

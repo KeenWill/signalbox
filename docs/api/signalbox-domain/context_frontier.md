@@ -7,7 +7,7 @@
 ```rust
 pub struct ContextFrontierId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl context_frontier::ContextFrontierId {
+impl ContextFrontierId {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
     pub const fn as_uuid(&self) -> &uuid::Uuid;
     pub const fn into_uuid(self) -> uuid::Uuid;
@@ -19,7 +19,7 @@ impl context_frontier::ContextFrontierId {
 ```rust
 pub struct SemanticTranscriptEntryId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl context_frontier::SemanticTranscriptEntryId {
+impl SemanticTranscriptEntryId {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
     pub const fn as_uuid(&self) -> &uuid::Uuid;
     pub const fn into_uuid(self) -> uuid::Uuid;
@@ -31,9 +31,9 @@ impl context_frontier::SemanticTranscriptEntryId {
 ```rust
 pub struct ContextFrontier {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl context_frontier::ContextFrontier {
+impl ContextFrontier {
     pub const fn owning_session(&self) -> SessionId;
-    pub const fn snapshot(&self) -> context_frontier::ContextFrontierId;
+    pub const fn snapshot(&self) -> ContextFrontierId;
 }
 ```
 
@@ -42,13 +42,10 @@ impl context_frontier::ContextFrontier {
 ```rust
 pub struct SemanticTranscriptEntryRef {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl context_frontier::SemanticTranscriptEntryRef {
-    pub const fn from_source(
-        source_session: SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
-    ) -> Self;
+impl SemanticTranscriptEntryRef {
+    pub const fn from_source(source_session: SessionId, entry: SemanticTranscriptEntryId) -> Self;
     pub const fn source_session(&self) -> SessionId;
-    pub const fn entry(&self) -> context_frontier::SemanticTranscriptEntryId;
+    pub const fn entry(&self) -> SemanticTranscriptEntryId;
 }
 ```
 
@@ -56,64 +53,64 @@ impl context_frontier::SemanticTranscriptEntryRef {
 
 ```rust
 pub struct ResolvedContextFrontierSnapshot {/* private */}
-impl context_frontier::ResolvedContextFrontierSnapshot {
-    pub const fn frontier(&self) -> context_frontier::ContextFrontier;
+impl ResolvedContextFrontierSnapshot {
+    pub const fn frontier(&self) -> ContextFrontier;
     pub fn entry_count(&self) -> usize;
     pub fn ordered_entries(
         &self,
-    ) -> impl exact_size::ExactSizeIterator<Item = context_frontier::SemanticTranscriptEntryRef>
+    ) -> impl exact_size::ExactSizeIterator<Item = SemanticTranscriptEntryRef>
            + double_ended::DoubleEndedIterator
            + '_;
     pub fn same_semantic_content(&self, other: &Self) -> bool;
     pub fn is_semantic_prefix_of(&self, later: &Self) -> bool;
-    pub fn immediate_semantic_prefix(&self) -> option::Option<context_frontier::ContextFrontier>;
+    pub fn immediate_semantic_prefix(&self) -> option::Option<ContextFrontier>;
     pub fn appended_entries(
         &self,
-    ) -> impl exact_size::ExactSizeIterator<Item = context_frontier::SemanticTranscriptEntryRef>
+    ) -> impl exact_size::ExactSizeIterator<Item = SemanticTranscriptEntryRef>
            + double_ended::DoubleEndedIterator
            + '_;
 }
-impl clone::Clone for context_frontier::ResolvedContextFrontierSnapshot {
+impl clone::Clone for ResolvedContextFrontierSnapshot {
     pub fn clone(&self) -> Self;
 }
-impl fmt::Debug for context_frontier::ResolvedContextFrontierSnapshot {
+impl fmt::Debug for ResolvedContextFrontierSnapshot {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl cmp::PartialEq for context_frontier::ResolvedContextFrontierSnapshot {
+impl cmp::PartialEq for ResolvedContextFrontierSnapshot {
     pub fn eq(&self, other: &Self) -> bool;
 }
-impl cmp::Eq for context_frontier::ResolvedContextFrontierSnapshot {}
+impl cmp::Eq for ResolvedContextFrontierSnapshot {}
 ```
 
 ## ResolvedContextFrontierReconstitutionInput
 
 ```rust
 pub struct ResolvedContextFrontierReconstitutionInput {/* private */}
-impl context_frontier::ResolvedContextFrontierReconstitutionInput {
+impl ResolvedContextFrontierReconstitutionInput {
     pub fn new(
         owning_session: SessionId,
-        snapshot: context_frontier::ContextFrontierId,
-        ordered_entries: vec::Vec<context_frontier::SemanticTranscriptEntryRef>,
+        snapshot: ContextFrontierId,
+        ordered_entries: vec::Vec<SemanticTranscriptEntryRef>,
     ) -> Self;
     pub fn derive_appending(
         &self,
-        snapshot: context_frontier::ContextFrontierId,
-        appended_entries: vec::Vec<context_frontier::SemanticTranscriptEntryRef>,
+        snapshot: ContextFrontierId,
+        appended_entries: vec::Vec<SemanticTranscriptEntryRef>,
     ) -> Self;
     pub const fn owning_session(&self) -> SessionId;
-    pub const fn snapshot(&self) -> context_frontier::ContextFrontierId;
+    pub const fn snapshot(&self) -> ContextFrontierId;
     pub fn entry_count(&self) -> usize;
-    pub fn ordered_entries(&self) -> &[context_frontier::SemanticTranscriptEntryRef];
-    pub fn reconstitute(self) -> option::Option<context_frontier::ResolvedContextFrontierSnapshot>;
+    pub fn ordered_entries(&self) -> &[SemanticTranscriptEntryRef];
+    pub fn reconstitute(self) -> option::Option<ResolvedContextFrontierSnapshot>;
 }
-impl clone::Clone for context_frontier::ResolvedContextFrontierReconstitutionInput {
+impl clone::Clone for ResolvedContextFrontierReconstitutionInput {
     pub fn clone(&self) -> Self;
 }
-impl fmt::Debug for context_frontier::ResolvedContextFrontierReconstitutionInput {
+impl fmt::Debug for ResolvedContextFrontierReconstitutionInput {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl cmp::PartialEq for context_frontier::ResolvedContextFrontierReconstitutionInput {
+impl cmp::PartialEq for ResolvedContextFrontierReconstitutionInput {
     pub fn eq(&self, other: &Self) -> bool;
 }
-impl cmp::Eq for context_frontier::ResolvedContextFrontierReconstitutionInput {}
+impl cmp::Eq for ResolvedContextFrontierReconstitutionInput {}
 ```

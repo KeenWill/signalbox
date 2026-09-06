@@ -7,8 +7,8 @@
 ```rust
 pub struct ProviderTargetMismatchFailureRef {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl turn_attempt::ProviderTargetMismatchFailureRef {
-    pub const fn kind(self) -> turn_attempt::ProviderTargetMismatchFailureKind;
+impl ProviderTargetMismatchFailureRef {
+    pub const fn kind(self) -> ProviderTargetMismatchFailureKind;
 }
 ```
 
@@ -28,9 +28,7 @@ pub enum ProviderTargetMismatchFailureKind {
 ```rust
 pub enum AppliedInterruptState {
     NoAppliedInterrupt,
-    Applied {
-        proof: applied_interrupt::AppliedInterruptProof,
-    },
+    Applied { proof: AppliedInterruptProof },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -40,16 +38,14 @@ pub enum AppliedInterruptState {
 ```rust
 pub struct FatalMismatchStopCauses {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_attempt::FatalMismatchStopCauses {
-    pub fn new(
-        failure: turn_attempt::ProviderTargetMismatchFailureRef,
-        interrupt: turn_attempt::AppliedInterruptState,
-    ) -> Self;
+impl FatalMismatchStopCauses {
+    pub fn new(failure: ProviderTargetMismatchFailureRef, interrupt: AppliedInterruptState)
+        -> Self;
     pub fn failures(
         &self,
-    ) -> impl exact_size::ExactSizeIterator<Item = turn_attempt::ProviderTargetMismatchFailureRef> + '_;
-    pub fn contains(&self, failure: turn_attempt::ProviderTargetMismatchFailureRef) -> bool;
-    pub const fn interrupt(&self) -> turn_attempt::AppliedInterruptState;
+    ) -> impl exact_size::ExactSizeIterator<Item = ProviderTargetMismatchFailureRef> + '_;
+    pub fn contains(&self, failure: ProviderTargetMismatchFailureRef) -> bool;
+    pub const fn interrupt(&self) -> AppliedInterruptState;
 }
 ```
 
@@ -57,23 +53,18 @@ impl turn_attempt::FatalMismatchStopCauses {
 
 ```rust
 pub enum TurnAttemptStopCauses {
-    CancellationOnly {
-        interrupt: applied_interrupt::AppliedInterruptProof,
-    },
-    FatalMismatch(turn_attempt::FatalMismatchStopCauses),
+    CancellationOnly { interrupt: AppliedInterruptProof },
+    FatalMismatch(FatalMismatchStopCauses),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_attempt::TurnAttemptStopCauses {
-    pub const fn cancellation_only(interrupt: applied_interrupt::AppliedInterruptProof) -> Self;
-    pub fn fatal_mismatch(failure: turn_attempt::ProviderTargetMismatchFailureRef) -> Self;
-    pub fn add_fatal_mismatch(
-        self,
-        failure: turn_attempt::ProviderTargetMismatchFailureRef,
-    ) -> Self;
+impl TurnAttemptStopCauses {
+    pub const fn cancellation_only(interrupt: AppliedInterruptProof) -> Self;
+    pub fn fatal_mismatch(failure: ProviderTargetMismatchFailureRef) -> Self;
+    pub fn add_fatal_mismatch(self, failure: ProviderTargetMismatchFailureRef) -> Self;
     pub fn add_interrupt(
         self,
-        proof: applied_interrupt::AppliedInterruptProof,
-    ) -> result::Result<Self, turn_attempt::TurnAttemptStopCauseUnionError>;
+        proof: AppliedInterruptProof,
+    ) -> result::Result<Self, TurnAttemptStopCauseUnionError>;
 }
 ```
 
@@ -82,15 +73,10 @@ impl turn_attempt::TurnAttemptStopCauses {
 ```rust
 pub struct TurnAttemptStopCauseUnionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_attempt::TurnAttemptStopCauseUnionError {
-    pub const fn current(&self) -> &turn_attempt::TurnAttemptStopCauses;
-    pub const fn requested(&self) -> applied_interrupt::AppliedInterruptProof;
-    pub fn into_parts(
-        self,
-    ) -> (
-        turn_attempt::TurnAttemptStopCauses,
-        applied_interrupt::AppliedInterruptProof,
-    );
+impl TurnAttemptStopCauseUnionError {
+    pub const fn current(&self) -> &TurnAttemptStopCauses;
+    pub const fn requested(&self) -> AppliedInterruptProof;
+    pub fn into_parts(self) -> (TurnAttemptStopCauses, AppliedInterruptProof);
 }
 ```
 
@@ -99,15 +85,15 @@ impl turn_attempt::TurnAttemptStopCauseUnionError {
 ```rust
 pub enum AttemptEnd {
     WithoutStop {
-        disposition: turn_attempt::UnstoppedAttemptDisposition,
+        disposition: UnstoppedAttemptDisposition,
     },
     AfterCancellation {
-        cause: applied_interrupt::AppliedInterruptProof,
-        disposition: turn_attempt::CancellationStopDisposition,
+        cause: AppliedInterruptProof,
+        disposition: CancellationStopDisposition,
     },
     AfterFatalMismatch {
-        causes: turn_attempt::FatalMismatchStopCauses,
-        disposition: turn_attempt::FatalMismatchStopDisposition,
+        causes: FatalMismatchStopCauses,
+        disposition: FatalMismatchStopDisposition,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -158,9 +144,7 @@ pub enum FatalMismatchStopDisposition {
 pub enum CurrentTurnAttemptState {
     Prepared,
     Running,
-    StopRequested {
-        causes: turn_attempt::TurnAttemptStopCauses,
-    },
+    StopRequested { causes: TurnAttemptStopCauses },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -170,9 +154,9 @@ pub enum CurrentTurnAttemptState {
 ```rust
 pub struct CurrentTurnAttempt {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_attempt::CurrentTurnAttempt {
+impl CurrentTurnAttempt {
     pub const fn id(&self) -> TurnAttemptId;
-    pub const fn state(&self) -> &turn_attempt::CurrentTurnAttemptState;
+    pub const fn state(&self) -> &CurrentTurnAttemptState;
 }
 ```
 
@@ -181,8 +165,8 @@ impl turn_attempt::CurrentTurnAttempt {
 ```rust
 pub struct EndedTurnAttempt {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_attempt::EndedTurnAttempt {
+impl EndedTurnAttempt {
     pub const fn id(&self) -> TurnAttemptId;
-    pub const fn end(&self) -> &turn_attempt::AttemptEnd;
+    pub const fn end(&self) -> &AttemptEnd;
 }
 ```

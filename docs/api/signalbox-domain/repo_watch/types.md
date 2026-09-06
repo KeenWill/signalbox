@@ -15,10 +15,10 @@ pub enum RepoWatchTextError {
     InvalidPattern { reason: string::String },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for repo_watch::RepoWatchTextError {
+impl fmt::Display for RepoWatchTextError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for repo_watch::RepoWatchTextError {}
+impl error::Error for RepoWatchTextError {}
 ```
 
 ## RepositorySlug
@@ -26,8 +26,8 @@ impl error::Error for repo_watch::RepoWatchTextError {}
 ```rust
 pub struct RepositorySlug(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::RepositorySlug {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl RepositorySlug {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -38,8 +38,8 @@ impl repo_watch::RepositorySlug {
 ```rust
 pub struct BranchName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::BranchName {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl BranchName {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -50,8 +50,8 @@ impl repo_watch::BranchName {
 ```rust
 pub struct LabelName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::LabelName {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl LabelName {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -62,8 +62,8 @@ impl repo_watch::LabelName {
 ```rust
 pub struct RepoWatchAuthorLogin(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::RepoWatchAuthorLogin {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl RepoWatchAuthorLogin {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -74,8 +74,8 @@ impl repo_watch::RepoWatchAuthorLogin {
 ```rust
 pub struct CheckRunName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::CheckRunName {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl CheckRunName {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -86,8 +86,8 @@ impl repo_watch::CheckRunName {
 ```rust
 pub struct WorkflowName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::WorkflowName {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl WorkflowName {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -98,8 +98,8 @@ impl repo_watch::WorkflowName {
 ```rust
 pub struct ReactionContent(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::ReactionContent {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl ReactionContent {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -110,8 +110,8 @@ impl repo_watch::ReactionContent {
 ```rust
 pub struct RepoWatchRuleId(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::RepoWatchRuleId {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl RepoWatchRuleId {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -122,8 +122,8 @@ impl repo_watch::RepoWatchRuleId {
 ```rust
 pub struct ReviewThreadId(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::ReviewThreadId {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl ReviewThreadId {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -134,8 +134,8 @@ impl repo_watch::ReviewThreadId {
 ```rust
 pub struct PullRequestTitle(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::PullRequestTitle {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl PullRequestTitle {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -146,8 +146,8 @@ impl repo_watch::PullRequestTitle {
 ```rust
 pub struct PullRequestBody(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl repo_watch::PullRequestBody {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl PullRequestBody {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -158,8 +158,8 @@ impl repo_watch::PullRequestBody {
 ```rust
 pub struct CommitSha(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::CommitSha {
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl CommitSha {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -170,7 +170,7 @@ impl repo_watch::CommitSha {
 ```rust
 pub struct PullRequestNumber(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::PullRequestNumber {
+impl PullRequestNumber {
     pub const fn new(value: nonzero::NonZeroU64) -> Self;
     pub const fn get(self) -> u64;
 }
@@ -181,7 +181,7 @@ impl repo_watch::PullRequestNumber {
 ```rust
 pub struct GitHubObjectId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::GitHubObjectId {
+impl GitHubObjectId {
     pub const fn new(value: nonzero::NonZeroU64) -> Self;
     pub const fn get(self) -> u64;
 }
@@ -192,7 +192,7 @@ impl repo_watch::GitHubObjectId {
 ```rust
 pub struct RepoWatchWorkflowRunAttempt(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::RepoWatchWorkflowRunAttempt {
+impl RepoWatchWorkflowRunAttempt {
     pub const fn new(value: nonzero::NonZeroU64) -> Self;
     pub const fn get(self) -> u64;
 }
@@ -203,19 +203,19 @@ impl repo_watch::RepoWatchWorkflowRunAttempt {
 ```rust
 pub struct RepoWatchPattern {/* private */}
 // derives: clone::Clone
-impl fmt::Debug for repo_watch::RepoWatchPattern {
+impl fmt::Debug for RepoWatchPattern {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl cmp::PartialEq for repo_watch::RepoWatchPattern {
+impl cmp::PartialEq for RepoWatchPattern {
     pub fn eq(&self, other: &Self) -> bool;
 }
-impl cmp::Eq for repo_watch::RepoWatchPattern {}
-impl hash::Hash for repo_watch::RepoWatchPattern {
+impl cmp::Eq for RepoWatchPattern {}
+impl hash::Hash for RepoWatchPattern {
     pub fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
-impl repo_watch::RepoWatchPattern {
-    const MAX_UTF8_BYTES: usize;
-    pub fn try_new(value: string::String) -> result::Result<Self, repo_watch::RepoWatchTextError>;
+impl RepoWatchPattern {
+    pub const MAX_UTF8_BYTES: usize;
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
     pub fn as_str(&self) -> &str;
     pub fn is_match(&self, candidate: &str) -> bool;
 }
@@ -226,8 +226,8 @@ impl repo_watch::RepoWatchPattern {
 ```rust
 pub struct RepoWatchRuleVersion(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::RepoWatchRuleVersion {
-    const V1: Self;
+impl RepoWatchRuleVersion {
+    pub const V1: Self;
     pub const fn new(value: nonzero::NonZeroU64) -> option::Option<Self>;
     pub const fn get(self) -> u64;
 }
@@ -254,7 +254,7 @@ pub enum RepoWatchEventKindNameV1 {
     ReactionChanged,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::RepoWatchEventKindNameV1 {
+impl RepoWatchEventKindNameV1 {
     pub fn all() -> vec::Vec<Self>;
 }
 ```
@@ -267,8 +267,8 @@ pub enum ChecksOutcome {
     Failure,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl convert::From<repo_watch::ChecksOutcome> for repo_watch::CheckConclusion {
-    pub fn from(value: repo_watch::ChecksOutcome) -> Self;
+impl convert::From<ChecksOutcome> for CheckConclusion {
+    pub fn from(value: ChecksOutcome) -> Self;
 }
 ```
 
@@ -287,8 +287,8 @@ pub enum CheckConclusion {
     StartupFailure,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl convert::From<repo_watch::ChecksOutcome> for repo_watch::CheckConclusion {
-    pub fn from(value: repo_watch::ChecksOutcome) -> Self;
+impl convert::From<ChecksOutcome> for CheckConclusion {
+    pub fn from(value: ChecksOutcome) -> Self;
 }
 ```
 
@@ -329,8 +329,8 @@ pub enum ReactionChange {
 ```rust
 pub enum ReactionSubject {
     PullRequestBody,
-    IssueComment { id: repo_watch::GitHubObjectId },
-    ReviewComment { id: repo_watch::GitHubObjectId },
+    IssueComment { id: GitHubObjectId },
+    ReviewComment { id: GitHubObjectId },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -343,54 +343,54 @@ pub enum RepoWatchEventKindV1 {
     PullRequestClosed,
     PullRequestMerged,
     HeadChanged {
-        previous: repo_watch::CommitSha,
-        current: repo_watch::CommitSha,
+        previous: CommitSha,
+        current: CommitSha,
     },
     MergeableStateChanged {
-        current: repo_watch::MergeableState,
+        current: MergeableState,
     },
     ChecksCompleted {
-        outcome: repo_watch::ChecksOutcome,
+        outcome: ChecksOutcome,
     },
     CheckRunCompleted {
-        name: repo_watch::CheckRunName,
-        conclusion: repo_watch::CheckConclusion,
+        name: CheckRunName,
+        conclusion: CheckConclusion,
     },
     BranchWorkflowRunCompleted {
-        branch: repo_watch::BranchName,
-        workflow: repo_watch::WorkflowName,
-        conclusion: repo_watch::CheckConclusion,
+        branch: BranchName,
+        workflow: WorkflowName,
+        conclusion: CheckConclusion,
     },
     ReviewSubmitted {
-        reviewer: repo_watch::RepoWatchAuthorLogin,
-        state: repo_watch::ReviewState,
-        commit: repo_watch::CommitSha,
+        reviewer: RepoWatchAuthorLogin,
+        state: ReviewState,
+        commit: CommitSha,
     },
     ThreadOpened {
-        thread: repo_watch::ReviewThreadId,
+        thread: ReviewThreadId,
     },
     ThreadResolved {
-        thread: repo_watch::ReviewThreadId,
+        thread: ReviewThreadId,
     },
     Labeled {
-        label: repo_watch::LabelName,
+        label: LabelName,
     },
     Unlabeled {
-        label: repo_watch::LabelName,
+        label: LabelName,
     },
     BaseAdvanced {
-        branch: repo_watch::BranchName,
+        branch: BranchName,
     },
     ReactionChanged {
-        subject: repo_watch::ReactionSubject,
-        reactor: repo_watch::RepoWatchAuthorLogin,
-        content: repo_watch::ReactionContent,
-        change: repo_watch::ReactionChange,
+        subject: ReactionSubject,
+        reactor: RepoWatchAuthorLogin,
+        content: ReactionContent,
+        change: ReactionChange,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl repo_watch::RepoWatchEventKindV1 {
-    pub const fn name(&self) -> repo_watch::RepoWatchEventKindNameV1;
+impl RepoWatchEventKindV1 {
+    pub const fn name(&self) -> RepoWatchEventKindNameV1;
 }
 ```
 
@@ -399,18 +399,18 @@ impl repo_watch::RepoWatchEventKindV1 {
 ```rust
 pub struct PullRequestEventContext {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl repo_watch::PullRequestEventContext {
-    pub fn new(input: repo_watch::PullRequestEventContextInput) -> Self;
-    pub const fn number(&self) -> repo_watch::PullRequestNumber;
-    pub const fn head_sha(&self) -> &repo_watch::CommitSha;
-    pub const fn head_repository(&self) -> &repo_watch::RepositorySlug;
-    pub const fn base_branch(&self) -> &repo_watch::BranchName;
-    pub const fn head_branch(&self) -> &repo_watch::BranchName;
-    pub const fn title(&self) -> &repo_watch::PullRequestTitle;
-    pub const fn body(&self) -> &repo_watch::PullRequestBody;
-    pub fn labels(&self) -> &[repo_watch::LabelName];
+impl PullRequestEventContext {
+    pub fn new(input: PullRequestEventContextInput) -> Self;
+    pub const fn number(&self) -> PullRequestNumber;
+    pub const fn head_sha(&self) -> &CommitSha;
+    pub const fn head_repository(&self) -> &RepositorySlug;
+    pub const fn base_branch(&self) -> &BranchName;
+    pub const fn head_branch(&self) -> &BranchName;
+    pub const fn title(&self) -> &PullRequestTitle;
+    pub const fn body(&self) -> &PullRequestBody;
+    pub fn labels(&self) -> &[LabelName];
     pub const fn draft(&self) -> bool;
-    pub const fn author(&self) -> option::Option<&repo_watch::RepoWatchAuthorLogin>;
+    pub const fn author(&self) -> option::Option<&RepoWatchAuthorLogin>;
 }
 ```
 
@@ -418,16 +418,16 @@ impl repo_watch::PullRequestEventContext {
 
 ```rust
 pub struct PullRequestEventContextInput {
-    pub number: repo_watch::PullRequestNumber,
-    pub head_sha: repo_watch::CommitSha,
-    pub head_repository: repo_watch::RepositorySlug,
-    pub base_branch: repo_watch::BranchName,
-    pub head_branch: repo_watch::BranchName,
-    pub title: repo_watch::PullRequestTitle,
-    pub body: repo_watch::PullRequestBody,
-    pub labels: vec::Vec<repo_watch::LabelName>,
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub head_repository: RepositorySlug,
+    pub base_branch: BranchName,
+    pub head_branch: BranchName,
+    pub title: PullRequestTitle,
+    pub body: PullRequestBody,
+    pub labels: vec::Vec<LabelName>,
     pub draft: bool,
-    pub author: option::Option<repo_watch::RepoWatchAuthorLogin>,
+    pub author: option::Option<RepoWatchAuthorLogin>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -436,7 +436,7 @@ pub struct PullRequestEventContextInput {
 
 ```rust
 pub enum RepoWatchEventTarget {
-    PullRequest(repo_watch::PullRequestEventContext),
+    PullRequest(PullRequestEventContext),
     Branch,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -447,24 +447,24 @@ pub enum RepoWatchEventTarget {
 ```rust
 pub struct RepoWatchEvent {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl repo_watch::RepoWatchEvent {
+impl RepoWatchEvent {
     pub fn try_pull_request(
         id: RepoWatchEventId,
-        repository: repo_watch::RepositorySlug,
-        context: repo_watch::PullRequestEventContext,
-        kind: repo_watch::RepoWatchEventKindV1,
-    ) -> result::Result<Self, repo_watch::RepoWatchEventConstructionError>;
+        repository: RepositorySlug,
+        context: PullRequestEventContext,
+        kind: RepoWatchEventKindV1,
+    ) -> result::Result<Self, RepoWatchEventConstructionError>;
     pub const fn branch_workflow(
         id: RepoWatchEventId,
-        repository: repo_watch::RepositorySlug,
-        branch: repo_watch::BranchName,
-        workflow: repo_watch::WorkflowName,
-        conclusion: repo_watch::CheckConclusion,
+        repository: RepositorySlug,
+        branch: BranchName,
+        workflow: WorkflowName,
+        conclusion: CheckConclusion,
     ) -> Self;
     pub const fn id(&self) -> RepoWatchEventId;
-    pub const fn repository(&self) -> &repo_watch::RepositorySlug;
-    pub const fn target(&self) -> &repo_watch::RepoWatchEventTarget;
-    pub const fn kind(&self) -> &repo_watch::RepoWatchEventKindV1;
+    pub const fn repository(&self) -> &RepositorySlug;
+    pub const fn target(&self) -> &RepoWatchEventTarget;
+    pub const fn kind(&self) -> &RepoWatchEventKindV1;
 }
 ```
 
@@ -480,10 +480,10 @@ pub enum RepoWatchEventConstructionError {
     UnlabeledContextContainsLabel,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for repo_watch::RepoWatchEventConstructionError {
+impl fmt::Display for RepoWatchEventConstructionError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for repo_watch::RepoWatchEventConstructionError {}
+impl error::Error for RepoWatchEventConstructionError {}
 ```
 
 ## RepoWatchLabelMatcher
@@ -491,11 +491,11 @@ impl error::Error for repo_watch::RepoWatchEventConstructionError {}
 ```rust
 pub struct RepoWatchLabelMatcher {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl repo_watch::RepoWatchLabelMatcher {
-    pub fn new(input: repo_watch::RepoWatchLabelMatcherInput) -> Self;
-    pub fn any_of(&self) -> &[repo_watch::LabelName];
-    pub fn all_of(&self) -> &[repo_watch::LabelName];
-    pub fn none_of(&self) -> &[repo_watch::LabelName];
+impl RepoWatchLabelMatcher {
+    pub fn new(input: RepoWatchLabelMatcherInput) -> Self;
+    pub fn any_of(&self) -> &[LabelName];
+    pub fn all_of(&self) -> &[LabelName];
+    pub fn none_of(&self) -> &[LabelName];
 }
 ```
 
@@ -503,9 +503,9 @@ impl repo_watch::RepoWatchLabelMatcher {
 
 ```rust
 pub struct RepoWatchLabelMatcherInput {
-    pub any_of: vec::Vec<repo_watch::LabelName>,
-    pub all_of: vec::Vec<repo_watch::LabelName>,
-    pub none_of: vec::Vec<repo_watch::LabelName>,
+    pub any_of: vec::Vec<LabelName>,
+    pub all_of: vec::Vec<LabelName>,
+    pub none_of: vec::Vec<LabelName>,
 }
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
 ```
@@ -515,20 +515,20 @@ pub struct RepoWatchLabelMatcherInput {
 ```rust
 pub struct RepoWatchMatcherV1 {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl repo_watch::RepoWatchMatcherV1 {
-    pub fn new(input: repo_watch::RepoWatchMatcherV1Input) -> Self;
-    pub fn event_kinds(&self) -> &[repo_watch::RepoWatchEventKindNameV1];
-    pub const fn repository(&self) -> option::Option<&repo_watch::RepositorySlug>;
-    pub const fn base_branch(&self) -> option::Option<&repo_watch::BranchName>;
-    pub const fn head_branch(&self) -> option::Option<&repo_watch::RepoWatchPattern>;
-    pub const fn title(&self) -> option::Option<&repo_watch::RepoWatchPattern>;
-    pub const fn body(&self) -> option::Option<&repo_watch::RepoWatchPattern>;
-    pub const fn labels(&self) -> &repo_watch::RepoWatchLabelMatcher;
+impl RepoWatchMatcherV1 {
+    pub fn new(input: RepoWatchMatcherV1Input) -> Self;
+    pub fn event_kinds(&self) -> &[RepoWatchEventKindNameV1];
+    pub const fn repository(&self) -> option::Option<&RepositorySlug>;
+    pub const fn base_branch(&self) -> option::Option<&BranchName>;
+    pub const fn head_branch(&self) -> option::Option<&RepoWatchPattern>;
+    pub const fn title(&self) -> option::Option<&RepoWatchPattern>;
+    pub const fn body(&self) -> option::Option<&RepoWatchPattern>;
+    pub const fn labels(&self) -> &RepoWatchLabelMatcher;
     pub const fn draft(&self) -> option::Option<bool>;
-    pub const fn author(&self) -> option::Option<&repo_watch::RepoWatchAuthorLogin>;
-    pub fn mergeable_state(&self) -> &[repo_watch::MergeableState];
-    pub fn conclusion(&self) -> &[repo_watch::CheckConclusion];
-    pub fn matches(&self, event: &repo_watch::RepoWatchEvent) -> bool;
+    pub const fn author(&self) -> option::Option<&RepoWatchAuthorLogin>;
+    pub fn mergeable_state(&self) -> &[MergeableState];
+    pub fn conclusion(&self) -> &[CheckConclusion];
+    pub fn matches(&self, event: &RepoWatchEvent) -> bool;
 }
 ```
 
@@ -536,17 +536,17 @@ impl repo_watch::RepoWatchMatcherV1 {
 
 ```rust
 pub struct RepoWatchMatcherV1Input {
-    pub event_kinds: vec::Vec<repo_watch::RepoWatchEventKindNameV1>,
-    pub repository: option::Option<repo_watch::RepositorySlug>,
-    pub base_branch: option::Option<repo_watch::BranchName>,
-    pub head_branch: option::Option<repo_watch::RepoWatchPattern>,
-    pub title: option::Option<repo_watch::RepoWatchPattern>,
-    pub body: option::Option<repo_watch::RepoWatchPattern>,
-    pub labels: repo_watch::RepoWatchLabelMatcher,
+    pub event_kinds: vec::Vec<RepoWatchEventKindNameV1>,
+    pub repository: option::Option<RepositorySlug>,
+    pub base_branch: option::Option<BranchName>,
+    pub head_branch: option::Option<RepoWatchPattern>,
+    pub title: option::Option<RepoWatchPattern>,
+    pub body: option::Option<RepoWatchPattern>,
+    pub labels: RepoWatchLabelMatcher,
     pub draft: option::Option<bool>,
-    pub author: option::Option<repo_watch::RepoWatchAuthorLogin>,
-    pub mergeable_state: vec::Vec<repo_watch::MergeableState>,
-    pub conclusion: vec::Vec<repo_watch::CheckConclusion>,
+    pub author: option::Option<RepoWatchAuthorLogin>,
+    pub mergeable_state: vec::Vec<MergeableState>,
+    pub conclusion: vec::Vec<CheckConclusion>,
 }
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
 ```
@@ -571,7 +571,7 @@ pub enum RepoWatchDispatchContextShape {
     Branch,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl fmt::Display for repo_watch::RepoWatchDispatchContextShape {
+impl fmt::Display for RepoWatchDispatchContextShape {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
@@ -581,14 +581,14 @@ impl fmt::Display for repo_watch::RepoWatchDispatchContextShape {
 ```rust
 pub struct RepoWatchTemplateContextDeclaration {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl repo_watch::RepoWatchTemplateContextDeclaration {
+impl RepoWatchTemplateContextDeclaration {
     pub fn try_new(
-        template: session_template::SessionTemplateName,
-        accepted: vec::Vec<repo_watch::RepoWatchDispatchContextShape>,
-    ) -> result::Result<Self, repo_watch::RepoWatchTemplateContextDeclarationError>;
-    pub const fn template(&self) -> &session_template::SessionTemplateName;
-    pub fn accepted(&self) -> &[repo_watch::RepoWatchDispatchContextShape];
-    pub fn accepts(&self, shape: repo_watch::RepoWatchDispatchContextShape) -> bool;
+        template: SessionTemplateName,
+        accepted: vec::Vec<RepoWatchDispatchContextShape>,
+    ) -> result::Result<Self, RepoWatchTemplateContextDeclarationError>;
+    pub const fn template(&self) -> &SessionTemplateName;
+    pub fn accepted(&self) -> &[RepoWatchDispatchContextShape];
+    pub fn accepts(&self, shape: RepoWatchDispatchContextShape) -> bool;
 }
 ```
 
@@ -596,15 +596,13 @@ impl repo_watch::RepoWatchTemplateContextDeclaration {
 
 ```rust
 pub enum RepoWatchTemplateContextDeclarationError {
-    NoAcceptedContextShape {
-        template: session_template::SessionTemplateName,
-    },
+    NoAcceptedContextShape { template: SessionTemplateName },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for repo_watch::RepoWatchTemplateContextDeclarationError {
+impl fmt::Display for RepoWatchTemplateContextDeclarationError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for repo_watch::RepoWatchTemplateContextDeclarationError {}
+impl error::Error for RepoWatchTemplateContextDeclarationError {}
 ```
 
 ## PullRequestContext
@@ -612,14 +610,14 @@ impl error::Error for repo_watch::RepoWatchTemplateContextDeclarationError {}
 ```rust
 pub struct PullRequestContext {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl repo_watch::PullRequestContext {
-    pub const fn repository(&self) -> &repo_watch::RepositorySlug;
-    pub const fn number(&self) -> repo_watch::PullRequestNumber;
-    pub const fn head_sha(&self) -> &repo_watch::CommitSha;
-    pub const fn head_repository(&self) -> &repo_watch::RepositorySlug;
-    pub const fn head_branch(&self) -> &repo_watch::BranchName;
-    pub const fn base_branch(&self) -> &repo_watch::BranchName;
-    pub const fn event(&self) -> &repo_watch::RepoWatchEvent;
+impl PullRequestContext {
+    pub const fn repository(&self) -> &RepositorySlug;
+    pub const fn number(&self) -> PullRequestNumber;
+    pub const fn head_sha(&self) -> &CommitSha;
+    pub const fn head_repository(&self) -> &RepositorySlug;
+    pub const fn head_branch(&self) -> &BranchName;
+    pub const fn base_branch(&self) -> &BranchName;
+    pub const fn event(&self) -> &RepoWatchEvent;
 }
 ```
 
@@ -628,12 +626,12 @@ impl repo_watch::PullRequestContext {
 ```rust
 pub struct BranchContext {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl repo_watch::BranchContext {
-    pub const fn repository(&self) -> &repo_watch::RepositorySlug;
-    pub const fn branch(&self) -> &repo_watch::BranchName;
-    pub const fn workflow(&self) -> &repo_watch::WorkflowName;
-    pub const fn conclusion(&self) -> repo_watch::CheckConclusion;
-    pub const fn event(&self) -> &repo_watch::RepoWatchEvent;
+impl BranchContext {
+    pub const fn repository(&self) -> &RepositorySlug;
+    pub const fn branch(&self) -> &BranchName;
+    pub const fn workflow(&self) -> &WorkflowName;
+    pub const fn conclusion(&self) -> CheckConclusion;
+    pub const fn event(&self) -> &RepoWatchEvent;
 }
 ```
 
@@ -641,16 +639,16 @@ impl repo_watch::BranchContext {
 
 ```rust
 pub enum DispatchSessionParameters {
-    PullRequest(repo_watch::PullRequestContext),
-    Branch(repo_watch::BranchContext),
+    PullRequest(PullRequestContext),
+    Branch(BranchContext),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl repo_watch::DispatchSessionParameters {
+impl DispatchSessionParameters {
     pub fn try_from_event(
-        event: repo_watch::RepoWatchEvent,
-    ) -> result::Result<Self, repo_watch::RepoWatchDispatchContextError>;
-    pub const fn shape(&self) -> repo_watch::RepoWatchDispatchContextShape;
-    pub const fn event(&self) -> &repo_watch::RepoWatchEvent;
+        event: RepoWatchEvent,
+    ) -> result::Result<Self, RepoWatchDispatchContextError>;
+    pub const fn shape(&self) -> RepoWatchDispatchContextShape;
+    pub const fn event(&self) -> &RepoWatchEvent;
 }
 ```
 
@@ -661,23 +659,21 @@ pub enum RepoWatchDispatchContextError {
     InvalidBranchEvent,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for repo_watch::RepoWatchDispatchContextError {
+impl fmt::Display for RepoWatchDispatchContextError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for repo_watch::RepoWatchDispatchContextError {}
+impl error::Error for RepoWatchDispatchContextError {}
 ```
 
 ## RepoWatchRuleActionV1
 
 ```rust
 pub enum RepoWatchRuleActionV1 {
-    DispatchSession {
-        template: session_template::SessionTemplateName,
-    },
+    DispatchSession { template: SessionTemplateName },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl repo_watch::RepoWatchRuleActionV1 {
-    pub const fn template(&self) -> &session_template::SessionTemplateName;
+impl RepoWatchRuleActionV1 {
+    pub const fn template(&self) -> &SessionTemplateName;
 }
 ```
 
@@ -686,17 +682,14 @@ impl repo_watch::RepoWatchRuleActionV1 {
 ```rust
 pub struct DispatchSessionAction {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl repo_watch::DispatchSessionAction {
-    pub const fn new(
-        template: session_template::SessionTemplateName,
-        params: repo_watch::DispatchSessionParameters,
-    ) -> Self;
-    pub const fn template(&self) -> &session_template::SessionTemplateName;
-    pub const fn params(&self) -> &repo_watch::DispatchSessionParameters;
+impl DispatchSessionAction {
+    pub const fn new(template: SessionTemplateName, params: DispatchSessionParameters) -> Self;
+    pub const fn template(&self) -> &SessionTemplateName;
+    pub const fn params(&self) -> &DispatchSessionParameters;
     pub fn synthesized_goal_statement(
         &self,
-        rule: &repo_watch::RepoWatchRuleId,
-    ) -> result::Result<goal::GoalStatement, goal::GoalTextError>;
+        rule: &RepoWatchRuleId,
+    ) -> result::Result<GoalStatement, GoalTextError>;
 }
 ```
 
@@ -704,7 +697,7 @@ impl repo_watch::DispatchSessionAction {
 
 ```rust
 pub enum RepoWatchActionV1 {
-    DispatchSession(repo_watch::DispatchSessionAction),
+    DispatchSession(DispatchSessionAction),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -714,10 +707,10 @@ pub enum RepoWatchActionV1 {
 ```rust
 pub struct RepoWatchRuleContentDigest(/* private */);
 // derives: clone::Clone, marker::Copy, cmp::Eq, hash::Hash, cmp::PartialEq
-impl repo_watch::RepoWatchRuleContentDigest {
+impl RepoWatchRuleContentDigest {
     pub const fn as_bytes(&self) -> &[u8; 32];
 }
-impl fmt::Debug for repo_watch::RepoWatchRuleContentDigest {
+impl fmt::Debug for RepoWatchRuleContentDigest {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
@@ -744,7 +737,7 @@ pub enum RepoWatchRuleIdentityField {
     CooldownSeconds,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl repo_watch::RepoWatchRuleIdentityField {
+impl RepoWatchRuleIdentityField {
     pub const fn configuration_path(self) -> &'static str;
 }
 ```
@@ -754,10 +747,46 @@ impl repo_watch::RepoWatchRuleIdentityField {
 ```rust
 pub struct RepoWatchRuleIdentityFieldDigest(/* private */);
 // derives: clone::Clone, marker::Copy, cmp::Eq, hash::Hash, cmp::PartialEq
-impl repo_watch::RepoWatchRuleIdentityFieldDigest {
+impl RepoWatchRuleIdentityFieldDigest {
     pub const fn as_bytes(&self) -> &[u8; 32];
 }
-impl fmt::Debug for repo_watch::RepoWatchRuleIdentityFieldDigest {
+impl fmt::Debug for RepoWatchRuleIdentityFieldDigest {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+```
+
+## RepoWatchRule
+
+```rust
+pub struct RepoWatchRule {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl RepoWatchRule {
+    pub fn try_new(
+        id: RepoWatchRuleId,
+        version: RepoWatchRuleVersion,
+        matcher: RepoWatchMatcherV1,
+        actions: vec::Vec<RepoWatchRuleActionV1>,
+        singleton_per: RepoWatchSingletonScope,
+        cooldown: time::Duration,
+    ) -> result::Result<Self, RepoWatchRuleValidationError>;
+    pub const fn id(&self) -> &RepoWatchRuleId;
+    pub const fn version(&self) -> RepoWatchRuleVersion;
+    pub const fn matcher(&self) -> &RepoWatchMatcherV1;
+    pub fn actions(&self) -> &[RepoWatchRuleActionV1];
+    pub const fn singleton_per(&self) -> RepoWatchSingletonScope;
+    pub const fn cooldown(&self) -> time::Duration;
+    pub fn content_digest(&self) -> RepoWatchRuleContentDigest;
+    pub fn identity_field_digests(
+        &self,
+    ) -> vec::Vec<(RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest)>;
+    pub fn required_context_shapes(&self) -> vec::Vec<RepoWatchDispatchContextShape>;
+    pub fn validate_template_contexts(
+        &self,
+        declarations: &[RepoWatchTemplateContextDeclaration],
+    ) -> result::Result<(), RepoWatchRuleValidationError>;
+    pub fn actions_for_event(
+        &self,
+        event: &RepoWatchEvent,
+    ) -> result::Result<vec::Vec<RepoWatchActionV1>, RepoWatchDispatchContextError>;
 }
 ```

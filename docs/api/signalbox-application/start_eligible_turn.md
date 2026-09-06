@@ -18,9 +18,7 @@ pub trait StartEligibleTurnIdGenerator {
 ```rust
 pub struct UuidV7StartEligibleTurnIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl start_eligible_turn::StartEligibleTurnIdGenerator
-    for start_eligible_turn::UuidV7StartEligibleTurnIdGenerator
-{
+impl StartEligibleTurnIdGenerator for UuidV7StartEligibleTurnIdGenerator {
     pub fn next_model_identity_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
     pub fn next_origin_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
     pub fn next_starting_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
@@ -49,8 +47,8 @@ pub trait StartEligibleTurnTransaction {
         identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
     ) -> impl future::Future<
         Output = result::Result<
-            start_eligible_turn::StartEligibleTurnOutcome,
-            <Self as start_eligible_turn::StartEligibleTurnTransaction>::Error,
+            StartEligibleTurnOutcome,
+            <Self as StartEligibleTurnTransaction>::Error,
         >,
     > + marker::Send;
     pub fn handle_with_activation_observer(
@@ -62,8 +60,8 @@ pub trait StartEligibleTurnTransaction {
         >,
     ) -> impl future::Future<
         Output = result::Result<
-            start_eligible_turn::StartEligibleTurnOutcome,
-            <Self as start_eligible_turn::StartEligibleTurnTransaction>::Error,
+            StartEligibleTurnOutcome,
+            <Self as StartEligibleTurnTransaction>::Error,
         >,
     > + marker::Send;
 }
@@ -74,53 +72,49 @@ pub trait StartEligibleTurnTransaction {
 ```rust
 pub struct StartEligibleTurnService<Generator, Transaction> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<Generator, Transaction> scheduler::EligibilityPass
-    for start_eligible_turn::StartEligibleTurnService<Generator, Transaction>
+impl<Generator, Transaction> EligibilityPass for StartEligibleTurnService<Generator, Transaction>
 where
-    Generator: start_eligible_turn::StartEligibleTurnIdGenerator + marker::Send,
-    Transaction:
-        start_eligible_turn::StartEligibleTurnTransaction + clone::Clone + marker::Send + 'static,
-    <Transaction as start_eligible_turn::StartEligibleTurnTransaction>::Error:
-        marker::Send + 'static,
+    Generator: StartEligibleTurnIdGenerator + marker::Send,
+    Transaction: StartEligibleTurnTransaction + clone::Clone + marker::Send + 'static,
+    <Transaction as StartEligibleTurnTransaction>::Error: marker::Send + 'static,
 {
-    type Error = <Transaction as start_eligible_turn::StartEligibleTurnTransaction>::Error;
+    type Error = <Transaction as StartEligibleTurnTransaction>::Error;
     pub fn run(
         &mut self,
         session: signalbox_domain::SessionId,
-    ) -> impl future::Future<Output = result::Result<(), <Self as scheduler::EligibilityPass>::Error>>
+    ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
            + marker::Send
            + 'static;
 }
-impl<Generator, Transaction> start_eligible_turn::StartEligibleTurnService<Generator, Transaction> {
+impl<Generator, Transaction> StartEligibleTurnService<Generator, Transaction> {
     pub const fn new(ids: Generator, transaction: Transaction) -> Self;
     pub fn into_parts(self) -> (Generator, Transaction);
 }
-impl<Generator, Transaction> start_eligible_turn::StartEligibleTurnService<Generator, Transaction>
+impl<Generator, Transaction> StartEligibleTurnService<Generator, Transaction>
 where
-    Generator: start_eligible_turn::StartEligibleTurnIdGenerator,
-    Transaction: start_eligible_turn::StartEligibleTurnTransaction,
+    Generator: StartEligibleTurnIdGenerator,
+    Transaction: StartEligibleTurnTransaction,
 {
     pub async fn execute(
         &mut self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        start_eligible_turn::StartEligibleTurnOutcome,
-        <Transaction as start_eligible_turn::StartEligibleTurnTransaction>::Error,
+        StartEligibleTurnOutcome,
+        <Transaction as StartEligibleTurnTransaction>::Error,
     >;
     pub fn execute_with_cloned_transaction(
         &mut self,
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<
         Output = result::Result<
-            start_eligible_turn::StartEligibleTurnOutcome,
-            <Transaction as start_eligible_turn::StartEligibleTurnTransaction>::Error,
+            StartEligibleTurnOutcome,
+            <Transaction as StartEligibleTurnTransaction>::Error,
         >,
     > + marker::Send
            + 'static
     where
         Transaction: clone::Clone + marker::Send + 'static,
-        <Transaction as start_eligible_turn::StartEligibleTurnTransaction>::Error:
-            marker::Send + 'static;
+        <Transaction as StartEligibleTurnTransaction>::Error: marker::Send + 'static;
     pub fn execute_with_cloned_transaction_and_observer(
         &mut self,
         session: signalbox_domain::SessionId,
@@ -129,14 +123,13 @@ where
         >,
     ) -> impl future::Future<
         Output = result::Result<
-            start_eligible_turn::StartEligibleTurnOutcome,
-            <Transaction as start_eligible_turn::StartEligibleTurnTransaction>::Error,
+            StartEligibleTurnOutcome,
+            <Transaction as StartEligibleTurnTransaction>::Error,
         >,
     > + marker::Send
            + 'static
     where
         Transaction: clone::Clone + marker::Send + 'static,
-        <Transaction as start_eligible_turn::StartEligibleTurnTransaction>::Error:
-            marker::Send + 'static;
+        <Transaction as StartEligibleTurnTransaction>::Error: marker::Send + 'static;
 }
 ```

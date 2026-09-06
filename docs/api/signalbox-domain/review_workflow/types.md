@@ -7,10 +7,8 @@
 ```rust
 pub struct ReviewKey(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl review_workflow::ReviewKey {
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, review_workflow::ReviewValueError>;
+impl ReviewKey {
+    pub fn try_new(value: string::String) -> result::Result<Self, ReviewValueError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -21,10 +19,8 @@ impl review_workflow::ReviewKey {
 ```rust
 pub struct ReviewText(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl review_workflow::ReviewText {
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, review_workflow::ReviewValueError>;
+impl ReviewText {
+    pub fn try_new(value: string::String) -> result::Result<Self, ReviewValueError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -46,10 +42,10 @@ pub enum ReviewValueFailure {
 ```rust
 pub struct ReviewValueError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewValueError {
-    pub const fn failure(&self) -> review_workflow::ReviewValueFailure;
+impl ReviewValueError {
+    pub const fn failure(&self) -> ReviewValueFailure;
     pub fn value(&self) -> &str;
-    pub fn into_parts(self) -> (string::String, review_workflow::ReviewValueFailure);
+    pub fn into_parts(self) -> (string::String, ReviewValueFailure);
 }
 ```
 
@@ -58,10 +54,8 @@ impl review_workflow::ReviewValueError {
 ```rust
 pub struct ReviewChangeRequestNumber(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl review_workflow::ReviewChangeRequestNumber {
-    pub const fn try_new(
-        value: u64,
-    ) -> result::Result<Self, review_workflow::ReviewPositiveNumberError>;
+impl ReviewChangeRequestNumber {
+    pub const fn try_new(value: u64) -> result::Result<Self, ReviewPositiveNumberError>;
     pub const fn get(self) -> u64;
 }
 ```
@@ -71,11 +65,9 @@ impl review_workflow::ReviewChangeRequestNumber {
 ```rust
 pub struct ReviewEventOrdinal(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl review_workflow::ReviewEventOrdinal {
+impl ReviewEventOrdinal {
     pub const fn one() -> Self;
-    pub const fn try_new(
-        value: u32,
-    ) -> result::Result<Self, review_workflow::ReviewPositiveNumberError>;
+    pub const fn try_new(value: u32) -> result::Result<Self, ReviewPositiveNumberError>;
     pub const fn get(self) -> u32;
 }
 ```
@@ -92,10 +84,10 @@ pub struct ReviewPositiveNumberError;
 ```rust
 pub struct ReviewConfidence(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl review_workflow::ReviewConfidence {
+impl ReviewConfidence {
     pub const fn try_from_basis_points(
         basis_points: u16,
-    ) -> result::Result<Self, review_workflow::ReviewConfidenceError>;
+    ) -> result::Result<Self, ReviewConfidenceError>;
     pub const fn basis_points(self) -> u16;
 }
 ```
@@ -105,7 +97,7 @@ impl review_workflow::ReviewConfidence {
 ```rust
 pub struct ReviewConfidenceError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewConfidenceError {
+impl ReviewConfidenceError {
     pub const fn basis_points(self) -> u16;
 }
 ```
@@ -115,13 +107,13 @@ impl review_workflow::ReviewConfidenceError {
 ```rust
 pub struct ReviewFindingConfidenceAxes {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl review_workflow::ReviewFindingConfidenceAxes {
+impl ReviewFindingConfidenceAxes {
     pub const fn new(
-        is_real_confidence: review_workflow::ReviewConfidence,
-        severity_label_confidence: review_workflow::ReviewConfidence,
+        is_real_confidence: ReviewConfidence,
+        severity_label_confidence: ReviewConfidence,
     ) -> Self;
-    pub const fn is_real_confidence(self) -> review_workflow::ReviewConfidence;
-    pub const fn severity_label_confidence(self) -> review_workflow::ReviewConfidence;
+    pub const fn is_real_confidence(self) -> ReviewConfidence;
+    pub const fn severity_label_confidence(self) -> ReviewConfidence;
 }
 ```
 
@@ -130,11 +122,9 @@ impl review_workflow::ReviewFindingConfidenceAxes {
 ```rust
 pub struct ReviewPolicyVersion(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl review_workflow::ReviewPolicyVersion {
+impl ReviewPolicyVersion {
     pub const fn one() -> Self;
-    pub const fn try_new(
-        value: u32,
-    ) -> result::Result<Self, review_workflow::ReviewPositiveNumberError>;
+    pub const fn try_new(value: u32) -> result::Result<Self, ReviewPositiveNumberError>;
     pub const fn get(self) -> u32;
 }
 ```
@@ -144,16 +134,16 @@ impl review_workflow::ReviewPolicyVersion {
 ```rust
 pub struct ReviewPolicy {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewPolicy {
+impl ReviewPolicy {
     pub const fn try_new(
-        version: review_workflow::ReviewPolicyVersion,
-        minimum_judge_confidence: review_workflow::ReviewConfidence,
-        minimum_publication_confidence: review_workflow::ReviewConfidence,
-    ) -> result::Result<Self, review_workflow::ReviewPolicyError>;
+        version: ReviewPolicyVersion,
+        minimum_judge_confidence: ReviewConfidence,
+        minimum_publication_confidence: ReviewConfidence,
+    ) -> result::Result<Self, ReviewPolicyError>;
     pub const fn version_one() -> Self;
-    pub const fn version(self) -> review_workflow::ReviewPolicyVersion;
-    pub const fn minimum_judge_confidence(self) -> review_workflow::ReviewConfidence;
-    pub const fn minimum_publication_confidence(self) -> review_workflow::ReviewConfidence;
+    pub const fn version(self) -> ReviewPolicyVersion;
+    pub const fn minimum_judge_confidence(self) -> ReviewConfidence;
+    pub const fn minimum_publication_confidence(self) -> ReviewConfidence;
 }
 ```
 
@@ -162,14 +152,8 @@ impl review_workflow::ReviewPolicy {
 ```rust
 pub struct ReviewPolicyError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewPolicyError {
-    pub const fn into_parts(
-        self,
-    ) -> (
-        review_workflow::ReviewPolicyVersion,
-        review_workflow::ReviewConfidence,
-        review_workflow::ReviewConfidence,
-    );
+impl ReviewPolicyError {
+    pub const fn into_parts(self) -> (ReviewPolicyVersion, ReviewConfidence, ReviewConfidence);
 }
 ```
 
@@ -177,7 +161,7 @@ impl review_workflow::ReviewPolicyError {
 
 ```rust
 pub enum ReviewTargetSubject {
-    ChangeRequest(review_workflow::ReviewChangeRequestNumber),
+    ChangeRequest(ReviewChangeRequestNumber),
     Commit,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
@@ -188,11 +172,11 @@ pub enum ReviewTargetSubject {
 ```rust
 pub struct ReviewTargetParentRef {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewTargetParentRef {
+impl ReviewTargetParentRef {
     pub const fn target(&self) -> ReviewTargetId;
-    pub const fn provider(&self) -> &review_workflow::ReviewKey;
-    pub const fn repository(&self) -> &review_workflow::ReviewKey;
-    pub const fn head_revision(&self) -> &review_workflow::ReviewKey;
+    pub const fn provider(&self) -> &ReviewKey;
+    pub const fn repository(&self) -> &ReviewKey;
+    pub const fn head_revision(&self) -> &ReviewKey;
 }
 ```
 
@@ -201,33 +185,33 @@ impl review_workflow::ReviewTargetParentRef {
 ```rust
 pub struct ReviewTarget {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewTarget {
+impl ReviewTarget {
     pub fn try_new(
         id: ReviewTargetId,
-        provider: review_workflow::ReviewKey,
-        repository: review_workflow::ReviewKey,
-        subject: review_workflow::ReviewTargetSubject,
-        head_revision: review_workflow::ReviewKey,
-        base_revision: option::Option<review_workflow::ReviewKey>,
-        stack_parent: option::Option<&review_workflow::ReviewTarget>,
-    ) -> result::Result<Self, review_workflow::ReviewTargetError>;
+        provider: ReviewKey,
+        repository: ReviewKey,
+        subject: ReviewTargetSubject,
+        head_revision: ReviewKey,
+        base_revision: option::Option<ReviewKey>,
+        stack_parent: option::Option<&ReviewTarget>,
+    ) -> result::Result<Self, ReviewTargetError>;
     pub fn try_reconstitute(
         id: ReviewTargetId,
-        provider: review_workflow::ReviewKey,
-        repository: review_workflow::ReviewKey,
-        subject: review_workflow::ReviewTargetSubject,
-        head_revision: review_workflow::ReviewKey,
-        base_revision: option::Option<review_workflow::ReviewKey>,
+        provider: ReviewKey,
+        repository: ReviewKey,
+        subject: ReviewTargetSubject,
+        head_revision: ReviewKey,
+        base_revision: option::Option<ReviewKey>,
         stack_parent: option::Option<ReviewTargetId>,
-        stack_parent_evidence: option::Option<&review_workflow::ReviewTarget>,
-    ) -> result::Result<Self, review_workflow::ReviewTargetError>;
+        stack_parent_evidence: option::Option<&ReviewTarget>,
+    ) -> result::Result<Self, ReviewTargetError>;
     pub const fn id(&self) -> ReviewTargetId;
-    pub const fn provider(&self) -> &review_workflow::ReviewKey;
-    pub const fn repository(&self) -> &review_workflow::ReviewKey;
-    pub const fn subject(&self) -> review_workflow::ReviewTargetSubject;
-    pub const fn head_revision(&self) -> &review_workflow::ReviewKey;
-    pub const fn base_revision(&self) -> option::Option<&review_workflow::ReviewKey>;
-    pub const fn stack_parent(&self) -> option::Option<&review_workflow::ReviewTargetParentRef>;
+    pub const fn provider(&self) -> &ReviewKey;
+    pub const fn repository(&self) -> &ReviewKey;
+    pub const fn subject(&self) -> ReviewTargetSubject;
+    pub const fn head_revision(&self) -> &ReviewKey;
+    pub const fn base_revision(&self) -> option::Option<&ReviewKey>;
+    pub const fn stack_parent(&self) -> option::Option<&ReviewTargetParentRef>;
     pub fn ancestry(&self) -> &[ReviewTargetId];
 }
 ```
@@ -253,7 +237,7 @@ pub enum ReviewTargetError {
 ```rust
 pub struct ReviewRunRef {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl review_workflow::ReviewRunRef {
+impl ReviewRunRef {
     pub const fn new(target: ReviewTargetId, run: ReviewRunId) -> Self;
     pub const fn target(self) -> ReviewTargetId;
     pub const fn run(self) -> ReviewRunId;
@@ -265,9 +249,9 @@ impl review_workflow::ReviewRunRef {
 ```rust
 pub struct ReviewPassRef {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl review_workflow::ReviewPassRef {
-    pub const fn new(run: review_workflow::ReviewRunRef, pass: ReviewPassId) -> Self;
-    pub const fn run(self) -> review_workflow::ReviewRunRef;
+impl ReviewPassRef {
+    pub const fn new(run: ReviewRunRef, pass: ReviewPassId) -> Self;
+    pub const fn run(self) -> ReviewRunRef;
     pub const fn pass(self) -> ReviewPassId;
     pub const fn target(self) -> ReviewTargetId;
 }
@@ -278,10 +262,10 @@ impl review_workflow::ReviewPassRef {
 ```rust
 pub struct ReviewFindingRef {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl review_workflow::ReviewFindingRef {
-    pub const fn new(pass: review_workflow::ReviewPassRef, finding: ReviewFindingId) -> Self;
-    pub const fn pass(self) -> review_workflow::ReviewPassRef;
-    pub const fn run(self) -> review_workflow::ReviewRunRef;
+impl ReviewFindingRef {
+    pub const fn new(pass: ReviewPassRef, finding: ReviewFindingId) -> Self;
+    pub const fn pass(self) -> ReviewPassRef;
+    pub const fn run(self) -> ReviewRunRef;
     pub const fn finding(self) -> ReviewFindingId;
     pub const fn target(self) -> ReviewTargetId;
 }
@@ -326,13 +310,13 @@ pub enum ReviewFindingEventType {
 pub enum ReviewFindingEventResultKind {
     Accepted,
     Rejected {
-        reason: review_workflow::ReviewText,
+        reason: ReviewText,
     },
     Duplicate {
-        canonical: review_workflow::ReviewReferencedFindingEvidence,
+        canonical: ReviewReferencedFindingEvidence,
     },
     Superseded {
-        successor: review_workflow::ReviewReferencedFindingEvidence,
+        successor: ReviewReferencedFindingEvidence,
     },
     Stale,
     Posted {
@@ -340,13 +324,13 @@ pub enum ReviewFindingEventResultKind {
     },
     Fixed,
     BlockedWithReason {
-        reason: review_workflow::ReviewText,
+        reason: ReviewText,
         link: option::Option<ReviewExternalLinkId>,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewFindingEventResultKind {
-    pub const fn event_type(&self) -> review_workflow::ReviewFindingEventType;
+impl ReviewFindingEventResultKind {
+    pub const fn event_type(&self) -> ReviewFindingEventType;
 }
 ```
 
@@ -355,16 +339,16 @@ impl review_workflow::ReviewFindingEventResultKind {
 ```rust
 pub struct ReviewFindingEventResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewFindingEventResult {
+impl ReviewFindingEventResult {
     pub fn new(
-        finding: review_workflow::ReviewFindingRef,
-        ordinal: review_workflow::ReviewEventOrdinal,
-        kind: review_workflow::ReviewFindingEventResultKind,
+        finding: ReviewFindingRef,
+        ordinal: ReviewEventOrdinal,
+        kind: ReviewFindingEventResultKind,
     ) -> Self;
-    pub const fn finding(&self) -> review_workflow::ReviewFindingRef;
-    pub const fn ordinal(&self) -> review_workflow::ReviewEventOrdinal;
-    pub const fn event_type(&self) -> review_workflow::ReviewFindingEventType;
-    pub const fn kind(&self) -> &review_workflow::ReviewFindingEventResultKind;
+    pub const fn finding(&self) -> ReviewFindingRef;
+    pub const fn ordinal(&self) -> ReviewEventOrdinal;
+    pub const fn event_type(&self) -> ReviewFindingEventType;
+    pub const fn kind(&self) -> &ReviewFindingEventResultKind;
 }
 ```
 
@@ -373,12 +357,12 @@ impl review_workflow::ReviewFindingEventResult {
 ```rust
 pub struct ReviewProducedFindings {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewProducedFindings {
+impl ReviewProducedFindings {
     pub fn try_new(
-        findings: vec::Vec<review_workflow::ReviewFindingRef>,
-    ) -> result::Result<Self, review_workflow::ReviewProducedFindingsError>;
-    pub fn findings(&self) -> &[review_workflow::ReviewFindingRef];
-    pub fn contains(&self, finding: review_workflow::ReviewFindingRef) -> bool;
+        findings: vec::Vec<ReviewFindingRef>,
+    ) -> result::Result<Self, ReviewProducedFindingsError>;
+    pub fn findings(&self) -> &[ReviewFindingRef];
+    pub fn contains(&self, finding: ReviewFindingRef) -> bool;
 }
 ```
 
@@ -386,13 +370,8 @@ impl review_workflow::ReviewProducedFindings {
 
 ```rust
 pub enum ReviewProducedFindingsError {
-    TooMany {
-        actual: usize,
-        maximum: usize,
-    },
-    Duplicate {
-        finding: review_workflow::ReviewFindingRef,
-    },
+    TooMany { actual: usize, maximum: usize },
+    Duplicate { finding: ReviewFindingRef },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -402,16 +381,15 @@ pub enum ReviewProducedFindingsError {
 ```rust
 pub struct ReviewExternalLinkAttachmentResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewExternalLinkAttachmentResult {
+impl ReviewExternalLinkAttachmentResult {
     pub const fn new(
         link: ReviewExternalLinkId,
-        external_object: review_workflow::ReviewKey,
-        finding_event: option::Option<review_workflow::ReviewFindingEventResult>,
+        external_object: ReviewKey,
+        finding_event: option::Option<ReviewFindingEventResult>,
     ) -> Self;
     pub const fn link(&self) -> ReviewExternalLinkId;
-    pub const fn external_object(&self) -> &review_workflow::ReviewKey;
-    pub const fn finding_event(&self)
-        -> option::Option<&review_workflow::ReviewFindingEventResult>;
+    pub const fn external_object(&self) -> &ReviewKey;
+    pub const fn finding_event(&self) -> option::Option<&ReviewFindingEventResult>;
 }
 ```
 
@@ -420,15 +398,15 @@ impl review_workflow::ReviewExternalLinkAttachmentResult {
 ```rust
 pub struct ReviewExternalLinkObservationResult {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewExternalLinkObservationResult {
+impl ReviewExternalLinkObservationResult {
     pub const fn new(
         link: ReviewExternalLinkId,
-        ordinal: review_workflow::ReviewEventOrdinal,
-        state: review_workflow::ReviewExternalObjectState,
+        ordinal: ReviewEventOrdinal,
+        state: ReviewExternalObjectState,
     ) -> Self;
     pub const fn link(self) -> ReviewExternalLinkId;
-    pub const fn ordinal(self) -> review_workflow::ReviewEventOrdinal;
-    pub const fn state(self) -> review_workflow::ReviewExternalObjectState;
+    pub const fn ordinal(self) -> ReviewEventOrdinal;
+    pub const fn state(self) -> ReviewExternalObjectState;
 }
 ```
 
@@ -437,15 +415,15 @@ impl review_workflow::ReviewExternalLinkObservationResult {
 ```rust
 pub struct ReviewExternalLinkNoChangeResult {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewExternalLinkNoChangeResult {
+impl ReviewExternalLinkNoChangeResult {
     pub const fn new(
         link: ReviewExternalLinkId,
-        observed_through: review_workflow::ReviewEventOrdinal,
-        state: review_workflow::ReviewExternalObjectState,
+        observed_through: ReviewEventOrdinal,
+        state: ReviewExternalObjectState,
     ) -> Self;
     pub const fn link(self) -> ReviewExternalLinkId;
-    pub const fn observed_through(self) -> review_workflow::ReviewEventOrdinal;
-    pub const fn state(self) -> review_workflow::ReviewExternalObjectState;
+    pub const fn observed_through(self) -> ReviewEventOrdinal;
+    pub const fn state(self) -> ReviewExternalObjectState;
 }
 ```
 
@@ -454,10 +432,10 @@ impl review_workflow::ReviewExternalLinkNoChangeResult {
 ```rust
 pub struct ReviewExternalLinkPublicationBlockedResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewExternalLinkPublicationBlockedResult {
-    pub const fn new(link: ReviewExternalLinkId, reason: review_workflow::ReviewText) -> Self;
+impl ReviewExternalLinkPublicationBlockedResult {
+    pub const fn new(link: ReviewExternalLinkId, reason: ReviewText) -> Self;
     pub const fn link(&self) -> ReviewExternalLinkId;
-    pub const fn reason(&self) -> &review_workflow::ReviewText;
+    pub const fn reason(&self) -> &ReviewText;
 }
 ```
 
@@ -465,12 +443,12 @@ impl review_workflow::ReviewExternalLinkPublicationBlockedResult {
 
 ```rust
 pub enum ReviewPassResult {
-    ProducedFindings(review_workflow::ReviewProducedFindings),
-    FindingEvent(review_workflow::ReviewFindingEventResult),
-    ExternalLinkAttachment(review_workflow::ReviewExternalLinkAttachmentResult),
-    ExternalLinkObservation(review_workflow::ReviewExternalLinkObservationResult),
-    ExternalLinkNoChange(review_workflow::ReviewExternalLinkNoChangeResult),
-    ExternalLinkPublicationBlocked(review_workflow::ReviewExternalLinkPublicationBlockedResult),
+    ProducedFindings(ReviewProducedFindings),
+    FindingEvent(ReviewFindingEventResult),
+    ExternalLinkAttachment(ReviewExternalLinkAttachmentResult),
+    ExternalLinkObservation(ReviewExternalLinkObservationResult),
+    ExternalLinkNoChange(ReviewExternalLinkNoChangeResult),
+    ExternalLinkPublicationBlocked(ReviewExternalLinkPublicationBlockedResult),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -480,18 +458,18 @@ pub enum ReviewPassResult {
 ```rust
 pub struct ReviewReferencedFindingEvidence {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewReferencedFindingEvidence {
-    pub fn try_from_finding(finding: &review_workflow::ReviewFinding) -> option::Option<Self>;
+impl ReviewReferencedFindingEvidence {
+    pub fn try_from_finding(finding: &ReviewFinding) -> option::Option<Self>;
     pub fn try_reconstitute(
-        reference: review_workflow::ReviewFindingRef,
-        status: review_workflow::ReviewFindingStatus,
-        producing_pass: &review_workflow::ReviewPassEvidence,
-        producing_run: review_workflow::ReviewRunEvidence,
+        reference: ReviewFindingRef,
+        status: ReviewFindingStatus,
+        producing_pass: &ReviewPassEvidence,
+        producing_run: ReviewRunEvidence,
     ) -> option::Option<Self>;
-    pub const fn reference(self) -> review_workflow::ReviewFindingRef;
-    pub const fn status(self) -> review_workflow::ReviewFindingStatus;
-    pub const fn producer_policy(self) -> review_workflow::ReviewPolicy;
-    pub const fn producing_pass(self) -> review_workflow::ReviewPassRef;
+    pub const fn reference(self) -> ReviewFindingRef;
+    pub const fn status(self) -> ReviewFindingStatus;
+    pub const fn producer_policy(self) -> ReviewPolicy;
+    pub const fn producing_pass(self) -> ReviewPassRef;
 }
 ```
 
@@ -516,19 +494,19 @@ pub enum ReviewWorkflowKind {
 pub enum ReviewRunState {
     Queued,
     Running {
-        active_pass: review_workflow::ReviewPassRef,
+        active_pass: ReviewPassRef,
     },
     Succeeded {
-        concluding_pass: review_workflow::ReviewPassRef,
+        concluding_pass: ReviewPassRef,
     },
     Failed {
-        failed_pass: review_workflow::ReviewPassRef,
+        failed_pass: ReviewPassRef,
     },
     Blocked {
-        blocking_pass: review_workflow::ReviewPassRef,
+        blocking_pass: ReviewPassRef,
     },
     Cancelled {
-        last_pass: option::Option<review_workflow::ReviewPassRef>,
+        last_pass: option::Option<ReviewPassRef>,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -539,17 +517,17 @@ pub enum ReviewRunState {
 ```rust
 pub struct ReviewRunEvidence {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewRunEvidence {
+impl ReviewRunEvidence {
     pub const fn new(
-        reference: review_workflow::ReviewRunRef,
-        workflow: review_workflow::ReviewWorkflowKind,
-        policy: review_workflow::ReviewPolicy,
-        state: review_workflow::ReviewRunState,
+        reference: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        policy: ReviewPolicy,
+        state: ReviewRunState,
     ) -> Self;
-    pub const fn reference(self) -> review_workflow::ReviewRunRef;
-    pub const fn workflow(self) -> review_workflow::ReviewWorkflowKind;
-    pub const fn policy(self) -> review_workflow::ReviewPolicy;
-    pub const fn state(self) -> review_workflow::ReviewRunState;
+    pub const fn reference(self) -> ReviewRunRef;
+    pub const fn workflow(self) -> ReviewWorkflowKind;
+    pub const fn policy(self) -> ReviewPolicy;
+    pub const fn state(self) -> ReviewRunState;
 }
 ```
 
@@ -558,17 +536,13 @@ impl review_workflow::ReviewRunEvidence {
 ```rust
 pub struct ReviewPassEvidence {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewPassEvidence {
-    pub fn from_pass(
-        pass: &review_workflow::ReviewPass,
-        policy: review_workflow::ReviewPolicy,
-    ) -> Self;
-    pub fn project_result(&self, result: review_workflow::ReviewPassResult)
-        -> option::Option<Self>;
-    pub const fn reference(&self) -> review_workflow::ReviewPassRef;
-    pub const fn kind(&self) -> review_workflow::ReviewPassKind;
-    pub const fn policy(&self) -> review_workflow::ReviewPolicy;
-    pub const fn state(&self) -> &review_workflow::ReviewPassState;
+impl ReviewPassEvidence {
+    pub fn from_pass(pass: &ReviewPass, policy: ReviewPolicy) -> Self;
+    pub fn project_result(&self, result: ReviewPassResult) -> option::Option<Self>;
+    pub const fn reference(&self) -> ReviewPassRef;
+    pub const fn kind(&self) -> ReviewPassKind;
+    pub const fn policy(&self) -> ReviewPolicy;
+    pub const fn state(&self) -> &ReviewPassState;
 }
 ```
 
@@ -577,19 +551,19 @@ impl review_workflow::ReviewPassEvidence {
 ```rust
 pub struct ReviewRunReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewRunReconstitutionInput {
+impl ReviewRunReconstitutionInput {
     pub const fn new(
-        reference: review_workflow::ReviewRunRef,
-        workflow: review_workflow::ReviewWorkflowKind,
-        policy: review_workflow::ReviewPolicy,
-        state: review_workflow::ReviewRunState,
-        pass_evidence: option::Option<review_workflow::ReviewPassEvidence>,
+        reference: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        policy: ReviewPolicy,
+        state: ReviewRunState,
+        pass_evidence: option::Option<ReviewPassEvidence>,
     ) -> Self;
-    pub const fn reference(&self) -> review_workflow::ReviewRunRef;
-    pub const fn workflow(&self) -> review_workflow::ReviewWorkflowKind;
-    pub const fn policy(&self) -> review_workflow::ReviewPolicy;
-    pub const fn state(&self) -> review_workflow::ReviewRunState;
-    pub const fn pass_evidence(&self) -> option::Option<&review_workflow::ReviewPassEvidence>;
+    pub const fn reference(&self) -> ReviewRunRef;
+    pub const fn workflow(&self) -> ReviewWorkflowKind;
+    pub const fn policy(&self) -> ReviewPolicy;
+    pub const fn state(&self) -> ReviewRunState;
+    pub const fn pass_evidence(&self) -> option::Option<&ReviewPassEvidence>;
 }
 ```
 
@@ -598,26 +572,26 @@ impl review_workflow::ReviewRunReconstitutionInput {
 ```rust
 pub struct ReviewRun {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewRun {
+impl ReviewRun {
     pub const fn new(
-        reference: review_workflow::ReviewRunRef,
-        workflow: review_workflow::ReviewWorkflowKind,
-        policy: review_workflow::ReviewPolicy,
+        reference: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        policy: ReviewPolicy,
     ) -> Self;
     pub fn try_reconstitute(
-        input: review_workflow::ReviewRunReconstitutionInput,
-    ) -> result::Result<Self, review_workflow::ReviewRunReconstitutionError>;
+        input: ReviewRunReconstitutionInput,
+    ) -> result::Result<Self, ReviewRunReconstitutionError>;
     pub fn transition(
         self,
-        next: review_workflow::ReviewRunState,
-        pass_evidence: option::Option<review_workflow::ReviewPassEvidence>,
-    ) -> result::Result<Self, review_workflow::ReviewRunTransitionError>;
-    pub const fn reference(&self) -> review_workflow::ReviewRunRef;
-    pub const fn workflow(&self) -> review_workflow::ReviewWorkflowKind;
-    pub const fn policy(&self) -> review_workflow::ReviewPolicy;
-    pub const fn state(&self) -> review_workflow::ReviewRunState;
-    pub const fn recorded_pass(&self) -> option::Option<review_workflow::ReviewPassRef>;
-    pub const fn evidence(&self) -> review_workflow::ReviewRunEvidence;
+        next: ReviewRunState,
+        pass_evidence: option::Option<ReviewPassEvidence>,
+    ) -> result::Result<Self, ReviewRunTransitionError>;
+    pub const fn reference(&self) -> ReviewRunRef;
+    pub const fn workflow(&self) -> ReviewWorkflowKind;
+    pub const fn policy(&self) -> ReviewPolicy;
+    pub const fn state(&self) -> ReviewRunState;
+    pub const fn recorded_pass(&self) -> option::Option<ReviewPassRef>;
+    pub const fn evidence(&self) -> ReviewRunEvidence;
 }
 ```
 
@@ -641,10 +615,10 @@ pub enum ReviewRunEvidenceFailure {
 ```rust
 pub struct ReviewRunReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewRunReconstitutionError {
-    pub const fn failure(&self) -> review_workflow::ReviewRunEvidenceFailure;
-    pub const fn input(&self) -> &review_workflow::ReviewRunReconstitutionInput;
-    pub fn into_input(self) -> review_workflow::ReviewRunReconstitutionInput;
+impl ReviewRunReconstitutionError {
+    pub const fn failure(&self) -> ReviewRunEvidenceFailure;
+    pub const fn input(&self) -> &ReviewRunReconstitutionInput;
+    pub fn into_input(self) -> ReviewRunReconstitutionInput;
 }
 ```
 
@@ -652,7 +626,7 @@ impl review_workflow::ReviewRunReconstitutionError {
 
 ```rust
 pub enum ReviewRunTransitionFailure {
-    Evidence(review_workflow::ReviewRunEvidenceFailure),
+    Evidence(ReviewRunEvidenceFailure),
     InvalidTransition,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -663,17 +637,12 @@ pub enum ReviewRunTransitionFailure {
 ```rust
 pub struct ReviewRunTransitionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewRunTransitionError {
-    pub const fn failure(&self) -> review_workflow::ReviewRunTransitionFailure;
-    pub const fn states(
-        &self,
-    ) -> (
-        review_workflow::ReviewRunState,
-        review_workflow::ReviewRunState,
-    );
-    pub const fn pass_evidence(&self) -> option::Option<&review_workflow::ReviewPassEvidence>;
-    pub const fn current(&self) -> &review_workflow::ReviewRun;
-    pub fn into_current(self) -> review_workflow::ReviewRun;
+impl ReviewRunTransitionError {
+    pub const fn failure(&self) -> ReviewRunTransitionFailure;
+    pub const fn states(&self) -> (ReviewRunState, ReviewRunState);
+    pub const fn pass_evidence(&self) -> option::Option<&ReviewPassEvidence>;
+    pub const fn current(&self) -> &ReviewRun;
+    pub fn into_current(self) -> ReviewRun;
 }
 ```
 
@@ -702,15 +671,15 @@ pub enum ReviewPassState {
     },
     Succeeded {
         turn: TurnId,
-        output_frontier: context_frontier::ContextFrontierId,
-        result: option::Option<review_workflow::ReviewPassResult>,
+        output_frontier: ContextFrontierId,
+        result: option::Option<ReviewPassResult>,
     },
     Failed {
         turn: TurnId,
     },
     Blocked {
         turn: TurnId,
-        result: option::Option<review_workflow::ReviewPassResult>,
+        result: option::Option<ReviewPassResult>,
     },
     Cancelled {
         turn: option::Option<TurnId>,
@@ -738,19 +707,19 @@ pub enum ReviewPassTurnOutcome {
 ```rust
 pub struct ReviewPassTurnEvidence {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewPassTurnEvidence {
+impl ReviewPassTurnEvidence {
     pub const fn new(
         turn: TurnId,
         session: SessionId,
         accepted_input: AcceptedInputId,
-        outcome: review_workflow::ReviewPassTurnOutcome,
-        terminal_frontier: option::Option<context_frontier::ContextFrontierId>,
+        outcome: ReviewPassTurnOutcome,
+        terminal_frontier: option::Option<ContextFrontierId>,
     ) -> Self;
     pub const fn turn(self) -> TurnId;
     pub const fn session(self) -> SessionId;
     pub const fn accepted_input(self) -> AcceptedInputId;
-    pub const fn outcome(self) -> review_workflow::ReviewPassTurnOutcome;
-    pub const fn terminal_frontier(self) -> option::Option<context_frontier::ContextFrontierId>;
+    pub const fn outcome(self) -> ReviewPassTurnOutcome;
+    pub const fn terminal_frontier(self) -> option::Option<ContextFrontierId>;
 }
 ```
 
@@ -759,7 +728,7 @@ impl review_workflow::ReviewPassTurnEvidence {
 ```rust
 pub struct ReviewPassAcceptedInputEvidence {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewPassAcceptedInputEvidence {
+impl ReviewPassAcceptedInputEvidence {
     pub const fn new(
         accepted_input: AcceptedInputId,
         session: SessionId,
@@ -768,5 +737,34 @@ impl review_workflow::ReviewPassAcceptedInputEvidence {
     pub const fn accepted_input(self) -> AcceptedInputId;
     pub const fn session(self) -> SessionId;
     pub const fn origin_turn(self) -> option::Option<TurnId>;
+}
+```
+
+## ReviewPassReconstitutionInput
+
+```rust
+pub struct ReviewPassReconstitutionInput {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassReconstitutionInput {
+    pub const fn new(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        workflow_run: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        accepted_input_evidence: ReviewPassAcceptedInputEvidence,
+        state: ReviewPassState,
+        turn_evidence: option::Option<ReviewPassTurnEvidence>,
+    ) -> Self;
+    pub const fn reference(&self) -> ReviewPassRef;
+    pub const fn kind(&self) -> ReviewPassKind;
+    pub const fn workflow_run(&self) -> ReviewRunRef;
+    pub const fn workflow(&self) -> ReviewWorkflowKind;
+    pub const fn session(&self) -> SessionId;
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn accepted_input_evidence(&self) -> ReviewPassAcceptedInputEvidence;
+    pub const fn state(&self) -> &ReviewPassState;
+    pub const fn turn_evidence(&self) -> option::Option<ReviewPassTurnEvidence>;
 }
 ```

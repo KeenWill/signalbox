@@ -7,14 +7,11 @@
 ```rust
 pub fn derive_repo_watch_events(
     repository: &repo_watch::RepositorySlug,
-    previous: option::Option<&repo_watch::RepoWatchObservation>,
-    current: &repo_watch::RepoWatchObservation,
-    identity_frontier: &mut repo_watch::RepoWatchEventIdentityFrontierV1,
-    ids: &mut impl repo_watch::RepoWatchEventIdGenerator,
-) -> result::Result<
-    vec::Vec<repo_watch::RepoWatchEventOccurrenceV1>,
-    repo_watch::RepoWatchDifferError,
->;
+    previous: option::Option<&RepoWatchObservation>,
+    current: &RepoWatchObservation,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+    ids: &mut impl RepoWatchEventIdGenerator,
+) -> result::Result<vec::Vec<RepoWatchEventOccurrenceV1>, RepoWatchDifferError>;
 ```
 
 ## derive_repo_watch_events_with_merged_baselines
@@ -22,15 +19,12 @@ pub fn derive_repo_watch_events(
 ```rust
 pub fn derive_repo_watch_events_with_merged_baselines(
     repository: &repo_watch::RepositorySlug,
-    previous: option::Option<&repo_watch::RepoWatchObservation>,
-    merged_baselines: &[repo_watch::RepoWatchMergedPullRequestBaselineV1],
-    current: &repo_watch::RepoWatchObservation,
-    identity_frontier: &mut repo_watch::RepoWatchEventIdentityFrontierV1,
-    ids: &mut impl repo_watch::RepoWatchEventIdGenerator,
-) -> result::Result<
-    vec::Vec<repo_watch::RepoWatchEventOccurrenceV1>,
-    repo_watch::RepoWatchDifferError,
->;
+    previous: option::Option<&RepoWatchObservation>,
+    merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
+    current: &RepoWatchObservation,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+    ids: &mut impl RepoWatchEventIdGenerator,
+) -> result::Result<vec::Vec<RepoWatchEventOccurrenceV1>, RepoWatchDifferError>;
 ```
 
 ## repo_watch_events_have_equal_identified_content

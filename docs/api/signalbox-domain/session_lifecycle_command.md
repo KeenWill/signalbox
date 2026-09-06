@@ -8,18 +8,13 @@
 pub enum CommandPrincipal {
     Core,
     Operator,
-    Module {
-        module: session_lifecycle::DispatchingModule,
-    },
+    Module { module: DispatchingModule },
     Watchdog,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session_lifecycle_command::CommandPrincipal {
-    pub const fn for_actor(actor: actor::Actor) -> Self;
-    pub const fn classify(
-        self,
-        actor: option::Option<actor::Actor>,
-    ) -> session_lifecycle::LifecycleActor;
+impl CommandPrincipal {
+    pub const fn for_actor(actor: Actor) -> Self;
+    pub const fn classify(self, actor: option::Option<Actor>) -> LifecycleActor;
 }
 ```
 
@@ -38,7 +33,7 @@ pub enum StartGate {
 ```rust
 pub enum FinishCondition {
     ExternalGate,
-    Declared(goal::FinishConditionStatement),
+    Declared(FinishConditionStatement),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -60,19 +55,19 @@ pub enum FinishCheckVerdict {
 pub enum SessionLifecycleOperation {
     ReleaseStart,
     Stop {
-        sticky: session_lifecycle::StopStickiness,
-        descendant_scope: session_delegation::DescendantTerminationScope,
+        sticky: StopStickiness,
+        descendant_scope: DescendantTerminationScope,
     },
     Supersede {
         successor: SessionId,
     },
     Abandon,
     CloseFailed {
-        cause: option::Option<session_lifecycle::SessionFailureCause>,
+        cause: option::Option<SessionFailureCause>,
     },
     Resume,
     Adopt {
-        finish_condition: option::Option<session_lifecycle_command::FinishCondition>,
+        finish_condition: option::Option<FinishCondition>,
     },
     Release,
 }
@@ -84,21 +79,21 @@ pub enum SessionLifecycleOperation {
 ```rust
 pub struct SessionLifecycleCommand {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session_lifecycle_command::SessionLifecycleCommand {
+impl SessionLifecycleCommand {
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,
-        operation: session_lifecycle_command::SessionLifecycleOperation,
+        operation: SessionLifecycleOperation,
     ) -> Self;
     pub const fn command_id(&self) -> DurableCommandId;
     pub const fn session(&self) -> SessionId;
-    pub const fn operation(&self) -> &session_lifecycle_command::SessionLifecycleOperation;
+    pub const fn operation(&self) -> &SessionLifecycleOperation;
 }
-impl cmp::PartialEq for session_lifecycle_command::SessionLifecycleCommand {
+impl cmp::PartialEq for SessionLifecycleCommand {
     pub fn eq(&self, other: &Self) -> bool;
 }
-impl cmp::Eq for session_lifecycle_command::SessionLifecycleCommand {}
-impl hash::Hash for session_lifecycle_command::SessionLifecycleCommand {
+impl cmp::Eq for SessionLifecycleCommand {}
+impl hash::Hash for SessionLifecycleCommand {
     pub fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 ```
@@ -129,15 +124,15 @@ pub enum SessionLifecycleCommandRejection {
 pub enum SessionLifecycleApplication {
     StartReleased,
     Closed {
-        outcome: session_lifecycle::SessionTerminalOutcome,
+        outcome: SessionTerminalOutcome,
     },
     ClosurePending {
-        outcome: session_lifecycle::SessionTerminalOutcome,
+        outcome: SessionTerminalOutcome,
         live_turn: TurnId,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults_version: SessionConfigurationDefaultsVersion,
     },
     Resumed {
-        state: session_lifecycle::SessionLifecycleState,
+        state: SessionLifecycleState,
     },
     OwnershipChanged,
 }
@@ -148,8 +143,8 @@ pub enum SessionLifecycleApplication {
 
 ```rust
 pub enum SessionLifecycleCommandResult {
-    Applied(session_lifecycle_command::SessionLifecycleApplication),
-    Rejected(session_lifecycle_command::SessionLifecycleCommandRejection),
+    Applied(SessionLifecycleApplication),
+    Rejected(SessionLifecycleCommandRejection),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

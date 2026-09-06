@@ -33,7 +33,7 @@ pub enum FastMode {
 ```rust
 pub enum FastModeOverlay {
     Inherit,
-    Value(model_settings::FastMode),
+    Value(FastMode),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -77,9 +77,9 @@ pub enum CodexCliServiceTier {
 
 ```rust
 pub enum ServiceTier {
-    Anthropic(model_settings::AnthropicServiceTier),
-    OpenAi(model_settings::OpenAiServiceTier),
-    CodexCli(model_settings::CodexCliServiceTier),
+    Anthropic(AnthropicServiceTier),
+    OpenAi(OpenAiServiceTier),
+    CodexCli(CodexCliServiceTier),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 ```
@@ -100,22 +100,19 @@ pub enum SettingOverlay<T> {
 ```rust
 pub struct ModelSettingsOverlay {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_settings::ModelSettingsOverlay {
+impl ModelSettingsOverlay {
     pub const fn inherit_all() -> Self;
     pub const fn new(
-        reasoning_level: model_settings::SettingOverlay<model_settings::ReasoningLevel>,
-        fast_mode: model_settings::FastModeOverlay,
-        service_tier: model_settings::SettingOverlay<model_settings::ServiceTier>,
+        reasoning_level: SettingOverlay<ReasoningLevel>,
+        fast_mode: FastModeOverlay,
+        service_tier: SettingOverlay<ServiceTier>,
     ) -> Self;
-    pub const fn from_effective(settings: model_settings::EffectiveModelSettings) -> Self;
-    pub const fn reasoning_level(
-        &self,
-    ) -> model_settings::SettingOverlay<model_settings::ReasoningLevel>;
-    pub const fn fast_mode(&self) -> model_settings::FastModeOverlay;
-    pub const fn service_tier(&self)
-        -> model_settings::SettingOverlay<model_settings::ServiceTier>;
+    pub const fn from_effective(settings: EffectiveModelSettings) -> Self;
+    pub const fn reasoning_level(&self) -> SettingOverlay<ReasoningLevel>;
+    pub const fn fast_mode(&self) -> FastModeOverlay;
+    pub const fn service_tier(&self) -> SettingOverlay<ServiceTier>;
 }
-impl default::Default for model_settings::ModelSettingsOverlay {
+impl default::Default for ModelSettingsOverlay {
     pub fn default() -> Self;
 }
 ```
@@ -125,18 +122,18 @@ impl default::Default for model_settings::ModelSettingsOverlay {
 ```rust
 pub struct EffectiveModelSettings {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_settings::EffectiveModelSettings {
+impl EffectiveModelSettings {
     pub const fn provider_defaults() -> Self;
     pub const fn new(
-        reasoning_level: option::Option<model_settings::ReasoningLevel>,
-        fast_mode: model_settings::FastMode,
-        service_tier: option::Option<model_settings::ServiceTier>,
+        reasoning_level: option::Option<ReasoningLevel>,
+        fast_mode: FastMode,
+        service_tier: option::Option<ServiceTier>,
     ) -> Self;
-    pub const fn reasoning_level(&self) -> option::Option<model_settings::ReasoningLevel>;
-    pub const fn fast_mode(&self) -> model_settings::FastMode;
-    pub const fn service_tier(&self) -> option::Option<model_settings::ServiceTier>;
+    pub const fn reasoning_level(&self) -> option::Option<ReasoningLevel>;
+    pub const fn fast_mode(&self) -> FastMode;
+    pub const fn service_tier(&self) -> option::Option<ServiceTier>;
 }
-impl default::Default for model_settings::EffectiveModelSettings {
+impl default::Default for EffectiveModelSettings {
     pub fn default() -> Self;
 }
 ```
@@ -158,11 +155,11 @@ pub enum ModelSettingSource {
 ```rust
 pub struct ResolvedModelSettings {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_settings::ResolvedModelSettings {
-    pub const fn effective(&self) -> model_settings::EffectiveModelSettings;
-    pub const fn reasoning_source(&self) -> option::Option<model_settings::ModelSettingSource>;
-    pub const fn fast_mode_source(&self) -> option::Option<model_settings::ModelSettingSource>;
-    pub const fn service_tier_source(&self) -> option::Option<model_settings::ModelSettingSource>;
+impl ResolvedModelSettings {
+    pub const fn effective(&self) -> EffectiveModelSettings;
+    pub const fn reasoning_source(&self) -> option::Option<ModelSettingSource>;
+    pub const fn fast_mode_source(&self) -> option::Option<ModelSettingSource>;
+    pub const fn service_tier_source(&self) -> option::Option<ModelSettingSource>;
 }
 ```
 
@@ -171,22 +168,22 @@ impl model_settings::ResolvedModelSettings {
 ```rust
 pub struct ValidatedModelSettings {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_settings::ValidatedModelSettings {
+impl ValidatedModelSettings {
     pub const fn provider_defaults() -> Self;
     pub fn reconstitute(
-        precedence: model_settings::ModelSettingsPrecedence,
-        effective: model_settings::EffectiveModelSettings,
-        reasoning_source: option::Option<model_settings::ModelSettingSource>,
-        fast_mode_source: option::Option<model_settings::ModelSettingSource>,
-        service_tier_source: option::Option<model_settings::ModelSettingSource>,
-        validated_for: option::Option<configuration::DirectModelSelection>,
+        precedence: ModelSettingsPrecedence,
+        effective: EffectiveModelSettings,
+        reasoning_source: option::Option<ModelSettingSource>,
+        fast_mode_source: option::Option<ModelSettingSource>,
+        service_tier_source: option::Option<ModelSettingSource>,
+        validated_for: option::Option<DirectModelSelection>,
     ) -> option::Option<Self>;
-    pub const fn precedence(&self) -> model_settings::ModelSettingsPrecedence;
-    pub const fn resolved(&self) -> model_settings::ResolvedModelSettings;
-    pub const fn effective(&self) -> model_settings::EffectiveModelSettings;
-    pub const fn validated_for(&self) -> option::Option<configuration::DirectModelSelection>;
+    pub const fn precedence(&self) -> ModelSettingsPrecedence;
+    pub const fn resolved(&self) -> ResolvedModelSettings;
+    pub const fn effective(&self) -> EffectiveModelSettings;
+    pub const fn validated_for(&self) -> option::Option<DirectModelSelection>;
 }
-impl default::Default for model_settings::ValidatedModelSettings {
+impl default::Default for ValidatedModelSettings {
     pub fn default() -> Self;
 }
 ```
@@ -196,20 +193,20 @@ impl default::Default for model_settings::ValidatedModelSettings {
 ```rust
 pub struct ModelSettingsPrecedence {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_settings::ModelSettingsPrecedence {
+impl ModelSettingsPrecedence {
     pub const fn provider_defaults() -> Self;
     pub const fn new(
-        per_call: model_settings::ModelSettingsOverlay,
-        session: model_settings::ModelSettingsOverlay,
-        profile: model_settings::ModelSettingsOverlay,
-        global_default: model_settings::ModelSettingsOverlay,
+        per_call: ModelSettingsOverlay,
+        session: ModelSettingsOverlay,
+        profile: ModelSettingsOverlay,
+        global_default: ModelSettingsOverlay,
     ) -> Self;
-    pub const fn per_call(&self) -> model_settings::ModelSettingsOverlay;
-    pub const fn session(&self) -> model_settings::ModelSettingsOverlay;
-    pub const fn profile(&self) -> model_settings::ModelSettingsOverlay;
-    pub const fn global_default(&self) -> model_settings::ModelSettingsOverlay;
-    pub const fn with_per_call(self, per_call: model_settings::ModelSettingsOverlay) -> Self;
-    pub fn resolve(self) -> model_settings::ResolvedModelSettings;
+    pub const fn per_call(&self) -> ModelSettingsOverlay;
+    pub const fn session(&self) -> ModelSettingsOverlay;
+    pub const fn profile(&self) -> ModelSettingsOverlay;
+    pub const fn global_default(&self) -> ModelSettingsOverlay;
+    pub const fn with_per_call(self, per_call: ModelSettingsOverlay) -> Self;
+    pub fn resolve(self) -> ResolvedModelSettings;
 }
 ```
 
@@ -219,7 +216,7 @@ impl model_settings::ModelSettingsPrecedence {
 pub enum FastModeSupport {
     Unsupported,
     RequestControl,
-    AlternateTarget(model_call::ResolvedProviderTarget),
+    AlternateTarget(ResolvedProviderTarget),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -229,46 +226,40 @@ pub enum FastModeSupport {
 ```rust
 pub struct ModelCapabilities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_settings::ModelCapabilities {
+impl ModelCapabilities {
     pub const fn new(
-        reasoning_levels: set::BTreeSet<model_settings::ReasoningLevel>,
-        fast_mode: model_settings::FastModeSupport,
-        service_tiers: set::BTreeSet<model_settings::ServiceTier>,
+        reasoning_levels: set::BTreeSet<ReasoningLevel>,
+        fast_mode: FastModeSupport,
+        service_tiers: set::BTreeSet<ServiceTier>,
     ) -> Self;
-    pub const fn reasoning_levels(&self) -> &set::BTreeSet<model_settings::ReasoningLevel>;
-    pub const fn fast_mode(&self) -> model_settings::FastModeSupport;
-    pub const fn service_tiers(&self) -> &set::BTreeSet<model_settings::ServiceTier>;
+    pub const fn reasoning_levels(&self) -> &set::BTreeSet<ReasoningLevel>;
+    pub const fn fast_mode(&self) -> FastModeSupport;
+    pub const fn service_tiers(&self) -> &set::BTreeSet<ServiceTier>;
     pub fn validate_explicit(
         &self,
-        selection: configuration::DirectModelSelection,
-        overlay: model_settings::ModelSettingsOverlay,
-    ) -> result::Result<(), model_settings::UnsupportedModelSetting>;
+        selection: DirectModelSelection,
+        overlay: ModelSettingsOverlay,
+    ) -> result::Result<(), UnsupportedModelSetting>;
     pub fn validate_precedence(
         &self,
-        selection: configuration::DirectModelSelection,
-        precedence: model_settings::ModelSettingsPrecedence,
-    ) -> result::Result<
-        model_settings::ValidatedModelSettings,
-        model_settings::UnsupportedModelSetting,
-    >;
+        selection: DirectModelSelection,
+        precedence: ModelSettingsPrecedence,
+    ) -> result::Result<ValidatedModelSettings, UnsupportedModelSetting>;
     pub fn adjust_for_model_change(
         &self,
-        inherited: model_settings::EffectiveModelSettings,
-    ) -> model_settings::CompatibleModelSettings;
+        inherited: EffectiveModelSettings,
+    ) -> CompatibleModelSettings;
     pub fn validate_model_change(
         &self,
-        selection: configuration::DirectModelSelection,
-        precedence: model_settings::ModelSettingsPrecedence,
-        caller_overlay: model_settings::ModelSettingsOverlay,
-    ) -> result::Result<
-        model_settings::AdjustedModelSettings,
-        model_settings::UnsupportedModelSetting,
-    >;
+        selection: DirectModelSelection,
+        precedence: ModelSettingsPrecedence,
+        caller_overlay: ModelSettingsOverlay,
+    ) -> result::Result<AdjustedModelSettings, UnsupportedModelSetting>;
     pub fn serving_target(
         &self,
-        selected: model_call::ResolvedProviderTarget,
-        fast_mode: model_settings::FastMode,
-    ) -> option::Option<model_call::ResolvedProviderTarget>;
+        selected: ResolvedProviderTarget,
+        fast_mode: FastMode,
+    ) -> option::Option<ResolvedProviderTarget>;
 }
 ```
 
@@ -277,15 +268,10 @@ impl model_settings::ModelCapabilities {
 ```rust
 pub struct AdjustedModelSettings {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_settings::AdjustedModelSettings {
-    pub const fn settings(&self) -> model_settings::ValidatedModelSettings;
-    pub fn adjustments(&self) -> &[model_settings::ModelChangeAdjustment];
-    pub fn into_parts(
-        self,
-    ) -> (
-        model_settings::ValidatedModelSettings,
-        boxed::Box<[model_settings::ModelChangeAdjustment]>,
-    );
+impl AdjustedModelSettings {
+    pub const fn settings(&self) -> ValidatedModelSettings;
+    pub fn adjustments(&self) -> &[ModelChangeAdjustment];
+    pub fn into_parts(self) -> (ValidatedModelSettings, boxed::Box<[ModelChangeAdjustment]>);
 }
 ```
 
@@ -294,22 +280,22 @@ impl model_settings::AdjustedModelSettings {
 ```rust
 pub enum UnsupportedModelSetting {
     ReasoningLevel {
-        selection: configuration::DirectModelSelection,
-        requested: model_settings::ReasoningLevel,
+        selection: DirectModelSelection,
+        requested: ReasoningLevel,
     },
     FastMode {
-        selection: configuration::DirectModelSelection,
+        selection: DirectModelSelection,
     },
     ServiceTier {
-        selection: configuration::DirectModelSelection,
-        requested: model_settings::ServiceTier,
+        selection: DirectModelSelection,
+        requested: ServiceTier,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for model_settings::UnsupportedModelSetting {
+impl fmt::Display for UnsupportedModelSetting {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for model_settings::UnsupportedModelSetting {}
+impl error::Error for UnsupportedModelSetting {}
 ```
 
 ## ModelChangeAdjustment
@@ -317,15 +303,15 @@ impl error::Error for model_settings::UnsupportedModelSetting {}
 ```rust
 pub enum ModelChangeAdjustment {
     ReasoningLevelClamped {
-        from: model_settings::ReasoningLevel,
-        to: model_settings::ReasoningLevel,
+        from: ReasoningLevel,
+        to: ReasoningLevel,
     },
     ReasoningLevelCleared {
-        from: model_settings::ReasoningLevel,
+        from: ReasoningLevel,
     },
     FastModeDisabled,
     ServiceTierCleared {
-        from: model_settings::ServiceTier,
+        from: ServiceTier,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
@@ -336,15 +322,10 @@ pub enum ModelChangeAdjustment {
 ```rust
 pub struct CompatibleModelSettings {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_settings::CompatibleModelSettings {
-    pub const fn effective(&self) -> model_settings::EffectiveModelSettings;
-    pub fn adjustments(&self) -> &[model_settings::ModelChangeAdjustment];
-    pub fn into_parts(
-        self,
-    ) -> (
-        model_settings::EffectiveModelSettings,
-        boxed::Box<[model_settings::ModelChangeAdjustment]>,
-    );
+impl CompatibleModelSettings {
+    pub const fn effective(&self) -> EffectiveModelSettings;
+    pub fn adjustments(&self) -> &[ModelChangeAdjustment];
+    pub fn into_parts(self) -> (EffectiveModelSettings, boxed::Box<[ModelChangeAdjustment]>);
 }
 ```
 
@@ -353,33 +334,29 @@ impl model_settings::CompatibleModelSettings {
 ```rust
 pub struct SessionModelSettingsChanged {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_settings::SessionModelSettingsChanged {
+impl SessionModelSettingsChanged {
     pub fn try_new(
         session: SessionId,
         command_id: DurableCommandId,
-        prior_defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        installed_defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        prior_model: configuration::ModelSelectionRequest,
-        installed_model: configuration::ModelSelectionRequest,
-        prior_settings: model_settings::ValidatedModelSettings,
-        installed_settings: model_settings::ValidatedModelSettings,
-        caller_override: model_settings::ModelSettingsOverlay,
-        adjustments: vec::Vec<model_settings::ModelChangeAdjustment>,
+        prior_defaults_version: SessionConfigurationDefaultsVersion,
+        installed_defaults_version: SessionConfigurationDefaultsVersion,
+        prior_model: ModelSelectionRequest,
+        installed_model: ModelSelectionRequest,
+        prior_settings: ValidatedModelSettings,
+        installed_settings: ValidatedModelSettings,
+        caller_override: ModelSettingsOverlay,
+        adjustments: vec::Vec<ModelChangeAdjustment>,
     ) -> option::Option<Self>;
     pub const fn session(&self) -> SessionId;
     pub const fn command_id(&self) -> DurableCommandId;
-    pub const fn prior_defaults_version(
-        &self,
-    ) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn installed_defaults_version(
-        &self,
-    ) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn prior_model(&self) -> configuration::ModelSelectionRequest;
-    pub const fn installed_model(&self) -> configuration::ModelSelectionRequest;
-    pub const fn prior_settings(&self) -> model_settings::ValidatedModelSettings;
-    pub const fn installed_settings(&self) -> model_settings::ValidatedModelSettings;
-    pub const fn caller_override(&self) -> model_settings::ModelSettingsOverlay;
-    pub fn adjustments(&self) -> &[model_settings::ModelChangeAdjustment];
+    pub const fn prior_defaults_version(&self) -> SessionConfigurationDefaultsVersion;
+    pub const fn installed_defaults_version(&self) -> SessionConfigurationDefaultsVersion;
+    pub const fn prior_model(&self) -> ModelSelectionRequest;
+    pub const fn installed_model(&self) -> ModelSelectionRequest;
+    pub const fn prior_settings(&self) -> ValidatedModelSettings;
+    pub const fn installed_settings(&self) -> ValidatedModelSettings;
+    pub const fn caller_override(&self) -> ModelSettingsOverlay;
+    pub fn adjustments(&self) -> &[ModelChangeAdjustment];
 }
 ```
 
@@ -388,27 +365,25 @@ impl model_settings::SessionModelSettingsChanged {
 ```rust
 pub struct TurnModelSettingsResolved {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl model_settings::TurnModelSettingsResolved {
+impl TurnModelSettingsResolved {
     pub fn try_new(
         accepted_input: AcceptedInputId,
         turn: TurnId,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        selection: configuration::FrozenModelSelection,
-        per_call_override: model_settings::ModelSettingsOverlay,
-        settings: model_settings::ValidatedModelSettings,
-        adjusted_from_selection: option::Option<configuration::DirectModelSelection>,
-        adjustments: vec::Vec<model_settings::ModelChangeAdjustment>,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selection: FrozenModelSelection,
+        per_call_override: ModelSettingsOverlay,
+        settings: ValidatedModelSettings,
+        adjusted_from_selection: option::Option<DirectModelSelection>,
+        adjustments: vec::Vec<ModelChangeAdjustment>,
     ) -> option::Option<Self>;
     pub const fn accepted_input(&self) -> AcceptedInputId;
     pub const fn turn(&self) -> TurnId;
-    pub const fn defaults_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn selection(&self) -> &configuration::FrozenModelSelection;
-    pub const fn per_call_override(&self) -> model_settings::ModelSettingsOverlay;
-    pub const fn settings(&self) -> model_settings::ValidatedModelSettings;
-    pub const fn adjusted_from_selection(
-        &self,
-    ) -> option::Option<configuration::DirectModelSelection>;
-    pub fn adjustments(&self) -> &[model_settings::ModelChangeAdjustment];
+    pub const fn defaults_version(&self) -> SessionConfigurationDefaultsVersion;
+    pub const fn selection(&self) -> &FrozenModelSelection;
+    pub const fn per_call_override(&self) -> ModelSettingsOverlay;
+    pub const fn settings(&self) -> ValidatedModelSettings;
+    pub const fn adjusted_from_selection(&self) -> option::Option<DirectModelSelection>;
+    pub fn adjustments(&self) -> &[ModelChangeAdjustment];
 }
 ```
 
@@ -417,13 +392,10 @@ impl model_settings::TurnModelSettingsResolved {
 ```rust
 pub struct ModelCapabilityDefinition {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_settings::ModelCapabilityDefinition {
-    pub const fn new(
-        selection: configuration::DirectModelSelection,
-        capabilities: model_settings::ModelCapabilities,
-    ) -> Self;
-    pub const fn selection(&self) -> configuration::DirectModelSelection;
-    pub const fn capabilities(&self) -> &model_settings::ModelCapabilities;
+impl ModelCapabilityDefinition {
+    pub const fn new(selection: DirectModelSelection, capabilities: ModelCapabilities) -> Self;
+    pub const fn selection(&self) -> DirectModelSelection;
+    pub const fn capabilities(&self) -> &ModelCapabilities;
 }
 ```
 
@@ -432,22 +404,14 @@ impl model_settings::ModelCapabilityDefinition {
 ```rust
 pub struct ModelCapabilityCatalog {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl model_settings::ModelCapabilityCatalog {
+impl ModelCapabilityCatalog {
     pub fn try_from_definitions(
-        definitions: impl collect::IntoIterator<Item = model_settings::ModelCapabilityDefinition>,
-    ) -> result::Result<Self, model_settings::ModelCapabilityCatalogError>;
-    pub fn resolve(
-        &self,
-        selection: configuration::DirectModelSelection,
-    ) -> option::Option<&model_settings::ModelCapabilities>;
+        definitions: impl collect::IntoIterator<Item = ModelCapabilityDefinition>,
+    ) -> result::Result<Self, ModelCapabilityCatalogError>;
+    pub fn resolve(&self, selection: DirectModelSelection) -> option::Option<&ModelCapabilities>;
     pub fn iter(
         &self,
-    ) -> impl iterator::Iterator<
-        Item = (
-            configuration::DirectModelSelection,
-            &model_settings::ModelCapabilities,
-        ),
-    >;
+    ) -> impl iterator::Iterator<Item = (DirectModelSelection, &ModelCapabilities)>;
 }
 ```
 
@@ -455,13 +419,11 @@ impl model_settings::ModelCapabilityCatalog {
 
 ```rust
 pub enum ModelCapabilityCatalogError {
-    DuplicateSelection {
-        selection: configuration::DirectModelSelection,
-    },
+    DuplicateSelection { selection: DirectModelSelection },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for model_settings::ModelCapabilityCatalogError {
+impl fmt::Display for ModelCapabilityCatalogError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for model_settings::ModelCapabilityCatalogError {}
+impl error::Error for ModelCapabilityCatalogError {}
 ```

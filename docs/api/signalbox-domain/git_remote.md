@@ -25,10 +25,10 @@ pub enum GitRemoteTextError {
     UnsupportedScheme,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for git_remote::GitRemoteTextError {
+impl fmt::Display for GitRemoteTextError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for git_remote::GitRemoteTextError {}
+impl error::Error for GitRemoteTextError {}
 ```
 
 ## GitRemoteName
@@ -36,8 +36,8 @@ impl error::Error for git_remote::GitRemoteTextError {}
 ```rust
 pub struct GitRemoteName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl git_remote::GitRemoteName {
-    pub fn try_new(value: string::String) -> result::Result<Self, git_remote::GitRemoteTextError>;
+impl GitRemoteName {
+    pub fn try_new(value: string::String) -> result::Result<Self, GitRemoteTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -48,12 +48,12 @@ impl git_remote::GitRemoteName {
 ```rust
 pub struct GitRemoteUrl(/* private */);
 // derives: clone::Clone, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl git_remote::GitRemoteUrl {
-    pub fn try_new(value: string::String) -> result::Result<Self, git_remote::GitRemoteTextError>;
+impl GitRemoteUrl {
+    pub fn try_new(value: string::String) -> result::Result<Self, GitRemoteTextError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
-impl fmt::Debug for git_remote::GitRemoteUrl {
+impl fmt::Debug for GitRemoteUrl {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
@@ -63,16 +63,16 @@ impl fmt::Debug for git_remote::GitRemoteUrl {
 ```rust
 pub struct ConfiguredGitRemoteRecord {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl git_remote::ConfiguredGitRemoteRecord {
+impl ConfiguredGitRemoteRecord {
     pub const fn new(
         mint: GitRemoteMintId,
         workspace: WorkspaceId,
-        name: git_remote::GitRemoteName,
-        url: git_remote::GitRemoteUrl,
+        name: GitRemoteName,
+        url: GitRemoteUrl,
     ) -> Self;
     pub const fn mint(&self) -> GitRemoteMintId;
     pub const fn workspace(&self) -> WorkspaceId;
-    pub const fn name(&self) -> &git_remote::GitRemoteName;
-    pub const fn url(&self) -> &git_remote::GitRemoteUrl;
+    pub const fn name(&self) -> &GitRemoteName;
+    pub const fn url(&self) -> &GitRemoteUrl;
 }
 ```

@@ -13,11 +13,11 @@ pub const fn scheduler_ordinary_pass_limit(max_in_flight_passes: usize) -> usize
 ```rust
 pub struct SchedulerPassOccupancyBound(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl scheduler::SchedulerPassOccupancyBound {
+impl SchedulerPassOccupancyBound {
     pub const fn unbounded() -> Self;
     pub fn try_new(
         bound: time::Duration,
-    ) -> result::Result<Self, scheduler::InvalidSchedulerPassOccupancyBound>;
+    ) -> result::Result<Self, InvalidSchedulerPassOccupancyBound>;
     pub const fn get(self) -> option::Option<time::Duration>;
 }
 ```
@@ -27,10 +27,10 @@ impl scheduler::SchedulerPassOccupancyBound {
 ```rust
 pub struct InvalidSchedulerPassOccupancyBound;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for scheduler::InvalidSchedulerPassOccupancyBound {
+impl fmt::Display for InvalidSchedulerPassOccupancyBound {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for scheduler::InvalidSchedulerPassOccupancyBound {}
+impl error::Error for InvalidSchedulerPassOccupancyBound {}
 ```
 
 ## SchedulerOldestInFlightPass
@@ -38,7 +38,7 @@ impl error::Error for scheduler::InvalidSchedulerPassOccupancyBound {}
 ```rust
 pub struct SchedulerOldestInFlightPass {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug
-impl scheduler::SchedulerOldestInFlightPass {
+impl SchedulerOldestInFlightPass {
     pub const fn new(session: signalbox_domain::SessionId, started_at: instant::Instant) -> Self;
     pub const fn session(self) -> signalbox_domain::SessionId;
     pub fn age(self) -> time::Duration;
@@ -49,11 +49,7 @@ impl scheduler::SchedulerOldestInFlightPass {
 
 ```rust
 pub trait SchedulerOccupancyObserver: marker::Send + marker::Sync + 'static {
-    pub fn observe(
-        &self,
-        occupancy: usize,
-        oldest: option::Option<scheduler::SchedulerOldestInFlightPass>,
-    );
+    pub fn observe(&self, occupancy: usize, oldest: option::Option<SchedulerOldestInFlightPass>);
 }
 ```
 
@@ -70,10 +66,10 @@ pub trait SchedulerPassExpiryHandler: fmt::Debug + marker::Send + marker::Sync +
 ```rust
 pub struct ReconciliationSweepInterval(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl scheduler::ReconciliationSweepInterval {
+impl ReconciliationSweepInterval {
     pub fn try_new(
         interval: time::Duration,
-    ) -> result::Result<Self, scheduler::InvalidReconciliationSweepInterval>;
+    ) -> result::Result<Self, InvalidReconciliationSweepInterval>;
     pub const fn get(self) -> time::Duration;
 }
 ```
@@ -83,10 +79,10 @@ impl scheduler::ReconciliationSweepInterval {
 ```rust
 pub struct InvalidReconciliationSweepInterval;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for scheduler::InvalidReconciliationSweepInterval {
+impl fmt::Display for InvalidReconciliationSweepInterval {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for scheduler::InvalidReconciliationSweepInterval {}
+impl error::Error for InvalidReconciliationSweepInterval {}
 ```
 
 ## EligibilityNudgeOutcome
@@ -105,12 +101,11 @@ pub enum EligibilityNudgeOutcome {
 
 ```rust
 pub trait EligibilityNudge {
-    pub fn nudge(&self, session: signalbox_domain::SessionId)
-        -> scheduler::EligibilityNudgeOutcome;
+    pub fn nudge(&self, session: signalbox_domain::SessionId) -> EligibilityNudgeOutcome;
     pub fn nudge_dispatch_start(
         &self,
         session: signalbox_domain::SessionId,
-    ) -> scheduler::EligibilityNudgeOutcome;
+    ) -> EligibilityNudgeOutcome;
 }
 ```
 
@@ -122,10 +117,7 @@ pub trait EligibilitySweep {
     pub fn find_sessions(
         &mut self,
     ) -> impl future::Future<
-        Output = result::Result<
-            scheduler::EligibilitySweepBatch,
-            <Self as scheduler::EligibilitySweep>::Error,
-        >,
+        Output = result::Result<EligibilitySweepBatch, <Self as EligibilitySweep>::Error>,
     > + marker::Send;
 }
 ```
@@ -135,7 +127,7 @@ pub trait EligibilitySweep {
 ```rust
 pub struct EligibilitySweepBatch {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl scheduler::EligibilitySweepBatch {
+impl EligibilitySweepBatch {
     pub fn new(sessions: vec::Vec<signalbox_domain::SessionId>, continuation: bool) -> Self;
     pub fn with_dispatch_starts(
         sessions: vec::Vec<signalbox_domain::SessionId>,
@@ -164,7 +156,7 @@ pub trait EligibilityWorkSource {
     ) -> impl future::Future<
         Output = result::Result<
             signalbox_domain::SessionId,
-            <Self as scheduler::EligibilityWorkSource>::Error,
+            <Self as EligibilityWorkSource>::Error,
         >,
     > + marker::Send;
     pub fn take_returned_dispatch_start(&mut self, _session: signalbox_domain::SessionId) -> bool;
@@ -175,7 +167,7 @@ pub trait EligibilityWorkSource {
     ) -> impl future::Future<
         Output = result::Result<
             signalbox_domain::SessionId,
-            <Self as scheduler::EligibilityWorkSource>::Error,
+            <Self as EligibilityWorkSource>::Error,
         >,
     > + marker::Send;
 }
@@ -186,23 +178,23 @@ pub trait EligibilityWorkSource {
 ```rust
 pub trait EligibilityPass {
     type Error;
-    pub fn failure_stage(_error: &<Self as scheduler::EligibilityPass>::Error) -> &'static str;
+    pub fn failure_stage(_error: &<Self as EligibilityPass>::Error) -> &'static str;
     pub fn failure_turn(
-        _error: &<Self as scheduler::EligibilityPass>::Error,
+        _error: &<Self as EligibilityPass>::Error,
     ) -> option::Option<signalbox_domain::TurnId>;
     pub fn occupancy_expiry_handler(
         &self,
-    ) -> option::Option<sync::Arc<dyn scheduler::SchedulerPassExpiryHandler>>;
+    ) -> option::Option<sync::Arc<dyn SchedulerPassExpiryHandler>>;
     pub fn run(
         &mut self,
         session: signalbox_domain::SessionId,
-    ) -> impl future::Future<Output = result::Result<(), <Self as scheduler::EligibilityPass>::Error>>
+    ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
            + marker::Send
            + 'static;
     pub fn run_dispatch_start(
         &mut self,
         session: signalbox_domain::SessionId,
-    ) -> impl future::Future<Output = result::Result<(), <Self as scheduler::EligibilityPass>::Error>>
+    ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
            + marker::Send
            + 'static;
 }
@@ -216,17 +208,15 @@ pub trait GoalPassDisposition: clone::Clone + marker::Send + 'static {
     pub fn reconcile_success(
         &self,
         session: signalbox_domain::SessionId,
-    ) -> impl future::Future<
-        Output = result::Result<(), <Self as scheduler::GoalPassDisposition>::Error>,
-    > + marker::Send
+    ) -> impl future::Future<Output = result::Result<(), <Self as GoalPassDisposition>::Error>>
+           + marker::Send
            + 'static;
     pub fn block_execution_failure(
         &self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
-    ) -> impl future::Future<
-        Output = result::Result<(), <Self as scheduler::GoalPassDisposition>::Error>,
-    > + marker::Send
+    ) -> impl future::Future<Output = result::Result<(), <Self as GoalPassDisposition>::Error>>
+           + marker::Send
            + 'static;
 }
 ```
@@ -242,29 +232,27 @@ pub enum GoalAwareEligibilityPassError<PassError, GoalError> {
     Reconciliation(GoalError),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<PassError, GoalError> fmt::Display
-    for scheduler::GoalAwareEligibilityPassError<PassError, GoalError>
+impl<PassError, GoalError> fmt::Display for GoalAwareEligibilityPassError<PassError, GoalError>
 where
     PassError: fmt::Display,
     GoalError: fmt::Display,
 {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl<PassError, GoalError> error::Error
-    for scheduler::GoalAwareEligibilityPassError<PassError, GoalError>
+impl<PassError, GoalError> error::Error for GoalAwareEligibilityPassError<PassError, GoalError>
 where
     PassError: error::Error + 'static,
     GoalError: error::Error + 'static,
 {
     pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl<PassError, GoalError> operator_failure::ClassifyOperatorFailure
-    for scheduler::GoalAwareEligibilityPassError<PassError, GoalError>
+impl<PassError, GoalError> ClassifyOperatorFailure
+    for GoalAwareEligibilityPassError<PassError, GoalError>
 where
-    PassError: operator_failure::ClassifyOperatorFailure,
-    GoalError: operator_failure::ClassifyOperatorFailure,
+    PassError: ClassifyOperatorFailure,
+    GoalError: ClassifyOperatorFailure,
 {
-    pub fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    pub fn operator_failure_class(&self) -> OperatorFailureClass;
     pub fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```
@@ -274,38 +262,37 @@ where
 ```rust
 pub struct GoalAwareEligibilityPass<Pass, Disposition> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<Pass, Disposition> scheduler::GoalAwareEligibilityPass<Pass, Disposition> {
+impl<Pass, Disposition> GoalAwareEligibilityPass<Pass, Disposition> {
     pub const fn new(pass: Pass, disposition: Disposition) -> Self;
     pub fn into_parts(self) -> (Pass, Disposition);
 }
-impl<Pass, Disposition> scheduler::EligibilityPass
-    for scheduler::GoalAwareEligibilityPass<Pass, Disposition>
+impl<Pass, Disposition> EligibilityPass for GoalAwareEligibilityPass<Pass, Disposition>
 where
-    Pass: scheduler::EligibilityPass + marker::Send + 'static,
-    <Pass as scheduler::EligibilityPass>::Error: marker::Send + 'static,
-    Disposition: scheduler::GoalPassDisposition,
+    Pass: EligibilityPass + marker::Send + 'static,
+    <Pass as EligibilityPass>::Error: marker::Send + 'static,
+    Disposition: GoalPassDisposition,
 {
-    type Error = scheduler::GoalAwareEligibilityPassError<
-        <Pass as scheduler::EligibilityPass>::Error,
-        <Disposition as scheduler::GoalPassDisposition>::Error,
+    type Error = GoalAwareEligibilityPassError<
+        <Pass as EligibilityPass>::Error,
+        <Disposition as GoalPassDisposition>::Error,
     >;
-    pub fn failure_stage(error: &<Self as scheduler::EligibilityPass>::Error) -> &'static str;
+    pub fn failure_stage(error: &<Self as EligibilityPass>::Error) -> &'static str;
     pub fn failure_turn(
-        error: &<Self as scheduler::EligibilityPass>::Error,
+        error: &<Self as EligibilityPass>::Error,
     ) -> option::Option<signalbox_domain::TurnId>;
     pub fn occupancy_expiry_handler(
         &self,
-    ) -> option::Option<sync::Arc<dyn scheduler::SchedulerPassExpiryHandler>>;
+    ) -> option::Option<sync::Arc<dyn SchedulerPassExpiryHandler>>;
     pub fn run(
         &mut self,
         session: signalbox_domain::SessionId,
-    ) -> impl future::Future<Output = result::Result<(), <Self as scheduler::EligibilityPass>::Error>>
+    ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
            + marker::Send
            + 'static;
     pub fn run_dispatch_start(
         &mut self,
         session: signalbox_domain::SessionId,
-    ) -> impl future::Future<Output = result::Result<(), <Self as scheduler::EligibilityPass>::Error>>
+    ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
            + marker::Send
            + 'static;
 }
@@ -316,13 +303,12 @@ where
 ```rust
 pub struct InProcessEligibilityNudge {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl scheduler::EligibilityNudge for scheduler::InProcessEligibilityNudge {
-    pub fn nudge(&self, session: signalbox_domain::SessionId)
-        -> scheduler::EligibilityNudgeOutcome;
+impl EligibilityNudge for InProcessEligibilityNudge {
+    pub fn nudge(&self, session: signalbox_domain::SessionId) -> EligibilityNudgeOutcome;
     pub fn nudge_dispatch_start(
         &self,
         session: signalbox_domain::SessionId,
-    ) -> scheduler::EligibilityNudgeOutcome;
+    ) -> EligibilityNudgeOutcome;
 }
 ```
 
@@ -331,54 +317,48 @@ impl scheduler::EligibilityNudge for scheduler::InProcessEligibilityNudge {
 ```rust
 pub struct InProcessEligibilityWorkSource<Sweep>
 where
-    Sweep: scheduler::EligibilitySweep, {/* private */}
-impl<Sweep> fmt::Debug for scheduler::InProcessEligibilityWorkSource<Sweep>
+    Sweep: EligibilitySweep, {/* private */}
+impl<Sweep> fmt::Debug for InProcessEligibilityWorkSource<Sweep>
 where
-    Sweep: scheduler::EligibilitySweep + fmt::Debug,
+    Sweep: EligibilitySweep + fmt::Debug,
 {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl<Sweep> drop::Drop for scheduler::InProcessEligibilityWorkSource<Sweep>
+impl<Sweep> drop::Drop for InProcessEligibilityWorkSource<Sweep>
 where
-    Sweep: scheduler::EligibilitySweep,
+    Sweep: EligibilitySweep,
 {
     pub fn drop(&mut self);
 }
-impl<Sweep> scheduler::InProcessEligibilityWorkSource<Sweep>
+impl<Sweep> InProcessEligibilityWorkSource<Sweep>
 where
-    Sweep: scheduler::EligibilitySweep,
+    Sweep: EligibilitySweep,
 {
-    pub fn new(sweep: Sweep) -> (scheduler::InProcessEligibilityNudge, Self);
+    pub fn new(sweep: Sweep) -> (InProcessEligibilityNudge, Self);
     pub fn with_interval(
         sweep: Sweep,
-        sweep_interval: scheduler::ReconciliationSweepInterval,
-    ) -> (scheduler::InProcessEligibilityNudge, Self);
+        sweep_interval: ReconciliationSweepInterval,
+    ) -> (InProcessEligibilityNudge, Self);
     pub fn with_options(
         sweep: Sweep,
-        sweep_interval: option::Option<scheduler::ReconciliationSweepInterval>,
+        sweep_interval: option::Option<ReconciliationSweepInterval>,
         nudge_buffer_capacity: option::Option<nonzero::NonZeroUsize>,
-    ) -> (scheduler::InProcessEligibilityNudge, Self);
+    ) -> (InProcessEligibilityNudge, Self);
 }
-impl<Sweep> scheduler::EligibilityWorkSource for scheduler::InProcessEligibilityWorkSource<Sweep>
+impl<Sweep> EligibilityWorkSource for InProcessEligibilityWorkSource<Sweep>
 where
-    Sweep: scheduler::EligibilitySweep + marker::Send + 'static,
+    Sweep: EligibilitySweep + marker::Send + 'static,
 {
-    type Error = <Sweep as scheduler::EligibilitySweep>::Error;
+    type Error = <Sweep as EligibilitySweep>::Error;
     pub async fn next(
         &mut self,
-    ) -> result::Result<
-        signalbox_domain::SessionId,
-        <Self as scheduler::EligibilityWorkSource>::Error,
-    >;
+    ) -> result::Result<signalbox_domain::SessionId, <Self as EligibilityWorkSource>::Error>;
     pub fn take_returned_unmonitored(&mut self, session: signalbox_domain::SessionId) -> bool;
     pub fn take_returned_dispatch_start(&mut self, session: signalbox_domain::SessionId) -> bool;
     pub fn take_pending_dispatch_start(&mut self) -> option::Option<signalbox_domain::SessionId>;
     pub async fn next_pending_dispatch_start(
         &mut self,
-    ) -> result::Result<
-        signalbox_domain::SessionId,
-        <Self as scheduler::EligibilityWorkSource>::Error,
-    >;
+    ) -> result::Result<signalbox_domain::SessionId, <Self as EligibilityWorkSource>::Error>;
 }
 ```
 
@@ -395,7 +375,7 @@ pub enum SchedulerLoopExit {
 
 ```rust
 pub struct SchedulerLoop<WorkSource, Pass> {/* private */}
-impl<WorkSource, Pass> scheduler::SchedulerLoop<WorkSource, Pass> {
+impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
     pub const fn new(work_source: WorkSource, pass: Pass) -> Self;
     pub const fn with_max_in_flight(
         work_source: WorkSource,
@@ -403,23 +383,21 @@ impl<WorkSource, Pass> scheduler::SchedulerLoop<WorkSource, Pass> {
         max_in_flight_passes: nonzero::NonZeroUsize,
     ) -> Self;
     pub const fn paused(work_source: WorkSource, pass: Pass) -> Self;
-    pub fn with_occupancy_bound(self, bound: scheduler::SchedulerPassOccupancyBound) -> Self;
+    pub fn with_occupancy_bound(self, bound: SchedulerPassOccupancyBound) -> Self;
     pub fn with_occupancy_observer(
         self,
-        observer: sync::Arc<dyn scheduler::SchedulerOccupancyObserver>,
+        observer: sync::Arc<dyn SchedulerOccupancyObserver>,
     ) -> Self;
     pub fn into_parts(self) -> (WorkSource, Pass);
 }
-impl<WorkSource, Pass> scheduler::SchedulerLoop<WorkSource, Pass>
+impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass>
 where
-    WorkSource: scheduler::EligibilityWorkSource,
-    Pass: scheduler::EligibilityPass + marker::Send,
-    <WorkSource as scheduler::EligibilityWorkSource>::Error:
-        operator_failure::ClassifyOperatorFailure,
-    <Pass as scheduler::EligibilityPass>::Error:
-        operator_failure::ClassifyOperatorFailure + marker::Send + 'static,
+    WorkSource: EligibilityWorkSource,
+    Pass: EligibilityPass + marker::Send,
+    <WorkSource as EligibilityWorkSource>::Error: ClassifyOperatorFailure,
+    <Pass as EligibilityPass>::Error: ClassifyOperatorFailure + marker::Send + 'static,
 {
-    pub async fn run_until<Shutdown>(&mut self, shutdown: Shutdown) -> scheduler::SchedulerLoopExit
+    pub async fn run_until<Shutdown>(&mut self, shutdown: Shutdown) -> SchedulerLoopExit
     where
         Shutdown: future::Future<Output = ()> + marker::Send;
 }

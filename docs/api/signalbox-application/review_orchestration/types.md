@@ -7,7 +7,7 @@
 ```rust
 pub struct ReviewOrchestrationAttemptId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl review_orchestration::ReviewOrchestrationAttemptId {
+impl ReviewOrchestrationAttemptId {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
     pub const fn as_uuid(self) -> uuid::Uuid;
 }
@@ -18,7 +18,7 @@ impl review_orchestration::ReviewOrchestrationAttemptId {
 ```rust
 pub struct ReviewTemplateDigest(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl review_orchestration::ReviewTemplateDigest {
+impl ReviewTemplateDigest {
     pub const fn new(bytes: [u8; 32]) -> Self;
     pub const fn bytes(self) -> [u8; 32];
 }
@@ -29,17 +29,17 @@ impl review_orchestration::ReviewTemplateDigest {
 ```rust
 pub struct ReviewStageTemplateDigests {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewStageTemplateDigests {
+impl ReviewStageTemplateDigests {
     pub const fn new(
-        import: review_orchestration::ReviewTemplateDigest,
-        judgment: review_orchestration::ReviewTemplateDigest,
-        repair: review_orchestration::ReviewTemplateDigest,
-        publication: review_orchestration::ReviewTemplateDigest,
+        import: ReviewTemplateDigest,
+        judgment: ReviewTemplateDigest,
+        repair: ReviewTemplateDigest,
+        publication: ReviewTemplateDigest,
     ) -> Self;
-    pub const fn import(self) -> review_orchestration::ReviewTemplateDigest;
-    pub const fn judgment(self) -> review_orchestration::ReviewTemplateDigest;
-    pub const fn repair(self) -> review_orchestration::ReviewTemplateDigest;
-    pub const fn publication(self) -> review_orchestration::ReviewTemplateDigest;
+    pub const fn import(self) -> ReviewTemplateDigest;
+    pub const fn judgment(self) -> ReviewTemplateDigest;
+    pub const fn repair(self) -> ReviewTemplateDigest;
+    pub const fn publication(self) -> ReviewTemplateDigest;
 }
 ```
 
@@ -48,13 +48,13 @@ impl review_orchestration::ReviewStageTemplateDigests {
 ```rust
 pub struct ReviewConcernSpec {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewConcernSpec {
+impl ReviewConcernSpec {
     pub const fn new(
         key: review_workflow::ReviewKey,
-        template_digest: review_orchestration::ReviewTemplateDigest,
+        template_digest: ReviewTemplateDigest,
     ) -> Self;
     pub const fn key(&self) -> &review_workflow::ReviewKey;
-    pub const fn template_digest(&self) -> review_orchestration::ReviewTemplateDigest;
+    pub const fn template_digest(&self) -> ReviewTemplateDigest;
 }
 ```
 
@@ -63,21 +63,21 @@ impl review_orchestration::ReviewConcernSpec {
 ```rust
 pub struct ReviewOrchestrationAttempt {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewOrchestrationAttempt {
+impl ReviewOrchestrationAttempt {
     pub fn try_new(
-        id: review_orchestration::ReviewOrchestrationAttemptId,
+        id: ReviewOrchestrationAttemptId,
         target: signalbox_domain::ReviewTargetId,
         policy: review_workflow::ReviewPolicy,
         concern_set_version: review_workflow::ReviewKey,
-        stage_templates: review_orchestration::ReviewStageTemplateDigests,
-        concerns: vec::Vec<review_orchestration::ReviewConcernSpec>,
-    ) -> result::Result<Self, review_orchestration::ReviewOrchestrationAttemptError>;
-    pub const fn id(&self) -> review_orchestration::ReviewOrchestrationAttemptId;
+        stage_templates: ReviewStageTemplateDigests,
+        concerns: vec::Vec<ReviewConcernSpec>,
+    ) -> result::Result<Self, ReviewOrchestrationAttemptError>;
+    pub const fn id(&self) -> ReviewOrchestrationAttemptId;
     pub const fn target(&self) -> signalbox_domain::ReviewTargetId;
     pub const fn policy(&self) -> review_workflow::ReviewPolicy;
     pub const fn concern_set_version(&self) -> &review_workflow::ReviewKey;
-    pub const fn stage_templates(&self) -> review_orchestration::ReviewStageTemplateDigests;
-    pub fn concerns(&self) -> &[review_orchestration::ReviewConcernSpec];
+    pub const fn stage_templates(&self) -> ReviewStageTemplateDigests;
+    pub fn concerns(&self) -> &[ReviewConcernSpec];
 }
 ```
 
@@ -89,10 +89,10 @@ pub enum ReviewOrchestrationAttemptError {
     RepeatedConcern { concern: review_workflow::ReviewKey },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for review_orchestration::ReviewOrchestrationAttemptError {
+impl fmt::Display for ReviewOrchestrationAttemptError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for review_orchestration::ReviewOrchestrationAttemptError {}
+impl error::Error for ReviewOrchestrationAttemptError {}
 ```
 
 ## ReviewDurableSealOutcome
@@ -122,7 +122,7 @@ pub enum ReviewPassIncompleteStatus {
 ```rust
 pub struct ReviewImportedContextEvidence {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewImportedContextEvidence {
+impl ReviewImportedContextEvidence {
     pub const fn new(producer: review_workflow::ReviewPassRef, digest: [u8; 32]) -> Self;
     pub const fn producer(self) -> review_workflow::ReviewPassRef;
     pub const fn digest(self) -> [u8; 32];
@@ -137,14 +137,14 @@ pub enum ReviewImportOutcome {
         pass: boxed::Box<review_workflow::ReviewPassEvidence>,
         run: review_workflow::ReviewRunEvidence,
         external_link: option::Option<boxed::Box<review_workflow::ReviewExternalLink>>,
-        template_digest: review_orchestration::ReviewTemplateDigest,
-        context: review_orchestration::ReviewImportedContextEvidence,
+        template_digest: ReviewTemplateDigest,
+        context: ReviewImportedContextEvidence,
     },
     Incomplete {
         pass: option::Option<boxed::Box<review_workflow::ReviewPassEvidence>>,
         run: option::Option<review_workflow::ReviewRunEvidence>,
-        template_digest: review_orchestration::ReviewTemplateDigest,
-        status: review_orchestration::ReviewPassIncompleteStatus,
+        template_digest: ReviewTemplateDigest,
+        status: ReviewPassIncompleteStatus,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -161,10 +161,10 @@ pub enum ReviewImportEvidenceFailure {
     IncompatiblePass,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for review_orchestration::ReviewImportEvidenceFailure {
+impl fmt::Display for ReviewImportEvidenceFailure {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for review_orchestration::ReviewImportEvidenceFailure {}
+impl error::Error for ReviewImportEvidenceFailure {}
 ```
 
 ## ReviewConcernSuccess
@@ -172,17 +172,17 @@ impl error::Error for review_orchestration::ReviewImportEvidenceFailure {}
 ```rust
 pub struct ReviewConcernSuccess {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewConcernSuccess {
+impl ReviewConcernSuccess {
     pub fn new(
         producer: review_workflow::ReviewPassEvidence,
         run: review_workflow::ReviewRunEvidence,
-        template_digest: review_orchestration::ReviewTemplateDigest,
+        template_digest: ReviewTemplateDigest,
         findings: vec::Vec<review_workflow::ReviewFinding>,
     ) -> Self;
     pub const fn producer(&self) -> review_workflow::ReviewPassRef;
     pub const fn producer_evidence(&self) -> &review_workflow::ReviewPassEvidence;
     pub const fn run_evidence(&self) -> review_workflow::ReviewRunEvidence;
-    pub const fn template_digest(&self) -> review_orchestration::ReviewTemplateDigest;
+    pub const fn template_digest(&self) -> ReviewTemplateDigest;
     pub fn findings(&self) -> &[review_workflow::ReviewFinding];
 }
 ```
@@ -191,7 +191,7 @@ impl review_orchestration::ReviewConcernSuccess {
 
 ```rust
 pub enum ReviewConcernOutcome {
-    Succeeded(boxed::Box<review_orchestration::ReviewConcernSuccess>),
+    Succeeded(boxed::Box<ReviewConcernSuccess>),
     Failed {
         pass: review_workflow::ReviewPassRef,
     },
@@ -213,15 +213,15 @@ pub enum ReviewConcernOutcome {
 ```rust
 pub struct ReviewConcernClaim {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewConcernClaim {
+impl ReviewConcernClaim {
     pub const fn new(
         concern: review_workflow::ReviewKey,
-        template_digest: review_orchestration::ReviewTemplateDigest,
-        outcome: review_orchestration::ReviewConcernOutcome,
+        template_digest: ReviewTemplateDigest,
+        outcome: ReviewConcernOutcome,
     ) -> Self;
     pub const fn concern(&self) -> &review_workflow::ReviewKey;
-    pub const fn template_digest(&self) -> review_orchestration::ReviewTemplateDigest;
-    pub const fn outcome(&self) -> &review_orchestration::ReviewConcernOutcome;
+    pub const fn template_digest(&self) -> ReviewTemplateDigest;
+    pub const fn outcome(&self) -> &ReviewConcernOutcome;
 }
 ```
 
@@ -230,10 +230,10 @@ impl review_orchestration::ReviewConcernClaim {
 ```rust
 pub struct ReviewConcernWork {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewConcernWork {
-    pub const fn attempt(&self) -> &review_orchestration::ReviewOrchestrationAttempt;
+impl ReviewConcernWork {
+    pub const fn attempt(&self) -> &ReviewOrchestrationAttempt;
     pub const fn imported_context_digest(&self) -> [u8; 32];
-    pub const fn concern(&self) -> &review_orchestration::ReviewConcernSpec;
+    pub const fn concern(&self) -> &ReviewConcernSpec;
 }
 ```
 
@@ -274,10 +274,10 @@ pub enum ReviewFanoutBarrierFailure {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for review_orchestration::ReviewFanoutBarrierFailure {
+impl fmt::Display for ReviewFanoutBarrierFailure {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for review_orchestration::ReviewFanoutBarrierFailure {}
+impl error::Error for ReviewFanoutBarrierFailure {}
 ```
 
 ## ReviewPlannedDisposition
@@ -304,13 +304,13 @@ pub enum ReviewPlannedDisposition {
 ```rust
 pub struct ReviewJudgmentPlanMember {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewJudgmentPlanMember {
+impl ReviewJudgmentPlanMember {
     pub const fn new(
         finding: review_workflow::ReviewFindingRef,
-        disposition: review_orchestration::ReviewPlannedDisposition,
+        disposition: ReviewPlannedDisposition,
     ) -> Self;
     pub const fn finding(&self) -> review_workflow::ReviewFindingRef;
-    pub const fn disposition(&self) -> &review_orchestration::ReviewPlannedDisposition;
+    pub const fn disposition(&self) -> &ReviewPlannedDisposition;
 }
 ```
 
@@ -319,18 +319,18 @@ impl review_orchestration::ReviewJudgmentPlanMember {
 ```rust
 pub struct ReviewJudgmentPlan {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewJudgmentPlan {
+impl ReviewJudgmentPlan {
     pub fn new(
         analysis_pass: review_workflow::ReviewPassEvidence,
         analysis_run: review_workflow::ReviewRunEvidence,
-        template_digest: review_orchestration::ReviewTemplateDigest,
-        members: vec::Vec<review_orchestration::ReviewJudgmentPlanMember>,
+        template_digest: ReviewTemplateDigest,
+        members: vec::Vec<ReviewJudgmentPlanMember>,
     ) -> Self;
     pub const fn analysis_pass(&self) -> review_workflow::ReviewPassRef;
     pub const fn analysis_pass_evidence(&self) -> &review_workflow::ReviewPassEvidence;
     pub const fn analysis_run_evidence(&self) -> review_workflow::ReviewRunEvidence;
-    pub const fn template_digest(&self) -> review_orchestration::ReviewTemplateDigest;
-    pub fn members(&self) -> &[review_orchestration::ReviewJudgmentPlanMember];
+    pub const fn template_digest(&self) -> ReviewTemplateDigest;
+    pub fn members(&self) -> &[ReviewJudgmentPlanMember];
 }
 ```
 
@@ -357,10 +357,10 @@ pub enum ReviewJudgmentPlanFailure {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for review_orchestration::ReviewJudgmentPlanFailure {
+impl fmt::Display for ReviewJudgmentPlanFailure {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for review_orchestration::ReviewJudgmentPlanFailure {}
+impl error::Error for ReviewJudgmentPlanFailure {}
 ```
 
 ## ReviewJudgmentEffectId
@@ -368,12 +368,12 @@ impl error::Error for review_orchestration::ReviewJudgmentPlanFailure {}
 ```rust
 pub struct ReviewJudgmentEffectId {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl review_orchestration::ReviewJudgmentEffectId {
+impl ReviewJudgmentEffectId {
     pub const fn new(
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: ReviewOrchestrationAttemptId,
         finding: review_workflow::ReviewFindingRef,
     ) -> Self;
-    pub const fn attempt(self) -> review_orchestration::ReviewOrchestrationAttemptId;
+    pub const fn attempt(self) -> ReviewOrchestrationAttemptId;
     pub const fn finding(self) -> review_workflow::ReviewFindingRef;
 }
 ```
@@ -383,10 +383,10 @@ impl review_orchestration::ReviewJudgmentEffectId {
 ```rust
 pub struct ReviewJudgmentEffectWork {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewJudgmentEffectWork {
-    pub const fn id(&self) -> review_orchestration::ReviewJudgmentEffectId;
-    pub const fn attempt(&self) -> &review_orchestration::ReviewOrchestrationAttempt;
-    pub const fn member(&self) -> &review_orchestration::ReviewJudgmentPlanMember;
+impl ReviewJudgmentEffectWork {
+    pub const fn id(&self) -> ReviewJudgmentEffectId;
+    pub const fn attempt(&self) -> &ReviewOrchestrationAttempt;
+    pub const fn member(&self) -> &ReviewJudgmentPlanMember;
 }
 ```
 
@@ -395,13 +395,13 @@ impl review_orchestration::ReviewJudgmentEffectWork {
 ```rust
 pub struct ReviewJudgmentEffectSuccess {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewJudgmentEffectSuccess {
+impl ReviewJudgmentEffectSuccess {
     pub const fn new(
         event: review_workflow::ReviewFindingEvent,
-        template_digest: review_orchestration::ReviewTemplateDigest,
+        template_digest: ReviewTemplateDigest,
     ) -> Self;
     pub const fn event(&self) -> &review_workflow::ReviewFindingEvent;
-    pub const fn template_digest(&self) -> review_orchestration::ReviewTemplateDigest;
+    pub const fn template_digest(&self) -> ReviewTemplateDigest;
 }
 ```
 
@@ -409,7 +409,7 @@ impl review_orchestration::ReviewJudgmentEffectSuccess {
 
 ```rust
 pub enum ReviewJudgmentEffectOutcome {
-    Applied(boxed::Box<review_orchestration::ReviewJudgmentEffectSuccess>),
+    Applied(boxed::Box<ReviewJudgmentEffectSuccess>),
     Failed,
     Blocked,
     Cancelled,
@@ -429,10 +429,10 @@ pub enum ReviewJudgmentEffectEvidenceFailure {
     IncompatibleRun,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for review_orchestration::ReviewJudgmentEffectEvidenceFailure {
+impl fmt::Display for ReviewJudgmentEffectEvidenceFailure {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for review_orchestration::ReviewJudgmentEffectEvidenceFailure {}
+impl error::Error for ReviewJudgmentEffectEvidenceFailure {}
 ```
 
 ## ReviewRepairSuccess
@@ -440,14 +440,14 @@ impl error::Error for review_orchestration::ReviewJudgmentEffectEvidenceFailure 
 ```rust
 pub struct ReviewRepairSuccess {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewRepairSuccess {
+impl ReviewRepairSuccess {
     pub const fn new(
         event: review_workflow::ReviewFindingEvent,
-        template_digest: review_orchestration::ReviewTemplateDigest,
+        template_digest: ReviewTemplateDigest,
     ) -> Self;
     pub const fn finding(&self) -> review_workflow::ReviewFindingRef;
     pub const fn event(&self) -> &review_workflow::ReviewFindingEvent;
-    pub const fn template_digest(&self) -> review_orchestration::ReviewTemplateDigest;
+    pub const fn template_digest(&self) -> ReviewTemplateDigest;
 }
 ```
 
@@ -455,7 +455,7 @@ impl review_orchestration::ReviewRepairSuccess {
 
 ```rust
 pub enum ReviewRepairMemberOutcome {
-    Fixed(boxed::Box<review_orchestration::ReviewRepairSuccess>),
+    Fixed(boxed::Box<ReviewRepairSuccess>),
     Failed(review_workflow::ReviewFindingRef),
     Cancelled(review_workflow::ReviewFindingRef),
     Blocked(review_workflow::ReviewFindingRef),
@@ -468,8 +468,8 @@ pub enum ReviewRepairMemberOutcome {
 ```rust
 pub struct ReviewRepairWork {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewRepairWork {
-    pub const fn attempt(&self) -> &review_orchestration::ReviewOrchestrationAttempt;
+impl ReviewRepairWork {
+    pub const fn attempt(&self) -> &ReviewOrchestrationAttempt;
     pub fn findings(&self) -> &[review_workflow::ReviewFindingRef];
 }
 ```
@@ -479,16 +479,16 @@ impl review_orchestration::ReviewRepairWork {
 ```rust
 pub struct ReviewPublicationSuccess {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewPublicationSuccess {
+impl ReviewPublicationSuccess {
     pub const fn new(
         link: review_workflow::ReviewFindingExternalLinkRef,
         run: review_workflow::ReviewRunEvidence,
-        template_digest: review_orchestration::ReviewTemplateDigest,
+        template_digest: ReviewTemplateDigest,
     ) -> Self;
     pub const fn finding(&self) -> review_workflow::ReviewFindingRef;
     pub const fn link(&self) -> &review_workflow::ReviewFindingExternalLinkRef;
     pub const fn run(&self) -> review_workflow::ReviewRunEvidence;
-    pub const fn template_digest(&self) -> review_orchestration::ReviewTemplateDigest;
+    pub const fn template_digest(&self) -> ReviewTemplateDigest;
 }
 ```
 
@@ -496,7 +496,7 @@ impl review_orchestration::ReviewPublicationSuccess {
 
 ```rust
 pub enum ReviewPublicationMemberOutcome {
-    Published(boxed::Box<review_orchestration::ReviewPublicationSuccess>),
+    Published(boxed::Box<ReviewPublicationSuccess>),
     Failed(review_workflow::ReviewFindingRef),
     Blocked(review_workflow::ReviewFindingRef),
     Cancelled(review_workflow::ReviewFindingRef),
@@ -509,8 +509,8 @@ pub enum ReviewPublicationMemberOutcome {
 ```rust
 pub struct ReviewPublicationWork {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_orchestration::ReviewPublicationWork {
-    pub const fn attempt(&self) -> &review_orchestration::ReviewOrchestrationAttempt;
+impl ReviewPublicationWork {
+    pub const fn attempt(&self) -> &ReviewOrchestrationAttempt;
     pub fn findings(&self) -> &[review_workflow::ReviewFindingRef];
 }
 ```
@@ -534,30 +534,30 @@ pub enum ReviewTerminalBarrierFailure {
     IncompatiblePublicationAttachment,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for review_orchestration::ReviewTerminalBarrierFailure {
+impl fmt::Display for ReviewTerminalBarrierFailure {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for review_orchestration::ReviewTerminalBarrierFailure {}
+impl error::Error for ReviewTerminalBarrierFailure {}
 ```
 
 ## ReviewOrchestrationOutcome
 
 ```rust
 pub enum ReviewOrchestrationOutcome {
-    ImportIncomplete(boxed::Box<review_orchestration::ReviewImportOutcome>),
-    FanoutIncomplete(review_orchestration::ReviewFanoutBarrierFailure),
+    ImportIncomplete(boxed::Box<ReviewImportOutcome>),
+    FanoutIncomplete(ReviewFanoutBarrierFailure),
     JudgmentIncomplete {
-        effect: review_orchestration::ReviewJudgmentEffectId,
-        outcome: review_orchestration::ReviewJudgmentEffectOutcome,
+        effect: ReviewJudgmentEffectId,
+        outcome: ReviewJudgmentEffectOutcome,
     },
     RepairIncomplete {
-        repairs: vec::Vec<review_orchestration::ReviewRepairMemberOutcome>,
+        repairs: vec::Vec<ReviewRepairMemberOutcome>,
     },
     PublicationIncomplete {
-        publications: vec::Vec<review_orchestration::ReviewPublicationMemberOutcome>,
+        publications: vec::Vec<ReviewPublicationMemberOutcome>,
     },
     Complete {
-        publications: vec::Vec<review_orchestration::ReviewPublicationMemberOutcome>,
+        publications: vec::Vec<ReviewPublicationMemberOutcome>,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -568,24 +568,24 @@ pub enum ReviewOrchestrationOutcome {
 ```rust
 pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
     Store(StoreError),
-    InvalidImportEvidence(review_orchestration::ReviewImportEvidenceFailure),
-    InvalidConcernEvidence(review_orchestration::ReviewFanoutBarrierFailure),
+    InvalidImportEvidence(ReviewImportEvidenceFailure),
+    InvalidConcernEvidence(ReviewFanoutBarrierFailure),
     Runner(RunnerError),
     ConcernTaskTerminated,
     DurableConflict,
-    InvalidJudgmentPlan(review_orchestration::ReviewJudgmentPlanFailure),
-    InvalidJudgmentEffectEvidence(review_orchestration::ReviewJudgmentEffectEvidenceFailure),
+    InvalidJudgmentPlan(ReviewJudgmentPlanFailure),
+    InvalidJudgmentEffectEvidence(ReviewJudgmentEffectEvidenceFailure),
     InvalidAppliedEffects,
-    InvalidTerminalBarrier(review_orchestration::ReviewTerminalBarrierFailure),
+    InvalidTerminalBarrier(ReviewTerminalBarrierFailure),
 }
 // derives: fmt::Debug
 impl<StoreError, RunnerError> fmt::Display
-    for review_orchestration::ReviewOrchestrationServiceError<StoreError, RunnerError>
+    for ReviewOrchestrationServiceError<StoreError, RunnerError>
 {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<StoreError, RunnerError> error::Error
-    for review_orchestration::ReviewOrchestrationServiceError<StoreError, RunnerError>
+    for ReviewOrchestrationServiceError<StoreError, RunnerError>
 where
     StoreError: error::Error + 'static,
     RunnerError: error::Error + 'static,
@@ -599,22 +599,22 @@ where
 ```rust
 pub struct ReviewOrchestrationService<Store, Runner> {/* private */}
 // derives: fmt::Debug
-impl<Store, Runner> review_orchestration::ReviewOrchestrationService<Store, Runner> {
+impl<Store, Runner> ReviewOrchestrationService<Store, Runner> {
     pub fn new(store: Store, runner: Runner) -> Self;
 }
-impl<Store, Runner> review_orchestration::ReviewOrchestrationService<Store, Runner>
+impl<Store, Runner> ReviewOrchestrationService<Store, Runner>
 where
-    Store: review_orchestration::ReviewOrchestrationAttemptStore,
-    Runner: review_orchestration::ReviewOrchestrationPassRunner,
+    Store: ReviewOrchestrationAttemptStore,
+    Runner: ReviewOrchestrationPassRunner,
 {
     pub async fn execute(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttempt,
+        attempt: ReviewOrchestrationAttempt,
     ) -> result::Result<
-        review_orchestration::ReviewOrchestrationOutcome,
-        review_orchestration::ReviewOrchestrationServiceError<
-            <Store as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
-            <Runner as review_orchestration::ReviewOrchestrationPassRunner>::Error,
+        ReviewOrchestrationOutcome,
+        ReviewOrchestrationServiceError<
+            <Store as ReviewOrchestrationAttemptStore>::Error,
+            <Runner as ReviewOrchestrationPassRunner>::Error,
         >,
     >;
 }

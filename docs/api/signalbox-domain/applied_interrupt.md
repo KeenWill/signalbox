@@ -7,7 +7,7 @@
 ```rust
 pub struct AppliedInterruptProof {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl applied_interrupt::AppliedInterruptProof {
+impl AppliedInterruptProof {
     pub const fn command(&self) -> DurableCommandId;
     pub const fn predecessor(&self) -> TurnId;
 }
@@ -18,11 +18,11 @@ impl applied_interrupt::AppliedInterruptProof {
 ```rust
 pub struct AppliedInterruptCommandResult {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl applied_interrupt::AppliedInterruptCommandResult {
-    pub const fn proof(&self) -> applied_interrupt::AppliedInterruptProof;
+impl AppliedInterruptCommandResult {
+    pub const fn proof(&self) -> AppliedInterruptProof;
     pub const fn session(&self) -> SessionId;
     pub const fn accepted_input(&self) -> AcceptedInputId;
     pub const fn successor(&self) -> TurnId;
-    pub const fn successor_order(&self) -> queue_order::AcceptedInputQueueOrder;
+    pub const fn successor_order(&self) -> AcceptedInputQueueOrder;
 }
 ```

@@ -7,15 +7,15 @@
 ```rust
 pub struct ReviewWorkflowCommand {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewWorkflowCommand {
+impl ReviewWorkflowCommand {
     pub const fn new(
         command_id: signalbox_domain::DurableCommandId,
         semantic_digest: [u8; 32],
-        operation: review_workflow::ReviewWorkflowOperation,
+        operation: ReviewWorkflowOperation,
     ) -> Self;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn semantic_digest(&self) -> [u8; 32];
-    pub const fn operation(&self) -> &review_workflow::ReviewWorkflowOperation;
+    pub const fn operation(&self) -> &ReviewWorkflowOperation;
 }
 ```
 
@@ -51,8 +51,8 @@ pub enum ReviewWorkflowOperation {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewWorkflowOperation {
-    pub const fn kind(&self) -> review_workflow::ReviewWorkflowOperationKind;
+impl ReviewWorkflowOperation {
+    pub const fn kind(&self) -> ReviewWorkflowOperationKind;
 }
 ```
 
@@ -82,7 +82,7 @@ pub enum ReviewPassCompletionStatus {
     Cancelled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl review_workflow::ReviewPassCompletionStatus {
+impl ReviewPassCompletionStatus {
     pub const fn from_state(state: &review_workflow::ReviewPassState) -> option::Option<Self>;
 }
 ```
@@ -105,7 +105,7 @@ pub enum ReviewWorkflowCommandResult {
     PassCompleted {
         run: signalbox_domain::ReviewRunId,
         pass: signalbox_domain::ReviewPassId,
-        status: review_workflow::ReviewPassCompletionStatus,
+        status: ReviewPassCompletionStatus,
     },
     FindingsRecorded {
         run: signalbox_domain::ReviewRunId,
@@ -131,7 +131,7 @@ pub enum ReviewWorkflowCommandResult {
 
 ```rust
 pub enum ReviewWorkflowCommandOutcome {
-    Recorded(review_workflow::ReviewWorkflowCommandResult),
+    Recorded(ReviewWorkflowCommandResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
@@ -146,11 +146,11 @@ pub trait ReviewWorkflowTransaction {
     type Error;
     pub fn handle(
         &mut self,
-        command: review_workflow::ReviewWorkflowCommand,
+        command: ReviewWorkflowCommand,
     ) -> impl future::Future<
         Output = result::Result<
-            review_workflow::ReviewWorkflowCommandOutcome,
-            <Self as review_workflow::ReviewWorkflowTransaction>::Error,
+            ReviewWorkflowCommandOutcome,
+            <Self as ReviewWorkflowTransaction>::Error,
         >,
     > + marker::Send;
 }
@@ -161,18 +161,16 @@ pub trait ReviewWorkflowTransaction {
 ```rust
 pub struct ReviewWorkflowCommandService<Transaction> {/* private */}
 // derives: fmt::Debug
-impl<Transaction> review_workflow::ReviewWorkflowCommandService<Transaction> {
+impl<Transaction> ReviewWorkflowCommandService<Transaction> {
     pub const fn new(transaction: Transaction) -> Self;
 }
-impl<Transaction: review_workflow::ReviewWorkflowTransaction>
-    review_workflow::ReviewWorkflowCommandService<Transaction>
-{
+impl<Transaction: ReviewWorkflowTransaction> ReviewWorkflowCommandService<Transaction> {
     pub async fn execute(
         &mut self,
-        command: review_workflow::ReviewWorkflowCommand,
+        command: ReviewWorkflowCommand,
     ) -> result::Result<
-        review_workflow::ReviewWorkflowCommandOutcome,
-        <Transaction as review_workflow::ReviewWorkflowTransaction>::Error,
+        ReviewWorkflowCommandOutcome,
+        <Transaction as ReviewWorkflowTransaction>::Error,
     >;
 }
 ```
@@ -188,7 +186,7 @@ pub trait ReviewWorkflowReader {
     ) -> impl future::Future<
         Output = result::Result<
             option::Option<review_workflow::ReviewTarget>,
-            <Self as review_workflow::ReviewWorkflowReader>::Error,
+            <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
     pub fn load_run(
@@ -197,7 +195,7 @@ pub trait ReviewWorkflowReader {
     ) -> impl future::Future<
         Output = result::Result<
             option::Option<review_workflow::ReviewRun>,
-            <Self as review_workflow::ReviewWorkflowReader>::Error,
+            <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
     pub fn load_run_with_pass(
@@ -209,7 +207,7 @@ pub trait ReviewWorkflowReader {
                 review_workflow::ReviewRun,
                 option::Option<review_workflow::ReviewPass>,
             )>,
-            <Self as review_workflow::ReviewWorkflowReader>::Error,
+            <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
     pub fn load_pass(
@@ -218,7 +216,7 @@ pub trait ReviewWorkflowReader {
     ) -> impl future::Future<
         Output = result::Result<
             option::Option<review_workflow::ReviewPass>,
-            <Self as review_workflow::ReviewWorkflowReader>::Error,
+            <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
     pub fn load_finding(
@@ -227,7 +225,7 @@ pub trait ReviewWorkflowReader {
     ) -> impl future::Future<
         Output = result::Result<
             option::Option<review_workflow::ReviewFinding>,
-            <Self as review_workflow::ReviewWorkflowReader>::Error,
+            <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
     pub fn list_findings(
@@ -236,7 +234,7 @@ pub trait ReviewWorkflowReader {
     ) -> impl future::Future<
         Output = result::Result<
             vec::Vec<review_workflow::ReviewFinding>,
-            <Self as review_workflow::ReviewWorkflowReader>::Error,
+            <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
 }

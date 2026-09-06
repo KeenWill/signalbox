@@ -17,9 +17,9 @@ pub enum AcceptedInputStartingLineage {
 ```rust
 pub struct AcceptedInputTurnStart {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl turn_lifecycle::AcceptedInputTurnStart {
-    pub const fn lineage(&self) -> turn_lifecycle::AcceptedInputStartingLineage;
-    pub const fn frontier(&self) -> context_frontier::ContextFrontier;
+impl AcceptedInputTurnStart {
+    pub const fn lineage(&self) -> AcceptedInputStartingLineage;
+    pub const fn frontier(&self) -> ContextFrontier;
 }
 ```
 
@@ -38,15 +38,13 @@ pub enum IssuedOperationRef {
 ```rust
 pub struct NonEmptyIssuedOperationRefs {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_lifecycle::NonEmptyIssuedOperationRefs {
+impl NonEmptyIssuedOperationRefs {
     pub fn try_from_operations(
-        operations: impl collect::IntoIterator<Item = turn_lifecycle::IssuedOperationRef>,
-    ) -> result::Result<Self, turn_lifecycle::NonEmptyIssuedOperationRefsError>;
+        operations: impl collect::IntoIterator<Item = IssuedOperationRef>,
+    ) -> result::Result<Self, NonEmptyIssuedOperationRefsError>;
     pub fn operation_count(&self) -> usize;
-    pub fn contains(&self, operation: turn_lifecycle::IssuedOperationRef) -> bool;
-    pub fn iter(
-        &self,
-    ) -> impl exact_size::ExactSizeIterator<Item = turn_lifecycle::IssuedOperationRef> + '_;
+    pub fn contains(&self, operation: IssuedOperationRef) -> bool;
+    pub fn iter(&self) -> impl exact_size::ExactSizeIterator<Item = IssuedOperationRef> + '_;
 }
 ```
 
@@ -55,9 +53,7 @@ impl turn_lifecycle::NonEmptyIssuedOperationRefs {
 ```rust
 pub enum NonEmptyIssuedOperationRefsError {
     Empty,
-    Duplicate {
-        operation: turn_lifecycle::IssuedOperationRef,
-    },
+    Duplicate { operation: IssuedOperationRef },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -67,7 +63,7 @@ pub enum NonEmptyIssuedOperationRefsError {
 ```rust
 pub struct AppliedStopForReconciliationProof {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl turn_lifecycle::AppliedStopForReconciliationProof {
+impl AppliedStopForReconciliationProof {
     pub const fn decision_command(&self) -> DurableCommandId;
     pub const fn turn(&self) -> TurnId;
 }
@@ -78,13 +74,13 @@ impl turn_lifecycle::AppliedStopForReconciliationProof {
 ```rust
 pub enum ReconciliationReason {
     UserChoseReconciliation {
-        decision: turn_lifecycle::AppliedStopForReconciliationProof,
+        decision: AppliedStopForReconciliationProof,
     },
     InterruptRequiresReconciliation {
-        interrupt: applied_interrupt::AppliedInterruptProof,
+        interrupt: AppliedInterruptProof,
     },
     FatalMismatchRequiresReconciliation {
-        causes: turn_attempt::FatalMismatchStopCauses,
+        causes: FatalMismatchStopCauses,
     },
     AutomaticRecovery {
         attempt: nonzero::NonZeroU32,
@@ -98,9 +94,9 @@ pub enum ReconciliationReason {
 ```rust
 pub struct ReconciliationMarker {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_lifecycle::ReconciliationMarker {
-    pub const fn ambiguous_operations(&self) -> &turn_lifecycle::NonEmptyIssuedOperationRefs;
-    pub const fn reason(&self) -> &turn_lifecycle::ReconciliationReason;
+impl ReconciliationMarker {
+    pub const fn ambiguous_operations(&self) -> &NonEmptyIssuedOperationRefs;
+    pub const fn reason(&self) -> &ReconciliationReason;
 }
 ```
 
@@ -109,26 +105,26 @@ impl turn_lifecycle::ReconciliationMarker {
 ```rust
 pub enum ActiveTurnPhase {
     Running {
-        current_attempt: turn_attempt::CurrentTurnAttempt,
+        current_attempt: CurrentTurnAttempt,
     },
     AwaitingApproval {
         request: ToolRequestId,
     },
     AwaitingChild {
-        wait: session_delegation::ChildWait,
+        wait: ChildWait,
     },
     AwaitingRecoveryDecision {
-        ambiguous_operations: turn_lifecycle::NonEmptyIssuedOperationRefs,
-        applied_interrupt: option::Option<applied_interrupt::AppliedInterruptProof>,
+        ambiguous_operations: NonEmptyIssuedOperationRefs,
+        applied_interrupt: option::Option<AppliedInterruptProof>,
     },
     AwaitingRunnerRecovery {
         runner: RunnerId,
-        placement_revision: runner::RunnerGeneration,
+        placement_revision: RunnerGeneration,
         optional_tool_attempt: option::Option<ToolAttemptId>,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_lifecycle::ActiveTurnPhase {
+impl ActiveTurnPhase {
     pub const fn retains_progressing_slot(&self) -> bool;
 }
 ```
@@ -140,12 +136,8 @@ pub enum TurnDisposition {
     Completed,
     Refused,
     Failed,
-    Cancelled {
-        cause: applied_interrupt::AppliedInterruptProof,
-    },
-    ReconciliationRequired {
-        marker: turn_lifecycle::ReconciliationMarker,
-    },
+    Cancelled { cause: AppliedInterruptProof },
+    ReconciliationRequired { marker: ReconciliationMarker },
     Retired,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq

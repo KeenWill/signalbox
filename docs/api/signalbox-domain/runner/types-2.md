@@ -2,39 +2,12 @@
 
 # runner: types-2
 
-## PinnedRunnerPlacement
-
-```rust
-pub struct PinnedRunnerPlacement {
-    pub runner: RunnerId,
-    pub working_directory: runner::RunnerWorkingDirectory,
-    pub credential_profile: option::Option<runner::CredentialProfileName>,
-    pub grant_lineage: option::Option<runner::RunnerCredentialGrantLineage>,
-    pub tools: set::BTreeSet<tool::ToolName>,
-    pub runner_required_tools: set::BTreeSet<tool::ToolName>,
-    pub workspace: option::Option<runner::ProvisionedWorkspace>,
-    pub sandbox: runner::RunnerSandboxProfile,
-    pub permission_overrides: runner::RunnerToolPermissionOverrides,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## RunnerPlacementLossSource
-
-```rust
-pub enum RunnerPlacementLossSource {
-    Connection,
-    Registration,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
 ## RunnerLostBeforePin
 
 ```rust
 pub struct RunnerLostBeforePin {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl runner::RunnerLostBeforePin {
+impl RunnerLostBeforePin {
     pub const fn from_stored(runner: RunnerId) -> Self;
     pub const fn runner(&self) -> RunnerId;
 }
@@ -45,13 +18,13 @@ impl runner::RunnerLostBeforePin {
 ```rust
 pub struct LostPinnedRunnerPlacement {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl runner::LostPinnedRunnerPlacement {
+impl LostPinnedRunnerPlacement {
     pub const fn from_stored(
-        pinned: runner::PinnedRunnerPlacement,
-        source: runner::RunnerPlacementLossSource,
+        pinned: PinnedRunnerPlacement,
+        source: RunnerPlacementLossSource,
     ) -> Self;
-    pub const fn pinned(&self) -> &runner::PinnedRunnerPlacement;
-    pub const fn source(&self) -> runner::RunnerPlacementLossSource;
+    pub const fn pinned(&self) -> &PinnedRunnerPlacement;
+    pub const fn source(&self) -> RunnerPlacementLossSource;
 }
 ```
 
@@ -59,8 +32,8 @@ impl runner::LostPinnedRunnerPlacement {
 
 ```rust
 pub enum AbandonedRunnerPlacement {
-    BeforePin(runner::RunnerLostBeforePin),
-    Pinned(boxed::Box<runner::LostPinnedRunnerPlacement>),
+    BeforePin(RunnerLostBeforePin),
+    Pinned(boxed::Box<LostPinnedRunnerPlacement>),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -70,10 +43,10 @@ pub enum AbandonedRunnerPlacement {
 ```rust
 pub enum SessionRunnerPlacementState {
     Unpinned,
-    RunnerLostBeforePin(runner::RunnerLostBeforePin),
-    Pinned(runner::PinnedRunnerPlacement),
-    RunnerLost(runner::LostPinnedRunnerPlacement),
-    RunnerAbandoned(runner::AbandonedRunnerPlacement),
+    RunnerLostBeforePin(RunnerLostBeforePin),
+    Pinned(PinnedRunnerPlacement),
+    RunnerLost(LostPinnedRunnerPlacement),
+    RunnerAbandoned(AbandonedRunnerPlacement),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -83,73 +56,73 @@ pub enum SessionRunnerPlacementState {
 ```rust
 pub struct SessionRunnerPlacement {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl runner::SessionRunnerPlacement {
-    pub const fn new(session: SessionId, request: runner::SessionRunnerPlacementRequest) -> Self;
-    pub const fn state(&self) -> &runner::SessionRunnerPlacementState;
-    pub const fn revision(&self) -> runner::RunnerGeneration;
+impl SessionRunnerPlacement {
+    pub const fn new(session: SessionId, request: SessionRunnerPlacementRequest) -> Self;
+    pub const fn state(&self) -> &SessionRunnerPlacementState;
+    pub const fn revision(&self) -> RunnerGeneration;
     pub const fn session(&self) -> SessionId;
-    pub const fn request(&self) -> &runner::SessionRunnerPlacementRequest;
+    pub const fn request(&self) -> &SessionRunnerPlacementRequest;
     pub fn pin_and_offer_lease(
         self,
-        enrollment: &runner::RunnerEnrollment,
-        registration: &runner::ValidatedRunnerRegistration,
-        directory: runner::RunnerWorkingDirectory,
-        workspace: option::Option<runner::ProvisionedWorkspace>,
-        authorization: runner::RunnerToolAttemptAuthorization,
-        offer: runner::RunnerLeaseOfferRequest,
-    ) -> result::Result<runner::SessionRunnerPin, runner::RunnerDomainError>;
+        enrollment: &RunnerEnrollment,
+        registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: option::Option<ProvisionedWorkspace>,
+        authorization: RunnerToolAttemptAuthorization,
+        offer: RunnerLeaseOfferRequest,
+    ) -> result::Result<SessionRunnerPin, RunnerDomainError>;
     pub fn offer_lease(
         &self,
-        enrollment: &runner::RunnerEnrollment,
-        registration: &runner::ValidatedRunnerRegistration,
-        grant: option::Option<&runner::CredentialProfileGrant>,
-        authorization: runner::RunnerToolAttemptAuthorization,
-        offer: runner::RunnerLeaseOfferRequest,
-    ) -> result::Result<runner::RunnerLease, runner::RunnerDomainError>;
+        enrollment: &RunnerEnrollment,
+        registration: &ValidatedRunnerRegistration,
+        grant: option::Option<&CredentialProfileGrant>,
+        authorization: RunnerToolAttemptAuthorization,
+        offer: RunnerLeaseOfferRequest,
+    ) -> result::Result<RunnerLease, RunnerDomainError>;
     pub fn offer_retry(
         &self,
-        enrollment: &runner::RunnerEnrollment,
-        registration: &runner::ValidatedRunnerRegistration,
-        grant: option::Option<&runner::CredentialProfileGrant>,
-        loss: runner::RunnerLeaseLoss,
-        authorization: runner::RunnerToolAttemptAuthorization,
-    ) -> result::Result<runner::RunnerLease, runner::RunnerDomainError>;
-    pub fn mark_runner_lost(self) -> result::Result<Self, runner::RunnerDomainError>;
+        enrollment: &RunnerEnrollment,
+        registration: &ValidatedRunnerRegistration,
+        grant: option::Option<&CredentialProfileGrant>,
+        loss: RunnerLeaseLoss,
+        authorization: RunnerToolAttemptAuthorization,
+    ) -> result::Result<RunnerLease, RunnerDomainError>;
+    pub fn mark_runner_lost(self) -> result::Result<Self, RunnerDomainError>;
     pub fn mark_runner_lost_before_pin(
         self,
         runner: RunnerId,
-    ) -> result::Result<Self, runner::RunnerDomainError>;
+    ) -> result::Result<Self, RunnerDomainError>;
     pub fn reconcile_registration(
         self,
-        registration: &runner::ValidatedRunnerRegistration,
-    ) -> result::Result<Self, runner::RunnerDomainError>;
+        registration: &ValidatedRunnerRegistration,
+    ) -> result::Result<Self, RunnerDomainError>;
     pub fn replace_lost_runner_before_pin(
         self,
-        request: runner::SessionRunnerPlacementRequest,
-        registration: &runner::ValidatedRunnerRegistration,
-    ) -> result::Result<runner::RunnerPrePinReplacement, runner::RunnerDomainError>;
+        request: SessionRunnerPlacementRequest,
+        registration: &ValidatedRunnerRegistration,
+    ) -> result::Result<RunnerPrePinReplacement, RunnerDomainError>;
     pub fn replace_lost_runner(
         self,
-        request: runner::SessionRunnerPlacementRequest,
-        registration: &runner::ValidatedRunnerRegistration,
-        directory: runner::RunnerWorkingDirectory,
-        workspace: option::Option<runner::ProvisionedWorkspace>,
-        prior_grant: option::Option<runner::CredentialProfileGrant>,
-    ) -> result::Result<runner::RunnerPlacementReplacement, runner::RunnerDomainError>;
-    pub fn abandon_lost_runner(self) -> result::Result<Self, runner::RunnerDomainError>;
+        request: SessionRunnerPlacementRequest,
+        registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: option::Option<ProvisionedWorkspace>,
+        prior_grant: option::Option<CredentialProfileGrant>,
+    ) -> result::Result<RunnerPlacementReplacement, RunnerDomainError>;
+    pub fn abandon_lost_runner(self) -> result::Result<Self, RunnerDomainError>;
     pub fn replace_credential_profile(
         self,
-        grant: runner::CredentialProfileGrant,
-        registration: &runner::ValidatedRunnerRegistration,
-        profile: runner::CredentialProfileName,
-        tools: impl collect::IntoIterator<Item = tool::ToolName>,
-    ) -> result::Result<runner::CredentialProfilePlacementReplacement, runner::RunnerDomainError>;
+        grant: CredentialProfileGrant,
+        registration: &ValidatedRunnerRegistration,
+        profile: CredentialProfileName,
+        tools: impl collect::IntoIterator<Item = ToolName>,
+    ) -> result::Result<CredentialProfilePlacementReplacement, RunnerDomainError>;
     pub fn reconstitute(
-        input: runner::SessionRunnerPlacementReconstitutionInput,
+        input: SessionRunnerPlacementReconstitutionInput,
         expected_session: SessionId,
-        registration: option::Option<&runner::ValidatedRunnerRegistration>,
-        profileless_tombstone: option::Option<&runner::CredentialProfileGrant>,
-    ) -> result::Result<Self, runner::RunnerDomainError>;
+        registration: option::Option<&ValidatedRunnerRegistration>,
+        profileless_tombstone: option::Option<&CredentialProfileGrant>,
+    ) -> result::Result<Self, RunnerDomainError>;
 }
 ```
 
@@ -158,7 +131,7 @@ impl runner::SessionRunnerPlacement {
 ```rust
 pub enum RunnerPlacementReconstitutionHistory {
     Initial,
-    PrePinReplacements(vec::Vec<runner::RunnerPrePinReplacementHistory>),
+    PrePinReplacements(vec::Vec<RunnerPrePinReplacementHistory>),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -167,10 +140,10 @@ pub enum RunnerPlacementReconstitutionHistory {
 
 ```rust
 pub struct RunnerPrePinReplacementHistory {
-    pub prior_revision: runner::RunnerGeneration,
+    pub prior_revision: RunnerGeneration,
     pub lost_runner: RunnerId,
-    pub prior_request: runner::SessionRunnerPlacementRequest,
-    pub replacement_request: runner::SessionRunnerPlacementRequest,
+    pub prior_request: SessionRunnerPlacementRequest,
+    pub replacement_request: SessionRunnerPlacementRequest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -180,10 +153,10 @@ pub struct RunnerPrePinReplacementHistory {
 ```rust
 pub struct SessionRunnerPlacementReconstitutionInput {
     pub session: SessionId,
-    pub revision: runner::RunnerGeneration,
-    pub request: runner::SessionRunnerPlacementRequest,
-    pub state: runner::SessionRunnerPlacementState,
-    pub history: runner::RunnerPlacementReconstitutionHistory,
+    pub revision: RunnerGeneration,
+    pub request: SessionRunnerPlacementRequest,
+    pub state: SessionRunnerPlacementState,
+    pub history: RunnerPlacementReconstitutionHistory,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -192,9 +165,9 @@ pub struct SessionRunnerPlacementReconstitutionInput {
 
 ```rust
 pub struct SessionRunnerPin {
-    pub placement: runner::SessionRunnerPlacement,
-    pub grant: option::Option<runner::CredentialProfileGrant>,
-    pub lease: runner::RunnerLease,
+    pub placement: SessionRunnerPlacement,
+    pub grant: option::Option<CredentialProfileGrant>,
+    pub lease: RunnerLease,
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -203,10 +176,10 @@ pub struct SessionRunnerPin {
 
 ```rust
 pub struct RunnerPrePinReplacement {
-    pub placement: runner::SessionRunnerPlacement,
-    pub before: runner::RunnerLostBeforePin,
-    pub prior_request: runner::SessionRunnerPlacementRequest,
-    pub replacement_request: runner::SessionRunnerPlacementRequest,
+    pub placement: SessionRunnerPlacement,
+    pub before: RunnerLostBeforePin,
+    pub prior_request: SessionRunnerPlacementRequest,
+    pub replacement_request: SessionRunnerPlacementRequest,
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -215,10 +188,10 @@ pub struct RunnerPrePinReplacement {
 
 ```rust
 pub struct RunnerPlacementReplacement {
-    pub placement: runner::SessionRunnerPlacement,
-    pub change: runner::RunnerPlacementChange,
-    pub grant: option::Option<runner::CredentialProfileGrant>,
-    pub grant_change: option::Option<runner::RunnerCredentialGrantChange>,
+    pub placement: SessionRunnerPlacement,
+    pub change: RunnerPlacementChange,
+    pub grant: option::Option<CredentialProfileGrant>,
+    pub grant_change: option::Option<RunnerCredentialGrantChange>,
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -228,12 +201,12 @@ pub struct RunnerPlacementReplacement {
 ```rust
 pub struct RunnerPlacementChange {
     pub session: SessionId,
-    pub prior_revision: runner::RunnerGeneration,
-    pub replacement_revision: runner::RunnerGeneration,
-    pub before_request: runner::SessionRunnerPlacementRequest,
-    pub after_request: runner::SessionRunnerPlacementRequest,
-    pub before: runner::PinnedRunnerPlacement,
-    pub after: runner::PinnedRunnerPlacement,
+    pub prior_revision: RunnerGeneration,
+    pub replacement_revision: RunnerGeneration,
+    pub before_request: SessionRunnerPlacementRequest,
+    pub after_request: SessionRunnerPlacementRequest,
+    pub before: PinnedRunnerPlacement,
+    pub after: PinnedRunnerPlacement,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -242,9 +215,9 @@ pub struct RunnerPlacementChange {
 
 ```rust
 pub struct CredentialProfilePlacementReplacement {
-    pub placement: runner::SessionRunnerPlacement,
-    pub placement_change: runner::RunnerPlacementChange,
-    pub grant: runner::CredentialProfileGrantReplacement,
+    pub placement: SessionRunnerPlacement,
+    pub placement_change: RunnerPlacementChange,
+    pub grant: CredentialProfileGrantReplacement,
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -264,25 +237,23 @@ pub enum CredentialProfileGrantState {
 ```rust
 pub struct CredentialProfileGrant {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl runner::CredentialProfileGrant {
-    pub const fn state(&self) -> runner::CredentialProfileGrantState;
-    pub const fn revision(&self) -> runner::RunnerGeneration;
-    pub const fn lineage(&self) -> runner::RunnerCredentialGrantLineage;
-    pub const fn profile(&self) -> &runner::CredentialProfileName;
+impl CredentialProfileGrant {
+    pub const fn state(&self) -> CredentialProfileGrantState;
+    pub const fn revision(&self) -> RunnerGeneration;
+    pub const fn lineage(&self) -> RunnerCredentialGrantLineage;
+    pub const fn profile(&self) -> &CredentialProfileName;
     pub const fn session(&self) -> SessionId;
     pub const fn runner(&self) -> RunnerId;
-    pub fn tools(&self) -> impl iterator::Iterator<Item = &tool::ToolName>;
-    pub fn approvals(
-        &self,
-    ) -> impl iterator::Iterator<Item = (&tool::ToolName, runner::CredentialToolApproval)>;
-    pub fn revoke(self) -> result::Result<Self, runner::RunnerDomainError>;
+    pub fn tools(&self) -> impl iterator::Iterator<Item = &ToolName>;
+    pub fn approvals(&self) -> impl iterator::Iterator<Item = (&ToolName, CredentialToolApproval)>;
+    pub fn revoke(self) -> result::Result<Self, RunnerDomainError>;
     pub fn reconstitute(
-        input: runner::CredentialProfileGrantReconstitutionInput,
+        input: CredentialProfileGrantReconstitutionInput,
         expected_session: SessionId,
-        registration: &runner::ValidatedRunnerRegistration,
-        sandbox: runner::RunnerSandboxProfile,
-        permission_overrides: &runner::RunnerToolPermissionOverrides,
-    ) -> result::Result<Self, runner::RunnerDomainError>;
+        registration: &ValidatedRunnerRegistration,
+        sandbox: RunnerSandboxProfile,
+        permission_overrides: &RunnerToolPermissionOverrides,
+    ) -> result::Result<Self, RunnerDomainError>;
 }
 ```
 
@@ -292,11 +263,11 @@ impl runner::CredentialProfileGrant {
 pub struct CredentialProfileGrantReconstitutionInput {
     pub session: SessionId,
     pub runner: RunnerId,
-    pub revision: runner::RunnerGeneration,
-    pub profile: runner::CredentialProfileName,
-    pub tools: set::BTreeSet<tool::ToolName>,
-    pub approvals: map::BTreeMap<tool::ToolName, runner::CredentialToolApproval>,
-    pub state: runner::CredentialProfileGrantState,
+    pub revision: RunnerGeneration,
+    pub profile: CredentialProfileName,
+    pub tools: set::BTreeSet<ToolName>,
+    pub approvals: map::BTreeMap<ToolName, CredentialToolApproval>,
+    pub state: CredentialProfileGrantState,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -305,8 +276,8 @@ pub struct CredentialProfileGrantReconstitutionInput {
 
 ```rust
 pub struct RunnerCredentialGrantChange {
-    pub before: option::Option<runner::CredentialProfileGrantReconstitutionInput>,
-    pub after: option::Option<runner::CredentialProfileGrantReconstitutionInput>,
+    pub before: option::Option<CredentialProfileGrantReconstitutionInput>,
+    pub after: option::Option<CredentialProfileGrantReconstitutionInput>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -317,10 +288,10 @@ pub struct RunnerCredentialGrantChange {
 pub struct CredentialDispatchAuthorization {
     pub session: SessionId,
     pub runner: RunnerId,
-    pub grant_revision: runner::RunnerGeneration,
-    pub profile: runner::CredentialProfileName,
-    pub tool: tool::ToolName,
-    pub approval: runner::CredentialToolApproval,
+    pub grant_revision: RunnerGeneration,
+    pub profile: CredentialProfileName,
+    pub tool: ToolName,
+    pub approval: CredentialToolApproval,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -329,8 +300,8 @@ pub struct CredentialDispatchAuthorization {
 
 ```rust
 pub struct CredentialProfileGrantReplacement {
-    pub grant: runner::CredentialProfileGrant,
-    pub change: runner::CredentialProfileChange,
+    pub grant: CredentialProfileGrant,
+    pub change: CredentialProfileChange,
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -340,12 +311,12 @@ pub struct CredentialProfileGrantReplacement {
 ```rust
 pub struct CredentialProfileChange {
     pub session: SessionId,
-    pub prior_revision: runner::RunnerGeneration,
-    pub replacement_revision: runner::RunnerGeneration,
-    pub before_profile: runner::CredentialProfileName,
-    pub after_profile: runner::CredentialProfileName,
-    pub before_tools: set::BTreeSet<tool::ToolName>,
-    pub after_tools: set::BTreeSet<tool::ToolName>,
+    pub prior_revision: RunnerGeneration,
+    pub replacement_revision: RunnerGeneration,
+    pub before_profile: CredentialProfileName,
+    pub after_profile: CredentialProfileName,
+    pub before_tools: set::BTreeSet<ToolName>,
+    pub after_tools: set::BTreeSet<ToolName>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

@@ -17,7 +17,7 @@ pub trait RepoWatchTemplateResolver {
     pub fn resolve_repo_watch_template(
         &self,
         name: &session_template::SessionTemplateName,
-    ) -> option::Option<repo_watch::RepoWatchResolvedTemplate>;
+    ) -> option::Option<RepoWatchResolvedTemplate>;
 }
 ```
 
@@ -28,12 +28,12 @@ pub trait RepoWatchDispatchTransaction {
     type Error;
     pub fn handle_repo_watch_evaluation(
         &mut self,
-        evaluation: repo_watch::RepoWatchRuleEvaluation,
-        ids: &mut (impl submit_input::SubmitInputIdGenerator + marker::Send),
+        evaluation: RepoWatchRuleEvaluation,
+        ids: &mut (impl SubmitInputIdGenerator + marker::Send),
     ) -> impl future::Future<
         Output = result::Result<
-            repo_watch::RepoWatchRuleEvaluationOutcome,
-            <Self as repo_watch::RepoWatchDispatchTransaction>::Error,
+            RepoWatchRuleEvaluationOutcome,
+            <Self as RepoWatchDispatchTransaction>::Error,
         >,
     > + marker::Send;
 }

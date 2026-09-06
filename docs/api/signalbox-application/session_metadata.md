@@ -7,18 +7,18 @@
 ```rust
 pub struct ReplaceSessionMetadataRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_metadata::ReplaceSessionMetadataRequest {
+impl ReplaceSessionMetadataRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
         replacement: session_metadata::SessionMetadataContent,
-    ) -> result::Result<Self, create_session::InvalidDurableCommandId>;
+    ) -> result::Result<Self, InvalidDurableCommandId>;
     pub fn try_new_for_tool(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
         request: signalbox_domain::ToolRequestId,
         replacement: session_metadata::SessionMetadataContent,
-    ) -> result::Result<Self, create_session::InvalidDurableCommandId>;
+    ) -> result::Result<Self, InvalidDurableCommandId>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn actor(&self) -> actor::Actor;
@@ -48,8 +48,8 @@ pub trait ReplaceSessionMetadataTransaction {
         command: session_metadata::ReplaceSessionMetadata,
     ) -> impl future::Future<
         Output = result::Result<
-            session_metadata::ReplaceSessionMetadataOutcome,
-            <Self as session_metadata::ReplaceSessionMetadataTransaction>::Error,
+            ReplaceSessionMetadataOutcome,
+            <Self as ReplaceSessionMetadataTransaction>::Error,
         >,
     > + marker::Send;
 }
@@ -60,20 +60,20 @@ pub trait ReplaceSessionMetadataTransaction {
 ```rust
 pub struct ReplaceSessionMetadataService<Transaction> {/* private */}
 // derives: fmt::Debug
-impl<Transaction> session_metadata::ReplaceSessionMetadataService<Transaction> {
+impl<Transaction> ReplaceSessionMetadataService<Transaction> {
     pub const fn new(transaction: Transaction) -> Self;
     pub fn into_transaction(self) -> Transaction;
 }
-impl<Transaction> session_metadata::ReplaceSessionMetadataService<Transaction>
+impl<Transaction> ReplaceSessionMetadataService<Transaction>
 where
-    Transaction: session_metadata::ReplaceSessionMetadataTransaction,
+    Transaction: ReplaceSessionMetadataTransaction,
 {
     pub async fn execute(
         &mut self,
-        request: session_metadata::ReplaceSessionMetadataRequest,
+        request: ReplaceSessionMetadataRequest,
     ) -> result::Result<
-        session_metadata::ReplaceSessionMetadataOutcome,
-        <Transaction as session_metadata::ReplaceSessionMetadataTransaction>::Error,
+        ReplaceSessionMetadataOutcome,
+        <Transaction as ReplaceSessionMetadataTransaction>::Error,
     >;
 }
 ```
@@ -89,7 +89,7 @@ pub trait SessionMetadataReader {
     ) -> impl future::Future<
         Output = result::Result<
             option::Option<session_metadata::SessionMetadataSnapshot>,
-            <Self as session_metadata::SessionMetadataReader>::Error,
+            <Self as SessionMetadataReader>::Error,
         >,
     > + marker::Send;
 }
@@ -100,20 +100,20 @@ pub trait SessionMetadataReader {
 ```rust
 pub struct LoadSessionMetadataService<Reader> {/* private */}
 // derives: fmt::Debug
-impl<Reader> session_metadata::LoadSessionMetadataService<Reader> {
+impl<Reader> LoadSessionMetadataService<Reader> {
     pub const fn new(reader: Reader) -> Self;
     pub fn into_reader(self) -> Reader;
 }
-impl<Reader> session_metadata::LoadSessionMetadataService<Reader>
+impl<Reader> LoadSessionMetadataService<Reader>
 where
-    Reader: session_metadata::SessionMetadataReader,
+    Reader: SessionMetadataReader,
 {
     pub async fn execute(
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
         option::Option<session_metadata::SessionMetadataSnapshot>,
-        <Reader as session_metadata::SessionMetadataReader>::Error,
+        <Reader as SessionMetadataReader>::Error,
     >;
 }
 ```
@@ -123,7 +123,7 @@ where
 ```rust
 pub struct SessionMetadataListQuery {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_metadata::SessionMetadataListQuery {
+impl SessionMetadataListQuery {
     pub fn default_page(page_size: u64) -> Self;
     pub fn try_new(
         required_tags: vec::Vec<string::String>,
@@ -131,7 +131,7 @@ impl session_metadata::SessionMetadataListQuery {
         include_archived: bool,
         page_size: u64,
         after_session: option::Option<signalbox_domain::SessionId>,
-    ) -> result::Result<Self, session_metadata::SessionMetadataListQueryError>;
+    ) -> result::Result<Self, SessionMetadataListQueryError>;
     pub fn try_new_with_required_tag_limit(
         required_tags: vec::Vec<string::String>,
         title_contains: option::Option<string::String>,
@@ -139,7 +139,7 @@ impl session_metadata::SessionMetadataListQuery {
         page_size: u64,
         after_session: option::Option<signalbox_domain::SessionId>,
         max_required_tags: option::Option<usize>,
-    ) -> result::Result<Self, session_metadata::SessionMetadataListQueryError>;
+    ) -> result::Result<Self, SessionMetadataListQueryError>;
     pub fn try_new_with_limits(
         required_tags: vec::Vec<string::String>,
         title_contains: option::Option<string::String>,
@@ -149,7 +149,7 @@ impl session_metadata::SessionMetadataListQuery {
         max_required_tags: option::Option<usize>,
         min_page_size: option::Option<u64>,
         max_page_size: option::Option<u64>,
-    ) -> result::Result<Self, session_metadata::SessionMetadataListQueryError>;
+    ) -> result::Result<Self, SessionMetadataListQueryError>;
     pub fn required_tags(&self) -> impl exact_size::ExactSizeIterator<Item = &str>;
     pub fn title_contains(&self) -> option::Option<&str>;
     pub const fn include_archived(&self) -> bool;
@@ -180,7 +180,7 @@ pub enum SessionMetadataListQueryError {
 ```rust
 pub struct SessionMetadataListItem {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session_metadata::SessionMetadataListItem {
+impl SessionMetadataListItem {
     pub fn new(
         snapshot: &session_metadata::SessionMetadataSnapshot,
         defaults_version: configuration::SessionConfigurationDefaultsVersion,
@@ -207,8 +207,8 @@ pub trait SessionMetadataPageReader {
         &mut self,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<session_metadata::SessionMetadataListItem>,
-            <Self as session_metadata::SessionMetadataPageReader>::Error,
+            option::Option<SessionMetadataListItem>,
+            <Self as SessionMetadataPageReader>::Error,
         >,
     > + marker::Send;
     pub fn next_after_session(&self) -> option::Option<signalbox_domain::SessionId>;
@@ -220,16 +220,14 @@ pub trait SessionMetadataPageReader {
 ```rust
 pub trait SessionMetadataLister {
     type Error;
-    type Page: session_metadata::SessionMetadataPageReader<
-        Error = <Self as session_metadata::SessionMetadataLister>::Error,
-    >;
+    type Page: SessionMetadataPageReader<Error = <Self as SessionMetadataLister>::Error>;
     pub fn open_session_metadata_page(
         &self,
-        query: session_metadata::SessionMetadataListQuery,
+        query: SessionMetadataListQuery,
     ) -> impl future::Future<
         Output = result::Result<
-            <Self as session_metadata::SessionMetadataLister>::Page,
-            <Self as session_metadata::SessionMetadataLister>::Error,
+            <Self as SessionMetadataLister>::Page,
+            <Self as SessionMetadataLister>::Error,
         >,
     > + marker::Send;
 }
@@ -240,20 +238,20 @@ pub trait SessionMetadataLister {
 ```rust
 pub struct ListSessionMetadataService<Lister> {/* private */}
 // derives: fmt::Debug
-impl<Lister> session_metadata::ListSessionMetadataService<Lister> {
+impl<Lister> ListSessionMetadataService<Lister> {
     pub const fn new(lister: Lister) -> Self;
     pub fn into_lister(self) -> Lister;
 }
-impl<Lister> session_metadata::ListSessionMetadataService<Lister>
+impl<Lister> ListSessionMetadataService<Lister>
 where
-    Lister: session_metadata::SessionMetadataLister,
+    Lister: SessionMetadataLister,
 {
     pub async fn execute(
         &self,
-        query: session_metadata::SessionMetadataListQuery,
+        query: SessionMetadataListQuery,
     ) -> result::Result<
-        <Lister as session_metadata::SessionMetadataLister>::Page,
-        <Lister as session_metadata::SessionMetadataLister>::Error,
+        <Lister as SessionMetadataLister>::Page,
+        <Lister as SessionMetadataLister>::Error,
     >;
 }
 ```

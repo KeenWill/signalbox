@@ -40,7 +40,7 @@
 | tool_attempt | 27 | 0 | 0 | [tool_attempt](tool_attempt.md) |
 | tool_execution | 20 | 0 | 0 | [tool_execution](tool_execution.md) |
 | turn_attempt | 13 | 0 | 0 | [turn_attempt](turn_attempt.md) |
-| turn_eligibility | 39 | 0 | 0 | [types](turn_eligibility/types.md), [types-2](turn_eligibility/types-2.md), [types-3](turn_eligibility/types-3.md) |
+| turn_eligibility | 39 | 0 | 0 | [types](turn_eligibility/types.md), [types-2](turn_eligibility/types-2.md) |
 | turn_lifecycle | 11 | 0 | 0 | [turn_lifecycle](turn_lifecycle.md) |
 | user_content | 15 | 0 | 0 | [user_content](user_content.md) |
 | workspace | 4 | 0 | 0 | [workspace](workspace.md) |

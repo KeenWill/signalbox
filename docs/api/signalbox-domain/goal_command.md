@@ -6,15 +6,15 @@
 
 ```rust
 pub enum GoalUserAction {
-    Attach(goal::GoalStatement),
-    Resume(option::Option<goal::GoalGuidance>),
+    Attach(GoalStatement),
+    Resume(option::Option<GoalGuidance>),
     Stop {
-        descendant_scope: session_delegation::DescendantTerminationScope,
+        descendant_scope: DescendantTerminationScope,
     },
-    Supersede(goal::GoalStatement),
+    Supersede(GoalStatement),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl goal_command::GoalUserAction {
+impl GoalUserAction {
     pub const fn starts_pursuit(&self) -> bool;
 }
 ```
@@ -24,15 +24,15 @@ impl goal_command::GoalUserAction {
 ```rust
 pub struct GoalUserCommand {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl goal_command::GoalUserCommand {
+impl GoalUserCommand {
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,
-        action: goal_command::GoalUserAction,
+        action: GoalUserAction,
     ) -> Self;
     pub const fn command_id(&self) -> DurableCommandId;
     pub const fn session(&self) -> SessionId;
-    pub const fn action(&self) -> &goal_command::GoalUserAction;
+    pub const fn action(&self) -> &GoalUserAction;
 }
 ```
 
@@ -58,8 +58,8 @@ pub enum GoalCommandRejection {
 
 ```rust
 pub enum GoalCommandResult {
-    Applied(goal::GoalEvent),
-    Rejected(goal_command::GoalCommandRejection),
+    Applied(GoalEvent),
+    Rejected(GoalCommandRejection),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -69,12 +69,9 @@ pub enum GoalCommandResult {
 ```rust
 pub struct ReconstitutedGoalCommand {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl goal_command::ReconstitutedGoalCommand {
-    pub const fn new(
-        command: goal_command::GoalUserCommand,
-        result: goal_command::GoalCommandResult,
-    ) -> Self;
-    pub const fn command(&self) -> &goal_command::GoalUserCommand;
-    pub const fn result(&self) -> &goal_command::GoalCommandResult;
+impl ReconstitutedGoalCommand {
+    pub const fn new(command: GoalUserCommand, result: GoalCommandResult) -> Self;
+    pub const fn command(&self) -> &GoalUserCommand;
+    pub const fn result(&self) -> &GoalCommandResult;
 }
 ```

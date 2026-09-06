@@ -8,56 +8,55 @@
 pub enum AcceptedInputTurnSchedulingRecordState {
     Queued,
     Active {
-        starting_lineage: turn_lifecycle::AcceptedInputStartingLineage,
-        starting_frontier: context_frontier::ContextFrontierId,
-        phase: turn_eligibility::ActiveTurnSchedulingReconstitutionInput,
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        phase: ActiveTurnSchedulingReconstitutionInput,
     },
     TerminalFailed {
-        starting_lineage: turn_lifecycle::AcceptedInputStartingLineage,
-        starting_frontier: context_frontier::ContextFrontierId,
-        terminal_execution:
-            option::Option<turn_eligibility::FailedTurnExecutionReconstitutionInput>,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        terminal_execution: option::Option<FailedTurnExecutionReconstitutionInput>,
+        terminal_frontier: ContextFrontierId,
     },
     TerminalCompleted {
-        starting_lineage: turn_lifecycle::AcceptedInputStartingLineage,
-        starting_frontier: context_frontier::ContextFrontierId,
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
         completing_attempt: TurnAttemptId,
-        completing_attempt_end: turn_eligibility::TerminalAttemptEndReconstitutionInput,
+        completing_attempt_end: TerminalAttemptEndReconstitutionInput,
         completing_call: ModelCallId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_frontier: ContextFrontierId,
     },
     TerminalRefused {
-        starting_lineage: turn_lifecycle::AcceptedInputStartingLineage,
-        starting_frontier: context_frontier::ContextFrontierId,
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
         refusing_attempt: TurnAttemptId,
-        refusing_attempt_end: turn_eligibility::TerminalAttemptEndReconstitutionInput,
+        refusing_attempt_end: TerminalAttemptEndReconstitutionInput,
         refusing_call: ModelCallId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_frontier: ContextFrontierId,
     },
     TerminalCancelled {
-        starting_lineage: turn_lifecycle::AcceptedInputStartingLineage,
-        starting_frontier: context_frontier::ContextFrontierId,
-        terminal_execution: turn_eligibility::CancelledTurnExecutionReconstitutionInput,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        terminal_execution: CancelledTurnExecutionReconstitutionInput,
+        terminal_frontier: ContextFrontierId,
     },
     TerminalReconciliationRequired {
-        starting_lineage: turn_lifecycle::AcceptedInputStartingLineage,
-        starting_frontier: context_frontier::ContextFrontierId,
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
         reconciling_attempt: TurnAttemptId,
-        reconciling_attempt_end: turn_eligibility::TerminalAttemptEndReconstitutionInput,
+        reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
         ambiguous_call: ModelCallId,
-        authority: turn_eligibility::AutomaticReconciliationAuthority,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        authority: AutomaticReconciliationAuthority,
+        terminal_frontier: ContextFrontierId,
     },
     TerminalToolReconciliationRequired {
-        starting_lineage: turn_lifecycle::AcceptedInputStartingLineage,
-        starting_frontier: context_frontier::ContextFrontierId,
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
         reconciling_attempt: TurnAttemptId,
-        reconciling_attempt_end: turn_eligibility::TerminalAttemptEndReconstitutionInput,
-        tool_batch: tool_execution::ToolBatch,
-        authority: turn_eligibility::AutomaticReconciliationAuthority,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
+        tool_batch: ToolBatch,
+        authority: AutomaticReconciliationAuthority,
+        terminal_frontier: ContextFrontierId,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -67,7 +66,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
 
 ```rust
 pub enum AutomaticReconciliationAuthority {
-    AppliedInterrupt(applied_interrupt::AppliedInterruptCommandResult),
+    AppliedInterrupt(AppliedInterruptCommandResult),
     AutomaticRecovery { attempt: nonzero::NonZeroU32 },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -93,17 +92,17 @@ pub enum DelegatedTurnSchedulingState {
 ```rust
 pub struct DelegatedTurnSchedulingFact {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::DelegatedTurnSchedulingFact {
+impl DelegatedTurnSchedulingFact {
     pub const fn new(
         turn: TurnId,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        selected: configuration::DirectModelSelection,
-        state: turn_eligibility::DelegatedTurnSchedulingState,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selected: DirectModelSelection,
+        state: DelegatedTurnSchedulingState,
     ) -> Self;
     pub const fn turn(&self) -> TurnId;
-    pub const fn defaults_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn selected(&self) -> configuration::DirectModelSelection;
-    pub const fn state(&self) -> turn_eligibility::DelegatedTurnSchedulingState;
+    pub const fn defaults_version(&self) -> SessionConfigurationDefaultsVersion;
+    pub const fn selected(&self) -> DirectModelSelection;
+    pub const fn state(&self) -> DelegatedTurnSchedulingState;
 }
 ```
 
@@ -112,45 +111,45 @@ impl turn_eligibility::DelegatedTurnSchedulingFact {
 ```rust
 pub struct FailedTurnExecutionReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::FailedTurnExecutionReconstitutionInput {
+impl FailedTurnExecutionReconstitutionInput {
     pub const fn attempt_only(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
-        attempt_disposition: turn_attempt::UnstoppedAttemptDisposition,
+        attempt_disposition: UnstoppedAttemptDisposition,
     ) -> Self;
     pub const fn with_call(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
-        attempt_disposition: turn_attempt::UnstoppedAttemptDisposition,
+        attempt_disposition: UnstoppedAttemptDisposition,
         ended_call: ModelCallId,
     ) -> Self;
     pub const fn attempt_only_after_cancellation(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
-        disposition: turn_attempt::CancellationStopDisposition,
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
+        disposition: CancellationStopDisposition,
+        interrupt: AppliedInterruptCommandResult,
     ) -> Self;
     pub const fn with_call_after_cancellation(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
-        disposition: turn_attempt::CancellationStopDisposition,
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
+        disposition: CancellationStopDisposition,
+        interrupt: AppliedInterruptCommandResult,
         ended_call: ModelCallId,
     ) -> Self;
     pub fn with_terminal_tool_attempts(
         self,
-        terminal_tool_attempts: vec::Vec<tool_attempt::EndedToolAttempt>,
+        terminal_tool_attempts: vec::Vec<EndedToolAttempt>,
     ) -> Self;
     pub fn with_terminal_tool_denials(
         self,
-        terminal_tool_denials: vec::Vec<tool::ToolApprovalResolution>,
+        terminal_tool_denials: vec::Vec<ToolApprovalResolution>,
     ) -> Self;
     pub const fn owning_turn(&self) -> TurnId;
     pub const fn ended_attempt(&self) -> TurnAttemptId;
-    pub const fn attempt_end(&self) -> &turn_eligibility::TerminalAttemptEndReconstitutionInput;
+    pub const fn attempt_end(&self) -> &TerminalAttemptEndReconstitutionInput;
     pub const fn ended_call(&self) -> option::Option<ModelCallId>;
-    pub fn terminal_tool_attempts(&self) -> &[tool_attempt::EndedToolAttempt];
-    pub fn terminal_tool_denials(&self) -> &[tool::ToolApprovalResolution];
+    pub fn terminal_tool_attempts(&self) -> &[EndedToolAttempt];
+    pub fn terminal_tool_denials(&self) -> &[ToolApprovalResolution];
 }
 ```
 
@@ -159,19 +158,15 @@ impl turn_eligibility::FailedTurnExecutionReconstitutionInput {
 ```rust
 pub struct TerminalAttemptEndReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::TerminalAttemptEndReconstitutionInput {
-    pub const fn without_stop(disposition: turn_attempt::UnstoppedAttemptDisposition) -> Self;
+impl TerminalAttemptEndReconstitutionInput {
+    pub const fn without_stop(disposition: UnstoppedAttemptDisposition) -> Self;
     pub const fn after_cancellation(
-        disposition: turn_attempt::CancellationStopDisposition,
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
+        disposition: CancellationStopDisposition,
+        interrupt: AppliedInterruptCommandResult,
     ) -> Self;
-    pub const fn yielded_to_runner_recovery(
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
-    ) -> Self;
-    pub const fn end(&self) -> &turn_attempt::AttemptEnd;
-    pub const fn interrupt(
-        &self,
-    ) -> option::Option<applied_interrupt::AppliedInterruptCommandResult>;
+    pub const fn yielded_to_runner_recovery(interrupt: AppliedInterruptCommandResult) -> Self;
+    pub const fn end(&self) -> &AttemptEnd;
+    pub const fn interrupt(&self) -> option::Option<AppliedInterruptCommandResult>;
 }
 ```
 
@@ -180,24 +175,24 @@ impl turn_eligibility::TerminalAttemptEndReconstitutionInput {
 ```rust
 pub struct CancelledTurnExecutionReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::CancelledTurnExecutionReconstitutionInput {
+impl CancelledTurnExecutionReconstitutionInput {
     pub const fn new(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
-        attempt_end: turn_eligibility::TerminalAttemptEndReconstitutionInput,
+        attempt_end: TerminalAttemptEndReconstitutionInput,
         ended_call: option::Option<ModelCallId>,
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
+        interrupt: AppliedInterruptCommandResult,
     ) -> Self;
     pub fn with_terminal_tool_attempts(
         self,
-        terminal_tool_attempts: vec::Vec<tool_attempt::EndedToolAttempt>,
+        terminal_tool_attempts: vec::Vec<EndedToolAttempt>,
     ) -> Self;
     pub fn with_terminal_tool_denials(
         self,
-        terminal_tool_denials: vec::Vec<tool::ToolApprovalResolution>,
+        terminal_tool_denials: vec::Vec<ToolApprovalResolution>,
     ) -> Self;
-    pub fn terminal_tool_attempts(&self) -> &[tool_attempt::EndedToolAttempt];
-    pub fn terminal_tool_denials(&self) -> &[tool::ToolApprovalResolution];
+    pub fn terminal_tool_attempts(&self) -> &[EndedToolAttempt];
+    pub fn terminal_tool_denials(&self) -> &[ToolApprovalResolution];
 }
 ```
 
@@ -206,45 +201,39 @@ impl turn_eligibility::CancelledTurnExecutionReconstitutionInput {
 ```rust
 pub struct ActiveTurnSchedulingReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::ActiveTurnSchedulingReconstitutionInput {
+impl ActiveTurnSchedulingReconstitutionInput {
     pub const fn prepared(owning_turn: TurnId, current_attempt: TurnAttemptId) -> Self;
     pub const fn running(owning_turn: TurnId, current_attempt: TurnAttemptId) -> Self;
-    pub fn with_executing_tool_batch(self, batch: &tool_execution::ToolBatch) -> Self;
+    pub fn with_executing_tool_batch(self, batch: &ToolBatch) -> Self;
     pub const fn stop_requested(
         owning_turn: TurnId,
         current_attempt: TurnAttemptId,
         call: ModelCallId,
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
+        interrupt: AppliedInterruptCommandResult,
     ) -> Self;
-    pub fn awaiting_approval(
-        owning_turn: TurnId,
-        batch: &tool_execution::ToolBatch,
-    ) -> option::Option<Self>;
-    pub fn awaiting_child(
-        owning_turn: TurnId,
-        batch: &tool_execution::ToolBatch,
-    ) -> option::Option<Self>;
+    pub fn awaiting_approval(owning_turn: TurnId, batch: &ToolBatch) -> option::Option<Self>;
+    pub fn awaiting_child(owning_turn: TurnId, batch: &ToolBatch) -> option::Option<Self>;
     pub const fn awaiting_tool_recovery(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
-        wait: tool_execution::AwaitingToolRecovery,
+        wait: AwaitingToolRecovery,
     ) -> Self;
     pub const fn awaiting_tool_recovery_after_restart(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
-        wait: tool_execution::AwaitingToolRecovery,
+        wait: AwaitingToolRecovery,
     ) -> Self;
     pub const fn awaiting_tool_recovery_after_cancellation(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
-        wait: tool_execution::AwaitingToolRecovery,
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
+        wait: AwaitingToolRecovery,
+        interrupt: AppliedInterruptCommandResult,
     ) -> Self;
     pub const fn awaiting_tool_recovery_after_cancellation_restart(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
-        wait: tool_execution::AwaitingToolRecovery,
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
+        wait: AwaitingToolRecovery,
+        interrupt: AppliedInterruptCommandResult,
     ) -> Self;
     pub const fn awaiting_model_call_recovery(
         owning_turn: TurnId,
@@ -260,20 +249,20 @@ impl turn_eligibility::ActiveTurnSchedulingReconstitutionInput {
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
         ambiguous_call: ModelCallId,
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
+        interrupt: AppliedInterruptCommandResult,
     ) -> Self;
     pub const fn awaiting_model_call_recovery_after_cancellation_restart(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
         ambiguous_call: ModelCallId,
-        interrupt: applied_interrupt::AppliedInterruptCommandResult,
+        interrupt: AppliedInterruptCommandResult,
     ) -> Self;
     pub const fn awaiting_runner_recovery(
         owning_turn: TurnId,
         runner: RunnerId,
-        placement_revision: runner::RunnerGeneration,
+        placement_revision: RunnerGeneration,
         interrupted_tool_attempt: option::Option<ToolAttemptId>,
-        source_frontier: option::Option<context_frontier::ContextFrontierId>,
+        source_frontier: option::Option<ContextFrontierId>,
     ) -> Self;
     pub const fn owning_turn(&self) -> TurnId;
 }
@@ -284,14 +273,14 @@ impl turn_eligibility::ActiveTurnSchedulingReconstitutionInput {
 ```rust
 pub struct DelegatedModelCallRecoveryReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::DelegatedModelCallRecoveryReconstitutionInput {
+impl DelegatedModelCallRecoveryReconstitutionInput {
     pub const fn new(
-        phase: turn_eligibility::ActiveTurnSchedulingReconstitutionInput,
-        pinned_target: model_call::PinnedProviderTargetReconstitutionInput,
-        call: model_call::ModelCallReconstitutionInput,
-        source_snapshot: context_frontier::ResolvedContextFrontierReconstitutionInput,
-        pending_steering: vec::Vec<turn_eligibility::PendingSteeringInput>,
-        consumed_steering: vec::Vec<turn_eligibility::ConsumedSteeringReconstitutionInput>,
+        phase: ActiveTurnSchedulingReconstitutionInput,
+        pinned_target: PinnedProviderTargetReconstitutionInput,
+        call: ModelCallReconstitutionInput,
+        source_snapshot: ResolvedContextFrontierReconstitutionInput,
+        pending_steering: vec::Vec<PendingSteeringInput>,
+        consumed_steering: vec::Vec<ConsumedSteeringReconstitutionInput>,
     ) -> Self;
 }
 ```
@@ -301,23 +290,23 @@ impl turn_eligibility::DelegatedModelCallRecoveryReconstitutionInput {
 ```rust
 pub struct SessionAcceptanceTailEntryReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::SessionAcceptanceTailEntryReconstitutionInput {
+impl SessionAcceptanceTailEntryReconstitutionInput {
     pub const fn new(
         session: SessionId,
-        accepted_input: accepted_input::AcceptedInputLifecycle,
-        position: queue_order::SessionInputPosition,
-        delivery: delivery_request::DeliveryRequest,
+        accepted_input: AcceptedInputLifecycle,
+        position: SessionInputPosition,
+        delivery: DeliveryRequest,
     ) -> Self;
     pub const fn retired_goal_origin(
         session: SessionId,
-        accepted_input: accepted_input::AcceptedInputLifecycle,
-        position: queue_order::SessionInputPosition,
-        delivery: delivery_request::DeliveryRequest,
+        accepted_input: AcceptedInputLifecycle,
+        position: SessionInputPosition,
+        delivery: DeliveryRequest,
     ) -> Self;
     pub const fn session(&self) -> SessionId;
-    pub const fn accepted_input(&self) -> &accepted_input::AcceptedInputLifecycle;
-    pub const fn position(&self) -> queue_order::SessionInputPosition;
-    pub const fn delivery(&self) -> delivery_request::DeliveryRequest;
+    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle;
+    pub const fn position(&self) -> SessionInputPosition;
+    pub const fn delivery(&self) -> DeliveryRequest;
 }
 ```
 
@@ -326,17 +315,17 @@ impl turn_eligibility::SessionAcceptanceTailEntryReconstitutionInput {
 ```rust
 pub struct SessionAcceptanceTailReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::SessionAcceptanceTailReconstitutionInput {
+impl SessionAcceptanceTailReconstitutionInput {
     pub fn new(
         session: SessionId,
         anchor: AcceptedInputId,
-        observed_last_position: queue_order::SessionInputPosition,
-        entries: vec::Vec<turn_eligibility::SessionAcceptanceTailEntryReconstitutionInput>,
+        observed_last_position: SessionInputPosition,
+        entries: vec::Vec<SessionAcceptanceTailEntryReconstitutionInput>,
     ) -> Self;
     pub const fn session(&self) -> SessionId;
     pub const fn anchor(&self) -> AcceptedInputId;
-    pub const fn observed_last_position(&self) -> queue_order::SessionInputPosition;
-    pub fn entries(&self) -> &[turn_eligibility::SessionAcceptanceTailEntryReconstitutionInput];
+    pub const fn observed_last_position(&self) -> SessionInputPosition;
+    pub fn entries(&self) -> &[SessionAcceptanceTailEntryReconstitutionInput];
 }
 ```
 
@@ -345,16 +334,16 @@ impl turn_eligibility::SessionAcceptanceTailReconstitutionInput {
 ```rust
 pub struct ConsumedSteeringReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::ConsumedSteeringReconstitutionInput {
+impl ConsumedSteeringReconstitutionInput {
     pub const fn new(
         session: SessionId,
-        accepted_input: accepted_input::AcceptedInputLifecycle,
-        acceptance_position: queue_order::SessionInputPosition,
+        accepted_input: AcceptedInputLifecycle,
+        acceptance_position: SessionInputPosition,
         source_turn: TurnId,
     ) -> Self;
     pub const fn session(&self) -> SessionId;
-    pub const fn accepted_input(&self) -> &accepted_input::AcceptedInputLifecycle;
-    pub const fn acceptance_position(&self) -> queue_order::SessionInputPosition;
+    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
     pub const fn source_turn(&self) -> TurnId;
 }
 ```
@@ -364,15 +353,15 @@ impl turn_eligibility::ConsumedSteeringReconstitutionInput {
 ```rust
 pub struct SteeringContinuationRoundReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::SteeringContinuationRoundReconstitutionInput {
+impl SteeringContinuationRoundReconstitutionInput {
     pub const fn new(
         call: ModelCallId,
-        round_tool_attempts: vec::Vec<tool_attempt::EndedToolAttempt>,
-        round_tool_denials: vec::Vec<tool::ToolApprovalResolution>,
+        round_tool_attempts: vec::Vec<EndedToolAttempt>,
+        round_tool_denials: vec::Vec<ToolApprovalResolution>,
     ) -> Self;
     pub const fn call(&self) -> ModelCallId;
-    pub fn round_tool_attempts(&self) -> &[tool_attempt::EndedToolAttempt];
-    pub fn round_tool_denials(&self) -> &[tool::ToolApprovalResolution];
+    pub fn round_tool_attempts(&self) -> &[EndedToolAttempt];
+    pub fn round_tool_denials(&self) -> &[ToolApprovalResolution];
 }
 ```
 
@@ -381,15 +370,15 @@ impl turn_eligibility::SteeringContinuationRoundReconstitutionInput {
 ```rust
 pub struct ContinuationRoundReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::ContinuationRoundReconstitutionInput {
+impl ContinuationRoundReconstitutionInput {
     pub const fn new(
         call: ModelCallId,
-        round_tool_attempts: vec::Vec<tool_attempt::EndedToolAttempt>,
-        round_tool_denials: vec::Vec<tool::ToolApprovalResolution>,
+        round_tool_attempts: vec::Vec<EndedToolAttempt>,
+        round_tool_denials: vec::Vec<ToolApprovalResolution>,
     ) -> Self;
     pub const fn call(&self) -> ModelCallId;
-    pub fn round_tool_attempts(&self) -> &[tool_attempt::EndedToolAttempt];
-    pub fn round_tool_denials(&self) -> &[tool::ToolApprovalResolution];
+    pub fn round_tool_attempts(&self) -> &[EndedToolAttempt];
+    pub fn round_tool_denials(&self) -> &[ToolApprovalResolution];
 }
 ```
 
@@ -398,15 +387,15 @@ impl turn_eligibility::ContinuationRoundReconstitutionInput {
 ```rust
 pub struct PendingSteeringInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::PendingSteeringInput {
+impl PendingSteeringInput {
     pub fn reconstitute(
-        accepted_input: accepted_input::AcceptedInputLifecycle,
-        acceptance_position: queue_order::SessionInputPosition,
+        accepted_input: AcceptedInputLifecycle,
+        acceptance_position: SessionInputPosition,
         source_turn: TurnId,
     ) -> option::Option<Self>;
     pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn lifecycle(&self) -> &accepted_input::AcceptedInputLifecycle;
-    pub const fn acceptance_position(&self) -> queue_order::SessionInputPosition;
+    pub const fn lifecycle(&self) -> &AcceptedInputLifecycle;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
 }
 ```
 
@@ -415,10 +404,10 @@ impl turn_eligibility::PendingSteeringInput {
 ```rust
 pub struct ConsumedSteeringInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::ConsumedSteeringInput {
+impl ConsumedSteeringInput {
     pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn lifecycle(&self) -> &accepted_input::AcceptedInputLifecycle;
-    pub const fn acceptance_position(&self) -> queue_order::SessionInputPosition;
+    pub const fn lifecycle(&self) -> &AcceptedInputLifecycle;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
     pub const fn source_turn(&self) -> TurnId;
 }
 ```
@@ -428,44 +417,44 @@ impl turn_eligibility::ConsumedSteeringInput {
 ```rust
 pub struct AcceptedInputTurnSchedulingRecord {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::AcceptedInputTurnSchedulingRecord {
+impl AcceptedInputTurnSchedulingRecord {
     pub fn new(
         stored_session: SessionId,
         turn: TurnId,
         accepted_input_session: SessionId,
-        accepted_input: accepted_input::AcceptedInputLifecycle,
+        accepted_input: AcceptedInputLifecycle,
         queue_session: SessionId,
         queue_turn: TurnId,
-        order: queue_order::AcceptedInputQueueOrder,
-        origin_delivery: delivery_request::DeliveryRequest,
-        origin_configuration: configuration::OriginConfiguration,
-        state: turn_eligibility::AcceptedInputTurnSchedulingRecordState,
+        order: AcceptedInputQueueOrder,
+        origin_delivery: DeliveryRequest,
+        origin_configuration: OriginConfiguration,
+        state: AcceptedInputTurnSchedulingRecordState,
     ) -> Self;
     pub fn reclassified(
         stored_session: SessionId,
         turn: TurnId,
         accepted_input_session: SessionId,
-        accepted_input: accepted_input::AcceptedInputLifecycle,
+        accepted_input: AcceptedInputLifecycle,
         queue_session: SessionId,
         queue_turn: TurnId,
-        order: queue_order::AcceptedInputQueueOrder,
-        origin_delivery: delivery_request::DeliveryRequest,
-        binding: accepted_input::SteeringBinding,
-        source_configuration: configuration::OriginConfiguration,
-        state: turn_eligibility::AcceptedInputTurnSchedulingRecordState,
+        order: AcceptedInputQueueOrder,
+        origin_delivery: DeliveryRequest,
+        binding: SteeringBinding,
+        source_configuration: OriginConfiguration,
+        state: AcceptedInputTurnSchedulingRecordState,
     ) -> Self;
     pub fn without_legacy_model_identity_boundary(self) -> Self;
     pub const fn stored_session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
     pub const fn accepted_input_session(&self) -> SessionId;
-    pub const fn accepted_input(&self) -> &accepted_input::AcceptedInputLifecycle;
+    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle;
     pub const fn queue_session(&self) -> SessionId;
     pub const fn queue_turn(&self) -> TurnId;
-    pub const fn order(&self) -> queue_order::AcceptedInputQueueOrder;
-    pub const fn origin_delivery(&self) -> delivery_request::DeliveryRequest;
-    pub const fn origin_configuration(&self) -> &configuration::OriginConfiguration;
-    pub const fn configuration_provenance(&self) -> &configuration::TurnConfigurationProvenance;
-    pub const fn state(&self) -> &turn_eligibility::AcceptedInputTurnSchedulingRecordState;
+    pub const fn order(&self) -> AcceptedInputQueueOrder;
+    pub const fn origin_delivery(&self) -> DeliveryRequest;
+    pub const fn origin_configuration(&self) -> &OriginConfiguration;
+    pub const fn configuration_provenance(&self) -> &TurnConfigurationProvenance;
+    pub const fn state(&self) -> &AcceptedInputTurnSchedulingRecordState;
 }
 ```
 
@@ -474,87 +463,333 @@ impl turn_eligibility::AcceptedInputTurnSchedulingRecord {
 ```rust
 pub struct AcceptedInputSchedulingReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl turn_eligibility::AcceptedInputSchedulingReconstitutionInput {
+impl AcceptedInputSchedulingReconstitutionInput {
     pub fn new(
-        session: session::Session,
-        turns: vec::Vec<turn_eligibility::AcceptedInputTurnSchedulingRecord>,
-        semantic_entries: vec::Vec<semantic_entry::SemanticTranscriptEntryReconstitutionInput>,
-        snapshots: vec::Vec<context_frontier::ResolvedContextFrontierReconstitutionInput>,
-        active_acceptance_tail: option::Option<
-            turn_eligibility::SessionAcceptanceTailReconstitutionInput,
-        >,
+        session: Session,
+        turns: vec::Vec<AcceptedInputTurnSchedulingRecord>,
+        semantic_entries: vec::Vec<SemanticTranscriptEntryReconstitutionInput>,
+        snapshots: vec::Vec<ResolvedContextFrontierReconstitutionInput>,
+        active_acceptance_tail: option::Option<SessionAcceptanceTailReconstitutionInput>,
     ) -> Self;
     pub fn with_preceding_non_accepted_terminal(
         self,
         session: SessionId,
         predecessor: TurnId,
         successor: TurnId,
-        terminal_frontier: context_frontier::ContextFrontierId,
-        selected: configuration::DirectModelSelection,
+        terminal_frontier: ContextFrontierId,
+        selected: DirectModelSelection,
     ) -> Self;
-    pub fn with_imported_session(
-        self,
-        imported_session: imported_session::ReconstitutedImportedSession,
-    ) -> Self;
+    pub fn with_imported_session(self, imported_session: ReconstitutedImportedSession) -> Self;
     pub fn with_model_call_facts(
         self,
-        pinned_targets: vec::Vec<model_call::PinnedProviderTargetReconstitutionInput>,
-        model_calls: vec::Vec<model_call::ModelCallReconstitutionInput>,
+        pinned_targets: vec::Vec<PinnedProviderTargetReconstitutionInput>,
+        model_calls: vec::Vec<ModelCallReconstitutionInput>,
     ) -> Self;
     pub fn with_context_compaction_facts(
         self,
-        calls: vec::Vec<context_compaction::ContextCompactionModelCallReconstitutionInput>,
-        compactions: vec::Vec<context_compaction::ContextCompactionReconstitutionInput>,
+        calls: vec::Vec<ContextCompactionModelCallReconstitutionInput>,
+        compactions: vec::Vec<ContextCompactionReconstitutionInput>,
     ) -> Self;
     pub fn with_consumed_steering_facts(
         self,
-        consumed_steering: vec::Vec<turn_eligibility::ConsumedSteeringReconstitutionInput>,
+        consumed_steering: vec::Vec<ConsumedSteeringReconstitutionInput>,
     ) -> Self;
     pub fn with_delegated_consumed_steering_facts(
         self,
-        consumed_steering: vec::Vec<turn_eligibility::ConsumedSteeringReconstitutionInput>,
+        consumed_steering: vec::Vec<ConsumedSteeringReconstitutionInput>,
     ) -> Self;
     pub fn with_delegated_turn_facts(
         self,
-        delegated_turns: vec::Vec<turn_eligibility::DelegatedTurnSchedulingFact>,
+        delegated_turns: vec::Vec<DelegatedTurnSchedulingFact>,
     ) -> Self;
     pub fn with_steering_continuation_rounds(
         self,
-        steering_continuation_rounds: vec::Vec<
-            turn_eligibility::SteeringContinuationRoundReconstitutionInput,
-        >,
+        steering_continuation_rounds: vec::Vec<SteeringContinuationRoundReconstitutionInput>,
     ) -> Self;
     pub fn with_continuation_rounds(
         self,
-        continuation_rounds: vec::Vec<turn_eligibility::ContinuationRoundReconstitutionInput>,
+        continuation_rounds: vec::Vec<ContinuationRoundReconstitutionInput>,
     ) -> Self;
-    pub const fn session(&self) -> &session::Session;
-    pub const fn imported_session(
-        &self,
-    ) -> option::Option<&imported_session::ReconstitutedImportedSession>;
-    pub fn turns(&self) -> &[turn_eligibility::AcceptedInputTurnSchedulingRecord];
-    pub fn semantic_entries(&self)
-        -> &[semantic_entry::SemanticTranscriptEntryReconstitutionInput];
-    pub fn snapshots(&self) -> &[context_frontier::ResolvedContextFrontierReconstitutionInput];
-    pub fn model_calls(&self) -> &[model_call::ModelCallReconstitutionInput];
-    pub fn pinned_targets(&self) -> &[model_call::PinnedProviderTargetReconstitutionInput];
-    pub fn consumed_steering(&self) -> &[turn_eligibility::ConsumedSteeringReconstitutionInput];
-    pub fn delegated_consumed_steering(
-        &self,
-    ) -> &[turn_eligibility::ConsumedSteeringReconstitutionInput];
-    pub fn delegated_turns(&self) -> &[turn_eligibility::DelegatedTurnSchedulingFact];
-    pub fn steering_continuation_rounds(
-        &self,
-    ) -> &[turn_eligibility::SteeringContinuationRoundReconstitutionInput];
-    pub fn continuation_rounds(&self) -> &[turn_eligibility::ContinuationRoundReconstitutionInput];
+    pub const fn session(&self) -> &Session;
+    pub const fn imported_session(&self) -> option::Option<&ReconstitutedImportedSession>;
+    pub fn turns(&self) -> &[AcceptedInputTurnSchedulingRecord];
+    pub fn semantic_entries(&self) -> &[SemanticTranscriptEntryReconstitutionInput];
+    pub fn snapshots(&self) -> &[ResolvedContextFrontierReconstitutionInput];
+    pub fn model_calls(&self) -> &[ModelCallReconstitutionInput];
+    pub fn pinned_targets(&self) -> &[PinnedProviderTargetReconstitutionInput];
+    pub fn consumed_steering(&self) -> &[ConsumedSteeringReconstitutionInput];
+    pub fn delegated_consumed_steering(&self) -> &[ConsumedSteeringReconstitutionInput];
+    pub fn delegated_turns(&self) -> &[DelegatedTurnSchedulingFact];
+    pub fn steering_continuation_rounds(&self) -> &[SteeringContinuationRoundReconstitutionInput];
+    pub fn continuation_rounds(&self) -> &[ContinuationRoundReconstitutionInput];
     pub const fn active_acceptance_tail(
         &self,
-    ) -> option::Option<&turn_eligibility::SessionAcceptanceTailReconstitutionInput>;
+    ) -> option::Option<&SessionAcceptanceTailReconstitutionInput>;
     pub fn reconstitute(
         self,
-    ) -> result::Result<
-        turn_eligibility::AcceptedInputSchedulingProjection,
-        turn_eligibility::AcceptedInputSchedulingReconstitutionError,
-    >;
+    ) -> result::Result<AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionError>;
+}
+```
+
+## AcceptedInputSchedulingReconstitutionFailure
+
+```rust
+pub enum AcceptedInputSchedulingReconstitutionFailure {
+    UnsupportedSessionAncestry,
+    MissingImportedSession,
+    UnexpectedImportedSession,
+    ImportedSessionMismatch,
+    UnsupportedSemanticEntry {
+        entry: SemanticTranscriptEntryId,
+    },
+    TurnSessionMismatch {
+        turn: TurnId,
+    },
+    AcceptedInputSessionMismatch {
+        turn: TurnId,
+    },
+    QueueSessionMismatch {
+        turn: TurnId,
+    },
+    QueueTurnMismatch {
+        turn: TurnId,
+    },
+    AcceptedInputOriginMismatch {
+        turn: TurnId,
+    },
+    OriginDeliveryMismatch {
+        turn: TurnId,
+    },
+    DuplicateAcceptedInput {
+        accepted_input: AcceptedInputId,
+    },
+    InvalidQueueOrder {
+        error: AcceptedInputQueueOrderError,
+    },
+    SemanticEntrySourceSessionMismatch {
+        entry: SemanticTranscriptEntryId,
+    },
+    DuplicateSemanticEntry {
+        entry: SemanticTranscriptEntryRef,
+    },
+    SemanticEntrySubjectMissing {
+        entry: SemanticTranscriptEntryId,
+    },
+    SemanticEntryStateMismatch {
+        entry: SemanticTranscriptEntryId,
+    },
+    DuplicateSemanticEntryForSubject {
+        entry: SemanticTranscriptEntryId,
+    },
+    DelegatedTurnFactMismatch {
+        turn: TurnId,
+    },
+    ConsumedSteeringSessionMismatch {
+        accepted_input: AcceptedInputId,
+    },
+    DuplicateConsumedSteering {
+        accepted_input: AcceptedInputId,
+    },
+    SteeringSemanticEntryMismatch {
+        entry: SemanticTranscriptEntryId,
+    },
+    ConsumedSteeringMismatch {
+        accepted_input: AcceptedInputId,
+    },
+    SteeringContinuationRoundMismatch {
+        call: ModelCallId,
+    },
+    ContinuationRoundMismatch {
+        call: ModelCallId,
+    },
+    SemanticEntryCallMissing {
+        entry: SemanticTranscriptEntryId,
+        call: ModelCallId,
+    },
+    SemanticEntryCallMismatch {
+        entry: SemanticTranscriptEntryId,
+        call: ModelCallId,
+    },
+    DuplicateModelCall {
+        call: ModelCallId,
+    },
+    DuplicateModelCallIdentityAcrossKinds {
+        call: ModelCallId,
+    },
+    DuplicatePinnedTarget {
+        turn: TurnId,
+    },
+    PinnedTargetMissing {
+        call: ModelCallId,
+    },
+    UnreferencedPinnedTarget {
+        turn: TurnId,
+    },
+    ModelCallSnapshotMissing {
+        call: ModelCallId,
+    },
+    InvalidModelCall {
+        call: ModelCallId,
+    },
+    CompactionCallSnapshotMissing {
+        call: ModelCallId,
+    },
+    DuplicateCompactionCall {
+        call: ModelCallId,
+    },
+    InvalidCompactionCall {
+        call: ModelCallId,
+    },
+    CompactionSnapshotMissing {
+        compaction: ContextCompactionId,
+    },
+    CompactionEvidenceMissing {
+        compaction: ContextCompactionId,
+    },
+    InvalidCompaction {
+        compaction: ContextCompactionId,
+    },
+    DuplicateCompaction {
+        compaction: ContextCompactionId,
+    },
+    UnreferencedCompactionEvidence {
+        call: ModelCallId,
+    },
+    InvalidCompactionChain {
+        compaction: ContextCompactionId,
+    },
+    UnreferencedModelCall {
+        call: ModelCallId,
+    },
+    TerminalModelCallMissing {
+        turn: TurnId,
+        call: ModelCallId,
+    },
+    TerminalModelCallMismatch {
+        turn: TurnId,
+    },
+    RecoveryModelCallMissing {
+        turn: TurnId,
+        call: ModelCallId,
+    },
+    RecoveryModelCallMismatch {
+        turn: TurnId,
+    },
+    MissingOriginEntry {
+        turn: TurnId,
+    },
+    MissingFailureEntry {
+        turn: TurnId,
+    },
+    MissingCompletionEntry {
+        turn: TurnId,
+    },
+    MissingCancellationEntry {
+        turn: TurnId,
+    },
+    CurrentAttemptOwnershipMismatch {
+        turn: TurnId,
+        attempt: TurnAttemptId,
+    },
+    TerminalAttemptOwnershipMismatch {
+        turn: TurnId,
+        attempt: TurnAttemptId,
+    },
+    TerminalAttemptEndMismatch {
+        turn: TurnId,
+        attempt: TurnAttemptId,
+    },
+    DuplicateCurrentAttempt {
+        attempt: TurnAttemptId,
+    },
+    ActivePhaseEvidenceMismatch {
+        turn: TurnId,
+        accepted_input: AcceptedInputId,
+    },
+    MissingActiveAcceptanceTail {
+        turn: TurnId,
+    },
+    UnexpectedActiveAcceptanceTail,
+    AcceptanceTailSessionMismatch {
+        expected: SessionId,
+        actual: SessionId,
+    },
+    AcceptanceTailAnchorMismatch {
+        turn: TurnId,
+        expected: AcceptedInputId,
+        actual: AcceptedInputId,
+    },
+    AcceptanceTailEntrySessionMismatch {
+        accepted_input: AcceptedInputId,
+    },
+    DuplicateAcceptanceTailEntry {
+        accepted_input: AcceptedInputId,
+    },
+    AcceptanceTailPositionMismatch {
+        accepted_input: AcceptedInputId,
+        expected: SessionInputPosition,
+        actual: SessionInputPosition,
+    },
+    AcceptanceTailLastPositionMismatch {
+        expected: SessionInputPosition,
+        actual: option::Option<SessionInputPosition>,
+    },
+    AcceptanceTailDispositionMismatch {
+        accepted_input: AcceptedInputId,
+    },
+    SnapshotOwningSessionMismatch {
+        snapshot: ContextFrontierId,
+    },
+    DuplicateSnapshot {
+        snapshot: ContextFrontierId,
+    },
+    InvalidSnapshotMembership {
+        snapshot: ContextFrontierId,
+    },
+    SnapshotEntryMissing {
+        snapshot: ContextFrontierId,
+        entry: SemanticTranscriptEntryRef,
+    },
+    StartingSnapshotMissing {
+        turn: TurnId,
+    },
+    TerminalSnapshotMissing {
+        turn: TurnId,
+    },
+    InvalidLifecycleOrder {
+        turn: TurnId,
+    },
+    StartingLineageMismatch {
+        turn: TurnId,
+        expected: AcceptedInputStartingLineage,
+        actual: AcceptedInputStartingLineage,
+    },
+    StartingFrontierMismatch {
+        turn: TurnId,
+    },
+    TerminalFrontierMismatch {
+        turn: TurnId,
+    },
+    UnreferencedSnapshot {
+        snapshot: ContextFrontierId,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## AcceptedInputSchedulingReconstitutionError
+
+```rust
+pub struct AcceptedInputSchedulingReconstitutionError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl AcceptedInputSchedulingReconstitutionError {
+    pub const fn input(&self) -> &AcceptedInputSchedulingReconstitutionInput;
+    pub const fn failure(&self) -> &AcceptedInputSchedulingReconstitutionFailure;
+    pub fn into_parts(
+        self,
+    ) -> (
+        AcceptedInputSchedulingReconstitutionInput,
+        AcceptedInputSchedulingReconstitutionFailure,
+    );
 }
 ```

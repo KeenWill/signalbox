@@ -15,9 +15,7 @@ pub trait BlobDerivationIdGenerator {
 ```rust
 pub struct UuidV7BlobDerivationIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl blob_derivation::BlobDerivationIdGenerator
-    for blob_derivation::UuidV7BlobDerivationIdGenerator
-{
+impl BlobDerivationIdGenerator for UuidV7BlobDerivationIdGenerator {
     pub fn next_blob_derivation_id(&mut self) -> signalbox_domain::BlobDerivationId;
 }
 ```
@@ -33,7 +31,7 @@ pub trait BlobDerivationStore {
     ) -> impl future::Future<
         Output = result::Result<
             option::Option<blob::BlobDerivation>,
-            <Self as blob_derivation::BlobDerivationStore>::Error,
+            <Self as BlobDerivationStore>::Error,
         >,
     > + marker::Send;
     pub fn record_deterministic(
@@ -41,10 +39,7 @@ pub trait BlobDerivationStore {
         key: blob::DeterministicBlobDerivationKey,
         derivation: blob::BlobDerivation,
     ) -> impl future::Future<
-        Output = result::Result<
-            blob_derivation::BlobDerivationRecordOutcome,
-            <Self as blob_derivation::BlobDerivationStore>::Error,
-        >,
+        Output = result::Result<BlobDerivationRecordOutcome, <Self as BlobDerivationStore>::Error>,
     > + marker::Send;
 }
 ```
@@ -71,15 +66,14 @@ pub trait DeterministicBlobProducer {
     ) -> impl future::Future<
         Output = result::Result<
             boxed::Box<[blob::BlobDigest]>,
-            <Self as blob_derivation::DeterministicBlobProducer>::Error,
+            <Self as DeterministicBlobProducer>::Error,
         >,
     > + marker::Send;
     pub fn outputs_retrievable(
         &mut self,
         outputs: &[blob::BlobDigest],
-    ) -> impl future::Future<
-        Output = result::Result<bool, <Self as blob_derivation::DeterministicBlobProducer>::Error>,
-    > + marker::Send;
+    ) -> impl future::Future<Output = result::Result<bool, <Self as DeterministicBlobProducer>::Error>>
+           + marker::Send;
 }
 ```
 
@@ -88,7 +82,7 @@ pub trait DeterministicBlobProducer {
 ```rust
 pub struct DeterministicBlobDerivationRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl blob_derivation::DeterministicBlobDerivationRequest {
+impl DeterministicBlobDerivationRequest {
     pub fn try_new(
         inputs: impl convert::Into<boxed::Box<[blob::BlobDigest]>>,
         transformation: blob::BlobTransformation,
@@ -121,12 +115,12 @@ pub enum BlobDerivationServiceError<StoreError, ProducerError> {
 }
 // derives: fmt::Debug
 impl<StoreError: fmt::Display, ProducerError: fmt::Display> fmt::Display
-    for blob_derivation::BlobDerivationServiceError<StoreError, ProducerError>
+    for BlobDerivationServiceError<StoreError, ProducerError>
 {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<StoreError: error::Error + 'static, ProducerError: error::Error + 'static> error::Error
-    for blob_derivation::BlobDerivationServiceError<StoreError, ProducerError>
+    for BlobDerivationServiceError<StoreError, ProducerError>
 {
 }
 ```
@@ -136,25 +130,23 @@ impl<StoreError: error::Error + 'static, ProducerError: error::Error + 'static> 
 ```rust
 pub struct DeterministicBlobDerivationService<Ids, Store, Producer> {/* private */}
 // derives: fmt::Debug
-impl<Ids, Store, Producer>
-    blob_derivation::DeterministicBlobDerivationService<Ids, Store, Producer>
-{
+impl<Ids, Store, Producer> DeterministicBlobDerivationService<Ids, Store, Producer> {
     pub const fn new(ids: Ids, store: Store, producer: Producer) -> Self;
 }
-impl<Ids, Store, Producer> blob_derivation::DeterministicBlobDerivationService<Ids, Store, Producer>
+impl<Ids, Store, Producer> DeterministicBlobDerivationService<Ids, Store, Producer>
 where
-    Ids: blob_derivation::BlobDerivationIdGenerator,
-    Store: blob_derivation::BlobDerivationStore,
-    Producer: blob_derivation::DeterministicBlobProducer,
+    Ids: BlobDerivationIdGenerator,
+    Store: BlobDerivationStore,
+    Producer: DeterministicBlobProducer,
 {
     pub async fn execute(
         &mut self,
-        request: blob_derivation::DeterministicBlobDerivationRequest,
+        request: DeterministicBlobDerivationRequest,
     ) -> result::Result<
-        blob_derivation::BlobDerivationServiceOutcome,
-        blob_derivation::BlobDerivationServiceError<
-            <Store as blob_derivation::BlobDerivationStore>::Error,
-            <Producer as blob_derivation::DeterministicBlobProducer>::Error,
+        BlobDerivationServiceOutcome,
+        BlobDerivationServiceError<
+            <Store as BlobDerivationStore>::Error,
+            <Producer as DeterministicBlobProducer>::Error,
         >,
     >;
 }

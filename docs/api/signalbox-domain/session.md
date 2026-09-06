@@ -7,19 +7,13 @@
 ```rust
 pub enum SessionCreationCause {
     Interactive,
-    ModuleDispatched {
-        dispatch: session_lifecycle::ModuleDispatch,
-    },
-    Delegated {
-        spawning_request: ToolRequestId,
-    },
+    ModuleDispatched { dispatch: ModuleDispatch },
+    Delegated { spawning_request: ToolRequestId },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session::SessionCreationCause {
-    pub const fn default_ownership(&self) -> session_lifecycle::SessionOwnership;
-    pub const fn default_finish_condition(
-        &self,
-    ) -> option::Option<session_lifecycle_command::FinishCondition>;
+impl SessionCreationCause {
+    pub const fn default_ownership(&self) -> SessionOwnership;
+    pub const fn default_finish_condition(&self) -> option::Option<FinishCondition>;
 }
 ```
 
@@ -47,11 +41,11 @@ pub enum TranscriptAncestry {
     None,
     SingleSource {
         source_session: SessionId,
-        source_frontier: session::TranscriptFrontier,
+        source_frontier: TranscriptFrontier,
     },
     ImportedConversation {
-        source_frontier: imported_conversation::ImportedTranscriptFrontier,
-        relationship: session::ImportedSessionRelationship,
+        source_frontier: ImportedTranscriptFrontier,
+        relationship: ImportedSessionRelationship,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
@@ -62,15 +56,12 @@ pub enum TranscriptAncestry {
 ```rust
 pub struct SessionCreationProvenance {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session::SessionCreationProvenance {
-    pub const fn new(
-        cause: session::SessionCreationCause,
-        ancestry: session::TranscriptAncestry,
-    ) -> Self;
+impl SessionCreationProvenance {
+    pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self;
     pub const fn delegated(spawning_request: ToolRequestId) -> Self;
-    pub const fn module_dispatched(dispatch: session_lifecycle::ModuleDispatch) -> Self;
-    pub const fn cause(&self) -> session::SessionCreationCause;
-    pub const fn ancestry(&self) -> session::TranscriptAncestry;
+    pub const fn module_dispatched(dispatch: ModuleDispatch) -> Self;
+    pub const fn cause(&self) -> SessionCreationCause;
+    pub const fn ancestry(&self) -> TranscriptAncestry;
 }
 ```
 
@@ -79,67 +70,59 @@ impl session::SessionCreationProvenance {
 ```rust
 pub struct CreateSession {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session::CreateSession {
+impl CreateSession {
     pub const fn new(
         command_id: DurableCommandId,
-        provenance: session::SessionCreationProvenance,
-        initial_configuration_defaults: configuration::SessionConfigurationDefaults,
+        provenance: SessionCreationProvenance,
+        initial_configuration_defaults: SessionConfigurationDefaults,
     ) -> Self;
     pub const fn new_with_placement(
         command_id: DurableCommandId,
-        provenance: session::SessionCreationProvenance,
-        initial_configuration_defaults: configuration::SessionConfigurationDefaults,
-        placement: session_placement::SessionPlacement,
+        provenance: SessionCreationProvenance,
+        initial_configuration_defaults: SessionConfigurationDefaults,
+        placement: SessionPlacement,
     ) -> Self;
     pub const fn new_from_template(
         command_id: DurableCommandId,
-        provenance: session::SessionCreationProvenance,
-        template_provenance: session_template::SessionTemplateProvenance,
-        resolved_configuration_defaults: configuration::SessionConfigurationDefaults,
+        provenance: SessionCreationProvenance,
+        template_provenance: SessionTemplateProvenance,
+        resolved_configuration_defaults: SessionConfigurationDefaults,
     ) -> Self;
     pub const fn new_from_template_with_placement(
         command_id: DurableCommandId,
-        provenance: session::SessionCreationProvenance,
-        template_provenance: session_template::SessionTemplateProvenance,
-        resolved_configuration_defaults: configuration::SessionConfigurationDefaults,
-        placement: session_placement::SessionPlacement,
+        provenance: SessionCreationProvenance,
+        template_provenance: SessionTemplateProvenance,
+        resolved_configuration_defaults: SessionConfigurationDefaults,
+        placement: SessionPlacement,
     ) -> Self;
     pub const fn command_id(&self) -> DurableCommandId;
-    pub const fn provenance(&self) -> session::SessionCreationProvenance;
-    pub const fn initial_configuration_defaults(
-        &self,
-    ) -> &configuration::SessionConfigurationDefaults;
-    pub const fn template_provenance(
-        &self,
-    ) -> option::Option<&session_template::SessionTemplateProvenance>;
-    pub const fn placement(&self) -> &session_placement::SessionPlacement;
+    pub const fn provenance(&self) -> SessionCreationProvenance;
+    pub const fn initial_configuration_defaults(&self) -> &SessionConfigurationDefaults;
+    pub const fn template_provenance(&self) -> option::Option<&SessionTemplateProvenance>;
+    pub const fn placement(&self) -> &SessionPlacement;
     pub fn with_lifecycle(
         self,
-        start_gate: session_lifecycle_command::StartGate,
-        ownership: session_lifecycle::SessionOwnership,
-        finish_condition: option::Option<session_lifecycle_command::FinishCondition>,
+        start_gate: StartGate,
+        ownership: SessionOwnership,
+        finish_condition: option::Option<FinishCondition>,
     ) -> Self;
-    pub const fn start_gate(&self) -> session_lifecycle_command::StartGate;
-    pub const fn ownership(&self) -> session_lifecycle::SessionOwnership;
-    pub const fn finish_condition(
-        &self,
-    ) -> option::Option<&session_lifecycle_command::FinishCondition>;
-    pub fn establish_initial_defaults(
-        &self,
-    ) -> configuration::VersionedSessionConfigurationDefaults;
+    pub const fn start_gate(&self) -> StartGate;
+    pub const fn ownership(&self) -> SessionOwnership;
+    pub const fn finish_condition(&self) -> option::Option<&FinishCondition>;
+    pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
 }
-impl cmp::PartialEq for session::CreateSession {
+impl cmp::PartialEq for CreateSession {
     pub fn eq(&self, other: &Self) -> bool;
 }
-impl cmp::Eq for session::CreateSession {}
-impl hash::Hash for session::CreateSession {
+impl cmp::Eq for CreateSession {}
+impl hash::Hash for CreateSession {
     pub fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
-impl session::CreateSession {
+impl CreateSession {
     pub fn prepare(
         self,
         session: SessionId,
-    ) -> result::Result<session::PreparedCreateSession, session::CreateSessionPreparationError>;
+    ) -> result::Result<PreparedCreateSession, CreateSessionPreparationError>;
 }
 ```
 
@@ -148,43 +131,39 @@ impl session::CreateSession {
 ```rust
 pub struct CreateSessionFromImportedFrontier {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session::CreateSessionFromImportedFrontier {
+impl CreateSessionFromImportedFrontier {
     pub fn prepare<NextSemanticEntryId>(
         self,
-        imported_conversation: &imported_conversation::ImportedConversation,
+        imported_conversation: &ImportedConversation,
         session: SessionId,
-        seed_frontier: context_frontier::ContextFrontierId,
+        seed_frontier: ContextFrontierId,
         next_semantic_entry_id: NextSemanticEntryId,
     ) -> result::Result<
-        imported_session::PreparedCreateSessionFromImportedFrontier,
-        imported_session::CreateSessionFromImportedFrontierPreparationError,
+        PreparedCreateSessionFromImportedFrontier,
+        CreateSessionFromImportedFrontierPreparationError,
     >
     where
-        NextSemanticEntryId: function::FnMut() -> context_frontier::SemanticTranscriptEntryId;
+        NextSemanticEntryId: function::FnMut() -> SemanticTranscriptEntryId;
 }
-impl session::CreateSessionFromImportedFrontier {
+impl CreateSessionFromImportedFrontier {
     pub const fn new(
         command_id: DurableCommandId,
-        imported_frontier: imported_conversation::ImportedTranscriptFrontier,
-        relationship: session::ImportedSessionRelationship,
-        initial_configuration_defaults: configuration::SessionConfigurationDefaults,
+        imported_frontier: ImportedTranscriptFrontier,
+        relationship: ImportedSessionRelationship,
+        initial_configuration_defaults: SessionConfigurationDefaults,
     ) -> Self;
     pub const fn command_id(&self) -> DurableCommandId;
     pub const fn imported_conversation(&self) -> ImportedConversationId;
-    pub const fn imported_frontier(&self) -> imported_conversation::ImportedTranscriptFrontier;
-    pub const fn relationship(&self) -> session::ImportedSessionRelationship;
-    pub const fn initial_configuration_defaults(
-        &self,
-    ) -> &configuration::SessionConfigurationDefaults;
-    pub fn establish_initial_defaults(
-        &self,
-    ) -> configuration::VersionedSessionConfigurationDefaults;
+    pub const fn imported_frontier(&self) -> ImportedTranscriptFrontier;
+    pub const fn relationship(&self) -> ImportedSessionRelationship;
+    pub const fn initial_configuration_defaults(&self) -> &SessionConfigurationDefaults;
+    pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
 }
-impl cmp::PartialEq for session::CreateSessionFromImportedFrontier {
+impl cmp::PartialEq for CreateSessionFromImportedFrontier {
     pub fn eq(&self, other: &Self) -> bool;
 }
-impl cmp::Eq for session::CreateSessionFromImportedFrontier {}
-impl hash::Hash for session::CreateSessionFromImportedFrontier {
+impl cmp::Eq for CreateSessionFromImportedFrontier {}
+impl hash::Hash for CreateSessionFromImportedFrontier {
     pub fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 ```
@@ -194,9 +173,9 @@ impl hash::Hash for session::CreateSessionFromImportedFrontier {
 ```rust
 pub struct ImportedSessionSeed {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session::ImportedSessionSeed {
+impl ImportedSessionSeed {
     pub const fn session(&self) -> SessionId;
-    pub const fn seed_frontier(&self) -> context_frontier::ContextFrontierId;
+    pub const fn seed_frontier(&self) -> ContextFrontierId;
 }
 ```
 
@@ -205,16 +184,12 @@ impl session::ImportedSessionSeed {
 ```rust
 pub struct InitialSession {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session::InitialSession {
+impl InitialSession {
     pub const fn id(&self) -> SessionId;
-    pub const fn provenance(&self) -> session::SessionCreationProvenance;
-    pub const fn template_provenance(
-        &self,
-    ) -> option::Option<&session_template::SessionTemplateProvenance>;
-    pub const fn configuration_defaults(
-        &self,
-    ) -> &configuration::VersionedSessionConfigurationDefaults;
-    pub const fn placement(&self) -> &session_placement::VersionedSessionPlacement;
+    pub const fn provenance(&self) -> SessionCreationProvenance;
+    pub const fn template_provenance(&self) -> option::Option<&SessionTemplateProvenance>;
+    pub const fn configuration_defaults(&self) -> &VersionedSessionConfigurationDefaults;
+    pub const fn placement(&self) -> &VersionedSessionPlacement;
 }
 ```
 
@@ -223,16 +198,12 @@ impl session::InitialSession {
 ```rust
 pub struct Session {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session::Session {
+impl Session {
     pub const fn id(&self) -> SessionId;
-    pub const fn creation_provenance(&self) -> session::SessionCreationProvenance;
-    pub const fn template_provenance(
-        &self,
-    ) -> option::Option<&session_template::SessionTemplateProvenance>;
-    pub const fn current_configuration_defaults(
-        &self,
-    ) -> &configuration::VersionedSessionConfigurationDefaults;
-    pub const fn current_placement(&self) -> &session_placement::VersionedSessionPlacement;
+    pub const fn creation_provenance(&self) -> SessionCreationProvenance;
+    pub const fn template_provenance(&self) -> option::Option<&SessionTemplateProvenance>;
+    pub const fn current_configuration_defaults(&self) -> &VersionedSessionConfigurationDefaults;
+    pub const fn current_placement(&self) -> &VersionedSessionPlacement;
 }
 ```
 
@@ -241,9 +212,9 @@ impl session::Session {
 ```rust
 pub struct SessionPlacementReconstitutionFacts {
     pub current_pointer_session: SessionId,
-    pub current_pointer_version: session_placement::SessionPlacementVersion,
+    pub current_pointer_version: SessionPlacementVersion,
     pub selected_event_session: SessionId,
-    pub selected_event: session_placement::VersionedSessionPlacement,
+    pub selected_event: VersionedSessionPlacement,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -253,62 +224,56 @@ pub struct SessionPlacementReconstitutionFacts {
 ```rust
 pub struct SessionReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session::SessionReconstitutionInput {
+impl SessionReconstitutionInput {
     pub fn new(
         requested_session: SessionId,
         stored_session: SessionId,
-        provenance: session::SessionCreationProvenance,
+        provenance: SessionCreationProvenance,
         current_defaults_session: SessionId,
-        current_defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
         defaults_session: SessionId,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        defaults: configuration::SessionConfigurationDefaults,
-        placement: session::SessionPlacementReconstitutionFacts,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self;
     pub fn new_with_template_provenance(
         requested_session: SessionId,
         stored_session: SessionId,
-        provenance: session::SessionCreationProvenance,
-        template_provenance: option::Option<session_template::SessionTemplateProvenance>,
+        provenance: SessionCreationProvenance,
+        template_provenance: option::Option<SessionTemplateProvenance>,
         current_defaults_session: SessionId,
-        current_defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
         defaults_session: SessionId,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        defaults: configuration::SessionConfigurationDefaults,
-        placement: session::SessionPlacementReconstitutionFacts,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self;
     pub fn new_with_template_and_placement(
         requested_session: SessionId,
         stored_session: SessionId,
-        provenance: session::SessionCreationProvenance,
-        template_provenance: option::Option<session_template::SessionTemplateProvenance>,
+        provenance: SessionCreationProvenance,
+        template_provenance: option::Option<SessionTemplateProvenance>,
         current_defaults_session: SessionId,
-        current_defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
         defaults_session: SessionId,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        defaults: configuration::SessionConfigurationDefaults,
-        placement: session::SessionPlacementReconstitutionFacts,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self;
     pub const fn requested_session(&self) -> SessionId;
     pub const fn stored_session(&self) -> SessionId;
-    pub const fn provenance(&self) -> session::SessionCreationProvenance;
-    pub const fn template_provenance(
-        &self,
-    ) -> option::Option<&session_template::SessionTemplateProvenance>;
+    pub const fn provenance(&self) -> SessionCreationProvenance;
+    pub const fn template_provenance(&self) -> option::Option<&SessionTemplateProvenance>;
     pub const fn current_defaults_session(&self) -> SessionId;
-    pub const fn current_defaults_version(
-        &self,
-    ) -> configuration::SessionConfigurationDefaultsVersion;
+    pub const fn current_defaults_version(&self) -> SessionConfigurationDefaultsVersion;
     pub const fn defaults_session(&self) -> SessionId;
-    pub const fn defaults_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn defaults(&self) -> &configuration::SessionConfigurationDefaults;
+    pub const fn defaults_version(&self) -> SessionConfigurationDefaultsVersion;
+    pub const fn defaults(&self) -> &SessionConfigurationDefaults;
     pub const fn current_placement_session(&self) -> SessionId;
-    pub const fn current_placement_version(&self) -> session_placement::SessionPlacementVersion;
+    pub const fn current_placement_version(&self) -> SessionPlacementVersion;
     pub const fn placement_session(&self) -> SessionId;
-    pub const fn current_placement(&self) -> &session_placement::VersionedSessionPlacement;
-    pub fn reconstitute(
-        self,
-    ) -> result::Result<session::Session, session::SessionReconstitutionError>;
+    pub const fn current_placement(&self) -> &VersionedSessionPlacement;
+    pub fn reconstitute(self) -> result::Result<Session, SessionReconstitutionError>;
 }
 ```
 
@@ -336,15 +301,10 @@ pub enum SessionReconstitutionFailure {
 ```rust
 pub struct SessionReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl session::SessionReconstitutionError {
-    pub const fn failure(&self) -> session::SessionReconstitutionFailure;
-    pub const fn input(&self) -> &session::SessionReconstitutionInput;
-    pub fn into_parts(
-        self,
-    ) -> (
-        session::SessionReconstitutionInput,
-        session::SessionReconstitutionFailure,
-    );
+impl SessionReconstitutionError {
+    pub const fn failure(&self) -> SessionReconstitutionFailure;
+    pub const fn input(&self) -> &SessionReconstitutionInput;
+    pub fn into_parts(self) -> (SessionReconstitutionInput, SessionReconstitutionFailure);
 }
 ```
 
@@ -353,7 +313,7 @@ impl session::SessionReconstitutionError {
 ```rust
 pub struct CreateSessionAppliedResult {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl session::CreateSessionAppliedResult {
+impl CreateSessionAppliedResult {
     pub const fn session(&self) -> SessionId;
 }
 ```
@@ -363,17 +323,11 @@ impl session::CreateSessionAppliedResult {
 ```rust
 pub struct PreparedCreateSession {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session::PreparedCreateSession {
-    pub const fn command(&self) -> &session::CreateSession;
-    pub const fn session(&self) -> &session::InitialSession;
-    pub const fn applied_result(&self) -> session::CreateSessionAppliedResult;
-    pub fn into_parts(
-        self,
-    ) -> (
-        session::CreateSession,
-        session::InitialSession,
-        session::CreateSessionAppliedResult,
-    );
+impl PreparedCreateSession {
+    pub const fn command(&self) -> &CreateSession;
+    pub const fn session(&self) -> &InitialSession;
+    pub const fn applied_result(&self) -> CreateSessionAppliedResult;
+    pub fn into_parts(self) -> (CreateSession, InitialSession, CreateSessionAppliedResult);
 }
 ```
 
@@ -392,17 +346,11 @@ pub enum CreateSessionPreparationFailure {
 ```rust
 pub struct CreateSessionPreparationError {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session::CreateSessionPreparationError {
-    pub const fn failure(&self) -> session::CreateSessionPreparationFailure;
-    pub const fn command(&self) -> &session::CreateSession;
+impl CreateSessionPreparationError {
+    pub const fn failure(&self) -> CreateSessionPreparationFailure;
+    pub const fn command(&self) -> &CreateSession;
     pub const fn session(&self) -> SessionId;
-    pub fn into_parts(
-        self,
-    ) -> (
-        SessionId,
-        session::CreateSession,
-        session::CreateSessionPreparationFailure,
-    );
+    pub fn into_parts(self) -> (SessionId, CreateSession, CreateSessionPreparationFailure);
 }
 ```
 
@@ -411,54 +359,49 @@ impl session::CreateSessionPreparationError {
 ```rust
 pub struct CreateSessionReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session::CreateSessionReconstitutionInput {
+impl CreateSessionReconstitutionInput {
     pub const fn new(
-        command: session::CreateSession,
+        command: CreateSession,
         result_session: SessionId,
         session: SessionId,
-        provenance: session::SessionCreationProvenance,
+        provenance: SessionCreationProvenance,
         defaults_session: SessionId,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        defaults: configuration::SessionConfigurationDefaults,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
     ) -> Self;
     pub const fn new_with_template_provenance(
-        command: session::CreateSession,
+        command: CreateSession,
         result_session: SessionId,
         session: SessionId,
-        provenance: session::SessionCreationProvenance,
-        template_provenance: option::Option<session_template::SessionTemplateProvenance>,
+        provenance: SessionCreationProvenance,
+        template_provenance: option::Option<SessionTemplateProvenance>,
         defaults_session: SessionId,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        defaults: configuration::SessionConfigurationDefaults,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
     ) -> Self;
     pub const fn new_with_template_and_placement(
-        command: session::CreateSession,
+        command: CreateSession,
         result_session: SessionId,
         session: SessionId,
-        provenance: session::SessionCreationProvenance,
-        template_provenance: option::Option<session_template::SessionTemplateProvenance>,
+        provenance: SessionCreationProvenance,
+        template_provenance: option::Option<SessionTemplateProvenance>,
         defaults_session: SessionId,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        defaults: configuration::SessionConfigurationDefaults,
-        placement: session_placement::VersionedSessionPlacement,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: VersionedSessionPlacement,
     ) -> Self;
-    pub const fn command(&self) -> &session::CreateSession;
+    pub const fn command(&self) -> &CreateSession;
     pub const fn result_session(&self) -> SessionId;
     pub const fn session(&self) -> SessionId;
-    pub const fn provenance(&self) -> session::SessionCreationProvenance;
-    pub const fn template_provenance(
-        &self,
-    ) -> option::Option<&session_template::SessionTemplateProvenance>;
+    pub const fn provenance(&self) -> SessionCreationProvenance;
+    pub const fn template_provenance(&self) -> option::Option<&SessionTemplateProvenance>;
     pub const fn defaults_session(&self) -> SessionId;
-    pub const fn defaults_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn defaults(&self) -> &configuration::SessionConfigurationDefaults;
-    pub const fn placement(&self) -> &session_placement::VersionedSessionPlacement;
+    pub const fn defaults_version(&self) -> SessionConfigurationDefaultsVersion;
+    pub const fn defaults(&self) -> &SessionConfigurationDefaults;
+    pub const fn placement(&self) -> &VersionedSessionPlacement;
     pub fn reconstitute(
         self,
-    ) -> result::Result<
-        session::ReconstitutedSessionCreation,
-        session::CreateSessionReconstitutionError,
-    >;
+    ) -> result::Result<ReconstitutedSessionCreation, CreateSessionReconstitutionError>;
 }
 ```
 
@@ -484,14 +427,14 @@ pub enum CreateSessionReconstitutionFailure {
 ```rust
 pub struct CreateSessionReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session::CreateSessionReconstitutionError {
-    pub const fn failure(&self) -> session::CreateSessionReconstitutionFailure;
-    pub const fn input(&self) -> &session::CreateSessionReconstitutionInput;
+impl CreateSessionReconstitutionError {
+    pub const fn failure(&self) -> CreateSessionReconstitutionFailure;
+    pub const fn input(&self) -> &CreateSessionReconstitutionInput;
     pub fn into_parts(
         self,
     ) -> (
-        session::CreateSessionReconstitutionInput,
-        session::CreateSessionReconstitutionFailure,
+        CreateSessionReconstitutionInput,
+        CreateSessionReconstitutionFailure,
     );
 }
 ```
@@ -501,9 +444,9 @@ impl session::CreateSessionReconstitutionError {
 ```rust
 pub struct ReconstitutedSessionCreation {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl session::ReconstitutedSessionCreation {
-    pub const fn command(&self) -> &session::CreateSession;
-    pub const fn session(&self) -> &session::InitialSession;
-    pub const fn applied_result(&self) -> session::CreateSessionAppliedResult;
+impl ReconstitutedSessionCreation {
+    pub const fn command(&self) -> &CreateSession;
+    pub const fn session(&self) -> &InitialSession;
+    pub const fn applied_result(&self) -> CreateSessionAppliedResult;
 }
 ```

@@ -7,7 +7,7 @@
 ```rust
 pub struct SessionInputPosition(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl queue_order::SessionInputPosition {
+impl SessionInputPosition {
     pub const fn try_from_u64(value: u64) -> option::Option<Self>;
     pub const fn as_u64(self) -> u64;
     pub const fn first() -> Self;
@@ -30,14 +30,14 @@ pub enum AcceptedInputQueuePriority {
 ```rust
 pub struct AcceptedInputQueueOrder {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl queue_order::AcceptedInputQueueOrder {
-    pub const fn ordinary(acceptance_position: queue_order::SessionInputPosition) -> Self;
+impl AcceptedInputQueueOrder {
+    pub const fn ordinary(acceptance_position: SessionInputPosition) -> Self;
     pub const fn interrupt_immediately_after(
-        acceptance_position: queue_order::SessionInputPosition,
+        acceptance_position: SessionInputPosition,
         predecessor: TurnId,
     ) -> Self;
-    pub const fn acceptance_position(&self) -> queue_order::SessionInputPosition;
-    pub const fn priority(&self) -> queue_order::AcceptedInputQueuePriority;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
+    pub const fn priority(&self) -> AcceptedInputQueuePriority;
 }
 ```
 
@@ -46,15 +46,11 @@ impl queue_order::AcceptedInputQueueOrder {
 ```rust
 pub struct AcceptedInputQueueWork {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl queue_order::AcceptedInputQueueWork {
-    pub const fn new(
-        session: SessionId,
-        turn: TurnId,
-        order: queue_order::AcceptedInputQueueOrder,
-    ) -> Self;
+impl AcceptedInputQueueWork {
+    pub const fn new(session: SessionId, turn: TurnId, order: AcceptedInputQueueOrder) -> Self;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
-    pub const fn order(&self) -> queue_order::AcceptedInputQueueOrder;
+    pub const fn order(&self) -> AcceptedInputQueueOrder;
 }
 ```
 
@@ -70,7 +66,7 @@ pub enum AcceptedInputQueueOrderError {
         turn: TurnId,
     },
     DuplicateAcceptancePosition {
-        position: queue_order::SessionInputPosition,
+        position: SessionInputPosition,
         first_turn: TurnId,
         second_turn: TurnId,
     },
@@ -92,8 +88,8 @@ pub enum AcceptedInputQueueOrderError {
     InterruptPositionNotAfterPredecessor {
         turn: TurnId,
         predecessor: TurnId,
-        position: queue_order::SessionInputPosition,
-        predecessor_position: queue_order::SessionInputPosition,
+        position: SessionInputPosition,
+        predecessor_position: SessionInputPosition,
     },
     InterruptPredecessorChronologyReversed {
         earlier_interrupt: TurnId,
@@ -109,6 +105,6 @@ pub enum AcceptedInputQueueOrderError {
 
 ```rust
 pub fn derive_accepted_input_total_order(
-    currently_known_work: impl collect::IntoIterator<Item = queue_order::AcceptedInputQueueWork>,
-) -> result::Result<vec::Vec<TurnId>, queue_order::AcceptedInputQueueOrderError>;
+    currently_known_work: impl collect::IntoIterator<Item = AcceptedInputQueueWork>,
+) -> result::Result<vec::Vec<TurnId>, AcceptedInputQueueOrderError>;
 ```
