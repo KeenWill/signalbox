@@ -5,7 +5,7 @@
 //! owns the failed marker and terminal frontier, while INV-034 requires
 //! prior-process nonterminal attempts to end as Lost.
 
-use std::{error::Error, fmt, future::Future};
+use std::future::Future;
 
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnFailureIdentities, ContextFrontierId,
@@ -144,9 +144,13 @@ impl StartupScanOutcome {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error(transparent)]
+#[operator(delegate = repository_error, code = delegate)]
 /// Repository failure annotated with the startup-scan aggregate scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartupScanError<RepositoryError> {
+    #[source]
     repository_error: RepositoryError,
     session: Option<SessionId>,
 }
@@ -182,37 +186,6 @@ impl<RepositoryError> StartupScanError<RepositoryError> {
     /// Consumes the scan annotation and returns the adapter-specific failure.
     pub fn into_repository_error(self) -> RepositoryError {
         self.repository_error
-    }
-}
-
-impl<RepositoryError> fmt::Display for StartupScanError<RepositoryError>
-where
-    RepositoryError: fmt::Display,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.repository_error.fmt(formatter)
-    }
-}
-
-impl<RepositoryError> Error for StartupScanError<RepositoryError>
-where
-    RepositoryError: Error + 'static,
-{
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.repository_error)
-    }
-}
-
-impl<RepositoryError> ClassifyOperatorFailure for StartupScanError<RepositoryError>
-where
-    RepositoryError: ClassifyOperatorFailure,
-{
-    fn operator_failure_class(&self) -> OperatorFailureClass {
-        self.repository_error.operator_failure_class()
-    }
-
-    fn operator_failure_cause_code(&self) -> &'static str {
-        self.repository_error.operator_failure_cause_code()
     }
 }
 

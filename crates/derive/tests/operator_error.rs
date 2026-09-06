@@ -176,3 +176,35 @@ fn explicit_bounds_do_not_constrain_unrelated_type_parameters() {
     );
     assert_eq!(failure.operator_failure_cause_code(), "leaf");
 }
+
+#[derive(Debug)]
+struct Padded;
+
+impl fmt::Display for Padded {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.pad("detail")
+    }
+}
+
+impl Error for Padded {}
+
+#[derive(Debug, OperatorError)]
+#[error(transparent)]
+struct Annotated {
+    #[source]
+    failure: Padded,
+    _context: usize,
+}
+
+#[test]
+fn transparent_metadata_wrapper_preserves_formatter_precision() {
+    let failure = Annotated {
+        failure: Padded,
+        _context: 1,
+    };
+    assert_eq!(format!("{failure:.3}"), "det");
+    assert_eq!(
+        failure.source().map(ToString::to_string),
+        Some("detail".to_owned())
+    );
+}
