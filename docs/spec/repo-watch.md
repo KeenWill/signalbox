@@ -60,6 +60,7 @@ The module schema contains twelve tables:
   complete frontier and ordered event batch exactly replay the immediately
   succeeding commit. A candidate equal to the stored frontier advances no
   generation when it carries no events and is rejected when it carries events.
+  A candidate that omits a retained stream is stale and changes nothing.
 - `frontier` holds one mutable occurrence counter per recurring event stream; an
   advance is an UPSERT and a retired pull-request stream is releasable by
   DELETE.
@@ -97,12 +98,14 @@ after its rule is deactivated; deactivation prevents only new matched
 dispatches.
 
 The module records a command in `dispatch_ledger` before submission and applies
-`command_settled` events to pending ledger rows. Identity reuse is idempotent
-only when all retained command metadata agrees. One dispatch reference names
-exactly one rule revision and event evaluation, including its complete ordered
-action batch. Recovery replans only to rediscover that evaluation, then core
-decodes and resubmits the exact retained payload rather than newly resolved
-template or configuration values.
+settlement lifecycle events to pending ledger rows. `SessionCreated` settles the
+next pending create action for its repository-watch dispatch and records the new
+session; replaying the event cannot settle another action. Identity reuse is
+idempotent only when all retained command metadata agrees. One dispatch
+reference names exactly one rule revision and event evaluation, including its
+complete ordered action batch. Recovery reads pending ledger rows without the
+removed or inactive rule, then core decodes and resubmits the exact retained
+payload rather than newly resolved template or configuration values.
 
 ## Ingest
 

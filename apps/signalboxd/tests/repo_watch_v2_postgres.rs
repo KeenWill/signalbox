@@ -19,14 +19,15 @@ use signalbox_module_repo_watch_v2::{
 };
 use signalbox_ownership_seam::{
     BranchName, CommitSha, CreateSession, DescendantTerminationScope, DurableCommandId,
-    FinishCondition, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent, RepoWatchEventContentIdentityV1,
-    RepoWatchEventId, RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventKindNameV1, RepoWatchEventOccurrenceV1, RepoWatchLabelMatcher,
-    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1,
-    RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope, RepositorySlug, SessionCommand,
-    SessionCommandPayload, SessionId, SessionLifecycleCommand, SessionLifecycleOperation,
-    SessionOwnership, SessionTemplateName, StartGate, StopStickiness, WorkflowName,
+    FinishCondition, LifecycleEvent, OffsetDateTime, PullRequestBody, PullRequestNumber,
+    PullRequestTitle, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventContentIdentityV1, RepoWatchEventId, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchEventOccurrenceV1,
+    RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepositorySlug, SessionCommand, SessionCommandPayload, SessionCreated, SessionId,
+    SessionLifecycleCommand, SessionLifecycleOperation, SessionOwnership, SessionTemplateName,
+    StartGate, StopStickiness, WorkflowName,
 };
 use signalbox_persistence::{
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
@@ -457,6 +458,80 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .fetch_one(&module_pool)
             .await?;
     assert_eq!(rejected_count, 0);
+    let complete_repository = RepositorySlug::try_new(String::from("complete/repository"))?;
+    store
+        .upsert_repository(RepositoryState {
+            repository: &complete_repository,
+            default_branch: &default_branch,
+            default_head: &default_head,
+            observed_at,
+        })
+        .await?;
+    let complete_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+        RepoWatchEventIdentityFrontierEntryV1::new([20; 32], NonZeroU64::MIN),
+        RepoWatchEventIdentityFrontierEntryV1::new([21; 32], NonZeroU64::MIN),
+    ])?;
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &complete_repository,
+                0,
+                &complete_frontier,
+                &[],
+                observed_at,
+                retain_until,
+            )
+            .await?,
+        FrontierEventAdmission::Committed {
+            generation: 1,
+            events: Box::new([]),
+        }
+    );
+    let incomplete_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+        RepoWatchEventIdentityFrontierEntryV1::new([20; 32], NonZeroU64::MIN),
+    ])?;
+    let incomplete_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(98)),
+        complete_repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("complete-frontier"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    let incomplete_occurrence = RepoWatchEventOccurrenceV1::from_parts(
+        incomplete_event.clone(),
+        RepoWatchEventContentIdentityV1::from_bytes([22; 32]),
+    );
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &complete_repository,
+                1,
+                &incomplete_frontier,
+                std::slice::from_ref(&incomplete_occurrence),
+                observed_at,
+                retain_until,
+            )
+            .await?,
+        FrontierEventAdmission::Stale
+    );
+    let (complete_generation, retained_streams): (Decimal, i64) = sqlx::query_as(
+        "SELECT repository.frontier_generation, count(frontier.stream_identity)
+           FROM repository_state AS repository
+           LEFT JOIN frontier USING (repository)
+          WHERE repository.repository = $1
+          GROUP BY repository.frontier_generation",
+    )
+    .bind(complete_repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(complete_generation, Decimal::from(1_u64));
+    assert_eq!(retained_streams, 2);
+    let incomplete_event_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE event_id = $1")
+            .bind(incomplete_event.id().into_uuid())
+            .fetch_one(&module_pool)
+            .await?;
+    assert_eq!(incomplete_event_count, 0);
     let incompatible_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
         RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
             [19; 32],
@@ -650,6 +725,23 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .collect::<Vec<_>>(),
         retained_command_ids
     );
+    let recovered_without_rule = store.recover_pending_commands(&mut command_codec).await?;
+    assert_eq!(
+        recovered_without_rule
+            .iter()
+            .map(|planned| planned.command().command_id())
+            .collect::<Vec<_>>(),
+        retained_command_ids
+    );
+    assert!(recovered_without_rule.iter().all(|planned| {
+        let SessionCommandPayload::CreateSession(command) =
+            planned.command().clone().into_payload()
+        else {
+            return false;
+        };
+        command.initial_configuration_defaults().model()
+            == ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(18)))
+    }));
     let created_session = Uuid::from_u128(82);
     let lifecycle_command_id = Uuid::from_u128(81);
     let trigger_sequence = NonZeroU64::new(42).expect("forty-two is positive");
@@ -701,22 +793,35 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         retained_reaction_ordinals,
         [Decimal::from(1_u64), Decimal::from(2_u64)]
     );
-    sqlx::query(
-        "UPDATE dispatch_ledger
-            SET status = 'applied', settled_at = $2, created_session_id = $3
-          WHERE command_id = $1",
-    )
-    .bind(retained_command_ids[0].into_uuid())
-    .bind(observed_at + Duration::from_secs(1))
-    .bind(created_session)
-    .execute(&module_pool)
-    .await?;
+    let created_event = LifecycleEvent::session_created_for_test(
+        43,
+        observed_at + Duration::from_secs(1),
+        reaction_session,
+        SessionCreated {
+            cause: SessionCreationCause::ModuleDispatched {
+                dispatch: ModuleDispatch::RepositoryWatch {
+                    dispatch: retained_dispatch,
+                },
+            },
+            ownership: SessionOwnership::Owned,
+        },
+    );
+    assert!(store.apply_lifecycle_event(&created_event).await?);
+    assert!(!store.apply_lifecycle_event(&created_event).await?);
     let linked_session: Uuid =
         sqlx::query_scalar("SELECT created_session_id FROM dispatch_ledger WHERE command_id = $1")
             .bind(retained_command_ids[0].into_uuid())
             .fetch_one(&module_pool)
             .await?;
     assert_eq!(linked_session, created_session);
+    let still_pending_creates: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dispatch_ledger
+          WHERE dispatch_ref = $1 AND command_kind = 'create_session' AND status = 'pending'",
+    )
+    .bind(retained_dispatch.into_uuid())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(still_pending_creates, 1);
     let invalid_lifecycle_link = sqlx::query(
         "UPDATE dispatch_ledger
             SET status = 'applied', settled_at = $2, created_session_id = $3

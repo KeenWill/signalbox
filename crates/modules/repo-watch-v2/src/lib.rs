@@ -6,18 +6,18 @@
 
 use std::{error::Error, fmt, num::NonZeroU64};
 
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::{Value, json};
 use signalbox_ownership_seam::{
     BranchName, CheckConclusion, ChecksOutcome, CommandOutsideSeam, CommandSettlement, CommitSha,
     CreateSession, FinishCondition, LifecycleEvent, LifecycleEventKind, MergeableState,
-    OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle, ReactionChange,
-    ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
+    ModuleDispatch, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
+    ReactionChange, ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
     RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
     RepoWatchEventOccurrenceV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleActionV1,
     RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, ReviewState, SessionCommand,
-    SessionCommandKind, SessionLifecycleCommand, SessionLifecycleOperation, SessionOwnership,
-    StartGate, StopStickiness,
+    SessionCommandKind, SessionCreationCause, SessionId, SessionLifecycleCommand,
+    SessionLifecycleOperation, SessionOwnership, StartGate, StopStickiness,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -696,26 +696,58 @@ impl RepoWatchStore {
                 Ok(FrontierEventAdmission::Stale)
             };
         }
-        let stored_frontier: Vec<(Vec<u8>, Decimal, Option<Decimal>)> = sqlx::query_as(
-            "SELECT stream_identity, sequence, pull_request_number
-               FROM frontier
-              WHERE repository = $1
-              ORDER BY stream_identity",
+        let stream_identities = frontier
+            .iter()
+            .map(|entry| entry.stream_identity().to_vec())
+            .collect::<Vec<_>>();
+        let sequences = frontier
+            .iter()
+            .map(|entry| Decimal::from(entry.sequence().get()))
+            .collect::<Vec<_>>();
+        let pull_request_numbers = frontier
+            .iter()
+            .map(|entry| {
+                entry
+                    .pull_request_number()
+                    .map(|number| Decimal::from(number.get()))
+            })
+            .collect::<Vec<_>>();
+        let (unchanged, omitted, stale): (bool, bool, bool) = sqlx::query_as(
+            "WITH candidate AS (
+                SELECT *
+                  FROM UNNEST($2::bytea[], $3::numeric[], $4::numeric[])
+                       AS entry(stream_identity, sequence, pull_request_number)
+             ),
+             stored AS (
+                SELECT stream_identity, sequence, pull_request_number
+                  FROM frontier
+                 WHERE repository = $1
+             )
+             SELECT
+                NOT EXISTS (
+                    (SELECT * FROM stored EXCEPT SELECT * FROM candidate)
+                    UNION ALL
+                    (SELECT * FROM candidate EXCEPT SELECT * FROM stored)
+                ),
+                EXISTS (
+                    SELECT 1
+                      FROM stored
+                      LEFT JOIN candidate USING (stream_identity)
+                     WHERE candidate.stream_identity IS NULL
+                ),
+                EXISTS (
+                    SELECT 1
+                      FROM stored
+                      JOIN candidate USING (stream_identity)
+                     WHERE stored.sequence > candidate.sequence
+                )",
         )
         .bind(repository.as_str())
-        .fetch_all(&mut *transaction)
+        .bind(&stream_identities)
+        .bind(&sequences)
+        .bind(&pull_request_numbers)
+        .fetch_one(&mut *transaction)
         .await?;
-        let unchanged = stored_frontier.len() == frontier.len()
-            && stored_frontier.iter().zip(&frontier).all(
-                |((stream_identity, sequence, pull_request_number), entry)| {
-                    stream_identity.as_slice() == entry.stream_identity().as_slice()
-                        && *sequence == Decimal::from(entry.sequence().get())
-                        && *pull_request_number
-                            == entry
-                                .pull_request_number()
-                                .map(|number| Decimal::from(number.get()))
-                },
-            );
         if unchanged {
             transaction.rollback().await?;
             return if events.is_empty() {
@@ -724,24 +756,13 @@ impl RepoWatchStore {
                 Ok(FrontierEventAdmission::ConflictingReuse)
             };
         }
+        if omitted || stale {
+            transaction.rollback().await?;
+            return Ok(FrontierEventAdmission::Stale);
+        }
         let next_generation = expected_generation
             .checked_add(1)
             .ok_or(StoreError::InvalidFrontierGeneration)?;
-        for entry in &frontier {
-            let stale: Option<bool> = sqlx::query_scalar(
-                "SELECT sequence > $3 FROM frontier
-                  WHERE repository = $1 AND stream_identity = $2",
-            )
-            .bind(repository.as_str())
-            .bind(entry.stream_identity().as_slice())
-            .bind(Decimal::from(entry.sequence().get()))
-            .fetch_optional(&mut *transaction)
-            .await?;
-            if stale.unwrap_or(false) {
-                transaction.rollback().await?;
-                return Ok(FrontierEventAdmission::Stale);
-            }
-        }
         let mut admissions = Vec::with_capacity(events.len());
         for occurrence in events {
             if occurrence.event().repository() != repository {
@@ -755,27 +776,27 @@ impl RepoWatchStore {
                 }
             }
         }
-        for entry in frontier {
-            sqlx::query(
-                "INSERT INTO frontier
-                    (repository, stream_identity, sequence, pull_request_number, updated_at)
-                 VALUES ($1, $2, $3, $4, statement_timestamp())
-                 ON CONFLICT (repository, stream_identity) DO UPDATE
-                 SET sequence = EXCLUDED.sequence,
-                     pull_request_number = EXCLUDED.pull_request_number,
-                     updated_at = statement_timestamp()",
-            )
-            .bind(repository.as_str())
-            .bind(entry.stream_identity().as_slice())
-            .bind(Decimal::from(entry.sequence().get()))
-            .bind(
-                entry
-                    .pull_request_number()
-                    .map(|number| Decimal::from(number.get())),
-            )
-            .execute(&mut *transaction)
-            .await?;
-        }
+        sqlx::query(
+            "WITH candidate AS (
+                SELECT *
+                  FROM UNNEST($2::bytea[], $3::numeric[], $4::numeric[])
+                       AS entry(stream_identity, sequence, pull_request_number)
+             )
+             INSERT INTO frontier
+                (repository, stream_identity, sequence, pull_request_number, updated_at)
+             SELECT $1, stream_identity, sequence, pull_request_number, statement_timestamp()
+               FROM candidate
+             ON CONFLICT (repository, stream_identity) DO UPDATE
+             SET sequence = EXCLUDED.sequence,
+                 pull_request_number = EXCLUDED.pull_request_number,
+                 updated_at = statement_timestamp()",
+        )
+        .bind(repository.as_str())
+        .bind(&stream_identities)
+        .bind(&sequences)
+        .bind(&pull_request_numbers)
+        .execute(&mut *transaction)
+        .await?;
         let advanced = sqlx::query(
             "UPDATE repository_state
                 SET frontier_generation = $2,
@@ -1466,8 +1487,110 @@ impl RepoWatchStore {
         Ok(DispatchAdmission::ConflictingReuse)
     }
 
-    /// Applies a command-settlement lifecycle event to the module ledger.
-    pub async fn settle_command(&self, event: &LifecycleEvent) -> Result<bool, StoreError> {
+    /// Rebuilds every pending command directly from the committed ledger.
+    ///
+    /// This path needs no active or configured rule: durable provenance and
+    /// the opaque core encoding are sufficient after a restart.
+    pub async fn recover_pending_commands<Codec: SessionCommandCodec>(
+        &self,
+        codec: &mut Codec,
+    ) -> Result<Box<[PlannedCommand]>, StoreError> {
+        type PendingCommandRow = (
+            Uuid,
+            Decimal,
+            Uuid,
+            String,
+            String,
+            Decimal,
+            Uuid,
+            Option<Decimal>,
+            String,
+            Vec<u8>,
+        );
+
+        let rows: Vec<PendingCommandRow> = sqlx::query_as(
+            "SELECT dispatch_ref, action_ordinal, command_id, repository, rule_id,
+                    rule_revision, event_id, trigger_sequence, command_kind, command_payload
+               FROM dispatch_ledger
+              WHERE status = 'pending'
+              ORDER BY issued_at, dispatch_ref, trigger_sequence NULLS FIRST, action_ordinal",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(
+                |(
+                    dispatch,
+                    ordinal,
+                    command_id,
+                    repository,
+                    rule_id,
+                    rule_revision,
+                    event_id,
+                    trigger_sequence,
+                    kind,
+                    payload,
+                )| {
+                    let command = codec
+                        .decode(&payload)
+                        .ok_or(StoreError::InvalidRetainedCommand)?;
+                    if command.command_id().into_uuid() != command_id
+                        || command_kind_storage(command.kind()) != kind
+                    {
+                        return Err(StoreError::InvalidRetainedCommand);
+                    }
+                    let action_ordinal = ordinal
+                        .to_u64()
+                        .filter(|ordinal| *ordinal > 0)
+                        .ok_or(StoreError::InvalidRetainedCommand)?;
+                    let rule_revision = rule_revision
+                        .to_u64()
+                        .and_then(NonZeroU64::new)
+                        .and_then(RepoWatchRuleVersion::new)
+                        .ok_or(StoreError::InvalidRetainedCommand)?;
+                    let trigger_sequence = match trigger_sequence {
+                        None => None,
+                        Some(sequence) => Some(
+                            sequence
+                                .to_u64()
+                                .filter(|sequence| *sequence > 0)
+                                .ok_or(StoreError::InvalidRetainedCommand)?,
+                        ),
+                    };
+                    Ok(PlannedCommand {
+                        dispatch: RepoWatchDispatchId::from_uuid(dispatch),
+                        action_ordinal,
+                        repository: RepositorySlug::try_new(repository)
+                            .map_err(|_| StoreError::InvalidRetainedCommand)?,
+                        rule_id: RepoWatchRuleId::try_new(rule_id)
+                            .map_err(|_| StoreError::InvalidRetainedCommand)?,
+                        rule_revision,
+                        event_id: signalbox_ownership_seam::RepoWatchEventId::from_uuid(event_id),
+                        trigger_sequence,
+                        command,
+                    })
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .map(Vec::into_boxed_slice)
+    }
+
+    /// Applies one lifecycle event to the module command ledger.
+    pub async fn apply_lifecycle_event(&self, event: &LifecycleEvent) -> Result<bool, StoreError> {
+        if let LifecycleEventKind::SessionCreated(created) = event.kind() {
+            let (
+                Some(session),
+                SessionCreationCause::ModuleDispatched {
+                    dispatch: ModuleDispatch::RepositoryWatch { dispatch },
+                },
+            ) = (event.session(), created.cause)
+            else {
+                return Ok(false);
+            };
+            return self
+                .settle_created_session(dispatch, session, event.recorded_at())
+                .await;
+        }
         let LifecycleEventKind::CommandSettled { command, result } = event.kind() else {
             return Ok(false);
         };
@@ -1493,6 +1616,34 @@ impl RepoWatchStore {
                 .session()
                 .map(signalbox_ownership_seam::SessionId::into_uuid),
         )
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    async fn settle_created_session(
+        &self,
+        dispatch: RepoWatchDispatchId,
+        session: SessionId,
+        settled_at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let updated = sqlx::query(
+            "WITH candidate AS (
+                SELECT command_id
+                  FROM dispatch_ledger
+                 WHERE dispatch_ref = $1 AND command_kind = 'create_session'
+                   AND (status = 'pending' OR created_session_id = $2)
+                 ORDER BY (created_session_id = $2) DESC NULLS LAST, action_ordinal
+                 LIMIT 1
+             )
+             UPDATE dispatch_ledger
+                SET status = 'applied', settled_at = $3, created_session_id = $2
+              WHERE command_id = (SELECT command_id FROM candidate)
+                AND status = 'pending'",
+        )
+        .bind(dispatch.into_uuid())
+        .bind(session.into_uuid())
+        .bind(settled_at)
         .execute(&self.pool)
         .await?;
         Ok(updated.rows_affected() == 1)

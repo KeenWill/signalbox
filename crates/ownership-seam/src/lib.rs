@@ -220,6 +220,22 @@ impl LifecycleEvent {
     pub const fn kind(&self) -> &LifecycleEventKind {
         &self.kind
     }
+
+    /// Builds a session-created event for persistence-boundary integration tests.
+    #[cfg(feature = "test-support")]
+    pub const fn session_created_for_test(
+        sequence: u64,
+        recorded_at: OffsetDateTime,
+        session: SessionId,
+        created: SessionCreated,
+    ) -> Self {
+        Self {
+            sequence,
+            recorded_at,
+            session: Some(session),
+            kind: LifecycleEventKind::SessionCreated(created),
+        }
+    }
 }
 
 /// Repository-watch's typed view of the core outbox.
