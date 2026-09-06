@@ -56,12 +56,17 @@ impl From<LifecycleMetricsCorruption> for LifecycleMetricsError {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One metric's exact numerator and denominator.
 ///
 /// The rate is derived, so a week with no members reports no rate at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LifecycleRate {
+    /// Returns the counted members.
+    #[get(copy)]
     numerator: u64,
+    /// Returns the population the count is over.
+    #[get(copy)]
     denominator: u64,
 }
 
@@ -71,16 +76,6 @@ impl LifecycleRate {
             numerator,
             denominator,
         }
-    }
-
-    /// Returns the counted members.
-    pub const fn numerator(self) -> u64 {
-        self.numerator
-    }
-
-    /// Returns the population the count is over.
-    pub const fn denominator(self) -> u64 {
-        self.denominator
     }
 
     /// Returns the rate in parts per million, absent for an empty population.
@@ -212,6 +207,7 @@ impl LifecycleDeadlineViolation {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One coherent metrics report.
 ///
 /// Carries the deadline violations as a count, not as rows: a widespread
@@ -220,17 +216,14 @@ impl LifecycleDeadlineViolation {
 /// cursor instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LifecycleMetricsReport {
+    /// Returns the weekly cohorts, oldest first.
+    #[get(slice)]
     weeks: Vec<LifecycleWeeklyMetrics>,
     current_week: PrimitiveDateTime,
     nonterminal_past_deadline: u64,
 }
 
 impl LifecycleMetricsReport {
-    /// Returns the weekly cohorts, oldest first.
-    pub fn weeks(&self) -> &[LifecycleWeeklyMetrics] {
-        &self.weeks
-    }
-
     /// Returns the `nonterminal_past_deadline` count, target zero.
     pub const fn nonterminal_past_deadline(&self) -> u64 {
         self.nonterminal_past_deadline

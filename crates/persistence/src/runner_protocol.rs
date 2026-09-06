@@ -125,29 +125,50 @@ pub enum RunnerConnectionCause {
     EnrollmentRevoked,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One canonical durable connection lifecycle head.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RunnerConnectionSnapshot {
+    /// Returns the physical connection epoch.
+    #[get(copy)]
     epoch: RunnerConnectionEpoch,
+    /// Returns the positive ordinal within this epoch's append-only event stream.
+    #[get(inner)]
     event_ordinal: NonZeroU64,
+    /// Returns the latest durable lifecycle state.
+    #[get(copy)]
     state: RunnerConnectionState,
+    /// Returns the typed evidence that produced the latest state.
+    #[get(copy)]
     cause: RunnerConnectionCause,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact terminal connection source named by the current durable loss fence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RunnerConnectionLossSnapshot {
+    /// Returns the enrollment whose connection became terminally lost.
+    #[get(copy)]
     enrollment: RunnerEnrollmentId,
+    /// Returns this enrollment's positive append-only loss epoch.
+    #[get(copy)]
     loss_epoch: RunnerConnectionLossEpoch,
+    /// Returns the exact terminal physical connection epoch.
+    #[get(copy)]
     connection_epoch: RunnerConnectionEpoch,
+    /// Returns the exact terminal event ordinal within the connection epoch.
+    #[get(inner)]
     connection_event_ordinal: NonZeroU64,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded restart page for an enrollment's durable connection loss.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerConnectionLossPropagationPage {
     loss: RunnerConnectionLossSnapshot,
     propagated_through: Option<SessionId>,
+    /// Returns at most 64 affected session identities in canonical order.
+    #[get(slice)]
     sessions: Vec<SessionId>,
     complete: bool,
 }
@@ -179,58 +200,9 @@ impl RunnerConnectionLossPropagationPage {
         self.propagated_through
     }
 
-    /// Returns at most 64 affected session identities in canonical order.
-    pub fn sessions(&self) -> &[SessionId] {
-        &self.sessions
-    }
-
     /// Reports that this loss cursor has durably completed.
     pub const fn is_complete(&self) -> bool {
         self.complete
-    }
-}
-
-impl RunnerConnectionLossSnapshot {
-    /// Returns the enrollment whose connection became terminally lost.
-    pub const fn enrollment(self) -> RunnerEnrollmentId {
-        self.enrollment
-    }
-
-    /// Returns this enrollment's positive append-only loss epoch.
-    pub const fn loss_epoch(self) -> RunnerConnectionLossEpoch {
-        self.loss_epoch
-    }
-
-    /// Returns the exact terminal physical connection epoch.
-    pub const fn connection_epoch(self) -> RunnerConnectionEpoch {
-        self.connection_epoch
-    }
-
-    /// Returns the exact terminal event ordinal within the connection epoch.
-    pub const fn connection_event_ordinal(self) -> u64 {
-        self.connection_event_ordinal.get()
-    }
-}
-
-impl RunnerConnectionSnapshot {
-    /// Returns the physical connection epoch.
-    pub const fn epoch(self) -> RunnerConnectionEpoch {
-        self.epoch
-    }
-
-    /// Returns the positive ordinal within this epoch's append-only event stream.
-    pub const fn event_ordinal(self) -> u64 {
-        self.event_ordinal.get()
-    }
-
-    /// Returns the latest durable lifecycle state.
-    pub const fn state(self) -> RunnerConnectionState {
-        self.state
-    }
-
-    /// Returns the typed evidence that produced the latest state.
-    pub const fn cause(self) -> RunnerConnectionCause {
-        self.cause
     }
 }
 
@@ -269,42 +241,28 @@ pub enum RunnerConnectionTransitionOutcome {
     },
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One nonterminal current connection selected by the startup scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NonterminalRunnerConnection {
+    /// Returns the enrollment that owns the connection.
+    #[get(copy)]
     enrollment: RunnerEnrollmentId,
+    /// Returns the physical connection epoch selected by the scan.
+    #[get(copy)]
     epoch: RunnerConnectionEpoch,
 }
 
-impl NonterminalRunnerConnection {
-    /// Returns the enrollment that owns the connection.
-    pub const fn enrollment(self) -> RunnerEnrollmentId {
-        self.enrollment
-    }
-
-    /// Returns the physical connection epoch selected by the scan.
-    pub const fn epoch(self) -> RunnerConnectionEpoch {
-        self.epoch
-    }
-}
-
+#[derive(signalbox_derive::Accessors)]
 /// One lifecycle event that was appended for an enrollment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AppliedRunnerConnectionTransition {
-    enrollment: RunnerEnrollmentId,
-    snapshot: RunnerConnectionSnapshot,
-}
-
-impl AppliedRunnerConnectionTransition {
     /// Returns the enrollment whose lifecycle event was appended.
-    pub const fn enrollment(self) -> RunnerEnrollmentId {
-        self.enrollment
-    }
-
+    #[get(copy)]
+    enrollment: RunnerEnrollmentId,
     /// Returns the durable lifecycle head produced by the append.
-    pub const fn snapshot(self) -> RunnerConnectionSnapshot {
-        self.snapshot
-    }
+    #[get(copy)]
+    snapshot: RunnerConnectionSnapshot,
 }
 
 /// Whether a requested lifecycle transition appended a durable event.
@@ -328,10 +286,13 @@ impl RunnerConnectionTransitionEffect {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One canonical validated registration plus its durable adapter revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredValidatedRunnerRegistration {
     revision: RunnerRegistrationRevision,
+    /// Returns the domain-validated registration snapshot.
+    #[get]
     registration: ValidatedRunnerRegistration,
 }
 
@@ -356,11 +317,18 @@ impl RunnerEnrollmentRequestId {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Identities issued by the daemon for one logical runner enrollment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IssuedRunnerEnrollmentIdentities {
+    /// Returns the logical enrollment identity.
+    #[get(copy)]
     enrollment: RunnerEnrollmentId,
+    /// Returns the logical runner identity.
+    #[get(copy)]
     runner: RunnerId,
+    /// Returns the daemon-owned authentication-reference identity.
+    #[get(copy)]
     authentication: RunnerAuthenticationId,
 }
 
@@ -377,29 +345,17 @@ impl IssuedRunnerEnrollmentIdentities {
             authentication,
         }
     }
-
-    /// Returns the logical enrollment identity.
-    pub const fn enrollment(self) -> RunnerEnrollmentId {
-        self.enrollment
-    }
-
-    /// Returns the logical runner identity.
-    pub const fn runner(self) -> RunnerId {
-        self.runner
-    }
-
-    /// Returns the daemon-owned authentication-reference identity.
-    pub const fn authentication(self) -> RunnerAuthenticationId {
-        self.authentication
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Complete labeled input for one pristine runner enrollment attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PristineRunnerEnrollmentRequest {
     request: RunnerEnrollmentRequestId,
     issued: IssuedRunnerEnrollmentIdentities,
     allowed_classes: Vec<RunnerCapabilityClass>,
+    /// Returns peer-advertised availability.
+    #[get]
     advertisement: RunnerAdvertisement,
 }
 
@@ -433,11 +389,6 @@ impl PristineRunnerEnrollmentRequest {
     pub fn allowed_classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass> {
         self.allowed_classes.iter()
     }
-
-    /// Returns peer-advertised availability.
-    pub const fn advertisement(&self) -> &RunnerAdvertisement {
-        &self.advertisement
-    }
 }
 
 /// Whether pristine enrollment created authority or replayed its exact receipt.
@@ -449,11 +400,16 @@ pub enum RunnerEnrollmentDisposition {
     Replayed,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Durable response facts for enrollment or registration resume.
 #[derive(Debug, Eq, PartialEq)]
 pub struct RunnerEnrollmentReceipt {
     request: RunnerEnrollmentRequestId,
+    /// Returns the canonical enrollment authority.
+    #[get]
     enrollment: RunnerEnrollment,
+    /// Returns the canonical validated registration and durable revision.
+    #[get]
     registration: StoredValidatedRunnerRegistration,
 }
 
@@ -463,11 +419,6 @@ impl RunnerEnrollmentReceipt {
         self.request
     }
 
-    /// Returns the canonical enrollment authority.
-    pub const fn enrollment(&self) -> &RunnerEnrollment {
-        &self.enrollment
-    }
-
     /// Returns the exact identities issued for this request.
     pub const fn identities(&self) -> IssuedRunnerEnrollmentIdentities {
         IssuedRunnerEnrollmentIdentities::new(
@@ -475,11 +426,6 @@ impl RunnerEnrollmentReceipt {
             self.enrollment.runner(),
             self.enrollment.authentication(),
         )
-    }
-
-    /// Returns the canonical validated registration and durable revision.
-    pub const fn registration(&self) -> &StoredValidatedRunnerRegistration {
-        &self.registration
     }
 
     /// Reconstructs the complete availability-only advertisement.
@@ -509,10 +455,13 @@ impl RunnerEnrollmentReceipt {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Evidence-bearing result of a pristine enrollment request.
 #[derive(Debug, Eq, PartialEq)]
 pub struct RunnerEnrollmentOutcome {
     disposition: RunnerEnrollmentDisposition,
+    /// Returns the exact durable receipt.
+    #[get]
     receipt: RunnerEnrollmentReceipt,
 }
 
@@ -520,11 +469,6 @@ impl RunnerEnrollmentOutcome {
     /// Reports whether the durable authority was created or replayed.
     pub const fn disposition(&self) -> RunnerEnrollmentDisposition {
         self.disposition
-    }
-
-    /// Returns the exact durable receipt.
-    pub const fn receipt(&self) -> &RunnerEnrollmentReceipt {
-        &self.receipt
     }
 
     /// Consumes the outcome into its exact durable receipt.
@@ -538,17 +482,15 @@ impl StoredValidatedRunnerRegistration {
     pub const fn revision(&self) -> RunnerRegistrationRevision {
         self.revision
     }
-
-    /// Returns the domain-validated registration snapshot.
-    pub const fn registration(&self) -> &ValidatedRunnerRegistration {
-        &self.registration
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One canonical placement record and its adapter event ordinal.
 #[derive(Debug, Eq, PartialEq)]
 pub struct StoredSessionRunnerPlacement {
     event_ordinal: u64,
+    /// Returns the domain-reconstituted placement.
+    #[get]
     placement: SessionRunnerPlacement,
     registration: Option<StoredValidatedRunnerRegistration>,
     grant: Option<CredentialProfileGrant>,
@@ -590,11 +532,6 @@ impl StoredSessionRunnerPlacement {
     /// Returns the durable placement event ordinal.
     pub const fn event_ordinal(&self) -> u64 {
         self.event_ordinal
-    }
-
-    /// Returns the domain-reconstituted placement.
-    pub const fn placement(&self) -> &SessionRunnerPlacement {
-        &self.placement
     }
 
     /// Returns the registration snapshot pinned by this placement, if any.
