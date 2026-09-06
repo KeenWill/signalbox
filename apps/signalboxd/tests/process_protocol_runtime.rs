@@ -136,17 +136,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-// numeric-bound: test deadline - starvation allowance for one server response
-// on the local socket, not a latency this suite asserts. Sixteen of these tests
-// share a CI node, each driving its own PostgreSQL container, so a reply the
-// daemon has already written can wait on the scheduler for seconds before this
-// connection is read again; a response that never comes still fails here well
-// inside the job's own cap.
 const RESPONSE_ALLOWANCE: Duration = Duration::from_secs(30);
-// numeric-bound: test deadline - starvation allowance for a scheduler pass or a
-// runtime task to finish work the test has already made eligible, not a
-// throughput this suite asserts. The same node contention applies, and the pass
-// waits on that test's own database container underneath it.
 const RUNTIME_SETTLE_ALLOWANCE: Duration = Duration::from_secs(60);
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
@@ -2544,22 +2534,12 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
 // unprovisioned workspace, and scheduled goal resumption are named follow-on
 // slices: they need the same fleet census but not more boot infrastructure.
 
-// numeric-bound: test fixture - mirrors the `scheduler_pass_admission_cap`
-// numeric bound that `config/signalboxd.example.toml` supplies, which
-// `support::parse_model_configuration` splices into this fixture's
-// configuration. The cap is deployment configuration rather than a compiled
-// constant, so the derived ordinary limit below is stated against it.
+// config/signalboxd.example.toml supplies scheduler_pass_admission_cap to this fixture.
 const FLEET_PASS_ADMISSION_CAP: usize = 16;
-// numeric-bound: derived ceiling - ordinary scheduler work can use the complete
-// configured pass admission cap.
 const FLEET_SESSION_COUNT: usize = FLEET_PASS_ADMISSION_CAP;
-// numeric-bound: test setup - preserves the ordinary production occupancy fixture
 const FLEET_BASELINE_OCCUPANCY_BOUND: Duration = Duration::from_secs(900);
-// numeric-bound: test deadline - exercises the production recovery path promptly
 const FLEET_OCCUPANCY_BOUND: Duration = Duration::from_secs(1);
-// numeric-bound: test deadline - keeps each fault observation short in CI
 const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(2);
-// numeric-bound: test setup - admits a full contended fleet inside two CI minutes
 const FLEET_SETUP_BOUND: Duration = Duration::from_secs(120);
 
 struct FleetPrepared {

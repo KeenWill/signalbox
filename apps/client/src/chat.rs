@@ -34,7 +34,6 @@ use crate::{
     transcript::SnapshotIdentitySet,
 };
 
-// numeric-bound: guard - one unterminated terminal line exhausting input memory
 const MAX_CHAT_LINE_BYTES: usize = MAX_INPUT_CONTENT_FRAME_BYTES + ":steer ".len();
 
 const COMMANDS: &str = ":stop TEXT | :steer TEXT | :approve ID | :deny ID REASON | \
