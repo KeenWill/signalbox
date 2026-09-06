@@ -327,6 +327,17 @@ pub struct Token;
         self.assertIn('| example | 3 | 1 | 1 | [example](example.md) |', files['README.md'])
         self.assertNotIn('Documentation must not', text)
 
+    def test_nested_source_span_stays_in_its_top_level_module_page(self):
+        document = fixture()
+        document['index']['1']['span']['filename'] = 'src/example/inner.rs'
+        renderer = Renderer(document)
+        modules = renderer.modules()
+        self.assertEqual(list(modules), ['example'])
+        self.assertIn(renderer.item(1), modules['example'])
+        files = renderer.files('sample')
+        self.assertEqual(set(files), {'example.md', 'README.md'})
+        self.assertIn('pub struct Record<T>', files['example.md'])
+
     def test_generic_constraints_and_external_paths_are_preserved(self):
         document = fixture()
         renderer = Renderer(document)
