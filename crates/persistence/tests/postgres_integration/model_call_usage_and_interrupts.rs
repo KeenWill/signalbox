@@ -665,9 +665,9 @@ async fn effective_target_baseline_rejects_changed_alternate_mapping() -> Result
     Ok(())
 }
 
-/// A prepared call refreshes its serving-target attribution at authorization.
-/// A restart with a changed alternate-target mapping therefore records the
-/// target used by the capability that can enter the provider.
+/// A prepared call refreshes its serving-target attribution at authorization
+/// only when the new target uses the frozen credential's family. A restart
+/// cannot send a call through an unrelated credential family and pool policy.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn effective_target_authorization_records_changed_mapping_after_restart()
@@ -773,8 +773,47 @@ async fn effective_target_authorization_records_changed_mapping_after_restart()
         Some("23514".into())
     );
 
+    let different_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+        (
+            new_fast_target,
+            Arc::<str>::from("other-model-family"),
+            None,
+        ),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
+    .expect("the replacement alternate target has a distinct credential family");
+    let incompatible = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(different_families);
+    assert!(matches!(
+        incompatible.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+    let unchanged: (String, Uuid, String) = sqlx::query_as(
+        "SELECT state_kind, effective_provider_model_identity_id, credential_reference
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        unchanged,
+        (
+            "prepared".to_owned(),
+            old_fast_target.identity().into_uuid(),
+            "test-model-primary".to_owned(),
+        )
+    );
+
     let new_families = ModelCredentialFamilyCatalog::try_new([
         (selected_target, Arc::<str>::from("test-model-family"), None),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
         (new_fast_target, Arc::<str>::from("test-model-family"), None),
     ])
     .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
@@ -1092,6 +1131,37 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
     assert_eq!(
         retained.projected_unreported_content_bytes(),
         u64::try_from(retained_source_suffix.len() + suffix.len())?
+    );
+
+    let fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 0x50),
+    ));
+    let fast_targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+        target,
+    )])
+    .expect("one dedicated-compaction target forms a catalog");
+    let fast_families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(target, fast_target)]))
+    .expect("the replacement fast target shares the fixture credential family");
+    let restarted =
+        PostgresModelCallRepository::new(pool.clone(), fast_targets, model_credential_reference())
+            .with_session_credentials(fast_families);
+    assert!(
+        restarted
+            .latest_reported_usage(
+                fixture.session,
+                target,
+                FastMode::Enabled,
+                false,
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
+            )
+            .await?
+            .is_none(),
+        "a dedicated compaction from another effective target is not a baseline"
     );
 
     let mutation_error = sqlx::query(

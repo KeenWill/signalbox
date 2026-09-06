@@ -768,7 +768,7 @@ impl PostgresModelCallRepository {
                        false AS has_provider_compaction,
                        NULL::numeric AS proven_unreported_content_bytes
                   FROM latest_compaction AS latest
-                 WHERE latest.resolved_provider_model_identity_id = $2
+                 WHERE latest.resolved_provider_model_identity_id = $8
                    AND latest.state_kind = 'terminal'
                    AND latest.terminal_disposition_kind = 'completed'
                    AND latest.usage_input_tokens IS NOT NULL
@@ -1783,6 +1783,26 @@ impl PostgresModelCallRepository {
                 current.target(),
                 fast_mode,
             );
+            let stored_effective_identity = sqlx::query_scalar::<_, Uuid>(
+                "SELECT effective_provider_model_identity_id
+                   FROM model_call
+                  WHERE model_call_id = $1",
+            )
+            .bind(call.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+            let stored_effective_target = ResolvedProviderTarget::naming(
+                ProviderModelIdentity::from_uuid(stored_effective_identity),
+            );
+            if stored_effective_target != current_effective_target
+                && !same_credential_family(
+                    self.credential_families.as_ref(),
+                    stored_effective_target,
+                    current_effective_target,
+                )
+            {
+                return Ok((false, AuthorizeModelCallOutcome::NoSend));
+            }
             let authorized = execution.authorize_send().map_err(|_| {
                 ModelCallCorruption::Inconsistent("checked Prepared call could not authorize send")
             })?;
@@ -3172,6 +3192,7 @@ where
             session,
             turn,
             producing_call,
+            serving_pool_target(credential_families, resolved.target(), fast_mode),
             *limit,
         )
         .await?
@@ -3374,10 +3395,12 @@ async fn load_tool_continuation_headroom_evidence(
     session: SessionId,
     turn: TurnId,
     producing_call: ModelCallId,
+    current_effective_target: ResolvedProviderTarget,
     limit: ToolContinuationUsageLimit,
 ) -> Result<Option<ToolContinuationHeadroomEvidence>, ModelCallRepositoryError> {
     let row = sqlx::query(
-        "SELECT usage_input_includes_cache_tokens,
+        "SELECT effective_provider_model_identity_id,
+                usage_input_includes_cache_tokens,
                 usage_input_tokens, usage_output_tokens,
                 usage_cache_creation_input_tokens,
                 usage_cache_read_input_tokens,
@@ -3500,6 +3523,9 @@ async fn load_tool_continuation_headroom_evidence(
     let mut retained_output_tokens = decode("retained_output_tokens")?;
     let has_provider_compaction = row.try_get::<bool, _>("has_provider_compaction")?;
     let mut input_is_retained: bool = row.try_get("input_is_retained")?;
+    let producing_effective_target = ResolvedProviderTarget::naming(
+        ProviderModelIdentity::from_uuid(row.try_get("effective_provider_model_identity_id")?),
+    );
     if has_provider_compaction
         && (retained_input_tokens.is_none() || retained_output_tokens.is_none())
     {
@@ -3508,9 +3534,12 @@ async fn load_tool_continuation_headroom_evidence(
         )
         .into());
     }
-    if has_provider_compaction && !limit.replays_provider_compaction() {
-        // The disabled projection omits the opaque block and replays the
-        // preserved history that the aggregate usage measured.
+    if has_provider_compaction
+        && (!limit.replays_provider_compaction()
+            || producing_effective_target != current_effective_target)
+    {
+        // A projection that cannot replay this exact serving target's opaque
+        // block uses the preserved history that aggregate usage measured.
         retained_input_tokens = None;
         retained_output_tokens = None;
         input_is_retained = true;
@@ -6757,6 +6786,20 @@ fn serving_pool_target(
     families.map_or(selected, |families| {
         families.serving_target_for_call(selected, fast_mode)
     })
+}
+
+fn same_credential_family(
+    families: Option<&crate::ModelCredentialFamilyCatalog>,
+    left: ResolvedProviderTarget,
+    right: ResolvedProviderTarget,
+) -> bool {
+    let Some(families) = families else {
+        return false;
+    };
+    matches!(
+        (families.family(left), families.family(right)),
+        (Some(left), Some(right)) if left == right
+    )
 }
 
 struct SelectedRuntimePoolCredential {

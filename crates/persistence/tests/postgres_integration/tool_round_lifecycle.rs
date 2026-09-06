@@ -935,6 +935,126 @@ async fn provider_compaction_releases_tool_continuation_input_headroom()
     Ok(())
 }
 
+/// A restarted continuation cannot reuse retained compaction counts from a
+/// producing call served by the previous fast target. The preserved aggregate
+/// usage remains the conservative headroom baseline after the mapping changes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn changed_fast_target_keeps_tool_continuation_aggregate_headroom()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7efa_1900;
+    let old_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 0x30),
+    ));
+    let new_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 0x31),
+    ));
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"retained summary"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let (fixture, _, _, requests) = checkpoint_fast_tool_batch_with_provider_compaction(
+        &pool,
+        seed,
+        old_fast_target,
+        compaction,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("fixture has one request");
+    };
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                *request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22)),
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("2026-09-05T00:00:00Z"))
+                            .expect("fixture result is bounded"),
+                    ),
+                }),
+        )
+        .await?;
+
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one target forms a catalog");
+    let families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (new_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(target, new_fast_target)]))
+    .expect("the replacement fast target shares the fixture credential family");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_session_credentials(families)
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Enabled,
+                10,
+                100,
+            )
+            .with_provider_compaction_replay()]);
+    let outcome = repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x26,
+                ))],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+            ),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+    let signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(required) =
+        outcome
+    else {
+        panic!("the previous serving target's retained usage cannot admit the continuation");
+    };
+    assert_eq!(required.producing_call(), fixture.call);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// a returning foreground delegation result is model-visible
 /// continuation content. The same-turn headroom bound counts its delivered
 /// child-result bytes alongside executed tool results, so a round whose child

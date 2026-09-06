@@ -3776,6 +3776,38 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
 > {
     let (fixture, model_repository, authorized) =
         authorize_checkpointed_model_call_with_attachment(pool, seed, attachment).await?;
+    commit_authorized_tool_batch(
+        seed,
+        (fixture, model_repository, authorized),
+        proposals,
+        initial_approval,
+        usage,
+        provider_compaction,
+    )
+    .await
+}
+
+async fn commit_authorized_tool_batch(
+    seed: u128,
+    authorized_call: (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        AuthorizedModelCall,
+    ),
+    proposals: &[(&str, &str)],
+    initial_approval: InitialToolApproval,
+    usage: ProviderReportedTokenUsage,
+    provider_compaction: Option<ProviderCompactionBlock>,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        Vec<signalbox_domain::ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
+    let (fixture, model_repository, authorized) = authorized_call;
     let requests = proposals
         .iter()
         .enumerate()
@@ -3852,6 +3884,118 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
         );
     }
     Ok((fixture, model_repository, observation, requests))
+}
+
+async fn checkpoint_fast_tool_batch_with_provider_compaction(
+    pool: &PgPool,
+    seed: u128,
+    fast_target: ResolvedProviderTarget,
+    provider_compaction: ProviderCompactionBlock,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        Vec<signalbox_domain::ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 3));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 4));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let selected_target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared_with_fast_target(
+            seed + 7,
+            seed + 1,
+            selection,
+            fast_target,
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 8,
+                seed + 1,
+                "fast tool-round request",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 9)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 10),
+            starting_frontier: Uuid::from_u128(seed + 11),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        selected_target,
+    )])
+    .expect("one fast tool-round target forms a catalog");
+    let families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, fast_target)]))
+    .expect("the fast tool-round targets share one credential family");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_session_credentials(families);
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                session,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 12)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 14)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 16)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(session, call).await?
+    else {
+        panic!("the fast tool-round call authorizes")
+    };
+    let fixture = RestartModelCallFixture {
+        session,
+        turn,
+        attempt,
+        call,
+    };
+    commit_authorized_tool_batch(
+        seed,
+        (fixture, repository, *authorized),
+        &[("current_time", "{}")],
+        InitialToolApproval::Confirm,
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(70))
+            .with_output_tokens(Some(50)),
+        Some(provider_compaction),
+    )
+    .await
 }
 
 /// Commissions `APPROVAL_GOAL_STATEMENT` on an existing fixture session and
