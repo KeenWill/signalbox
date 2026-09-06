@@ -194,7 +194,9 @@ referenced status, and the subject transition; no event-history snapshot decides
 them independently. An external-link transition locks the reservation and then
 any associated finding before loading its multi-statement projection. The lock
 protocol these orders extend belongs to
-[persistence protocol](persistence-protocol.md).
+[persistence protocol](persistence-protocol.md). A finding-reference edge that
+closes a direct or transitive cycle in a target's complete finding graph is
+corruption.
 
 One orchestration attempt names one immutable target, one frozen policy, one
 ordered concern-set version, and the exact template digests its passes use.
