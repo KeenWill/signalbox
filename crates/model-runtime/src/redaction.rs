@@ -610,13 +610,54 @@ fn provider_compaction_contains_credential(
     credential: &CredentialValue,
 ) -> bool {
     let key = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-    !key.is_empty()
-        && content.iter().any(|part| match part {
-            AssistantPart::ProviderCompaction { block_json } => {
-                block_json.contains(key) || json_escapes_decode_to_credential(block_json, key)
-            }
-            _ => false,
+    if key.is_empty() {
+        return false;
+    }
+    content.iter().enumerate().any(|(index, part)| {
+        let AssistantPart::ProviderCompaction { block_json } = part else {
+            return false;
+        };
+        block_json.contains(key)
+            || json_escapes_decode_to_credential(block_json, key)
+            || provider_compaction_prefix_completed_by_text(block_json, &content[index + 1..], key)
+    })
+}
+
+fn provider_compaction_prefix_completed_by_text(
+    block_json: &str,
+    following: &[AssistantPart],
+    credential: &str,
+) -> bool {
+    let Ok(block) = serde_json::from_str::<serde_json::Value>(block_json) else {
+        return false;
+    };
+    ["content", "encrypted_content"]
+        .into_iter()
+        .filter_map(|field| block.get(field).and_then(serde_json::Value::as_str))
+        .any(|value| {
+            credential.char_indices().skip(1).any(|(split, _)| {
+                value.ends_with(&credential[..split])
+                    && following_text_starts_with(following, &credential[split..])
+            })
         })
+}
+
+fn following_text_starts_with(parts: &[AssistantPart], expected: &str) -> bool {
+    let mut remaining = expected;
+    for part in parts {
+        let AssistantPart::Text(text) = part else {
+            return false;
+        };
+        if text.starts_with(remaining) {
+            return true;
+        }
+        if remaining.starts_with(text) {
+            remaining = &remaining[text.len()..];
+            continue;
+        }
+        return false;
+    }
+    false
 }
 
 fn redact_text(text: String, credential: &CredentialValue) -> String {
@@ -1617,6 +1658,39 @@ mod tests {
 
         let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
             panic!("credential-bearing opaque replay evidence is rejected");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_provider_compaction_and_following_text_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: vec![
+                    AssistantPart::ProviderCompaction {
+                        block_json:
+                            r#"{"type":"compaction","content":"key_","encrypted_content":"opaque"}"#
+                                .to_string(),
+                    },
+                    AssistantPart::Text("loop tail".to_string()),
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("cross-part credential evidence is rejected");
         };
         assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
         assert_eq!(

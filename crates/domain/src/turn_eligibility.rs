@@ -8226,6 +8226,10 @@ fn tool_round_producing_call_in_window(
                     Some(SemanticTranscriptEntryPayload::AssistantText {
                         producing_call, ..
                     }) if producing_call == *call_id => {}
+                    Some(SemanticTranscriptEntryPayload::ProviderCompaction {
+                        producing_call,
+                        ..
+                    }) if producing_call == *call_id => {}
                     Some(SemanticTranscriptEntryPayload::AssistantToolUse {
                         producing_call,
                         request,
@@ -12496,6 +12500,7 @@ mod tests {
     ) -> AcceptedInputSchedulingReconstitutionInput {
         let session = session.clone();
         let origin_entry = semantic_entry(30);
+        let compaction_entry = semantic_entry(34);
         let tool_use_entry = semantic_entry(31);
         let result_entry = semantic_entry(32);
         let cancellation_entry = semantic_entry(33);
@@ -12564,6 +12569,17 @@ mod tests {
         let semantic_entries = vec![
             cancelled.entry(&session, origin_entry),
             SemanticTranscriptEntryReconstitutionInput::new(
+                compaction_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::ProviderCompaction {
+                    producing_call,
+                    block: crate::ProviderCompactionBlock::try_new(String::from(
+                        r#"{"type":"compaction","content":"retained summary"}"#,
+                    ))
+                    .expect("fixture provider compaction is valid"),
+                },
+            ),
+            SemanticTranscriptEntryReconstitutionInput::new(
                 tool_use_entry.id(),
                 session.id(),
                 InitialSemanticTranscriptEntryPayload::AssistantToolUse {
@@ -12593,11 +12609,15 @@ mod tests {
             semantic_entries,
             vec![
                 starting_frontier.snapshot(&session, &[origin_entry]),
-                call_frontier.snapshot(&session, &[origin_entry, tool_use_entry, result_entry]),
+                call_frontier.snapshot(
+                    &session,
+                    &[origin_entry, compaction_entry, tool_use_entry, result_entry],
+                ),
                 terminal_frontier.snapshot(
                     &session,
                     &[
                         origin_entry,
+                        compaction_entry,
                         tool_use_entry,
                         result_entry,
                         cancellation_entry,
@@ -12635,9 +12655,10 @@ mod tests {
     }
 
     /// S02 / S07 / S10 / INV-006 / INV-037: a cancelled terminal turn naming
-    /// its unsent round-two continuation call reconstitutes when that call's
-    /// whole frontier is the completed round's result projection the
-    /// cancellation marker extends.
+    /// its unsent round-two continuation call reconstitutes when provider
+    /// compaction precedes the tool proposal and that call's whole frontier is
+    /// the completed round's result projection the cancellation marker
+    /// extends.
     #[test]
     fn s02_s07_s10_inv006_inv037_cancelled_continuation_call_reconstitutes() {
         let session = current_session();
