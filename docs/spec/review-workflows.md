@@ -260,8 +260,15 @@ pull-request identity during decision revalidation is an error; the predicate
 performs no I/O. Persisted authentication and review waves are bound to the
 complete policy value and requalified when it changes. Exempt head changes are
 rename-only changes and clean base forwards; comment-only changes require a
-fresh quiet review. The Python reconciler delegates evidence evaluation to the
-crate's CLI and retains its loop, dispatch fence, and cool-off state.
+fresh quiet review. The crate's `reconcile` subcommand runs candidate selection,
+in-process fetch and evaluation, the dispatch fence, and repository-bound
+cool-off state. State decoding requires version 2 and all record fields, rejects
+unknown fields, and performs no migration. It syncs the state file and parent
+directory before starting a dispatch child; every ambiguous outcome retains the
+fence. Operator commands run as argv in their own process groups; timeout kills
+the group and reaps the child. `SIGINT` stops the loop. Reconciliation requires
+a configured policy path and an explicit state path when neither
+`XDG_STATE_HOME` nor `HOME` supplies a default.
 
 ## Planned
 
