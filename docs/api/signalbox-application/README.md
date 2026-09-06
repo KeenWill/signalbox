@@ -8,7 +8,6 @@
 | attention | 16 | 1 | 6 | [attention](attention.md) |
 | blob_derivation | 6 | 3 | 0 | [blob_derivation](blob_derivation.md) |
 | commissioned_dispatch | 5 | 1 | 0 | [commissioned_dispatch](commissioned_dispatch.md) |
-| convergence_reconciliation | 6 | 0 | 1 | [convergence_reconciliation](convergence_reconciliation.md) |
 | conversation_import | 8 | 4 | 0 | [conversation_import](conversation_import.md) |
 | create_session | 6 | 2 | 0 | [create_session](create_session.md) |
 | create_session_from_imported_frontier | 4 | 2 | 0 | [create_session_from_imported_frontier](create_session_from_imported_frontier.md) |
