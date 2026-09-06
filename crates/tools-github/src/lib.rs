@@ -7,7 +7,6 @@
 use std::{
     borrow::Cow,
     collections::HashSet,
-    error::Error,
     fmt,
     future::Future,
     time::{Duration, Instant},
@@ -867,17 +866,11 @@ fn decode_operation(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("invalid GitHub tool arguments")]
 /// A model-provided GitHub argument failed its checked representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidGitHubArguments;
-
-impl fmt::Display for InvalidGitHubArguments {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid GitHub tool arguments")
-    }
-}
-
-impl Error for InvalidGitHubArguments {}
 
 #[derive(Clone, Debug)]
 struct GitHubArgumentValidator {
@@ -913,11 +906,14 @@ impl fmt::Debug for SanitizedGitHubError {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized physical transport failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitHubTransportFailure {
+    #[error("invalid GitHub credential")]
     /// Credential bytes were unusable.
     InvalidCredential,
+    #[error("GitHub rejected the request with HTTP status {status}")]
     /// GitHub definitively rejected the request.
     Rejected {
         /// HTTP status.
@@ -925,21 +921,28 @@ pub enum GitHubTransportFailure {
         /// Sanitized response excerpt.
         detail: Option<SanitizedGitHubError>,
     },
+    #[error("GitHub returned definitive GraphQL rejection evidence")]
     /// GitHub returned definitive GraphQL rejection evidence.
     GraphQlRejected,
+    #[error("GitHub returned an invalid response")]
     /// A success response violated the bounded contract.
     InvalidResponse {
         /// Sanitized response excerpt.
         detail: Option<SanitizedGitHubError>,
     },
+    #[error("GitHub response exceeded the byte cap")]
     /// Response bytes exceeded the cap.
     ResponseTooLarge,
+    #[error("GitHub pull-request revision changed during the read")]
     /// Base or head changed during a diff read.
     RevisionChanged,
+    #[error("GitHub request could not be dispatched")]
     /// Client setup failed before the request could be dispatched.
     PreDispatchInfrastructure,
+    #[error("GitHub request outcome is unknown")]
     /// Physical dispatch outcome is unknown.
     DispatchUnknown,
+    #[error("GitHub request destination was rejected")]
     /// The destination was outside the explicit policy.
     EgressRejected,
 }
@@ -982,37 +985,6 @@ impl GitHubTransportFailure {
         }
     }
 }
-
-impl fmt::Display for GitHubTransportFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidCredential => formatter.write_str("invalid GitHub credential"),
-            Self::Rejected { status, detail: _ } => {
-                write!(
-                    formatter,
-                    "GitHub rejected the request with HTTP status {status}"
-                )
-            }
-            Self::GraphQlRejected => {
-                formatter.write_str("GitHub returned definitive GraphQL rejection evidence")
-            }
-            Self::InvalidResponse { detail: _ } => {
-                formatter.write_str("GitHub returned an invalid response")
-            }
-            Self::ResponseTooLarge => formatter.write_str("GitHub response exceeded the byte cap"),
-            Self::RevisionChanged => {
-                formatter.write_str("GitHub pull-request revision changed during the read")
-            }
-            Self::PreDispatchInfrastructure => {
-                formatter.write_str("GitHub request could not be dispatched")
-            }
-            Self::DispatchUnknown => formatter.write_str("GitHub request outcome is unknown"),
-            Self::EgressRejected => formatter.write_str("GitHub request destination was rejected"),
-        }
-    }
-}
-
-impl Error for GitHubTransportFailure {}
 
 /// Result category crossing the injected transport boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1378,28 +1350,26 @@ impl<Credentials, Transport> GitHubPullRequestCreateExecutor<Credentials, Transp
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Static suite construction failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitHubToolsConstructionError {
+    #[error("GitHub pull-request tool construction failed")]
     /// Static name rejected.
     Name,
+    #[error("GitHub pull-request tool construction failed")]
     /// Static schema rejected.
     Schema,
+    #[error("GitHub pull-request tool construction failed")]
     /// Static sanitized detail rejected.
     ErrorDetail,
+    #[error("GitHub pull-request tool construction failed")]
     /// Duplicate static name.
     Duplicate,
+    #[error("GitHub pull-request tool construction failed")]
     /// Production transport construction failed.
     Transport,
 }
-
-impl fmt::Display for GitHubToolsConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("GitHub pull-request tool construction failed")
-    }
-}
-
-impl Error for GitHubToolsConstructionError {}
 
 fn make_detail(value: &str) -> Result<ToolExecutionErrorDetail, GitHubToolsConstructionError> {
     ToolExecutionErrorDetail::try_new(value.to_owned())
@@ -1418,19 +1388,13 @@ pub struct GitHubExecutor<Credentials, Transport> {
     revision_detail: ToolExecutionErrorDetail,
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("GitHub pull-request executor failed")]
 /// Sanitized executor failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitHubExecutorError {
     class: OperatorFailureClass,
 }
-
-impl fmt::Display for GitHubExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("GitHub pull-request executor failed")
-    }
-}
-
-impl Error for GitHubExecutorError {}
 
 impl ClassifyOperatorFailure for GitHubExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
@@ -2354,17 +2318,11 @@ impl GitHubTransport for GitHubApiTransport {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("GitHub API transport construction failed")]
 /// Production transport construction failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitHubApiTransportConstructionError;
-
-impl fmt::Display for GitHubApiTransportConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("GitHub API transport construction failed")
-    }
-}
-
-impl Error for GitHubApiTransportConstructionError {}
 
 fn mutation_failure(failure: GitHubTransportFailure) -> GitHubTransportFailure {
     match failure {
@@ -2943,6 +2901,7 @@ mod test_support;
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     use std::{
         cell::RefCell,
         io::{self, Write},

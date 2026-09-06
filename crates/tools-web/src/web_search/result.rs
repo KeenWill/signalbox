@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::fmt;
 
 use reqwest::StatusCode;
 use url::Url;
@@ -264,6 +264,8 @@ impl WebSearchResponse {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("web search provider rejection evidence")]
 /// Parsed provider rejection facts with no retained raw response bytes.
 pub struct WebSearchProviderError {
     pub(super) status: u16,
@@ -276,14 +278,6 @@ impl fmt::Debug for WebSearchProviderError {
         formatter.write_str("WebSearchProviderError")
     }
 }
-
-impl fmt::Display for WebSearchProviderError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("web search provider rejection evidence")
-    }
-}
-
-impl Error for WebSearchProviderError {}
 
 pub(super) fn fixed_result_diagnostic_outputs() -> [String; 9] {
     let fields = WebSearchResultFields {

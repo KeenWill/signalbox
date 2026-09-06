@@ -1539,62 +1539,54 @@ impl Iterator for ContentFragments<'_> {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Invalid canonical scalar at the wire boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CanonicalValueError {
+    #[error("UUID is not canonical lowercase hyphenated text")]
     /// UUID was not lowercase canonical hyphenated text.
     Uuid,
+    #[error("command identity is a reserved sentinel")]
     /// Command UUID used a reserved sentinel.
     CommandId,
+    #[error("unsigned integer is not canonical decimal text")]
     /// Decimal text was not the shortest full-range unsigned spelling.
     Decimal,
+    #[error("client request identity must be nonzero")]
     /// Client request identity was zero.
     RequestId,
+    #[error("content fragment exceeds the process-protocol UTF-8 byte bound")]
     /// A transcript fragment exceeded its UTF-8 byte bound.
     Content,
+    #[error("session metadata value is invalid")]
     /// Session metadata violated its exact string, set, map, or page bound.
     Metadata,
+    #[error("digest is not canonical lowercase 64-character hexadecimal text")]
     /// Digest was not exactly 64 lowercase hexadecimal characters.
     Digest,
+    #[error("session system prompt is empty, oversized, or contains U+0000")]
     /// A session system prompt was empty, contained U+0000, or exceeded its
     /// UTF-8 byte bound.
     SystemPrompt,
+    #[error("session placement is invalid")]
     /// A dotted session placement or root-global-read decision was invalid.
     Placement,
+    #[error("runner working directory is invalid")]
     /// Runner working-directory text was empty, NUL-bearing, or oversized.
     RunnerWorkingDirectory,
+    #[error("runner catalog name is invalid")]
     /// Runner capability, credential-profile, or repository name was invalid.
     RunnerCatalogName,
+    #[error("runner projection state is invalid")]
     /// Runner projection state and exact-runner evidence were inconsistent.
     RunnerProjection,
+    #[error("dollar amount is not canonical nonnegative decimal text")]
     /// Dollar amount was not canonical bounded nonnegative decimal text.
     DollarAmount,
+    #[error("billing rate version is invalid")]
     /// Billing rate version was empty, padded, NUL-bearing, or oversized.
     RateVersion,
 }
-
-impl fmt::Display for CanonicalValueError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Uuid => "UUID is not canonical lowercase hyphenated text",
-            Self::CommandId => "command identity is a reserved sentinel",
-            Self::Decimal => "unsigned integer is not canonical decimal text",
-            Self::RequestId => "client request identity must be nonzero",
-            Self::Content => "content fragment exceeds the process-protocol UTF-8 byte bound",
-            Self::Metadata => "session metadata value is invalid",
-            Self::Digest => "digest is not canonical lowercase 64-character hexadecimal text",
-            Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
-            Self::Placement => "session placement is invalid",
-            Self::RunnerWorkingDirectory => "runner working directory is invalid",
-            Self::RunnerCatalogName => "runner catalog name is invalid",
-            Self::RunnerProjection => "runner projection state is invalid",
-            Self::DollarAmount => "dollar amount is not canonical nonnegative decimal text",
-            Self::RateVersion => "billing rate version is invalid",
-        })
-    }
-}
-
-impl Error for CanonicalValueError {}
 
 /// Exact source format selected for one conversation import.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -9675,111 +9667,99 @@ fn validate_blob_read_detail(detail: RejectionDetail) -> Result<(), FrameValidat
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A structurally invalid frame value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameValidationError {
+    #[error("frame version is unsupported")]
     /// In-memory frame used another version.
     UnsupportedVersion,
+    #[error("client request identity is uncorrelated")]
     /// A client request used reserved correlation identity zero.
     UncorrelatedClientRequest,
+    #[error("successful server message is uncorrelated")]
     /// A success response used reserved correlation identity zero.
     UncorrelatedSuccess,
+    #[error("application server error is uncorrelated")]
     /// A non-framing error used reserved correlation identity zero.
     UncorrelatedApplicationError,
+    #[error("server error detail does not match its code")]
     /// Rejection detail did not match the error code.
     ErrorDetailShape,
+    #[error("transcript turn state is inconsistent")]
     /// A transcript turn carried an impossible correlated state shape.
     TurnStateShape,
+    #[error("tool approval event shape is inconsistent")]
     /// A tool approval event carried inconsistent decision provenance.
     ToolApprovalShape,
+    #[error("session metadata frame shape is inconsistent")]
     /// A metadata request or response carried an invalid correlated shape.
     MetadataShape,
+    #[error("unified conversation-listing frame shape is inconsistent")]
     /// A unified conversation-listing frame carried an invalid shape.
     ConversationListShape,
+    #[error("operator-status frame shape is inconsistent")]
     /// A repository-watch operator-status row carried an invalid shape.
     OperatorStatusShape,
+    #[error("frame omits its required system-prompt member")]
     SystemPromptShape,
+    #[error("conversation-import frame shape is inconsistent")]
     /// A chunked conversation-import frame carried a contradictory shape.
     ConversationImportShape,
+    #[error("blob-upload frame shape is inconsistent")]
     /// A chunked immutable-blob frame carried a contradictory shape.
     BlobUploadShape,
+    #[error("blob-read frame shape is inconsistent")]
     /// A blob metadata, range, or range-rejection value contradicted its bounds.
     BlobReadShape,
+    #[error("imported frontier position is not positive")]
     /// An imported-frontier request carried a nonpositive position.
     ImportedFrontierShape,
+    #[error("compaction through position is not positive")]
     /// A context-compaction request carried a nonpositive position.
     ContextCompactionShape,
+    #[error("imported conversation entry position is not positive")]
     /// An imported-conversation entry carried a nonpositive position.
     ImportedConversationEntryShape,
+    #[error("imported text preview shape is inconsistent")]
     /// An imported text preview exceeded its bound or contradicted its own
     /// truncation marker.
     ImportedTextPreviewShape,
+    #[error("imported frontier rejection range is inconsistent")]
     /// An out-of-range imported rejection stated a range its own requested
     /// position falls inside, or an empty selectable range.
     ImportedFrontierRangeShape,
+    #[error("submit-input delivery shape is inconsistent")]
     /// A submit-input delivery carried forbidden or missing correlated fields.
     InputDeliveryShape,
+    #[error("ordered user content shape is inconsistent")]
     /// Ordered user parts violated their canonical shape or resource bounds.
     UserContentShape,
+    #[error("session-template frame shape is inconsistent")]
     /// A template name or positive version carried an invalid shape.
     TemplateShape,
+    #[error("review workflow frame shape is inconsistent")]
     /// A review lifecycle or orchestration frame carried an invalid shape.
     ReviewShape,
+    #[error("model-call usage frame shape is inconsistent")]
     /// A model-call usage row carried cost without any reported usage axis.
     ModelCallUsageShape,
+    #[error("commissioned-goal frame shape is inconsistent")]
     /// A goal request, state, or event carried an invalid shape.
     GoalShape,
+    #[error("session-delegation frame shape is inconsistent")]
     /// A delegation update carried an invalid correlated shape.
     DelegationShape,
+    #[error("model-settings frame shape is inconsistent")]
     /// Model settings or capability data carried a contradictory shape.
     ModelSettingsShape,
+    #[error("session-placement frame shape is inconsistent")]
     /// A dotted placement or its root-global-read acknowledgement is invalid.
     PlacementShape,
+    #[error("commissioned-session fence shape is inconsistent")]
     /// A commissioned-session authority fence carried an invalid shape.
     DispatchFenceShape,
 }
-
-impl fmt::Display for FrameValidationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::UnsupportedVersion => "frame version is unsupported",
-            Self::UncorrelatedClientRequest => "client request identity is uncorrelated",
-            Self::UncorrelatedSuccess => "successful server message is uncorrelated",
-            Self::UncorrelatedApplicationError => "application server error is uncorrelated",
-            Self::ErrorDetailShape => "server error detail does not match its code",
-            Self::TurnStateShape => "transcript turn state is inconsistent",
-            Self::ToolApprovalShape => "tool approval event shape is inconsistent",
-            Self::MetadataShape => "session metadata frame shape is inconsistent",
-            Self::ConversationListShape => {
-                "unified conversation-listing frame shape is inconsistent"
-            }
-            Self::OperatorStatusShape => "operator-status frame shape is inconsistent",
-            Self::SystemPromptShape => "frame omits its required system-prompt member",
-            Self::ConversationImportShape => "conversation-import frame shape is inconsistent",
-            Self::BlobUploadShape => "blob-upload frame shape is inconsistent",
-            Self::BlobReadShape => "blob-read frame shape is inconsistent",
-            Self::ImportedFrontierShape => "imported frontier position is not positive",
-            Self::ContextCompactionShape => "compaction through position is not positive",
-            Self::ImportedConversationEntryShape => {
-                "imported conversation entry position is not positive"
-            }
-            Self::ImportedTextPreviewShape => "imported text preview shape is inconsistent",
-            Self::ImportedFrontierRangeShape => "imported frontier rejection range is inconsistent",
-            Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
-            Self::UserContentShape => "ordered user content shape is inconsistent",
-            Self::TemplateShape => "session-template frame shape is inconsistent",
-            Self::ReviewShape => "review workflow frame shape is inconsistent",
-            Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
-            Self::GoalShape => "commissioned-goal frame shape is inconsistent",
-            Self::DelegationShape => "session-delegation frame shape is inconsistent",
-            Self::ModelSettingsShape => "model-settings frame shape is inconsistent",
-            Self::PlacementShape => "session-placement frame shape is inconsistent",
-            Self::DispatchFenceShape => "commissioned-session fence shape is inconsistent",
-        })
-    }
-}
-
-impl Error for FrameValidationError {}
 
 /// Stable classification of an incoming line failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9835,35 +9815,19 @@ impl fmt::Display for FrameDecodeError {
 
 impl Error for FrameDecodeError {}
 
+#[derive(signalbox_derive::OperatorError)]
 /// Outgoing frame could not be encoded within the protocol boundary.
 #[derive(Debug)]
 pub enum FrameEncodeError {
+    #[error("invalid process-protocol frame: {field_0}")]
     /// In-memory value violated its closed frame shape.
-    Validation(FrameValidationError),
+    Validation(#[source] FrameValidationError),
+    #[error("process-protocol frame serialization failed")]
     /// JSON serialization failed.
-    Json(serde_json::Error),
+    Json(#[source] serde_json::Error),
+    #[error("process-protocol frame is oversized")]
     /// Encoded frame exceeded the inclusive byte cap.
     OversizedFrame,
-}
-
-impl fmt::Display for FrameEncodeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Validation(error) => write!(formatter, "invalid process-protocol frame: {error}"),
-            Self::Json(_) => formatter.write_str("process-protocol frame serialization failed"),
-            Self::OversizedFrame => formatter.write_str("process-protocol frame is oversized"),
-        }
-    }
-}
-
-impl Error for FrameEncodeError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Validation(error) => Some(error),
-            Self::Json(error) => Some(error),
-            Self::OversizedFrame => None,
-        }
-    }
 }
 
 impl From<FrameValidationError> for FrameEncodeError {

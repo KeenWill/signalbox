@@ -8,7 +8,7 @@
 use std::{
     collections::HashSet,
     error::Error,
-    fmt, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -256,44 +256,56 @@ fn nul_case_field(case: &ApprovalJudgeCase) -> Option<&'static str> {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A corpus file could not be read or admitted.
 #[derive(Debug)]
 pub enum CorpusLoadError {
+    #[error("could not read corpus {}: {source}", path.display())]
     /// Filesystem access failed.
     Read {
         /// Requested corpus path.
         path: PathBuf,
+        #[source]
         /// Underlying filesystem failure.
         source: std::io::Error,
     },
+    #[error("corpus JSON is invalid: {field_0}")]
     /// JSON decoding or strict shape validation failed.
-    Json(serde_json::Error),
+    Json(#[source] serde_json::Error),
+    #[error("corpus {} is not valid corpus JSON: {source}", path.display())]
     /// JSON decoding or strict shape validation failed for a named file.
     JsonInFile {
         /// Corpus file that failed to decode.
         path: PathBuf,
+        #[source]
         /// Underlying decode failure.
         source: serde_json::Error,
     },
+    #[error("corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}")]
     /// The corpus names a format this harness does not implement.
     UnsupportedFormatVersion {
         /// Version found in the document.
         observed: u32,
     },
+    #[error("corpus contains no cases")]
     /// The corpus contains no evaluation cases.
     EmptyCorpus,
+    #[error("corpus case id {id} appears more than once")]
     /// More than one case uses the same stable logical identity.
     DuplicateCaseId {
         /// Repeated case identity.
         id: String,
     },
+    #[error("corpus contains a case whose id is empty or whitespace-only")]
     /// A case id is empty or whitespace-only and carries no stable identity.
     BlankCaseId,
+    #[error("corpus case id {id:?} exceeds 128 bytes or contains control characters")]
     /// A case id exceeds the shared byte ceiling or contains a control character.
     InvalidCaseId {
         /// Rejected case identity.
         id: String,
     },
+    #[error("corpus case {id:?} field {field} contains unsupported U+0000")]
     /// A case string contains U+0000, which PostgreSQL JSONB cannot preserve.
     NulCaseString {
         /// Case carrying the unsupported string.
@@ -301,71 +313,12 @@ pub enum CorpusLoadError {
         /// Case field containing U+0000.
         field: &'static str,
     },
+    #[error("corpus case {id} has no label provenance")]
     /// A case does not identify the source of its expected label.
     MissingLabelProvenance {
         /// Case without meaningful label provenance.
         id: String,
     },
-}
-
-impl fmt::Display for CorpusLoadError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Read { path, source } => {
-                write!(
-                    formatter,
-                    "could not read corpus {}: {source}",
-                    path.display()
-                )
-            }
-            Self::Json(source) => write!(formatter, "corpus JSON is invalid: {source}"),
-            Self::JsonInFile { path, source } => write!(
-                formatter,
-                "corpus {} is not valid corpus JSON: {source}",
-                path.display()
-            ),
-            Self::UnsupportedFormatVersion { observed } => write!(
-                formatter,
-                "corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}"
-            ),
-            Self::EmptyCorpus => write!(formatter, "corpus contains no cases"),
-            Self::DuplicateCaseId { id } => {
-                write!(formatter, "corpus case id {id} appears more than once")
-            }
-            Self::BlankCaseId => write!(
-                formatter,
-                "corpus contains a case whose id is empty or whitespace-only"
-            ),
-            Self::InvalidCaseId { id } => write!(
-                formatter,
-                "corpus case id {id:?} exceeds 128 bytes or contains control characters"
-            ),
-            Self::NulCaseString { id, field } => write!(
-                formatter,
-                "corpus case {id:?} field {field} contains unsupported U+0000"
-            ),
-            Self::MissingLabelProvenance { id } => {
-                write!(formatter, "corpus case {id} has no label provenance")
-            }
-        }
-    }
-}
-
-impl Error for CorpusLoadError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Read { source, .. } => Some(source),
-            Self::Json(source) => Some(source),
-            Self::JsonInFile { source, .. } => Some(source),
-            Self::UnsupportedFormatVersion { .. }
-            | Self::EmptyCorpus
-            | Self::DuplicateCaseId { .. }
-            | Self::BlankCaseId
-            | Self::InvalidCaseId { .. }
-            | Self::NulCaseString { .. }
-            | Self::MissingLabelProvenance { .. } => None,
-        }
-    }
 }
 
 /// Replays and scores every corpus case through the current binary judge path.
@@ -568,28 +521,35 @@ impl DispositionMetrics {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A corpus could not be scored through the judge adapter.
 #[derive(Debug)]
 pub enum ScoreError {
+    #[error("corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}")]
     /// The corpus names a format this scorer does not implement.
     UnsupportedFormatVersion {
         /// Version found in the corpus.
         observed: u32,
     },
+    #[error("corpus contains no cases")]
     /// The corpus contains no evaluation cases.
     EmptyCorpus,
+    #[error("corpus case id {id} appears more than once")]
     /// More than one case uses the same stable logical identity.
     DuplicateCaseId {
         /// Repeated case identity.
         id: String,
     },
+    #[error("corpus contains a case whose id is empty or whitespace-only")]
     /// A case id is empty or whitespace-only and carries no stable identity.
     BlankCaseId,
+    #[error("corpus case id {id:?} exceeds 128 bytes or contains control characters")]
     /// A case id exceeds the shared byte ceiling or contains a control character.
     InvalidCaseId {
         /// Rejected case identity.
         id: String,
     },
+    #[error("corpus case {id:?} field {field} contains unsupported U+0000")]
     /// A case string contains U+0000, which no admitted store can preserve.
     NulCaseString {
         /// Case carrying the unsupported string.
@@ -597,15 +557,18 @@ pub enum ScoreError {
         /// Case field containing U+0000.
         field: &'static str,
     },
+    #[error("corpus case {id} has no label provenance")]
     /// A case does not identify the source of its expected label.
     MissingLabelProvenance {
         /// Case without meaningful label provenance.
         id: String,
     },
+    #[error("approval-judge replay failed for case {case_id}: {source}")]
     /// One case failed admission or replay.
     Case {
         /// Logical identity of the failed case.
         case_id: String,
+        #[source]
         /// Underlying admission or replay failure.
         source: Box<dyn Error + Send + Sync>,
     },
@@ -622,55 +585,6 @@ impl ScoreError {
             | Self::NulCaseString { id, .. }
             | Self::MissingLabelProvenance { id } => Some(id),
             Self::Case { case_id, .. } => Some(case_id),
-        }
-    }
-}
-
-impl fmt::Display for ScoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnsupportedFormatVersion { observed } => write!(
-                formatter,
-                "corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}"
-            ),
-            Self::EmptyCorpus => write!(formatter, "corpus contains no cases"),
-            Self::DuplicateCaseId { id } => {
-                write!(formatter, "corpus case id {id} appears more than once")
-            }
-            Self::BlankCaseId => write!(
-                formatter,
-                "corpus contains a case whose id is empty or whitespace-only"
-            ),
-            Self::InvalidCaseId { id } => write!(
-                formatter,
-                "corpus case id {id:?} exceeds 128 bytes or contains control characters"
-            ),
-            Self::NulCaseString { id, field } => write!(
-                formatter,
-                "corpus case {id:?} field {field} contains unsupported U+0000"
-            ),
-            Self::MissingLabelProvenance { id } => {
-                write!(formatter, "corpus case {id} has no label provenance")
-            }
-            Self::Case { case_id, source } => write!(
-                formatter,
-                "approval-judge replay failed for case {case_id}: {source}"
-            ),
-        }
-    }
-}
-
-impl Error for ScoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::UnsupportedFormatVersion { .. }
-            | Self::EmptyCorpus
-            | Self::DuplicateCaseId { .. }
-            | Self::BlankCaseId
-            | Self::InvalidCaseId { .. }
-            | Self::NulCaseString { .. }
-            | Self::MissingLabelProvenance { .. } => None,
-            Self::Case { source, .. } => Some(source.as_ref()),
         }
     }
 }

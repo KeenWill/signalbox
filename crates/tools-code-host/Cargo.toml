@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+signalbox-derive = { path = "../derive" }
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 reqwest = { version = "0.13.4", default-features = false, features = [
     "rustls-no-provider",

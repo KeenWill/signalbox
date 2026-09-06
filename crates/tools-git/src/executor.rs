@@ -1,9 +1,7 @@
 use std::{
     cell::RefCell,
     collections::BTreeSet,
-    error::Error,
     ffi::{OsStr, OsString},
-    fmt,
     os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
 };
@@ -102,17 +100,11 @@ struct BranchSwitchHooks<
     before_head_publish: BeforeHeadPublish,
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("local Git executor contract failed")]
 /// Sanitized local Git executor failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalGitExecutorError;
-
-impl fmt::Display for LocalGitExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("local Git executor contract failed")
-    }
-}
-
-impl Error for LocalGitExecutorError {}
 
 impl ClassifyOperatorFailure for LocalGitExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
