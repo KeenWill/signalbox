@@ -15,5 +15,18 @@ ALTER TABLE repository_state
         (frontier_generation = 0) = (last_frontier_commit_digest IS NULL)
     );
 
+ALTER TABLE gh_event
+    ADD COLUMN frontier_generation numeric(20,0) NOT NULL,
+    ADD COLUMN event_ordinal numeric(20,0) NOT NULL,
+    ADD CONSTRAINT gh_event_frontier_generation_u64 CHECK (
+        frontier_generation BETWEEN 1 AND 18446744073709551615
+    ),
+    ADD CONSTRAINT gh_event_event_ordinal_u64 CHECK (
+        event_ordinal BETWEEN 1 AND 18446744073709551615
+    ),
+    ADD CONSTRAINT gh_event_repository_generation_ordinal_key UNIQUE (
+        repository, frontier_generation, event_ordinal
+    );
+
 RESET search_path;
 RESET ROLE;
