@@ -44,7 +44,8 @@ mismatch is stale unless the complete projections, candidate, and ordered batch
 exactly replay the immediately succeeding commit. An empty event batch with an
 unchanged cursor is unchanged only when both stored projections also match; a
 projection-only change advances the generation and records the complete commit
-digest.
+digest. Projection timestamps use PostgreSQL microsecond precision in both the
+stored comparison and commit identity.
 
 A pure differ (`derive_repo_watch_events`) compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities,

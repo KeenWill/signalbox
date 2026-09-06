@@ -238,7 +238,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let default_branch = BranchName::try_new(String::from("main"))?;
     let default_head =
         CommitSha::try_new(String::from("1111111111111111111111111111111111111111"))?;
-    let observed_at = OffsetDateTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let observed_at =
+        OffsetDateTime::UNIX_EPOCH + Duration::from_secs(1_000) + Duration::from_nanos(123);
     let body = br#"{"action":"opened"}"#;
     let delivery = || WebhookDelivery {
         repository: &repository,
@@ -409,6 +410,19 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             generation: 1,
             events: Box::new([EventAdmission::Replayed]),
         }
+    );
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &projection,
+                1,
+                &frontier,
+                &[],
+                observed_at + Duration::from_secs(1),
+                retain_until + Duration::from_secs(1),
+            )
+            .await?,
+        FrontierEventAdmission::Unchanged
     );
     let updated_title = PullRequestTitle::try_new(String::from("Updated projection"))?;
     projection.pull_requests[0].title = &updated_title;
