@@ -1,0 +1,848 @@
+{
+  "mutations/base-conflict.json": {
+    "converged": false,
+    "reasons": [
+      "base-conflict"
+    ]
+  },
+  "mutations/body-only-finding.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/body-too-long.json": {
+    "converged": false,
+    "reasons": [
+      "description-exceeds-350-words"
+    ]
+  },
+  "mutations/changes-requested.json": {
+    "converged": false,
+    "reasons": [
+      "review-changes-requested"
+    ]
+  },
+  "mutations/check-green-to-red.json": {
+    "converged": false,
+    "reasons": [
+      "check-not-green:required build:FAILURE"
+    ]
+  },
+  "mutations/check-red-to-green.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/check-red.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:required build:FAILURE"
+    ]
+  },
+  "mutations/check-rerun.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/checks-stale.json": {
+    "converged": false,
+    "reasons": [
+      "checks-not-for-current-head"
+    ]
+  },
+  "mutations/clean-base-forward.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/closed-then-reopened.json": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "mutations/comment-only-head.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/completed-summary.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/declined-finding.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/description-malformed.json": {
+    "error": "pull request body must be a string"
+  },
+  "mutations/description-null.json": {
+    "error": "pull request body must be a string"
+  },
+  "mutations/draft-malformed.json": {
+    "error": "pull request isDraft must be a boolean"
+  },
+  "mutations/draft-null.json": {
+    "error": "pull request isDraft must be a boolean"
+  },
+  "mutations/draft.json": {
+    "converged": false,
+    "reasons": [
+      "pull-request-is-draft"
+    ]
+  },
+  "mutations/escalated-open-after-review.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1"
+    ]
+  },
+  "mutations/escalation-before-reviewer-edit.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/escalation-followed-by-reply.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/escalation-wave-4.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/escalation-wave-5.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/escalation-wave-6.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/escalation-wave-8.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/final-identity-baseRefOid.json": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "mutations/final-identity-body.json": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "mutations/final-identity-headRefOid.json": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "mutations/finding-edited-after-disposition.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/head-change-during-census.json": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "mutations/identity-query-incomplete.json": {
+    "error": "'reviewDecision'"
+  },
+  "mutations/identity-query-missing-0.json": {
+    "error": "final identity query missing from observation"
+  },
+  "mutations/identity-query-missing-1.json": {
+    "error": "final identity query missing from observation"
+  },
+  "mutations/informational-answer.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/inline-comment-code-change.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/inventory-unsettled.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled"
+    ]
+  },
+  "mutations/later-body-finding.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/later-changes-requested-finding.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/live-exempt-comparison.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/material-base-forward.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/mergeability-unknown.json": {
+    "converged": false,
+    "reasons": [
+      "mergeability-unknown"
+    ]
+  },
+  "mutations/missing-check.json": {
+    "converged": false,
+    "reasons": [
+      "checks-not-for-current-head",
+      "base-ancestry-unknown",
+      "gating-checks-missing"
+    ]
+  },
+  "mutations/multi-commit-clean-base-forward.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/no-gating-checks.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "gating-checks-missing"
+    ]
+  },
+  "mutations/only-exempt-checks.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "gating-checks-missing"
+    ]
+  },
+  "mutations/persisted-body-finding.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/persisted-request-deleted.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/persisted-request-edited.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/policy-tightened.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/policy-unbound.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-acknowledged-finding.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-base-commit-missing.json": {
+    "converged": false,
+    "reasons": [
+      "base-commits-not-in-head:1"
+    ]
+  },
+  "mutations/python-edited-disposition.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-edited-rename.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-fixed-finding.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-later-decline-supersedes-escalation.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-missing-fix.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-missing-quiet-review.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-non-python-c-header.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-non-python-rust-file.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-pending-gating-check.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:required build:IN_PROGRESS"
+    ]
+  },
+  "mutations/python-persisted-review-id-replaced.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-persisted-review-missing.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-persisted-review-red-rerun.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:required build:FAILURE"
+    ]
+  },
+  "mutations/python-planning-banner-only-at-head.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-planning-only-added.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-planning-only-modified.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-planning-rename-base-path.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-python-encoding-cookie-change.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-python-executable-change.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-python-hash-comments.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-python-hunk-content-that-looks-like-a-header.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-python-shebang-change.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-python-string-contents.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-question-finding.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-request-typo-plural.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-request-typo-suffix.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-request-wrong-head.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-review-and-request-pagination.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-thread-comment-pagination.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-trivial-information.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-unreachable-review-commit.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-untrusted-disposition.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-unverified-merge.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-wave-ancestry-unavailable.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-wave-base-comparison-unavailable.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/rename-only-head.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/request-deleted.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/request-edited.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/request-pre-green.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/request-untrusted.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/resolution-observed.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/review-before-body-edit.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/review-dismissed.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/review-edit-during-census.json": {
+    "converged": false,
+    "reasons": [
+      "checks-not-for-current-head",
+      "base-ancestry-unknown"
+    ]
+  },
+  "mutations/review-other-actor.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/rollup-missing.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head",
+      "check-rollup-missing",
+      "gating-checks-missing"
+    ]
+  },
+  "mutations/settled.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/summary-without-reaction.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/thread-page-missing.json": {
+    "error": "incomplete connection census"
+  },
+  "mutations/threads-over-100.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/undispositioned-finding.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/unresolved-finding.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/wave-census-after-rerun.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "pr-1566.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "unresolved-review-threads:2",
+      "undispositioned-review-threads:36",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Anthropic smoke eligibility:QUEUED",
+      "check-not-green:Claude smoke eligibility:QUEUED",
+      "check-not-green:Codex smoke eligibility:QUEUED",
+      "check-not-green:OpenAI smoke eligibility:QUEUED",
+      "check-not-green:Rust change scope:QUEUED",
+      "check-not-green:cargo-deny:QUEUED",
+      "check-not-green:contract-checks:QUEUED",
+      "check-not-green:checker-and-format-tests:QUEUED"
+    ]
+  },
+  "pr-1567.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1568.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1569.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1570.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1571.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1572.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1573.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1574.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1575.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1576.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:37",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:Tool eval eligibility:QUEUED",
+      "check-not-green:OpenAI smoke eligibility:QUEUED",
+      "check-not-green:cargo-deny:QUEUED",
+      "check-not-green:Swift native change scope:QUEUED"
+    ]
+  },
+  "pr-1577.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1578.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:25",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust change scope:QUEUED",
+      "check-not-green:Rust coverage (report only):IN_PROGRESS",
+      "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:contract-checks:QUEUED",
+      "check-not-green:workspace tool eval (report only):QUEUED",
+      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:Claude smoke compatibility:QUEUED",
+      "check-not-green:Codex smoke compatibility:QUEUED",
+      "check-not-green:OpenAI smoke compatibility:QUEUED",
+      "check-not-green:checker-and-format-tests:QUEUED"
+    ]
+  },
+  "pr-1580.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:5",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Anthropic smoke eligibility:QUEUED",
+      "check-not-green:Rust change scope:QUEUED",
+      "check-not-green:Rust coverage (report only):IN_PROGRESS",
+      "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:contract-checks:QUEUED",
+      "check-not-green:workspace tool eval (report only):QUEUED",
+      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:Claude smoke compatibility:QUEUED",
+      "check-not-green:Codex smoke compatibility:QUEUED"
+    ]
+  },
+  "pr-1581.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:postgres-integration (persistence 1/6):FAILURE",
+      "check-not-green:postgres-integration (persistence 2/6):FAILURE",
+      "check-not-green:postgres-integration (persistence 4/6):FAILURE",
+      "check-not-green:postgres-integration:FAILURE"
+    ]
+  },
+  "pr-1582.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1583.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1584.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "unresolved-review-threads:2",
+      "undispositioned-review-threads:19",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Anthropic smoke eligibility:QUEUED",
+      "check-not-green:Codex smoke eligibility:QUEUED",
+      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:OpenAI smoke eligibility:QUEUED",
+      "check-not-green:Rust change scope:QUEUED",
+      "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:contract-checks:QUEUED",
+      "check-not-green:workspace tool eval (report only):QUEUED",
+      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:Claude smoke compatibility:QUEUED",
+      "check-not-green:checker-and-format-tests:QUEUED"
+    ]
+  },
+  "pr-1585.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1586.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:8",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:exec tool eval (report only):FAILURE",
+      "check-not-green:postgres-integration (persistence 1/6):FAILURE",
+      "check-not-green:postgres-integration (persistence 2/6):FAILURE",
+      "check-not-green:postgres-integration (signalboxd 1/1):FAILURE",
+      "check-not-green:postgres-integration:FAILURE"
+    ]
+  },
+  "pr-1587.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "unresolved-review-threads:3",
+      "undispositioned-review-threads:19",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Codex smoke eligibility:QUEUED",
+      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:OpenAI smoke eligibility:QUEUED",
+      "check-not-green:Rust change scope:QUEUED",
+      "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:contract-checks:QUEUED",
+      "check-not-green:workspace tool eval (report only):QUEUED",
+      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:Anthropic smoke compatibility:QUEUED",
+      "check-not-green:Claude smoke compatibility:QUEUED",
+      "check-not-green:checker-and-format-tests:IN_PROGRESS"
+    ]
+  },
+  "pr-1588.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1589.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust coverage (report only):CANCELLED",
+      "check-not-green:postgres-integration (runner 1/1):CANCELLED",
+      "check-not-green:postgres-integration (signalboxd 1/1):FAILURE",
+      "check-not-green:postgres-integration:FAILURE"
+    ]
+  },
+  "pr-1590.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1591.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1592.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1593.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:15",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Claude live compatibility:QUEUED",
+      "check-not-green:checker-and-format-tests:IN_PROGRESS",
+      "check-not-green:rust-checks:QUEUED",
+      "check-not-green:workspace-tests:IN_PROGRESS",
+      "check-not-green:Domain instruction counts (report only):QUEUED",
+      "check-not-green:postgres-integration (build):QUEUED"
+    ]
+  },
+  "pr-1594.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:3",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:workspace-tests:FAILURE",
+      "check-not-green:postgres-integration (persistence 1/6):FAILURE",
+      "check-not-green:validate:FAILURE",
+      "check-not-green:postgres-integration:FAILURE",
+      "base-commits-not-in-head:80"
+    ]
+  },
+  "pr-1595.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1596.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  }
+}

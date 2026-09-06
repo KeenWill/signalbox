@@ -22,18 +22,21 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AcceptedInputTurnFailureIdentities,
-    AssistantText, CancelledModelCallTurnIdentities, CompletedModelCallIdentities,
-    ContextCompactionId, ContextFrontierId, CreateSession, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, FrozenAliasDefinition, Goal, GoalCommandRejection,
-    GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
-    GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
-    GoalUserProvenance, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelSelectionOverride, ModelSelectionRequest,
-    ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices, PreparedCreateSession,
-    ProviderModelIdentity, ReplaceSessionDefaults, ResolvedProviderTarget,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
+    AssistantText, CancelledModelCallTurnIdentities, CommandPrincipal,
+    CompletedModelCallIdentities, ContextCompactionId, ContextFrontierId, CreateSession,
+    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, FinishCheckVerdict, FrozenAliasDefinition, Goal,
+    GoalCommandRejection, GoalCommandResult, GoalEvent, GoalGuidance, GoalModelBlockedReasonKind,
+    GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
+    GoalUserAction, GoalUserCommand, GoalUserProvenance, LifecycleActor, ModelAlias, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelSelectionOverride,
+    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, ParentTerminationKind,
+    PerInputConfigurationChoices, PreparedCreateSession, ProviderModelIdentity,
+    ReplaceSessionDefaults, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionInputPosition, SessionLifecycleApplication,
+    SessionLifecycleCommand, SessionLifecycleCommandResult, SessionLifecycleOperation,
+    SessionLifecycleState, SessionTerminalOutcome, StopStickiness, SubmitInput,
     SubmitInputAppliedResult, SubmitInputResult, ToolRequestId, TranscriptAncestry, TurnAttemptId,
     TurnId, TurnModelSettingsResolved, TurnTerminalCause, UserContent,
 };
@@ -55,14 +58,18 @@ use signalbox_persistence::{
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     outbox::{
         DispatchedDelegationOutcome, DispatchedDelegationProvenance, DispatchedDelegationReason,
-        DispatchedOutboxEvent, DispatchedOutboxEventKind, OutboxDeliveryDecision,
-        OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedTurnTerminalDisposition,
+        OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{ProcessReadRepository, ProcessTurnState},
     replace_session_defaults::{
         ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepository,
     },
     scheduler::PostgresEligibilitySweep,
+    session_lifecycle::SessionLifecycleRepository,
+    session_lifecycle_command::{
+        SessionLifecycleCommandHandlingOutcome, SessionLifecycleCommandRepository,
+    },
     start_eligible_turn::{CommitCompactionFailurePreviewOutcome, StartEligibleTurnRepository},
     startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository,
@@ -121,6 +128,68 @@ fn tool_request(value: u128) -> ToolRequestId {
     ToolRequestId::from_uuid(Uuid::from_u128(value))
 }
 
+/// Delivers every committed event in order.
+async fn drain_dispatched(pool: &PgPool) -> Result<Vec<DispatchedOutboxEvent>, Box<dyn Error>> {
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let mut dispatched = Vec::new();
+    loop {
+        let mut offered = None;
+        let outcome = dispatcher
+            .dispatch_next(|event| {
+                offered = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?;
+        match (outcome, offered) {
+            (OutboxDispatchOutcome::Delivered { .. }, Some(event)) => dispatched.push(event),
+            (OutboxDispatchOutcome::Idle, None) => return Ok(dispatched),
+            (outcome, _) => return Err(format!("unexpected dispatch outcome {outcome:?}").into()),
+        }
+    }
+}
+
+/// The stored kind of each delivered event, in delivery order.
+fn dispatched_kind_names(dispatched: &[DispatchedOutboxEvent]) -> Vec<&'static str> {
+    dispatched
+        .iter()
+        .map(|event| match event.kind() {
+            DispatchedOutboxEventKind::SessionCreated(_) => "session_created",
+            DispatchedOutboxEventKind::SessionStateChanged(_) => "session_state_changed",
+            DispatchedOutboxEventKind::SessionTerminal(_) => "session_terminal",
+            DispatchedOutboxEventKind::TurnTerminal { .. } => "turn_terminal",
+            DispatchedOutboxEventKind::GoalChanged(_) => "goal_changed",
+            DispatchedOutboxEventKind::CommandSettled { .. } => "command_settled",
+            DispatchedOutboxEventKind::InjectionSettled { .. } => "injection_settled",
+            DispatchedOutboxEventKind::SessionOwnershipChanged(_) => "session_ownership_changed",
+            DispatchedOutboxEventKind::SessionModelSettingsChanged(_) => {
+                "session_model_settings_changed"
+            }
+            DispatchedOutboxEventKind::TurnModelSettingsResolved(_) => {
+                "turn_model_settings_resolved"
+            }
+            DispatchedOutboxEventKind::InputAccepted { .. } => "input_accepted",
+            DispatchedOutboxEventKind::TurnActivated { .. } => "turn_activated",
+            DispatchedOutboxEventKind::ModelCallTransition { .. } => "model_call_transition",
+            DispatchedOutboxEventKind::ToolBatchTransition { .. } => "tool_batch_transition",
+            DispatchedOutboxEventKind::ToolApprovalDecided { .. } => "tool_approval_decided",
+            DispatchedOutboxEventKind::ContextCompacted { .. } => "context_compacted",
+            DispatchedOutboxEventKind::RunnerStateTransition { .. } => "runner_state_transition",
+            DispatchedOutboxEventKind::DelegationUpdate(_) => "delegation_update",
+            DispatchedOutboxEventKind::DelegationWake(_) => "delegation_wake",
+        })
+        .collect()
+}
+
+/// Where `turn`'s acceptance event sits in the delivered order.
+fn acceptance_position(dispatched: &[DispatchedOutboxEvent], turn: TurnId) -> Option<usize> {
+    dispatched.iter().position(|event| {
+        matches!(
+            event.kind(),
+            DispatchedOutboxEventKind::InputAccepted { turn: accepted, .. } if *accepted == turn
+        )
+    })
+}
+
 #[track_caller]
 fn turn_model_settings_event(event: &DispatchedOutboxEvent) -> &TurnModelSettingsResolved {
     match event.kind() {
@@ -146,10 +215,7 @@ fn creation() -> PreparedCreateSession {
 fn creation_with_model(model: ModelSelectionRequest) -> PreparedCreateSession {
     CreateSession::new(
         command(CREATE_COMMAND),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(model),
     )
     .prepare(session(SESSION))
@@ -159,10 +225,7 @@ fn creation_with_model(model: ModelSelectionRequest) -> PreparedCreateSession {
 fn creation_fixture(command_id: u128, session_id: u128, selection: u128) -> PreparedCreateSession {
     CreateSession::new(
         command(command_id),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(Uuid::from_u128(selection)),
         )),
@@ -415,13 +478,12 @@ async fn call_free_failure_recovery_cause_round_trips_as_a_closed_type()
     Ok(())
 }
 
-/// INV-048 / INV-053: a fresh durable sweep rediscovers a pursuing goal whose
+/// a fresh durable sweep rediscovers a pursuing goal whose
 /// current turn terminalized before its scheduler disposition could commit,
 /// and the goal-owned origin records its frozen model settings.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_inv053_terminal_goal_disposition_survives_scheduler_restart()
--> Result<(), Box<dyn Error>> {
+async fn terminal_goal_disposition_survives_scheduler_restart() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -459,7 +521,7 @@ async fn inv048_inv053_terminal_goal_disposition_survives_scheduler_restart()
     );
     terminalize_goal_turn_as_failed(&pool, 0xe61).await?;
 
-    let (sessions, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -739,6 +801,142 @@ async fn completed_goal_with_successor(
     Ok(())
 }
 
+/// A release serialized after the current goal turn completes retires the
+/// daemon's liveness obligation before it can queue another goal turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_released_session_does_not_continue_its_completed_goal_turn() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached = turn_candidates(0xb58);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x958),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("release after this goal turn")),
+                ),
+                Some(attached),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(activate_goal_turn(&pool, 0xd59).await?, attached.turn());
+    mark_goal_turn_completed(&pool, attached.turn()).await?;
+    assert_eq!(
+        SessionLifecycleCommandRepository::new(pool.clone())
+            .handle(
+                SessionLifecycleCommand::new(
+                    command(0x959),
+                    session(SESSION),
+                    SessionLifecycleOperation::Release,
+                ),
+                CommandPrincipal::Operator,
+            )
+            .await?,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
+            SessionLifecycleApplication::OwnershipChanged
+        ))
+    );
+
+    assert_eq!(
+        repository
+            .reconcile_current_after_execution(
+                session(SESSION),
+                turn_candidates(0xb59),
+                GoalNeed::try_new(String::from("repair execution"))
+                    .expect("fixture need is admitted"),
+                |_| None,
+            )
+            .await?,
+        GoalTurnContinuationOutcome::NotPursuing
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM goal_turn WHERE session_id = $1")
+            .bind(Uuid::from_u128(SESSION))
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A release serialized after goal reconciliation retires the successor that
+/// was already queued, so unmonitored goal work cannot later activate.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn release_retires_an_already_queued_goal_successor() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let attached = turn_candidates(0xb5a);
+    let successor = turn_candidates(0xb5b);
+    completed_goal_with_successor(&pool, attached, successor).await?;
+    let queued: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(successor.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(queued, "queued");
+
+    assert_eq!(
+        SessionLifecycleCommandRepository::new(pool.clone())
+            .handle(
+                SessionLifecycleCommand::new(
+                    command(0x95a),
+                    session(SESSION),
+                    SessionLifecycleOperation::Release,
+                ),
+                CommandPrincipal::Operator,
+            )
+            .await?,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
+            SessionLifecycleApplication::OwnershipChanged
+        ))
+    );
+
+    let retired: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, terminal_cause_kind
+           FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(successor.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        retired,
+        (
+            String::from("terminal"),
+            Some(String::from("retired")),
+            Some(String::from("goal_turn_ineligible")),
+        )
+    );
+    let retired_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turn_terminal_outbox_event
+          WHERE session_id = $1 AND turn_id = $2 AND disposition_kind = 'retired'",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(successor.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retired_events, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn mark_completed_goal_turn_failed(
     pool: &PgPool,
     turn: TurnId,
@@ -770,19 +968,131 @@ fn assert_applied_transition(outcome: GoalTransitionOutcome) {
 }
 
 #[track_caller]
+fn applied_transition_event(outcome: GoalTransitionOutcome) -> GoalEvent {
+    match outcome {
+        GoalTransitionOutcome::Applied(event) => event,
+        other => panic!("fixture transition must apply, got {other:?}"),
+    }
+}
+
+#[track_caller]
 fn assert_applied_command(outcome: GoalCommandHandlingOutcome) {
     let GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_)) = outcome else {
         panic!("fixture command must apply");
     };
 }
 
-/// INV-048 / INV-053: a goal-owned accepted input dispatches its frozen model
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn attaching_a_goal_dispatches_the_first_turn_under_the_command_issuer()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let attached = GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(ATTACH_COMMAND),
+                session(SESSION),
+                GoalUserAction::Attach(statement("finish the commissioned task")),
+            ),
+            Some(turn_candidates(0xb68)),
+            |_| None,
+        )
+        .await?;
+    let lifecycle: (String, String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, actor_kind, actor_module
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session(SESSION).into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_applied_command(attached);
+    assert_eq!(
+        lifecycle,
+        (String::from("dispatched"), String::from("operator"), None)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn owned_pending_failure_selection_requires_the_exact_need_under_the_session_lock()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xb69);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(ATTACH_COMMAND),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("finish the commissioned task")),
+                ),
+                Some(attached_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(
+        activate_goal_turn(&pool, 0xd69).await?,
+        attached_turn.turn()
+    );
+    terminalize_goal_turn_as_failed(&pool, 0xe69).await?;
+    let unmonitored_need = GoalNeed::try_new(String::from("await adoption to repair execution"))?;
+    let operator_need = GoalNeed::try_new(String::from("operator must repair execution"))?;
+    let blocked = applied_transition_event(
+        repository
+            .block_execution_failure(
+                session(SESSION),
+                unmonitored_need.clone(),
+                GoalSchedulerProvenance::new(attached_turn.turn()),
+            )
+            .await?,
+    );
+
+    assert_eq!(
+        repository
+            .pending_owned_execution_failure_with_need(session(SESSION), &operator_need)
+            .await?,
+        None
+    );
+    assert_eq!(
+        repository
+            .pending_owned_execution_failure_with_need(session(SESSION), &unmonitored_need)
+            .await?,
+        Some(blocked.ordinal())
+    );
+    SessionLifecycleRepository::new(pool.clone())
+        .release(session(SESSION), LifecycleActor::Operator)
+        .await?;
+    assert_eq!(
+        repository
+            .pending_owned_execution_failure_with_need(session(SESSION), &unmonitored_need)
+            .await?,
+        None
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// a goal-owned accepted input dispatches its frozen model
 /// settings and activates without a synthetic user command, then remains a
 /// canonical active origin for steer.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command()
--> Result<(), Box<dyn Error>> {
+async fn s_goal_goal_owned_input_activates_without_a_user_command() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -815,52 +1125,25 @@ async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command(
     .await?;
     assert_eq!(accepted_events, 1);
 
-    let dispatcher = OutboxDispatcher::new(pool.clone());
-    let mut created = None;
+    let dispatched = drain_dispatched(&pool).await?;
     assert_eq!(
-        dispatcher
-            .dispatch_next(|event| {
-                created = Some(event.clone());
-                OutboxDeliveryDecision::Delivered
-            })
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 1 }
+        dispatched_kind_names(&dispatched),
+        [
+            "session_created",
+            "goal_changed",
+            "session_ownership_changed",
+            "turn_model_settings_resolved",
+            "input_accepted",
+        ]
     );
-    let created = created.expect("the session creation event was offered");
-    assert_eq!(created.session(), session(SESSION));
-    assert!(matches!(
-        created.kind(),
-        DispatchedOutboxEventKind::SessionCreated
-    ));
-
-    let mut settings = None;
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|event| {
-                settings = Some(event.clone());
-                OutboxDeliveryDecision::Delivered
-            })
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 2 }
-    );
-    let settings = settings.expect("the goal settings event was offered");
-    assert_eq!(settings.session(), session(SESSION));
-    let settings = turn_model_settings_event(&settings);
+    assert_eq!(dispatched[0].session(), Some(session(SESSION)));
+    let settings = &dispatched[3];
+    assert_eq!(settings.session(), Some(session(SESSION)));
+    let settings = turn_model_settings_event(settings);
     assert_eq!(settings.accepted_input(), candidates.accepted_input());
     assert_eq!(settings.turn(), candidates.turn());
-
-    let mut accepted = None;
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|event| {
-                accepted = Some(event.clone());
-                OutboxDeliveryDecision::Delivered
-            })
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 3 }
-    );
-    let accepted = accepted.expect("the goal input acceptance event was offered");
-    assert_eq!(accepted.session(), session(SESSION));
+    let accepted = &dispatched[4];
+    assert_eq!(accepted.session(), Some(session(SESSION)));
     assert_eq!(
         accepted.kind(),
         &DispatchedOutboxEventKind::InputAccepted {
@@ -936,11 +1219,11 @@ async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command(
     Ok(())
 }
 
-/// INV-048: an expected-head resume applies to exactly the blocked event it
+/// an expected-head resume applies to exactly the blocked event it
 /// names, and an unmet expectation appends nothing and spends no identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<(), Box<dyn Error>> {
+async fn s_goal_expected_resume_binds_to_one_blocked_event() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1029,6 +1312,15 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
             .await?
             .is_empty()
     );
+    // The automatic resume is daemon core's, and the transition it projects
+    // says so: the envelope issuer classifies it, not the command's presence.
+    let actor: (String, Option<String>) = sqlx::query_as(
+        "SELECT actor_kind, actor_module FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session(SESSION).into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(actor, (String::from("core"), None));
     let spent: i64 =
         sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
             .bind(Uuid::from_u128(RESUME_COMMAND))
@@ -1046,11 +1338,11 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
     Ok(())
 }
 
-/// INV-048: resuming a blocked goal schedules exactly one next turn whose
+/// resuming a blocked goal schedules exactly one next turn whose
 /// accepted input is the exact optional user guidance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(), Box<dyn Error>> {
+async fn s_goal_resume_delivers_guidance_to_the_next_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1157,11 +1449,11 @@ async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(),
     Ok(())
 }
 
-/// INV-048: PostgreSQL round-trips the complete immutable goal lineage,
+/// PostgreSQL round-trips the complete immutable goal lineage,
 /// including its user receipts and atomic statement supersession.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_complete_lineage_round_trips() -> Result<(), Box<dyn Error>> {
+async fn s_goal_complete_lineage_round_trips() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1274,10 +1566,10 @@ async fn s_goal_inv048_complete_lineage_round_trips() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// INV-048: persisted goal history rejects mutation after commit.
+/// persisted goal history rejects mutation after commit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_event_history_is_append_only() -> Result<(), Box<dyn Error>> {
+async fn goal_event_history_is_append_only() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1312,11 +1604,11 @@ async fn inv048_goal_event_history_is_append_only() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-/// INV-048: superseding before activation makes the old queued statement
+/// superseding before activation makes the old queued statement
 /// ineligible while the replacement remains the first runnable goal turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<dyn Error>> {
+async fn supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1349,8 +1641,8 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
 
     let retired_rows: i64 = sqlx::query_scalar(
         "SELECT count(*)
-           FROM goal_turn_retired_outbox_event
-          WHERE session_id = $1 AND turn_id = $2",
+           FROM turn_terminal_outbox_event
+          WHERE session_id = $1 AND turn_id = $2 AND disposition_kind = 'retired'",
     )
     .bind(Uuid::from_u128(SESSION))
     .bind(obsolete.turn().into_uuid())
@@ -1358,42 +1650,33 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
     .await?;
     assert_eq!(retired_rows, 1);
 
-    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let dispatched = drain_dispatched(&pool).await?;
+    // Retirement is published before the replacement's acceptance.
     assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 1 }
+        dispatched_kind_names(&dispatched),
+        [
+            "session_created",
+            "goal_changed",
+            "session_ownership_changed",
+            "turn_model_settings_resolved",
+            "input_accepted",
+            "goal_changed",
+            "turn_terminal",
+            "turn_model_settings_resolved",
+            "input_accepted",
+        ]
     );
+    assert_eq!(dispatched[6].session(), Some(session(SESSION)));
     assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 2 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 3 }
-    );
-    let mut retired = None;
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|event| {
-                retired = Some(event.clone());
-                OutboxDeliveryDecision::Delivered
-            })
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 4 }
-    );
-    let retired = retired.expect("the queued goal retirement event was offered");
-    assert_eq!(retired.session(), session(SESSION));
-    assert_eq!(
-        retired.kind(),
-        &DispatchedOutboxEventKind::GoalTurnRetired {
+        dispatched[6].kind(),
+        &DispatchedOutboxEventKind::TurnTerminal {
             turn: obsolete.turn(),
+            disposition: DispatchedTurnTerminalDisposition::Retired,
         }
+    );
+    assert_eq!(
+        acceptance_position(&dispatched, replacement.turn()),
+        Some(8)
     );
 
     assert_eq!(activate_goal_turn(&pool, 0xd31).await?, replacement.turn());
@@ -1403,12 +1686,11 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-048: a terminal current goal turn whose goal remains pursuing is a
+/// a terminal current goal turn whose goal remains pursuing is a
 /// durable reconciliation hint after process loss.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_terminal_current_goal_turn_is_a_reconciliation_hint() -> Result<(), Box<dyn Error>>
-{
+async fn terminal_current_goal_turn_is_a_reconciliation_hint() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1430,7 +1712,7 @@ async fn inv048_terminal_current_goal_turn_is_a_reconciliation_hint() -> Result<
     );
     assert_eq!(activate_goal_turn(&pool, 0xd40).await?, attached.turn());
     mark_goal_turn_completed(&pool, attached.turn()).await?;
-    let (sessions, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -1443,12 +1725,12 @@ async fn inv048_terminal_current_goal_turn_is_a_reconciliation_hint() -> Result<
     Ok(())
 }
 
-/// INV-012 / INV-048: stopping before activation retains the exact descendant
+/// stopping before activation retains the exact descendant
 /// scope for replay, leaves no runnable goal work, and cannot block a later
 /// explicit commission.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_inv048_stop_scope_replays_and_retires_queued_work() -> Result<(), Box<dyn Error>> {
+async fn stop_scope_replays_and_retires_queued_work() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1485,11 +1767,10 @@ async fn inv012_inv048_stop_scope_replays_and_retires_queued_work() -> Result<()
             .await?,
         StartEligibleTurnOutcome::NoEligibleTurn
     );
-    let (stopped_sessions, _dispatch_starts, stopped_continuation) =
-        PostgresEligibilitySweep::new(pool.clone())
-            .find_sessions()
-            .await?
-            .into_parts();
+    let (stopped_sessions, stopped_continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
 
     assert!(stopped_sessions.is_empty());
     assert!(!stopped_continuation);
@@ -1513,12 +1794,11 @@ async fn inv012_inv048_stop_scope_replays_and_retires_queued_work() -> Result<()
     Ok(())
 }
 
-/// INV-048: a stopped queued goal turn is immutable history and does not
+/// a stopped queued goal turn is immutable history and does not
 /// remain a periodic reconciliation hint.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_stopped_queued_goal_is_absent_from_reconciliation_hints()
--> Result<(), Box<dyn Error>> {
+async fn stopped_queued_goal_is_absent_from_reconciliation_hints() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1552,7 +1832,7 @@ async fn inv048_stopped_queued_goal_is_absent_from_reconciliation_hints()
             )
             .await?,
     );
-    let (sessions, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -1565,11 +1845,11 @@ async fn inv048_stopped_queued_goal_is_absent_from_reconciliation_hints()
     Ok(())
 }
 
-/// INV-048: retiring a queued replacement keeps its immutable tail position
+/// retiring a queued replacement keeps its immutable tail position
 /// while excluding its turn from runtime scheduling.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_stopped_replacement_does_not_corrupt_the_active_acceptance_tail()
+async fn stopped_replacement_does_not_corrupt_the_active_acceptance_tail()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -1665,11 +1945,11 @@ async fn inv048_stopped_replacement_does_not_corrupt_the_active_acceptance_tail(
     Ok(())
 }
 
-/// INV-048: an alias absent at acceptance is a replayable command rejection,
+/// an alias absent at acceptance is a replayable command rejection,
 /// not repository corruption or a partially commissioned lineage.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_unknown_goal_model_alias_is_durably_rejected() -> Result<(), Box<dyn Error>> {
+async fn unknown_goal_model_alias_is_durably_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let alias = ModelAlias::from_uuid(Uuid::from_u128(0xa11));
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -1718,12 +1998,11 @@ async fn inv048_unknown_goal_model_alias_is_durably_rejected() -> Result<(), Box
     Ok(())
 }
 
-/// INV-048: an applied command receipt can reference only the goal event that
+/// an applied command receipt can reference only the goal event that
 /// carries that same durable command identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_applied_receipt_cannot_cross_wire_another_command_event()
--> Result<(), Box<dyn Error>> {
+async fn applied_receipt_cannot_cross_wire_another_command_event() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1733,9 +2012,9 @@ async fn inv048_applied_receipt_cannot_cross_wire_another_command_event()
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp()),
-                ($2, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator'),
+                ($2, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(first.into_uuid())
     .bind(second.into_uuid())
@@ -1791,12 +2070,11 @@ async fn inv048_applied_receipt_cannot_cross_wire_another_command_event()
     Ok(())
 }
 
-/// INV-048: an applied goal command names only the event kind corresponding
+/// an applied goal command names only the event kind corresponding
 /// to its immutable operation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_command_operation_matches_the_applied_event_kind() -> Result<(), Box<dyn Error>>
-{
+async fn goal_command_operation_matches_the_applied_event_kind() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1805,8 +2083,8 @@ async fn inv048_goal_command_operation_matches_the_applied_event_kind() -> Resul
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(mismatched.into_uuid())
     .execute(&mut *transaction)
@@ -1850,11 +2128,11 @@ async fn inv048_goal_command_operation_matches_the_applied_event_kind() -> Resul
     Ok(())
 }
 
-/// INV-048: exhausting the session acceptance ordinal yields typed scheduler
+/// exhausting the session acceptance ordinal yields typed scheduler
 /// backpressure and a durable, replayable user-command rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_turn_acceptance_position_exhaustion_is_typed_and_durable()
+async fn goal_turn_acceptance_position_exhaustion_is_typed_and_durable()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -1933,12 +2211,12 @@ async fn inv048_goal_turn_acceptance_position_exhaustion_is_typed_and_durable()
     Ok(())
 }
 
-/// INV-048: neither a delayed model declaration nor an unrecorded scheduler
+/// neither a delayed model declaration nor an unrecorded scheduler
 /// failure from an older turn can block a resumed goal whose newer turn is current.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_delayed_old_turn_transitions_do_not_block_the_resumed_turn()
--> Result<(), Box<dyn Error>> {
+async fn delayed_old_turn_transitions_do_not_block_the_resumed_turn() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2033,11 +2311,11 @@ async fn inv048_delayed_old_turn_transitions_do_not_block_the_resumed_turn()
     Ok(())
 }
 
-/// INV-048: a continuation can name only the acceptance-latest goal turn,
+/// a continuation can name only the acceptance-latest goal turn,
 /// so a resumed turn prevents a stale completed predecessor from branching.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_continuation_requires_the_latest_goal_turn() -> Result<(), Box<dyn Error>> {
+async fn continuation_requires_the_latest_goal_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2158,11 +2436,11 @@ async fn inv048_continuation_requires_the_latest_goal_turn() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-048: a direct model event cannot name an older turn from the current
+/// a direct model event cannot name an older turn from the current
 /// goal generation after a successor has become current.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_model_event_requires_the_current_goal_turn() -> Result<(), Box<dyn Error>> {
+async fn model_event_requires_the_current_goal_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2205,11 +2483,11 @@ async fn inv048_model_event_requires_the_current_goal_turn() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-048: a direct scheduler event cannot name an unsuccessful older turn
+/// a direct scheduler event cannot name an unsuccessful older turn
 /// after a same-generation successor has become current.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_scheduler_event_requires_the_current_goal_turn() -> Result<(), Box<dyn Error>> {
+async fn scheduler_event_requires_the_current_goal_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2242,12 +2520,11 @@ async fn inv048_scheduler_event_requires_the_current_goal_turn() -> Result<(), B
     Ok(())
 }
 
-/// INV-048: a direct scheduler failure event must name a terminal turn whose
+/// a direct scheduler failure event must name a terminal turn whose
 /// disposition is unsuccessful.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_scheduler_event_requires_an_unsuccessful_terminal_turn()
--> Result<(), Box<dyn Error>> {
+async fn scheduler_event_requires_an_unsuccessful_terminal_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2290,13 +2567,12 @@ async fn inv048_scheduler_event_requires_an_unsuccessful_terminal_turn()
     Ok(())
 }
 
-/// INV-048: model goal events bind to the exact `goal_declare` name and
+/// model goal events bind to the exact `goal_declare` name and
 /// canonical arguments and adjacent declaration text carried by their trusted
 /// request identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_model_goal_declaration_request_matches_name_and_arguments()
--> Result<(), Box<dyn Error>> {
+async fn model_goal_declaration_request_matches_name_and_arguments() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2387,11 +2663,11 @@ async fn inv048_model_goal_declaration_request_matches_name_and_arguments()
     Ok(())
 }
 
-/// INV-048: goal_declare is rejected when another response part follows it,
+/// goal_declare is rejected when another response part follows it,
 /// preventing later tool effects after a terminal goal transition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_model_goal_declaration_is_the_final_response_part() -> Result<(), Box<dyn Error>> {
+async fn model_goal_declaration_is_the_final_response_part() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2442,6 +2718,7 @@ async fn inv048_model_goal_declaration_is_the_final_response_part() -> Result<()
             session(SESSION),
             GoalReport::try_new(report_text).expect("fixture report is admitted"),
             provenance,
+            signalbox_domain::FinishCheckVerdict::Unverified,
         )
         .await
         .expect_err("a nonfinal declaration cannot source a goal event");
@@ -2452,11 +2729,83 @@ async fn inv048_model_goal_declaration_is_the_final_response_part() -> Result<()
     Ok(())
 }
 
-/// INV-048: the adjacent transcript representation carries the domain's full
+/// A committed closure makes a later model achievement non-current, so
+/// settlement cannot be stranded behind a contradictory terminal goal event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_committed_closure_refuses_late_model_achievement() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xba6);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x9a6),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("finish before the closure commits")),
+                ),
+                Some(attached_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(
+        activate_goal_turn(&pool, 0xda6).await?,
+        attached_turn.turn()
+    );
+    let report = String::from("late achievement");
+    let declaration_request = tool_request(0xfa6);
+    insert_goal_tool_request(
+        &pool,
+        attached_turn.turn(),
+        declaration_request,
+        "goal_declare",
+        r#"{"transition":"achieved"}"#,
+        &report,
+    )
+    .await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .commit_pending_terminal(
+            session(SESSION),
+            SessionTerminalOutcome::FailedUnknown,
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+
+    let outcome = repository
+        .declare_achieved(
+            session(SESSION),
+            GoalReport::try_new(report).expect("fixture report is admitted"),
+            GoalModelProvenance::new(attached_turn.turn(), declaration_request),
+            signalbox_domain::FinishCheckVerdict::Unverified,
+        )
+        .await?;
+
+    assert_eq!(outcome, GoalTransitionOutcome::NotCurrentGoalTurn);
+    assert_eq!(
+        repository
+            .load_goal(session(SESSION))
+            .await?
+            .expect("the goal remains attached")
+            .current()
+            .state(),
+        &GoalState::Pursuing
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// the adjacent transcript representation carries the domain's full
 /// 1 MiB goal-report bound without widening normalized tool arguments.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_model_goal_declaration_carries_full_report_bound() -> Result<(), Box<dyn Error>> {
+async fn model_goal_declaration_carries_full_report_bound() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2504,6 +2853,7 @@ async fn inv048_model_goal_declaration_carries_full_report_bound() -> Result<(),
                 session(SESSION),
                 report,
                 GoalModelProvenance::new(attached_turn.turn(), request),
+                signalbox_domain::FinishCheckVerdict::Unverified,
             )
             .await?,
     );
@@ -2513,11 +2863,11 @@ async fn inv048_model_goal_declaration_carries_full_report_bound() -> Result<(),
     Ok(())
 }
 
-/// INV-048: the schema admits one goal declaration event per trusted model
+/// the schema admits one goal declaration event per trusted model
 /// tool-request identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_model_goal_declaration_request_is_single_use() -> Result<(), Box<dyn Error>> {
+async fn model_goal_declaration_request_is_single_use() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let unique_request: bool = sqlx::query_scalar(
         "SELECT EXISTS (
@@ -2538,12 +2888,11 @@ async fn inv048_model_goal_declaration_request_is_single_use() -> Result<(), Box
     Ok(())
 }
 
-/// INV-048: a changed current alias that is unavailable at reconciliation is
+/// a changed current alias that is unavailable at reconciliation is
 /// a typed continuation outcome, not durable-state corruption.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_changed_unknown_alias_is_a_typed_continuation_outcome() -> Result<(), Box<dyn Error>>
-{
+async fn changed_unknown_alias_is_a_typed_continuation_outcome() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let first_alias = ModelAlias::from_uuid(Uuid::from_u128(0xa21));
     let changed_alias = ModelAlias::from_uuid(Uuid::from_u128(0xa22));
@@ -2608,11 +2957,11 @@ async fn inv048_changed_unknown_alias_is_a_typed_continuation_outcome() -> Resul
     Ok(())
 }
 
-/// INV-048: every user-provenance event names an applied receipt at that exact
+/// every user-provenance event names an applied receipt at that exact
 /// event ordinal; rejected commands cannot source events.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_rejected_goal_command_cannot_source_an_event() -> Result<(), Box<dyn Error>> {
+async fn rejected_goal_command_cannot_source_an_event() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2621,8 +2970,8 @@ async fn inv048_rejected_goal_command_cannot_source_an_event() -> Result<(), Box
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(rejected.into_uuid())
     .execute(&mut *transaction)
@@ -2668,11 +3017,11 @@ async fn inv048_rejected_goal_command_cannot_source_an_event() -> Result<(), Box
     Ok(())
 }
 
-/// INV-048: applied command receipts and their exact events carry the same
+/// applied command receipts and their exact events carry the same
 /// immutable statement or optional guidance payload.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_command_payload_matches_the_applied_event() -> Result<(), Box<dyn Error>> {
+async fn goal_command_payload_matches_the_applied_event() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2681,8 +3030,8 @@ async fn inv048_goal_command_payload_matches_the_applied_event() -> Result<(), B
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(mismatched.into_uuid())
     .execute(&mut *transaction)
@@ -2727,11 +3076,11 @@ async fn inv048_goal_command_payload_matches_the_applied_event() -> Result<(), B
     Ok(())
 }
 
-/// INV-048: every pursuit-starting user event atomically creates exactly one
+/// every pursuit-starting user event atomically creates exactly one
 /// goal-owned accepted input and turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_pursuing_goal_event_requires_its_goal_turn() -> Result<(), Box<dyn Error>> {
+async fn pursuing_goal_event_requires_its_goal_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2740,8 +3089,8 @@ async fn inv048_pursuing_goal_event_requires_its_goal_turn() -> Result<(), Box<d
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(applied.into_uuid())
     .execute(&mut *transaction)
@@ -2783,11 +3132,11 @@ async fn inv048_pursuing_goal_event_requires_its_goal_turn() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-048: a queued goal turn's requested and frozen configuration derive
+/// a queued goal turn's requested and frozen configuration derive
 /// from the exact defaults epoch named by its accepted input.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_turn_configuration_matches_its_defaults_epoch() -> Result<(), Box<dyn Error>> {
+async fn goal_turn_configuration_matches_its_defaults_epoch() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2799,8 +3148,8 @@ async fn inv048_goal_turn_configuration_matches_its_defaults_epoch() -> Result<(
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(applied.into_uuid())
     .execute(&mut *transaction)
@@ -2910,11 +3259,11 @@ async fn inv048_goal_turn_configuration_matches_its_defaults_epoch() -> Result<(
     Ok(())
 }
 
-/// INV-048: rejection reasons are closed over the operation paths that can
+/// rejection reasons are closed over the operation paths that can
 /// produce them.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_command_rejection_matches_its_operation() -> Result<(), Box<dyn Error>> {
+async fn goal_command_rejection_matches_its_operation() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2923,8 +3272,8 @@ async fn inv048_goal_command_rejection_matches_its_operation() -> Result<(), Box
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(impossible.into_uuid())
     .execute(&mut *transaction)
@@ -2957,11 +3306,11 @@ async fn inv048_goal_command_rejection_matches_its_operation() -> Result<(), Box
     Ok(())
 }
 
-/// INV-048: goal-owned turn admission takes the scheduler row lock before it
+/// goal-owned turn admission takes the scheduler row lock before it
 /// inserts any accepted-input or turn-lifecycle fact.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_turn_insert_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
+async fn goal_turn_insert_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -3117,14 +3466,13 @@ async fn acquire_peer_message_suffix(
     Ok(())
 }
 
-/// S19 / INV-010 / INV-012: descendant-scoped goal stop takes its canonical
+/// descendant-scoped goal stop takes its canonical
 /// cascade prefix before the ordinary root lock, so an overlapping peer-message
 /// prefix cannot form the child/root inversion that PostgreSQL reports as
 /// `40P01`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_inv010_inv012_goal_stop_orders_cascade_before_peer_message()
--> Result<(), Box<dyn Error>> {
+async fn goal_stop_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfb00;
     let fixture = descendant_lock_order_fixture(&pool, seed).await?;
@@ -3168,13 +3516,12 @@ async fn s19_inv010_inv012_goal_stop_orders_cascade_before_peer_message()
     Ok(())
 }
 
-/// S19 / INV-010 / INV-012: descendant-scoped input interrupt takes the same
+/// descendant-scoped input interrupt takes the same
 /// canonical cascade prefix before its root and scheduler locks, preventing the
 /// peer-message child/root inversion.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_inv010_inv012_input_interrupt_orders_cascade_before_peer_message()
--> Result<(), Box<dyn Error>> {
+async fn input_interrupt_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfc00;
     let fixture = descendant_lock_order_fixture(&pool, seed).await?;
@@ -3236,13 +3583,12 @@ async fn s19_inv010_inv012_input_interrupt_orders_cascade_before_peer_message()
     Ok(())
 }
 
-/// S19 / INV-010 / INV-012: when the descendant-scope root is itself a
+/// when the descendant-scope root is itself a
 /// delegated child, the canonical session frontier includes its parent
 /// endpoint in the same ascending lock set.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_inv010_inv012_descendant_frontier_includes_root_parent_endpoint()
--> Result<(), Box<dyn Error>> {
+async fn descendant_frontier_includes_root_parent_endpoint() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfca0;
     let grandparent = seed + 1;
@@ -3350,14 +3696,13 @@ async fn s19_inv010_inv012_descendant_frontier_includes_root_parent_endpoint()
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012 / INV-032: an applied descendant-scoped goal stop
+/// an applied descendant-scoped goal stop
 /// atomically records every edge, logically terminalizes active and queued
 /// bound children with exact provenance, and leaves the background child
 /// runnable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cascade()
--> Result<(), Box<dyn Error>> {
+async fn goal_stop_materializes_complete_delegation_cascade() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf100;
     let bound_child = 0xf101;
@@ -3795,6 +4140,155 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     Ok(())
 }
 
+/// a descendant-scoped lifecycle stop whose live
+/// turn is closed by its core interrupt carries `stopped` into the cascade, so
+/// a bound child follows `on_parent_stopped` rather than `on_parent_cancelled`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn lifecycle_stop_interrupt_uses_stopped_child_policy() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let parent = 0xf500;
+    let child = 0xf501;
+    let spawning_request = 0xf510;
+    let child_turn = 0xf511;
+    let lifecycle_command = 0xf520;
+    let interrupt_command = 0xf521;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf502, parent, 0xf503))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf504, child, 0xf505))
+        .await?;
+    insert_queued_delegation_fixture(
+        &pool,
+        DelegationFixture {
+            spawning_request,
+            parent_session: parent,
+            parent_turn: 0xf512,
+            child_session: child,
+            child_turn,
+            task_entry: 0xf513,
+            selection: 0xf505,
+            policy_kind: "bound",
+            on_parent_stopped: Some("stop"),
+            on_parent_cancelled: Some("keep_running"),
+        },
+    )
+    .await?;
+    let candidates = turn_candidates(0xf530);
+    assert_applied_command(
+        GoalRepository::new(pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0xf531),
+                    session(parent),
+                    GoalUserAction::Attach(statement("exercise lifecycle stop cascade")),
+                ),
+                Some(candidates),
+                |_| None,
+            )
+            .await?,
+    );
+    let active_turn = activated_turn(
+        StartEligibleTurnRepository::new(pool.clone())
+            .handle(session(parent), activation_identities(0xf540))
+            .await?,
+    );
+    let stop = SessionLifecycleCommand::new(
+        command(lifecycle_command),
+        session(parent),
+        SessionLifecycleOperation::Stop {
+            sticky: StopStickiness::Sticky,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+        },
+    );
+    let committed = SessionLifecycleCommandRepository::new(pool.clone())
+        .handle(stop, CommandPrincipal::Operator)
+        .await?;
+    assert_eq!(
+        committed,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
+            SessionLifecycleApplication::ClosurePending {
+                outcome: SessionTerminalOutcome::Stopped {
+                    sticky: StopStickiness::Sticky,
+                },
+                live_turn: active_turn,
+                defaults_version: SessionConfigurationDefaultsVersion::first(),
+            },
+        ))
+    );
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(0xf550));
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates_alias_resolver_as(
+            SubmitInput::new(
+                command(interrupt_command),
+                session(parent),
+                UserContent::try_text(String::from("close the stopped parent"))
+                    .expect("fixture input content is admitted"),
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: active_turn,
+                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    configuration: PerInputConfigurationChoices::new(
+                        SessionConfigurationDefaultsVersion::first(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
+            ),
+            CommandPrincipal::Core,
+            ParentTerminationKind::Stopped,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xf551)),
+            Some(successor),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xf552)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xf553)),
+            ),
+            |_| successor,
+            |_| panic!("the fixture has no tool batch to cancel"),
+            || panic!("the fixture has no approval wait"),
+            || panic!("the fixture has no approval wait"),
+            |_| None,
+        )
+        .await?;
+
+    let cascade: (String, String) = sqlx::query_as(
+        "SELECT root_source_kind, termination_kind
+           FROM session_delegation_termination_cascade
+          WHERE root_command_id = $1",
+    )
+    .bind(Uuid::from_u128(interrupt_command))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        cascade,
+        (String::from("turn_command"), String::from("stopped"))
+    );
+    let child_disposition: (String, String, String) = sqlx::query_as(
+        "SELECT event.outcome_kind, event.reason_kind, terminal.disposition_kind
+           FROM session_delegation_event AS event
+           JOIN session_delegation_logical_terminal AS terminal
+             ON terminal.spawning_tool_request_id = event.spawning_tool_request_id
+            AND terminal.root_command_id = event.provenance_command_id
+          WHERE event.spawning_tool_request_id = $1
+            AND event.event_kind = 'outcome_recorded'",
+    )
+    .bind(Uuid::from_u128(spawning_request))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        child_disposition,
+        (
+            String::from("child_stopped"),
+            String::from("parent_stopped_parent_and_descendants"),
+            String::from("stopped"),
+        )
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// One derived cascade edge: which relationship it dispositions, the immediate
 /// parent kind that selected its action, and the causal source that supplied
 /// that kind.
@@ -3823,7 +4317,7 @@ struct PrunedEdgeRecordCounts {
     logical_terminals: i64,
 }
 
-/// S19 / INV-010 / INV-012: a descendant-scoped stop descends into a nested
+/// a descendant-scoped stop descends into a nested
 /// relationship under its immediate parent's disposition, not under the root
 /// command's kind.
 ///
@@ -3836,8 +4330,8 @@ struct PrunedEdgeRecordCounts {
 /// `parent_stopped_parent_and_descendants`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_inv010_inv012_nested_cascade_descends_under_immediate_parent_disposition()
--> Result<(), Box<dyn Error>> {
+async fn nested_cascade_descends_under_immediate_parent_disposition() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf600;
     let bound_child = 0xf601;
@@ -3991,7 +4485,7 @@ async fn s19_inv010_inv012_nested_cascade_descends_under_immediate_parent_dispos
     Ok(())
 }
 
-/// S19 / INV-010 / INV-012: a descendant-scoped stop stops descending below a
+/// a descendant-scoped stop stops descending below a
 /// relationship that survives it, leaving that whole subtree runnable.
 ///
 /// `background_child` keeps running under any parent termination, so the
@@ -4002,8 +4496,7 @@ async fn s19_inv010_inv012_nested_cascade_descends_under_immediate_parent_dispos
 /// queued delegated turn stays eligible.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_inv010_inv012_nested_cascade_prunes_below_a_surviving_edge()
--> Result<(), Box<dyn Error>> {
+async fn nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf700;
     let background_child = 0xf701;
@@ -4158,7 +4651,7 @@ async fn s19_inv010_inv012_nested_cascade_prunes_below_a_surviving_edge()
     Ok(())
 }
 
-/// S18 / INV-005 / INV-032: a delegated turn that completes while holding
+/// a delegated turn that completes while holding
 /// next-safe-point steering reclassifies that steering into a successor turn.
 ///
 /// A delegated turn has no accepted-input queue origin, so reclassification
@@ -4166,8 +4659,7 @@ async fn s19_inv010_inv012_nested_cascade_prunes_below_a_surviving_edge()
 /// queue chain that an accepted-input turn walks.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv005_inv032_delegated_turn_reclassifies_its_pending_steering()
--> Result<(), Box<dyn Error>> {
+async fn delegated_turn_reclassifies_its_pending_steering() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xfb00;
     let child = 0xfb01;
@@ -4233,7 +4725,7 @@ async fn s18_inv005_inv032_delegated_turn_reclassifies_its_pending_steering()
     };
     assert_eq!(checkpointed, call);
 
-    let (eligible, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -4322,14 +4814,13 @@ async fn s18_inv005_inv032_delegated_turn_reclassifies_its_pending_steering()
     Ok(())
 }
 
-/// S18 / INV-015 / INV-032: a cascade-terminalized child releases its
+/// a cascade-terminalized child releases its
 /// compaction boundary. The retained delegated turn stays physically active, so
 /// preparation must read runtime relevance rather than the physical state and
 /// must source the logical terminal's frontier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv015_inv032_logically_terminal_child_admits_compaction() -> Result<(), Box<dyn Error>>
-{
+async fn logically_terminal_child_admits_compaction() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xfa00;
     let bound_child = 0xfa01;
@@ -4446,11 +4937,11 @@ async fn s18_inv015_inv032_logically_terminal_child_admits_compaction() -> Resul
     Ok(())
 }
 
-/// INV-048: an applied stop waits on the scheduler row before recording its
+/// an applied stop waits on the scheduler row before recording its
 /// terminal event, so queued activation cannot cross the user receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_stop_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
+async fn stop_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -4510,6 +5001,175 @@ async fn inv048_stop_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
         .await?
         .expect("the stopped goal remains visible");
     assert_eq!(after_release.current().state(), &GoalState::UserStopped);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Attaches a goal whose first turn is active and records the model's
+/// `goal_declare` request on it.
+async fn attach_and_declare(
+    pool: &PgPool,
+    command: u128,
+    candidates: u128,
+    request: u128,
+    activate: bool,
+) -> Result<(TurnId, GoalModelProvenance), Box<dyn Error>> {
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(candidates);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    signalbox_domain::DurableCommandId::from_uuid(Uuid::from_u128(command)),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("finish the fixture work")),
+                ),
+                Some(attached_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    let turn = attached_turn.turn();
+    if activate {
+        assert_eq!(activate_goal_turn(pool, candidates + 0x10).await?, turn);
+    }
+    let declaration_request = tool_request(request);
+    insert_goal_tool_request(
+        pool,
+        turn,
+        declaration_request,
+        "goal_declare",
+        r#"{"transition":"achieved"}"#,
+        "the fixture work is finished",
+    )
+    .await?;
+    Ok((turn, GoalModelProvenance::new(turn, declaration_request)))
+}
+
+/// A failing finish check appends no achievement, keeps
+/// the goal pursuing, and leaves its detail for the failure that follows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_failing_finish_check_blocks_the_goal_with_its_result() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let (_, provenance) = attach_and_declare(&pool, 0x9c1, 0xbc1, 0xfc1, true).await?;
+
+    let outcome = repository
+        .declare_achieved(
+            session(SESSION),
+            GoalReport::try_new(String::from("the fixture work is finished"))?,
+            provenance,
+            FinishCheckVerdict::Failed {
+                detail: String::from("two review threads are unresolved"),
+            },
+        )
+        .await?;
+
+    assert_applied_transition(outcome);
+    let goal = repository
+        .load_goal(session(SESSION))
+        .await?
+        .expect("the goal stays attached");
+    assert_eq!(
+        *goal.current().state(),
+        GoalState::Blocked {
+            reason: signalbox_domain::GoalBlockedReasonKind::FinishCheckFailed,
+            need: GoalNeed::try_new(String::from("two review threads are unresolved"))?,
+        }
+    );
+    assert_eq!(
+        goal.events().len(),
+        2,
+        "the failing check appended its block"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A passing finish check appends the achievement and
+/// commits `achieved_verified` to the handoff; the settlement that retires the
+/// generation's queued turn records the session terminal.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_passing_finish_check_settles_achieved_verified() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let (_, provenance) = attach_and_declare(&pool, 0x9c2, 0xbc2, 0xfc2, false).await?;
+
+    assert_applied_transition(
+        repository
+            .declare_achieved(
+                session(SESSION),
+                GoalReport::try_new(String::from("the fixture work is finished"))?,
+                provenance,
+                FinishCheckVerdict::Passed,
+            )
+            .await?,
+    );
+    let settled = lifecycle
+        .load(session(SESSION))
+        .await?
+        .expect("the session keeps its lifecycle row");
+
+    assert_eq!(
+        settled.state(),
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::AchievedVerified,
+        }
+    );
+    assert_eq!(settled.pending_terminal(), None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// An achievement no finish check verifies closes the session `achieved_declared`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_declared_achievement_settles_achieved_declared() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let (_, provenance) = attach_and_declare(&pool, 0x9c4, 0xbc4, 0xfc4, false).await?;
+
+    assert_applied_transition(
+        repository
+            .declare_achieved(
+                session(SESSION),
+                GoalReport::try_new(String::from("the fixture work is finished"))?,
+                provenance,
+                FinishCheckVerdict::Unverified,
+            )
+            .await?,
+    );
+    let settled = lifecycle
+        .load(session(SESSION))
+        .await?
+        .expect("the session keeps its lifecycle row");
+
+    assert_eq!(
+        settled.state(),
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::AchievedDeclared,
+        }
+    );
+    assert_eq!(settled.pending_terminal(), None);
 
     pool.close().await;
     drop(container);

@@ -500,6 +500,13 @@ fn wire_messages(
                         .to_string(),
                 });
             }
+            MessagePart::ProviderCompaction { .. } => {
+                return Err(PreparationFailure::UnsupportedOperation {
+                    detail:
+                        "provider compaction blocks can only be replayed by their provider adapter"
+                            .to_string(),
+                });
+            }
         }
     }
     flush(role, &mut pending_text, &mut pending_tool_calls, out);
@@ -622,27 +629,10 @@ mod tests {
         ));
     }
 
-    fn sort_json_object_keys(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(object) => {
-                object.sort_keys();
-                for nested in object.values_mut() {
-                    sort_json_object_keys(nested);
-                }
-            }
-            serde_json::Value::Array(values) => {
-                for nested in values {
-                    sort_json_object_keys(nested);
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn request_json(operation: &ModelOperation<String>) -> String {
         let request = build_request(operation).expect("translatable operation builds");
         let mut value = serde_json::to_value(&request).expect("wire request serializes");
-        sort_json_object_keys(&mut value);
+        value.sort_all_objects();
         format!("{value:#}")
     }
 

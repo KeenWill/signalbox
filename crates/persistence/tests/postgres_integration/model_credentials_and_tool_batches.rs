@@ -432,12 +432,11 @@ async fn session_model_credential_publication_rejects_a_concurrent_late_entry()
     Ok(())
 }
 
-/// S10 / INV-005: stored tool arguments use the same exact canonical JSON or
+/// stored tool arguments use the same exact canonical JSON or
 /// undecodable representation admitted by the domain.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv005_tool_argument_representation_is_database_checked() -> Result<(), Box<dyn Error>>
-{
+async fn tool_argument_representation_is_database_checked() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7380;
     let canonical = r#"{"exponent":1e+400,"wide":18446744073709551617}"#;
@@ -518,11 +517,11 @@ async fn s10_inv005_tool_argument_representation_is_database_checked() -> Result
     Ok(())
 }
 
-/// S10: user-decision receipts for one batch reconstitute from one identity-set
+/// user-decision receipts for one batch reconstitute from one identity-set
 /// load instead of one query per approval row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_user_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn Error>> {
+async fn user_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x73a0;
     let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
@@ -596,12 +595,11 @@ async fn s10_user_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// S10 / INV-012: a replayed not-earliest receipt can name only an earlier
+/// a replayed not-earliest receipt can name only an earlier
 /// request from the same producing round.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv012_decision_receipt_rejects_cross_round_earliest_request()
--> Result<(), Box<dyn Error>> {
+async fn decision_receipt_rejects_cross_round_earliest_request() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x73c0;
     let (_, _, _, requested) =
@@ -612,8 +610,8 @@ async fn s10_inv012_decision_receipt_rejects_cross_round_earliest_request()
     let command = Uuid::from_u128(seed + 0x200);
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *transaction)
@@ -650,12 +648,11 @@ async fn s10_inv012_decision_receipt_rejects_cross_round_earliest_request()
     Ok(())
 }
 
-/// S31 / INV-043: durable runner lease binding keeps restart reconstitution from
+/// durable runner lease binding keeps restart reconstitution from
 /// issuing a second runner capability for the same physical attempt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s31_inv043_active_batch_reload_restores_consumed_runner_issuance()
--> Result<(), Box<dyn Error>> {
+async fn active_batch_reload_restores_consumed_runner_issuance() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x73f0;
     let (fixture, _, _, request) =
@@ -724,15 +721,14 @@ async fn s31_inv043_active_batch_reload_restores_consumed_runner_issuance()
     Ok(())
 }
 
-/// S31 / INV-004 / INV-043: a stored retryable claimed loss leaves its source
+/// a stored retryable claimed loss leaves its source
 /// attempt in flight, so a restarted process reloads an active batch that
 /// still carries the exact live source the checked claimed replacement
 /// requires, and its retired inventory stays empty until the atomic
 /// replacement commit retires the predecessor.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s31_inv004_inv043_batch_reload_preserves_lost_claimed_source_attempt()
--> Result<(), Box<dyn Error>> {
+async fn batch_reload_preserves_lost_claimed_source_attempt() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7460;
     let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
@@ -863,14 +859,13 @@ async fn s31_inv004_inv043_batch_reload_preserves_lost_claimed_source_attempt()
     Ok(())
 }
 
-/// S31 / INV-004 / INV-043: active-batch reload restores the durable
+/// active-batch reload restores the durable
 /// retired-identity inventory a claimed runner retry leaves behind, so a
 /// restarted process rejects reuse of the retired physical-attempt identity in
 /// the domain instead of failing on the retained database row's key.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s31_inv004_inv043_batch_reload_restores_retired_attempt_identities()
--> Result<(), Box<dyn Error>> {
+async fn batch_reload_restores_retired_attempt_identities() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7440;
     let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
@@ -1076,14 +1071,13 @@ async fn observed_tool_batch_frontiers(
     })
 }
 
-/// S02 / S10 / S11 / INV-005 / INV-006 / INV-019 / INV-027 / INV-036: one confirmed
+/// one confirmed
 /// proposal survives a repository restart, records a replay-safe user
 /// decision, executes through an exact durable fence, and projects one
 /// reference-only result atomically with the same-turn continuation call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and_projects_result()
--> Result<(), Box<dyn Error>> {
+async fn tool_round_survives_restart_and_projects_result() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7400;
     let (fixture, model_repository, observation, request) =

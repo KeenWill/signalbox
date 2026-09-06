@@ -35,9 +35,9 @@ mod tests {
     use super::{GoalUserAction, GoalUserCommand};
     use crate::{DescendantTerminationScope, DurableCommandId, SessionId};
 
-    /// INV-012: stop-command replay comparison binds descendant scope.
+    /// stop-command replay comparison binds descendant scope.
     #[test]
-    fn inv012_stop_command_identity_includes_descendant_scope() {
+    fn stop_command_identity_includes_descendant_scope() {
         let command_id = DurableCommandId::from_uuid(uuid::Uuid::from_u128(1));
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(2));
         let parent_alone = GoalUserCommand::new(
@@ -126,6 +126,8 @@ impl GoalUserCommand {
 pub enum GoalCommandRejection {
     /// The target session does not exist.
     SessionNotFound,
+    /// The session's closure is pending; the closure settles the goal.
+    SessionClosing,
     /// A goal is already pursuing or blocked.
     GoalAlreadyAttached,
     /// The session has no goal lineage.

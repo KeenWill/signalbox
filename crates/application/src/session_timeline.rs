@@ -4,7 +4,7 @@
 //! it without exporting storage rows, while browser DTOs remain a separate
 //! representation at the HTTP boundary.
 
-use std::{fmt, future::Future, num::NonZeroU64};
+use std::{future::Future, num::NonZeroU64};
 
 use signalbox_domain::{
     BlobDigest, ModelCallId, ProviderModelCallFailureCause, ProviderModelIdentity, SessionId,
@@ -86,25 +86,17 @@ pub enum TimelineWindowAnchor {
     Around(TimelineAddress),
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Rejection of an invalid client-selected window ceiling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimelineWindowLimitError {
+    #[error("timeline item limit is outside its hard bounds")]
     /// The item count is zero or exceeds the hard ceiling.
     Items,
+    #[error("timeline byte limit is outside its hard bounds")]
     /// The byte budget is below the safe minimum or above the hard ceiling.
     Bytes,
 }
-
-impl fmt::Display for TimelineWindowLimitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Items => formatter.write_str("timeline item limit is outside its hard bounds"),
-            Self::Bytes => formatter.write_str("timeline byte limit is outside its hard bounds"),
-        }
-    }
-}
-
-impl std::error::Error for TimelineWindowLimitError {}
 
 /// Validated item and projected-byte ceilings for one window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,6 +143,18 @@ impl TimelineWindowLimits {
 pub enum SessionTimelineEventKind {
     /// A session was durably created.
     SessionCreated,
+    /// The session's lifecycle state changed.
+    SessionStateChanged,
+    /// The session closed with a declared outcome.
+    SessionTerminal,
+    /// A goal event was appended.
+    GoalChanged,
+    /// A claimed command settled.
+    CommandSettled,
+    /// An accepted injection settled.
+    InjectionSettled,
+    /// An adopt or release flipped the ownership bit.
+    SessionOwnershipChanged,
     /// Session-default model settings changed.
     SessionModelSettingsChanged,
     /// Effective model settings were resolved for a turn.
@@ -270,29 +274,17 @@ pub struct SessionTimelineWindow {
     pub continuation_after: TimelineContinuation,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Rejection of an invalid selected detail ceiling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimelineDetailLimitError {
+    #[error("timeline detail item limit is outside its hard bounds")]
     /// The item count is zero or exceeds the hard ceiling.
     Items,
+    #[error("timeline detail byte limit is outside its hard bounds")]
     /// The byte budget is below the safe minimum or above the hard ceiling.
     Bytes,
 }
-
-impl fmt::Display for TimelineDetailLimitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Items => {
-                formatter.write_str("timeline detail item limit is outside its hard bounds")
-            }
-            Self::Bytes => {
-                formatter.write_str("timeline detail byte limit is outside its hard bounds")
-            }
-        }
-    }
-}
-
-impl std::error::Error for TimelineDetailLimitError {}
 
 /// Validated item and projected-body byte ceilings for one detail read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -96,8 +96,8 @@ async fn insert_command(
     kind: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, 1, now())",
+        "INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, $2, 1, now(), 'operator')",
     )
     .bind(command.into_uuid())
     .bind(kind)
@@ -352,10 +352,9 @@ async fn a_mint_is_refused_under_repeatable_read_after_a_concurrent_winner()
     Ok(())
 }
 
-/// A lone mint under `REPEATABLE READ` is admitted. The previous shape refused
-/// every isolation level but `READ COMMITTED`, because an advisory lock cannot
-/// refresh a snapshot; the constraint has no such dependency, so this fails if
-/// that refusal is reintroduced.
+/// A lone mint under `REPEATABLE READ` is admitted: the constraint has no
+/// advisory-lock dependency on snapshot refresh, so this fails if an
+/// isolation-level refusal is introduced.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_mint_under_repeatable_read_is_admitted() -> Result<(), Box<dyn Error>> {
@@ -887,9 +886,9 @@ async fn assert_aliasing_root_is_refused(
     Ok(())
 }
 
-/// The aliasing spellings the previous path-keyed shape would have admitted as
-/// distinct scopes. Each names the same directory as [`WORKSPACE_ROOT`], and
-/// each must die at the durable boundary rather than at some later comparison.
+/// Aliasing spellings a path-keyed scope would admit as distinct. Each names the
+/// same directory as [`WORKSPACE_ROOT`], and each must die at the durable
+/// boundary rather than at some later comparison.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_workspace_root_aliasing_another_spelling_is_refused() -> Result<(), Box<dyn Error>> {
@@ -990,6 +989,33 @@ async fn the_destination_predicate_agrees_with_the_domain_newtype() -> Result<()
 
     assert_url_predicate_agrees(&pool, "https://example.test/namespace/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://example.test").await?;
+    assert_url_predicate_agrees(&pool, "https://1.2.3.999/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://4294967296/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.2.65536/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.16777216/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.2.3.4.5/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://256.1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://09/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.09/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://0x100000000/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://example.1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1..2/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.2.3.999./repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://4294967295/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.2.65535/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.16777215/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://127.0.0.1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://127.1./repo").await?;
+    assert_url_predicate_agrees(&pool, "https://0x7f.1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://0177.1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://0x/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://0xFFFFFFFF/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.0x/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://example.0xg/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://example%2etest/repo").await?;
+    assert_url_predicate_agrees(&pool, r"https://example.test\repo").await?;
+
     assert_url_predicate_agrees(&pool, "https://a").await?;
     assert_url_predicate_agrees(&pool, "https://example.test:8443/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://user@example.test/project.git").await?;

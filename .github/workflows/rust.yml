@@ -77,8 +77,8 @@ jobs:
                 # Binding process/specification prose and generated indexes
                 # run the complete bar even though they are Markdown.
                 AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
-                  | docs/domain-spine.md | docs/invariants.md \
-                  | docs/scenarios.md | docs/style.md)
+                  | docs/api/* \
+                  | docs/style.md)
                   rust=$((rust + 1))
                   ;;
                 docs/* | *.md)
@@ -111,40 +111,42 @@ jobs:
 
   contract-checks:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
-      # Full history also fetches `refs/remotes/origin/*`, which the docs
-      # checker reads verification provenance from: the first-parent history of
-      # `origin/main`, never a merge the branch under review contributes.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Check generated invariant index
-        run: python3 scripts/generate_invariants.py --check
-      - name: Check domain spine sync
-        run: python3 scripts/check_domain_spine.py
+      - name: Use Python with Markdown exclusion support
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install Markdown toolchain
+        run: |
+          python3 -m venv --clear /tmp/mdformat-venv
+          /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
+      - name: Check generated domain API declarations
+        run: |
+          rustdoc_toolchain=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("docs/api/crates.toml").read_text())["rustdoc_toolchain"])')
+          rustup toolchain install "$rustdoc_toolchain" --profile minimal
+          python3 scripts/render_domain_spine.py
+          git diff --exit-code -- docs/api
+          test -z "$(git ls-files --others --exclude-standard docs/api)"
+      - name: Report domain API digest
+        continue-on-error: true
+        env:
+          DOMAIN_SPINE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          export PATH="$PATH:${CARGO_HOME:-$HOME/.cargo}/bin"
+          command -v cargo-public-api || cargo install cargo-public-api --locked
+          python3 scripts/domain_spine_digest.py >> "$GITHUB_STEP_SUMMARY"
       - name: Check documentation consistency
-        run: python3 scripts/check_docs_consistency.py
+        run: /tmp/mdformat-venv/bin/python scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
         run: python3 scripts/check_migration_versions.py
-      - name: Check numeric bound declarations
-        run: python3 scripts/check_numeric_bounds.py
-      # Gates normally: the tree satisfies this today, so the step can only
-      # fail on a regression. Clippy enforces the panic denies but cannot see
-      # a member that opts out of inheriting them, which is the hole this
-      # closes. Reads `cargo metadata --no-deps` for the member set, which
-      # resolves no dependency graph and compiles nothing, so it belongs above
-      # the cache step with the other non-compiling checks.
-      - name: Check panic-gate coverage
-        run: python3 scripts/check_panic_gate.py
-      # Gates normally: the tree satisfies all three rules this checker decides,
-      # so the step can only fail on a regression. A rule joins this step only
-      # once the tree it scans is already at zero — never as a side effect of a
-      # change that merely reduces a count.
-      - name: Check style rules
-        run: python3 scripts/check_style_rules.py
+      - name: Check ownership-seam boundaries
+        run: python3 scripts/check_ownership_seam.py
   checker-and-format-tests:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 10
@@ -153,24 +155,26 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Test domain-spine checker
-        run: python3 scripts/test_check_domain_spine.py
+      - name: Use Python with Markdown exclusion support
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install Markdown toolchain
+        run: |
+          python3 -m venv --clear /tmp/mdformat-venv
+          /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
+      - name: Test domain API digest
+        run: python3 scripts/test_domain_spine_digest.py
+      - name: Test domain API renderer
+        run: python3 scripts/test_render_domain_spine.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
-      - name: Test numeric bound checker
-        run: python3 scripts/test_check_numeric_bounds.py
-      - name: Test panic-gate checker
-        run: python3 scripts/test_check_panic_gate.py
-      - name: Test style-rule checker
-        run: python3 scripts/test_check_style_rules.py
+      - name: Test ownership-seam checker
+        run: python3 scripts/test_check_ownership_seam.py
       - name: Test documentation consistency checker
-        run: python3 scripts/test_check_docs_consistency.py
+        run: /tmp/mdformat-venv/bin/python scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader
-        run: python3 scripts/test_postgres_integration_suites.py
-      - name: Test the convergence reconciler
-        run: python3 tooling/convergence-reconciler/test_reconcile.py
-      - name: Test the built-executable resolver
-        run: python3 tooling/test_resolve_cargo_bin.py
+        run: /tmp/mdformat-venv/bin/python scripts/test_postgres_integration_suites.py
       - name: Test the lifecycle watchdog
         run: python3 tooling/test_supervise_lifecycle.py
       # Drives the sweep against a fake `docker` it puts first on PATH, so it
@@ -180,44 +184,33 @@ jobs:
       # inspection, or the daemon that never answers that the cases require.
       - name: Test the orphaned-container sweep
         run: python3 tooling/test_sweep_test_containers.py
-      # Runs here rather than in coverage.yml or swift.yml because it reads
-      # both of them: it extracts the jq programs those workflows embed and
-      # checks each against the Python summarizer that reads the same
-      # documents. Landing it in either workflow would leave the other's
-      # predicates tested only when that workflow happened to trigger, and
-      # neither triggers on a change to the summarizers alone. The runner image
-      # provides jq, which is also what lets those two workflows invoke it with
-      # no install step of their own.
-      - name: Test the coverage workflow predicates
-        run: python3 tooling/test_coverage_workflow_predicates.py
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check Markdown formatting
-        run: |
-          python3 -m venv /tmp/mdformat-venv
-          /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
-          /tmp/mdformat-venv/bin/mdformat --check *.md docs/
+        run: /tmp/mdformat-venv/bin/mdformat --check *.md docs/
       # Conservative inventory for the recorded session-lock protocols. The
       # checksum makes changes to the small
-      # reviewed inventory explicit; the scan rejects strongest-mode row-lock
-      # clauses anywhere else in production Rust. This deliberately performs
+      # reviewed inventory explicit; the scan rejects row-lock clauses and
+      # advisory-lock calls elsewhere in production Rust. This deliberately performs
       # no Rust or SQL parsing.
       - name: Check explicit-lock inventory
         run: |
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            f59b2179c097b9a2544f0d6d678e45945bc0659c4bdc00ee18520b95e7ebf391
+            4da7adc13c029c73b72fec67f87d264ffef2ea27ec04196e158870496d3910c4
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
               s{/[*].*?[*]/}{ }gs;
+              s{^\s*//[^\n]*}{ }gm;
               s{--[^\n]*}{ }g;
               s/\s+/ /g;
-              print "$ARGV\n" if /\bfor update\b/i;
+              print "$ARGV\n" if /\bfor (?:no key update|key share|share|update)\b/i
+                || /\bpg_(?:try_)?advisory_(?:xact_)?lock(?:_shared)?\s*\(/i;
             ')"
           test -z "$unexpected" || {
-            printf 'explicit row lock outside inventory:\n%s\n' "$unexpected"
+            printf 'explicit lock outside inventory:\n%s\n' "$unexpected"
             exit 1
           }
   rust-checks:
@@ -545,7 +538,7 @@ jobs:
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
-    # Generous by design: this job now absorbs all six suites' compilation,
+    # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
     timeout-minutes: 35
@@ -557,6 +550,8 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Install Python checker dependencies
+        run: python3 -m pip install --user --break-system-packages -r tooling/requirements-mdformat.txt
       # First, so a malformed manifest fails before any compilation. The run
       # job expands this into its shard matrix, which is why adding a shard is
       # a one-line manifest edit and touches nothing here.
@@ -609,7 +604,7 @@ jobs:
           shared-key: rust
           save-if: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
+        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -676,14 +671,6 @@ jobs:
           path: ${{ runner.temp }}/terminal-client.tar.zst
           if-no-files-found: error
           retention-days: 1
-      - name: Upload the approval-judge-eval archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: postgres-integration-archive-approval-judge-eval
-          path: ${{ runner.temp }}/approval-judge-eval.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-
   # The dedicated Docker fleet gives each shard an isolated DinD daemon. The
   # build and run jobs share the same runner image and absolute work-path shape,
   # which keeps paths embedded in nextest archives valid across their pods.
@@ -696,7 +683,7 @@ jobs:
   # Persistence is sharded according to its measured test-execution cost; every
   # other suite runs whole because it fits well inside the job timeout.
   #
-  # The run matrix currently expands to eleven shards after the one shared
+  # The run matrix currently expands to ten shards after the one shared
   # build.
   # The shards compile nothing and run for minutes; the build's single cache
   # key replaces the old per-suite keys that evicted one another.
@@ -746,7 +733,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
+        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive

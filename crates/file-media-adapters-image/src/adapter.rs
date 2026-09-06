@@ -29,7 +29,7 @@ pub(crate) async fn probe(
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorProbeOutput, ProcessorFailure> {
     let prefix = source::read_probe_prefix(source, cancellation).await?;
-    if format.matches_signature(&prefix) {
+    if image::guess_format(&prefix).ok() == Some(format.image_format()) {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(format.media_type()),
             strength: ProbeStrength::Strong,

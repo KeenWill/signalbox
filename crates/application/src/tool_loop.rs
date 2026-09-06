@@ -4,7 +4,7 @@
 //! catalog policy, mints every durable identity candidate, keeps executor work
 //! outside transactions, and submits only correlated evidence to persistence.
 
-use std::{collections::BTreeMap, error::Error, fmt, future::Future, num::NonZeroU64, sync::Arc};
+use std::{collections::BTreeMap, fmt, future::Future, num::NonZeroU64, sync::Arc};
 
 use crate::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
@@ -148,13 +148,15 @@ impl ToolDefinition {
         self.permission_default
     }
 
-    /// Overrides legacy blanket/registry policy for this exact tool.
+    /// Configures an explicit posture for this exact tool, superseding the session
+    /// blanket and the registry default.
     pub const fn with_approval_posture(mut self, posture: ToolApprovalPosture) -> Self {
         self.approval_posture = Some(posture);
         self
     }
 
-    /// Returns the configured per-tool posture, absent for legacy behavior.
+    /// Returns the configured per-tool posture, absent when no explicit
+    /// per-tool posture is configured.
     pub const fn approval_posture(&self) -> Option<ToolApprovalPosture> {
         self.approval_posture
     }
@@ -867,53 +869,99 @@ fn emit_contained_executor_failure(
     );
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Failure annotated with the exact tool orchestration stage.
 #[derive(Debug)]
 pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
+    #[error("tool batch load failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_batch_load")]
     /// Loading current batch state failed.
-    Load(TransactionError),
+    Load(#[source] TransactionError),
+    #[error("tool attempt prepare failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_attempt_prepare")]
     /// Preparing a durable physical attempt failed.
-    Prepare(TransactionError),
+    Prepare(#[source] TransactionError),
+    #[error("tool attempt authorization failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_attempt_authorization")]
     /// Authorizing a prepared attempt failed.
-    Authorize(TransactionError),
+    Authorize(#[source] TransactionError),
+    #[error("tool attempt authorization reread failed: {reread_error}")]
+    #[operator(delegate = reread_error, code = "tool_attempt_authorization_reread")]
     /// A commit-ambiguous authorization and its immediate reread both failed.
     AuthorizationReread {
         /// Original commit-ambiguous authorization failure.
         authorization_error: TransactionError,
+        #[source]
         /// Failure to establish whether authorization committed.
         reread_error: TransactionError,
     },
+    #[error("tool attempt authorization reconciliation failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_attempt_authorization_reconciliation")]
     /// A later pass could not reconcile retained non-consumption evidence.
-    AuthorizationReconciliation(TransactionError),
+    AuthorizationReconciliation(#[source] TransactionError),
+    #[error("tool preflight evidence commit failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_preflight_commit")]
     /// A local preflight error could not commit.
-    PreflightCommit(TransactionError),
+    PreflightCommit(#[source] TransactionError),
+    #[error("tool executor failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_executor")]
     /// Executor work produced no trustworthy evidence.
-    Executor(ExecutorError),
+    Executor(#[source] ExecutorError),
+    #[error(
+        "tool executor failed ({executor_error}) and crash classification failed: {classification_error}"
+    )]
+    #[operator(delegate = classification_error, code = "tool_executor_crash_classification")]
     /// Executor work failed and its required crash classification also failed.
     ExecutorCrashClassification {
         /// Original executor failure.
         executor_error: ExecutorError,
+        #[source]
         /// Failure to durably classify the in-flight attempt.
         classification_error: TransactionError,
     },
+    #[error("tool executor evidence carried a different dispatch fence")]
+    #[operator(class = CallerOrHubBug, code = "tool_executor_correlation_mismatch")]
     /// Executor evidence named a dispatch fence other than the invocation.
     ExecutorCorrelationMismatch,
+    #[error(
+        "tool executor evidence carried a different dispatch fence and crash classification failed: {field_0}"
+    )]
+    #[operator(
+        delegate = 0,
+        code = "tool_executor_correlation_mismatch_crash_classification"
+    )]
     /// Cross-wired executor evidence and its required crash classification both failed.
-    ExecutorCorrelationMismatchCrashClassification(TransactionError),
+    ExecutorCorrelationMismatchCrashClassification(#[source] TransactionError),
+    #[error("tool observation commit failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_observation_commit")]
     /// Executor evidence could not commit.
-    ObservationCommit(TransactionError),
+    ObservationCommit(#[source] TransactionError),
+    #[error("tool observation reconciliation failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_observation_reconciliation")]
     /// Retained executor evidence could not be reconciled with durable state.
-    ObservationReconciliation(TransactionError),
+    ObservationReconciliation(#[source] TransactionError),
+    #[error("durable tool completion reconciliation failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_durable_completion_reconciliation")]
     /// An executor-reported durable completion could not be reread from storage.
-    DurableCompletionReconciliation(TransactionError),
+    DurableCompletionReconciliation(#[source] TransactionError),
+    #[error("executor durable completion did not match storage")]
+    #[operator(class = CallerOrHubBug, code = "tool_durable_completion_mismatch")]
     /// An executor-reported durable completion was absent or cross-wired.
     DurableCompletionMismatch,
+    #[error("durable child wait reconciliation failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_child_wait_reconciliation")]
     /// A reported durable child wait could not be reread from storage.
-    ChildWaitReconciliation(TransactionError),
+    ChildWaitReconciliation(#[source] TransactionError),
+    #[error("executor durable child wait did not match storage")]
+    #[operator(class = CallerOrHubBug, code = "tool_child_wait_mismatch")]
     /// A reported durable child wait was absent or cross-wired.
     ChildWaitMismatch,
+    #[error("tool crash classification failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_crash_classification")]
     /// Crash classification failed.
-    CrashClassification(TransactionError),
+    CrashClassification(#[source] TransactionError),
+    #[error("fatal tool executor failure remained fatal after crash classification recovery")]
+    #[operator(class = failure_class, code = cause_code)]
     /// A retained fatal executor failure was durably classified on retry.
     RecoveredFatalExecutorFailure {
         /// Original fatal operator classification.
@@ -921,188 +969,14 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
         /// Original safe executor cause token.
         cause_code: &'static str,
     },
+    #[error("tool continuation failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_continuation")]
     /// Atomic continuation preparation failed.
-    Continuation(TransactionError),
+    Continuation(#[source] TransactionError),
+    #[error("tool catalog metadata changed after attempt preparation")]
+    #[operator(class = CallerOrHubBug, code = "tool_catalog_drift")]
     /// Catalog metadata no longer matches durable attempt authorization.
     CatalogDrift,
-}
-
-impl<TransactionError, ExecutorError> fmt::Display
-    for ToolExecutionServiceError<TransactionError, ExecutorError>
-where
-    TransactionError: fmt::Display,
-    ExecutorError: fmt::Display,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Load(error) => write!(formatter, "tool batch load failed: {error}"),
-            Self::Prepare(error) => write!(formatter, "tool attempt prepare failed: {error}"),
-            Self::Authorize(error) => {
-                write!(formatter, "tool attempt authorization failed: {error}")
-            }
-            Self::AuthorizationReread { reread_error, .. } => {
-                write!(
-                    formatter,
-                    "tool attempt authorization reread failed: {reread_error}"
-                )
-            }
-            Self::AuthorizationReconciliation(error) => {
-                write!(
-                    formatter,
-                    "tool attempt authorization reconciliation failed: {error}"
-                )
-            }
-            Self::PreflightCommit(error) => {
-                write!(formatter, "tool preflight evidence commit failed: {error}")
-            }
-            Self::Executor(error) => write!(formatter, "tool executor failed: {error}"),
-            Self::ExecutorCrashClassification {
-                executor_error,
-                classification_error,
-            } => write!(
-                formatter,
-                "tool executor failed ({executor_error}) and crash classification failed: \
-                 {classification_error}"
-            ),
-            Self::ExecutorCorrelationMismatch => {
-                formatter.write_str("tool executor evidence carried a different dispatch fence")
-            }
-            Self::ExecutorCorrelationMismatchCrashClassification(error) => write!(
-                formatter,
-                "tool executor evidence carried a different dispatch fence and crash \
-                 classification failed: {error}"
-            ),
-            Self::ObservationCommit(error) => {
-                write!(formatter, "tool observation commit failed: {error}")
-            }
-            Self::ObservationReconciliation(error) => {
-                write!(formatter, "tool observation reconciliation failed: {error}")
-            }
-            Self::DurableCompletionReconciliation(error) => write!(
-                formatter,
-                "durable tool completion reconciliation failed: {error}"
-            ),
-            Self::DurableCompletionMismatch => {
-                formatter.write_str("executor durable completion did not match storage")
-            }
-            Self::ChildWaitReconciliation(error) => {
-                write!(
-                    formatter,
-                    "durable child wait reconciliation failed: {error}"
-                )
-            }
-            Self::ChildWaitMismatch => {
-                formatter.write_str("executor durable child wait did not match storage")
-            }
-            Self::CrashClassification(error) => {
-                write!(formatter, "tool crash classification failed: {error}")
-            }
-            Self::RecoveredFatalExecutorFailure { .. } => formatter.write_str(
-                "fatal tool executor failure remained fatal after crash classification recovery",
-            ),
-            Self::Continuation(error) => write!(formatter, "tool continuation failed: {error}"),
-            Self::CatalogDrift => {
-                formatter.write_str("tool catalog metadata changed after attempt preparation")
-            }
-        }
-    }
-}
-
-impl<TransactionError, ExecutorError> Error
-    for ToolExecutionServiceError<TransactionError, ExecutorError>
-where
-    TransactionError: Error + 'static,
-    ExecutorError: Error + 'static,
-{
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Load(error)
-            | Self::Prepare(error)
-            | Self::Authorize(error)
-            | Self::AuthorizationReconciliation(error)
-            | Self::PreflightCommit(error)
-            | Self::ExecutorCorrelationMismatchCrashClassification(error)
-            | Self::ObservationCommit(error)
-            | Self::ObservationReconciliation(error)
-            | Self::DurableCompletionReconciliation(error)
-            | Self::ChildWaitReconciliation(error)
-            | Self::CrashClassification(error)
-            | Self::Continuation(error) => Some(error),
-            Self::AuthorizationReread { reread_error, .. } => Some(reread_error),
-            Self::Executor(error) => Some(error),
-            Self::ExecutorCrashClassification {
-                classification_error,
-                ..
-            } => Some(classification_error),
-            Self::ExecutorCorrelationMismatch
-            | Self::DurableCompletionMismatch
-            | Self::ChildWaitMismatch
-            | Self::RecoveredFatalExecutorFailure { .. }
-            | Self::CatalogDrift => None,
-        }
-    }
-}
-
-impl<TransactionError, ExecutorError> ClassifyOperatorFailure
-    for ToolExecutionServiceError<TransactionError, ExecutorError>
-where
-    TransactionError: ClassifyOperatorFailure,
-    ExecutorError: ClassifyOperatorFailure,
-{
-    fn operator_failure_class(&self) -> OperatorFailureClass {
-        match self {
-            Self::Load(error)
-            | Self::Prepare(error)
-            | Self::Authorize(error)
-            | Self::AuthorizationReconciliation(error)
-            | Self::PreflightCommit(error)
-            | Self::ObservationCommit(error)
-            | Self::ObservationReconciliation(error)
-            | Self::DurableCompletionReconciliation(error)
-            | Self::ChildWaitReconciliation(error)
-            | Self::CrashClassification(error)
-            | Self::ExecutorCorrelationMismatchCrashClassification(error)
-            | Self::Continuation(error) => error.operator_failure_class(),
-            Self::AuthorizationReread { reread_error, .. } => reread_error.operator_failure_class(),
-            Self::Executor(error) => error.operator_failure_class(),
-            Self::ExecutorCrashClassification {
-                classification_error,
-                ..
-            } => classification_error.operator_failure_class(),
-            Self::RecoveredFatalExecutorFailure { failure_class, .. } => *failure_class,
-            Self::ExecutorCorrelationMismatch
-            | Self::DurableCompletionMismatch
-            | Self::ChildWaitMismatch
-            | Self::CatalogDrift => OperatorFailureClass::CallerOrHubBug,
-        }
-    }
-
-    fn operator_failure_cause_code(&self) -> &'static str {
-        match self {
-            Self::Load(_) => "tool_batch_load",
-            Self::Prepare(_) => "tool_attempt_prepare",
-            Self::Authorize(_) => "tool_attempt_authorization",
-            Self::AuthorizationReread { .. } => "tool_attempt_authorization_reread",
-            Self::AuthorizationReconciliation(_) => "tool_attempt_authorization_reconciliation",
-            Self::PreflightCommit(_) => "tool_preflight_commit",
-            Self::Executor(_) => "tool_executor",
-            Self::ExecutorCrashClassification { .. } => "tool_executor_crash_classification",
-            Self::ExecutorCorrelationMismatch => "tool_executor_correlation_mismatch",
-            Self::ExecutorCorrelationMismatchCrashClassification(_) => {
-                "tool_executor_correlation_mismatch_crash_classification"
-            }
-            Self::ObservationCommit(_) => "tool_observation_commit",
-            Self::ObservationReconciliation(_) => "tool_observation_reconciliation",
-            Self::DurableCompletionReconciliation(_) => "tool_durable_completion_reconciliation",
-            Self::DurableCompletionMismatch => "tool_durable_completion_mismatch",
-            Self::ChildWaitReconciliation(_) => "tool_child_wait_reconciliation",
-            Self::ChildWaitMismatch => "tool_child_wait_mismatch",
-            Self::CrashClassification(_) => "tool_crash_classification",
-            Self::RecoveredFatalExecutorFailure { cause_code, .. } => cause_code,
-            Self::Continuation(_) => "tool_continuation",
-            Self::CatalogDrift => "tool_catalog_drift",
-        }
-    }
 }
 
 /// Coordinates one serialized tool-loop stage.
@@ -2125,7 +1999,7 @@ fn report_tool_turn_terminalization(failed: &FailedModelCallTurn, terminal_outco
 /// Sanitized by construction: the daemon-authored catalog name, two
 /// daemon-minted aggregate identifiers, and the closed error kind are the only
 /// fields, so no credential material, response body, tool argument, or
-/// conversation content can reach telemetry (INV-035). The bounded error
+/// conversation content can reach telemetry. The bounded error
 /// detail is deliberately omitted — executors alone decide what it says.
 fn report_tool_attempt(name: &ToolName, observation: &CorrelatedToolAttemptObservation) {
     let ToolAttemptSignal::Failed(error_kind) = tool_attempt_signal(observation.observation())
@@ -2192,6 +2066,7 @@ pub(crate) fn initial_tool_approval(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     use std::{
         collections::VecDeque,
         num::NonZeroU64,
@@ -2945,10 +2820,10 @@ mod tests {
         );
     }
 
-    /// INV-020: registry automation records policy provenance, while blanket
+    /// registry automation records policy provenance, while blanket
     /// automation remains explicitly distinct from user agency.
     #[test]
-    fn inv020_initial_policy_preserves_automation_provenance() {
+    fn initial_policy_preserves_automation_provenance() {
         let automatic = definition(
             "automatic",
             ToolPermissionDefault::Auto,
@@ -3093,10 +2968,10 @@ mod tests {
         );
     }
 
-    /// INV-024 / INV-027: an approved unknown request closes with typed
+    /// an approved unknown request closes with typed
     /// preflight evidence before authorization or executor entry.
     #[tokio::test]
-    async fn inv024_inv027_unknown_tool_never_crosses_executor_boundary() {
+    async fn unknown_tool_never_crosses_executor_boundary() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let transaction = FakeTransaction {
@@ -3259,10 +3134,10 @@ mod tests {
         assert_eq!(error.operator_failure_cause_code(), "tool_catalog_drift");
     }
 
-    /// INV-011 / INV-021 / INV-024: durable authorization precedes the
+    /// durable authorization precedes the
     /// executor, and only its exact correlation can commit returned evidence.
     #[tokio::test]
-    async fn inv011_inv021_inv024_executor_evidence_is_fenced_and_committed_in_order() {
+    async fn executor_evidence_is_fenced_and_committed_in_order() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {
@@ -3321,10 +3196,10 @@ mod tests {
         );
     }
 
-    /// S17 / INV-005 / INV-011: a scheduling-aware executor's durable
+    /// a scheduling-aware executor's durable
     /// foreground wait is reread before the service accepts the parked turn.
     #[tokio::test]
-    async fn s17_inv005_inv011_durable_child_wait_is_authenticated_without_second_observation() {
+    async fn durable_child_wait_is_authenticated_without_second_observation() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3375,10 +3250,10 @@ mod tests {
         );
     }
 
-    /// S17 / INV-011 / INV-024: terminal evidence committed atomically with a
+    /// terminal evidence committed atomically with a
     /// tool effect is authenticated and never sent through a second commit.
     #[tokio::test]
-    async fn s17_inv011_inv024_durable_completion_is_authenticated_without_second_commit() {
+    async fn durable_completion_is_authenticated_without_second_commit() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3427,10 +3302,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024: a durable-completion claim cannot authorize an
+    /// a durable-completion claim cannot authorize an
     /// attempt that storage still reports as pending.
     #[tokio::test]
-    async fn inv011_inv024_durable_completion_fails_closed_when_not_committed() {
+    async fn durable_completion_fails_closed_when_not_committed() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3476,10 +3351,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024 / INV-037: a failed durable-completion reread retains
+    /// a failed durable-completion reread retains
     /// the exact evidence and dispatch permit, then retries only authentication.
     #[tokio::test]
-    async fn inv011_inv024_inv037_durable_completion_retries_only_authentication() {
+    async fn durable_completion_retries_only_authentication() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3541,10 +3416,10 @@ mod tests {
         );
     }
 
-    /// S17 / INV-011 / INV-024: a transient durable-wait reread failure keeps
+    /// a transient durable-wait reread failure keeps
     /// the exact evidence and dispatch permit for same-incarnation retry.
     #[tokio::test]
-    async fn s17_inv011_inv024_durable_child_wait_retries_only_its_authentication() {
+    async fn durable_child_wait_retries_only_its_authentication() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3600,12 +3475,12 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024 / INV-037: an infrastructure executor failure cannot
+    /// an infrastructure executor failure cannot
     /// release the interrupt gate while its durable attempt remains in flight,
     /// and its committed crash classification contains the failure for this
     /// turn.
     #[tokio::test]
-    async fn inv011_inv024_inv037_infrastructure_executor_failure_classifies_before_gate_release() {
+    async fn infrastructure_executor_failure_classifies_before_gate_release() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3679,10 +3554,10 @@ mod tests {
         ));
     }
 
-    /// INV-011 / INV-024 / INV-037: crash classification closes an authorized
+    /// crash classification closes an authorized
     /// attempt before a fail-closed executor error remains fatal to the daemon.
     #[tokio::test]
-    async fn inv011_inv024_inv037_corrupt_executor_failure_remains_fatal_after_classification() {
+    async fn corrupt_executor_failure_remains_fatal_after_classification() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3728,10 +3603,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024 / INV-037: failed executor crash classification
+    /// failed executor crash classification
     /// retains the exact gate permit until a later pass commits closure.
     #[tokio::test]
-    async fn inv011_inv024_inv037_failed_executor_classification_retains_gate() {
+    async fn failed_executor_classification_retains_gate() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3813,10 +3688,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024 / INV-037: a failed classification retry retains the
+    /// a failed classification retry retains the
     /// original fatal executor class after durable closure succeeds.
     #[tokio::test]
-    async fn inv011_inv024_inv037_recovered_classification_preserves_fatal_executor_failure() {
+    async fn recovered_classification_preserves_fatal_executor_failure() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3893,10 +3768,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-037: a correlation mismatch retained across failed crash
+    /// a correlation mismatch retained across failed crash
     /// classification resurfaces only after durable closure releases the gate.
     #[tokio::test]
-    async fn inv011_inv037_recovered_classification_preserves_correlation_mismatch() {
+    async fn recovered_classification_preserves_correlation_mismatch() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3983,10 +3858,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-037: a prepared execution hint is revalidated after the
+    /// a prepared execution hint is revalidated after the
     /// dispatch gate, so a winning interrupt becomes ordinary no-work.
     #[tokio::test]
-    async fn inv011_inv037_stale_prepared_hint_after_gate_is_no_work() {
+    async fn stale_prepared_hint_after_gate_is_no_work() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {
@@ -4029,10 +3904,10 @@ mod tests {
         assert!(events.lock().expect("event lock").is_empty());
     }
 
-    /// INV-011 / INV-037: an all-resolved continuation hint is revalidated
+    /// an all-resolved continuation hint is revalidated
     /// under the dispatch gate, so a winning interrupt is ordinary no-work.
     #[tokio::test]
-    async fn inv011_inv037_vanished_continuation_batch_is_no_work() {
+    async fn vanished_continuation_batch_is_no_work() {
         let (batch, _) = batch_with_attempt_state(
             "{}",
             ToolEffectClass::EffectFree,
@@ -4080,11 +3955,11 @@ mod tests {
         assert!(events.lock().expect("event lock").is_empty());
     }
 
-    /// INV-011 / INV-024: an in-flight attempt is not classified as
+    /// an in-flight attempt is not classified as
     /// prior-process loss until the same-turn dispatch permit is available and
     /// authoritative state has been reloaded.
     #[tokio::test]
-    async fn inv011_inv024_crash_classification_waits_for_dispatch_gate() {
+    async fn crash_classification_waits_for_dispatch_gate() {
         let (batch, _) = batch_with_attempt_state(
             "{}",
             ToolEffectClass::EffectFree,
@@ -4161,9 +4036,9 @@ mod tests {
         assert_eq!(observation.correlation(), &expected_correlation);
     }
 
-    /// INV-024: effect-free ambiguity becomes a known failure.
+    /// effect-free ambiguity becomes a known failure.
     #[test]
-    fn inv024_effect_free_ambiguity_becomes_known_failure() {
+    fn effect_free_ambiguity_becomes_known_failure() {
         assert_ambiguity_admission(
             ToolEffectClass::EffectFree,
             ToolAttemptObservation::KnownFailed {
@@ -4172,9 +4047,9 @@ mod tests {
         );
     }
 
-    /// INV-024: external-effect ambiguity retains its recovery distinction.
+    /// external-effect ambiguity retains its recovery distinction.
     #[test]
-    fn inv024_external_effect_ambiguity_is_preserved() {
+    fn external_effect_ambiguity_is_preserved() {
         assert_ambiguity_admission(
             ToolEffectClass::ExternalEffect,
             ToolAttemptObservation::Ambiguous,
@@ -4212,12 +4087,12 @@ mod tests {
         )
     }
 
-    /// S15 / INV-024: a result past the admission bound is replaced by the
+    /// a result past the admission bound is replaced by the
     /// typed `ResultTooLarge` error. The observation compared here is the whole
     /// value handed to the commit boundary, so equality with a detail-less
     /// typed failure is also the proof that no oversized byte survives into it.
     #[test]
-    fn s15_inv024_oversized_result_is_replaced_by_result_too_large() {
+    fn oversized_result_is_replaced_by_result_too_large() {
         let observation = completed_text_admission("r".repeat(OVERSIZED_RESULT_BYTES));
 
         assert_eq!(
@@ -4228,12 +4103,12 @@ mod tests {
         );
     }
 
-    /// S15 / INV-024: a result carrying U+0000 is admitted as a detail-less
+    /// a result carrying U+0000 is admitted as a detail-less
     /// `ExecutionFailed`. The tool-loop specification names a replacement kind
     /// for the size bound only, so this test pins the implemented mapping for
     /// the null-bearing arm rather than a specified one.
     #[test]
-    fn s15_inv024_result_containing_null_is_replaced_by_execution_failed() {
+    fn result_containing_null_is_replaced_by_execution_failed() {
         let observation = completed_text_admission(String::from("head\0tail"));
 
         assert_eq!(
@@ -4284,11 +4159,11 @@ mod tests {
         );
     }
 
-    /// S15 / INV-024: the substitution is what the hub durably commits — the
+    /// the substitution is what the hub durably commits — the
     /// ended attempt carries the typed `ResultTooLarge` failure, so oversized
     /// executor bytes never become durable result evidence.
     #[tokio::test]
-    async fn s15_inv024_committed_oversized_result_ends_the_attempt_known_failed() {
+    async fn committed_oversized_result_ends_the_attempt_known_failed() {
         let effect_class = ToolEffectClass::EffectFree;
         let (batch, _) = prepared_batch("{}", effect_class);
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -4346,10 +4221,10 @@ mod tests {
         assert_eq!(*events.lock().expect("event lock"), ["authorize", "commit"]);
     }
 
-    /// INV-011 / INV-024: the definition selected by successful preflight is
+    /// the definition selected by successful preflight is
     /// the exact same-incarnation declaration carried across authorization.
     #[tokio::test]
-    async fn inv011_inv024_authorization_uses_preflight_definition_snapshot() {
+    async fn authorization_uses_preflight_definition_snapshot() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {
@@ -4399,11 +4274,11 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024: a lost authorization acknowledgement is reread
+    /// a lost authorization acknowledgement is reread
     /// while the dispatch gate remains held, and committed authority enters
     /// the executor exactly once.
     #[tokio::test]
-    async fn inv011_inv024_ambiguous_authorization_resumes_committed_fence() {
+    async fn ambiguous_authorization_resumes_committed_fence() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {
@@ -4456,10 +4331,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024: a failed result commit retains exact executor
+    /// a failed result commit retains exact executor
     /// evidence and retries only that commit after an authoritative reread.
     #[tokio::test]
-    async fn inv011_inv024_failed_commit_does_not_repeat_executor_work() {
+    async fn failed_commit_does_not_repeat_executor_work() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {

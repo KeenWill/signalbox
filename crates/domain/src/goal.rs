@@ -6,7 +6,9 @@
 
 use std::{error::Error, fmt, num::NonZeroU64};
 
-use crate::{DurableCommandId, SessionId, ToolRequestId, TurnId};
+use crate::{
+    DurableCommandId, LifecycleActor, SessionClosureOutcome, SessionId, ToolRequestId, TurnId,
+};
 
 const MAX_GOAL_TEXT_UTF8_BYTES: usize = 1_048_576;
 
@@ -44,6 +46,8 @@ goal_text!(/// Optional user guidance delivered when a blocked goal resumes.
     GoalGuidance);
 goal_text!(/// The final report supplied when the model declares achievement.
     GoalReport);
+goal_text!(/// A finish condition declared at creation or adoption.
+    FinishConditionStatement);
 
 fn validate_goal_text(value: &str) -> Result<(), GoalTextError> {
     if value.is_empty() {
@@ -250,6 +254,8 @@ pub enum GoalBlockedReasonKind {
     AuthorizationRequired,
     /// The preceding turn failed and was not silently retried.
     ExecutionFailure,
+    /// The declared finish check refused an achievement; the need is its result.
+    FinishCheckFailed,
 }
 
 impl From<GoalModelBlockedReasonKind> for GoalBlockedReasonKind {
@@ -277,6 +283,8 @@ pub enum GoalBlockProvenance {
         /// Exact source turn.
         provenance: GoalSchedulerProvenance,
     },
+    /// A failing finish check on the declaring request.
+    FinishCheck { provenance: GoalModelProvenance },
 }
 
 impl GoalBlockProvenance {
@@ -296,6 +304,7 @@ impl GoalBlockProvenance {
                 ..
             } => GoalBlockedReasonKind::AuthorizationRequired,
             Self::ExecutionFailure { .. } => GoalBlockedReasonKind::ExecutionFailure,
+            Self::FinishCheck { .. } => GoalBlockedReasonKind::FinishCheckFailed,
         }
     }
 }
@@ -324,6 +333,16 @@ pub enum GoalState {
         /// The successor commissioned by the same event.
         by_generation: GoalGeneration,
     },
+    /// The session closed beneath this generation.
+    ///
+    /// Goal state is the sole continuation-stopping condition in this
+    /// contract, so a terminal session settles its live generation here. The
+    /// state is terminal in every direction: no resume, no supersession, and
+    /// no later commission, because the session that would run them is gone.
+    SessionClosed {
+        /// The session outcome that closed it.
+        outcome: SessionClosureOutcome,
+    },
 }
 
 impl GoalState {
@@ -333,7 +352,8 @@ impl GoalState {
             Self::Blocked { .. }
             | Self::Achieved { .. }
             | Self::UserStopped
-            | Self::Superseded { .. } => false,
+            | Self::Superseded { .. }
+            | Self::SessionClosed { .. } => false,
         }
     }
 
@@ -343,7 +363,8 @@ impl GoalState {
             Self::Pursuing
             | Self::Achieved { .. }
             | Self::UserStopped
-            | Self::Superseded { .. } => false,
+            | Self::Superseded { .. }
+            | Self::SessionClosed { .. } => false,
         }
     }
 
@@ -354,14 +375,20 @@ impl GoalState {
     pub const fn is_open(&self) -> bool {
         match self {
             Self::Pursuing | Self::Blocked { .. } => true,
-            Self::Achieved { .. } | Self::UserStopped | Self::Superseded { .. } => false,
+            Self::Achieved { .. }
+            | Self::UserStopped
+            | Self::Superseded { .. }
+            | Self::SessionClosed { .. } => false,
         }
     }
 
     fn admits_later_commission(&self) -> bool {
         match self {
             Self::Achieved { .. } | Self::UserStopped => true,
-            Self::Pursuing | Self::Blocked { .. } | Self::Superseded { .. } => false,
+            Self::Pursuing
+            | Self::Blocked { .. }
+            | Self::Superseded { .. }
+            | Self::SessionClosed { .. } => false,
         }
     }
 }
@@ -472,6 +499,18 @@ pub enum GoalEventKind {
         /// Durable user-command provenance for both effects.
         provenance: GoalUserProvenance,
     },
+    /// The session closed, settling the live generation beneath it.
+    ///
+    /// The session outcomes that reach this event are the ones with no
+    /// existing goal spelling: a stop settles as `user_stopped` and a verified
+    /// achievement as `achieved`, because those are the same act seen from the
+    /// goal's side.
+    SessionClosed {
+        /// The outcome the session recorded.
+        outcome: SessionClosureOutcome,
+        /// The classified actor that closed it.
+        provenance: LifecycleActor,
+    },
 }
 
 /// A session's complete goal lineage and current generation.
@@ -579,6 +618,15 @@ impl Goal {
         self.block(GoalBlockProvenance::ExecutionFailure { provenance }, need)
     }
 
+    /// Blocks the goal on a failing finish check; the need is the check's result.
+    pub fn block_finish_check(
+        self,
+        need: GoalNeed,
+        provenance: GoalModelProvenance,
+    ) -> Result<Self, GoalTransitionError> {
+        self.block(GoalBlockProvenance::FinishCheck { provenance }, need)
+    }
+
     fn block(
         mut self,
         block: GoalBlockProvenance,
@@ -670,6 +718,37 @@ impl Goal {
             ordinal,
             generation,
             kind: GoalEventKind::UserStopped { provenance },
+        });
+        Ok(self)
+    }
+
+    /// Settles an open generation because its session reached a terminal
+    /// outcome.
+    ///
+    /// Rejected for a closed generation: an achieved or stopped generation is
+    /// already settled, and settling it again would record a second terminal
+    /// event for one lineage.
+    pub fn close_with_session(
+        mut self,
+        outcome: SessionClosureOutcome,
+        provenance: LifecycleActor,
+    ) -> Result<Self, GoalTransitionError> {
+        if !self.current().state.is_open() {
+            return Err(GoalTransitionError::new(
+                self,
+                GoalTransitionFailure::RequiresPursuingOrBlocked,
+            ));
+        }
+        let ordinal = self.next_ordinal()?;
+        let generation = self.current().generation;
+        self.current_mut().state = GoalState::SessionClosed { outcome };
+        self.events.push(GoalEvent {
+            ordinal,
+            generation,
+            kind: GoalEventKind::SessionClosed {
+                outcome,
+                provenance,
+            },
         });
         Ok(self)
     }
@@ -806,7 +885,8 @@ impl GoalReconstitutionInput {
             | GoalEventKind::Resumed { .. }
             | GoalEventKind::Achieved { .. }
             | GoalEventKind::UserStopped { .. }
-            | GoalEventKind::Superseded { .. } => {
+            | GoalEventKind::Superseded { .. }
+            | GoalEventKind::SessionClosed { .. } => {
                 return Err(GoalReconstitutionError::new(
                     GoalReconstitutionFailure::MissingCommission,
                 ));
@@ -848,6 +928,10 @@ fn apply_stored_event(goal: Goal, event: &GoalEvent) -> Result<Goal, GoalTransit
             block: GoalBlockProvenance::ExecutionFailure { provenance },
             need,
         } => goal.block_execution_failure(need.clone(), *provenance),
+        GoalEventKind::Blocked {
+            block: GoalBlockProvenance::FinishCheck { provenance },
+            need,
+        } => goal.block_finish_check(need.clone(), *provenance),
         GoalEventKind::Resumed {
             guidance,
             provenance,
@@ -860,6 +944,10 @@ fn apply_stored_event(goal: Goal, event: &GoalEvent) -> Result<Goal, GoalTransit
             replacement_statement,
             provenance,
         } => goal.supersede(replacement_statement.clone(), *provenance),
+        GoalEventKind::SessionClosed {
+            outcome,
+            provenance,
+        } => goal.close_with_session(*outcome, *provenance),
     }
 }
 
@@ -937,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn inv048_scheduler_block_reports_event_ordinal_exhaustion() {
+    fn scheduler_block_reports_event_ordinal_exhaustion() {
         let mut goal = Goal::commission(
             session(),
             statement("exhaust the event ordinal"),
@@ -965,7 +1053,7 @@ mod tests {
         );
     }
 
-    /// INV-048: supersession preserves immutable lineage while commissioning one successor.
+    /// supersession preserves immutable lineage while commissioning one successor.
     #[test]
     fn supersession_preserves_old_statement_and_commissions_successor() {
         let first_statement = statement("ship the first scope");
@@ -987,7 +1075,7 @@ mod tests {
         assert_eq!(superseded.current().state(), &GoalState::Pursuing);
     }
 
-    /// INV-048: execution failure is a scheduler-only block and never a retry.
+    /// execution failure is a scheduler-only block and never a retry.
     #[test]
     fn execution_failure_blocks_without_model_selectable_provenance() {
         let failed_turn = TurnId::from_uuid(Uuid::from_u128(INVOKING_TURN));
@@ -1007,7 +1095,7 @@ mod tests {
         );
     }
 
-    /// INV-048: achievement points at the exact correlated report declaration.
+    /// achievement points at the exact correlated report declaration.
     #[test]
     fn achieved_state_references_exact_report_tool_invocation() {
         let provenance = model();
@@ -1033,10 +1121,10 @@ mod tests {
         );
     }
 
-    /// INV-048: pursuing is the sole scheduler-continuing state; every other
+    /// pursuing is the sole scheduler-continuing state; every other
     /// lifecycle state stops that generation.
     #[test]
-    fn inv048_only_pursuing_state_continues_scheduler_turns() {
+    fn only_pursuing_state_continues_scheduler_turns() {
         let blocked = GoalState::Blocked {
             reason: GoalBlockedReasonKind::AuthorizationRequired,
             need: need("authorization for the deployment"),
@@ -1058,7 +1146,7 @@ mod tests {
         assert!(!superseded.is_pursuing());
     }
 
-    /// INV-048: the complete event history replays to the identical aggregate.
+    /// the complete event history replays to the identical aggregate.
     #[test]
     fn event_history_round_trips_through_checked_reconstitution() {
         let guidance = GoalGuidance::try_new(String::from("use the newly supplied key"))

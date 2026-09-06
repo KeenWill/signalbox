@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+signalbox-derive = { path = "../derive" }
 jiff = { version = "0.2.34", default-features = false, features = [
     "std",
     "tzdb-bundle-always",

@@ -704,10 +704,7 @@ async fn create_session(pool: &PgPool, ids: OperationIds) -> HarnessResult<TurnF
     let selection = DirectModelSelection::from_uuid(ids.uuid(IdentityRole::ModelSelection));
     let prepared = CreateSession::new(
         command,
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
     )
     .prepare(session)
@@ -975,7 +972,11 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         })?;
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
     let model_outcome = model_repository
         .apply_terminal_observation(
             flow.session,

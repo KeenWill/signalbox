@@ -354,12 +354,12 @@ header** rather than a static API key. Against
   5-minute/8-day proactive OAuth refresh (Codex does this in its `AuthManager`,
   out of band from the request path). The substrate's per-request resolve
   semantics accommodate a rotating token, but its
-  [credential-access boundary](../spec/runtime-substrate.md#credential-access-boundary)
-  value is opaque bytes (`CredentialValue`, read only via `expose_bytes`) — it
-  cannot directly carry that struct. A future adapter therefore either defines
-  an encoded byte credential it parses internally, or widens the credential API,
-  a foundation-weight change to the owning specification made through the
-  decision process in [AGENTS.md](../../AGENTS.md).
+  [credential-access boundary](../spec/runtime-substrate.md) value is opaque
+  bytes (`CredentialValue`, read only via `expose_bytes`) — it cannot directly
+  carry that struct. A future adapter therefore either defines an encoded byte
+  credential it parses internally, or widens the credential API, a
+  foundation-weight change to the owning specification made through the
+  repository's decision process.
 - **Turn semantics are wider than one call.** The sticky `x-codex-turn-state`
   token (§6) must be replayed across the several requests of one backend turn
   yet never leak across turns, but the substrate's boundary is per-call: the

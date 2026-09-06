@@ -13,7 +13,9 @@ async fn active_credential_pool_fixture(
     pool: &sqlx::PgPool,
     seed: u128,
     pool_name: &str,
-    member_reference: &str,
+    member_references: &[&str],
+    availability_action: CredentialPoolRuntimeAction,
+    credential_rejected_action: CredentialPoolRuntimeAction,
 ) -> Result<(SessionId, TurnId, PostgresModelCallRepository), Box<dyn Error>> {
     let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
     let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
@@ -55,15 +57,23 @@ async fn active_credential_pool_fixture(
             .expect("one pool fixture target forms a catalog");
     let policy = CredentialPoolRuntimePolicy::new(
         pool_name.to_owned(),
-        vec![CredentialPoolRuntimeMember::new(
-            member_reference.to_owned(),
-            nonzero_priority(1),
-        )],
+        member_references
+            .iter()
+            .enumerate()
+            .map(|(position, reference)| {
+                CredentialPoolRuntimeMember::new(
+                    (*reference).to_owned(),
+                    nonzero_priority(
+                        u32::try_from(position + 1).expect("fixture membership fits u32"),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>(),
         signalbox_persistence::model_execution::CredentialPoolRuntimeExhaustion::Fail,
-        CredentialPoolRuntimeAction::SwitchNow,
-        CredentialPoolRuntimeAction::SwitchNow,
-        CredentialPoolRuntimeAction::SwitchNow,
-        CredentialPoolRuntimeAction::Quarantine,
+        availability_action,
+        availability_action,
+        availability_action,
+        credential_rejected_action,
     );
     let repository = PostgresModelCallRepository::new(
         pool.clone(),
@@ -111,14 +121,234 @@ async fn model_call_outbox_order_guard_is_available(
     Ok(available)
 }
 
+/// A pool member quarantined after prospective counting closes the activation
+/// as call-free pool exhaustion instead of rolling back the definitive result.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn counted_attachment_failure_handles_pool_exhaustion_at_commit() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xcd50_0000_u128;
+    let pool_name = "counted-attachment-race-pool";
+    let member = "counted-attachment-member";
+    let (observed_session, observed_turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        pool_name,
+        &[member],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 3));
+    let target_session = SessionId::from_uuid(Uuid::from_u128(seed + 50));
+    let target_turn = TurnId::from_uuid(Uuid::from_u128(seed + 51));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 52,
+            seed + 50,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 53,
+                seed + 50,
+                "attachment failure races pool quarantine",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 54)),
+            Some(target_turn),
+        )
+        .await?;
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(
+            target_session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 55)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 56)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 57)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 58)),
+            ),
+        )
+        .await?
+        .expect("the target turn has an activation preview");
+    let prospective_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 59));
+    let prospective = repository
+        .preview_activation_operation(preview.prepared(), prospective_call)
+        .await?
+        .expect("the member is available during prospective counting");
+
+    let (observed_call, observed_reference) =
+        prepare_and_authorize_pool_call(&repository, observed_session, seed + 100).await?;
+    assert_eq!(observed_reference, member);
+    sqlx::query(
+        "INSERT INTO credential_pool_member_action
+            (pool_name, credential_reference, action_kind,
+             observed_session_id, observed_turn_id,
+             observation_model_call_id, cause_kind)
+         VALUES ($1, $2, 'quarantine', $3, $4, $5, 'credential_rejected')",
+    )
+    .bind(pool_name)
+    .bind(member)
+    .bind(observed_session.into_uuid())
+    .bind(observed_turn.into_uuid())
+    .bind(observed_call.observation_correlation().call().into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let outcome = activation
+        .commit_counted_attachment_failure_preview(
+            preview,
+            prospective,
+            &repository,
+            AttachmentPreparationFailure::Missing,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 60)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 61)),
+            ),
+            None,
+        )
+        .await?;
+    assert_eq!(
+        outcome,
+        CommitCountedAttachmentFailurePreviewOutcome::Failed(target_turn)
+    );
+    let durable: (String, Option<String>, i64, i64) = sqlx::query_as(
+        "SELECT lifecycle.state_kind, lifecycle.terminal_cause_kind,
+                (SELECT count(*) FROM model_call
+                  WHERE session_id = $1 AND turn_id = $2),
+                (SELECT count(*) FROM credential_pool_terminal_exhaustion
+                  WHERE session_id = $1 AND turn_id = $2)
+           FROM turn_lifecycle AS lifecycle
+          WHERE lifecycle.session_id = $1 AND lifecycle.turn_id = $2",
+    )
+    .bind(target_session.into_uuid())
+    .bind(target_turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        durable,
+        (
+            String::from("terminal"),
+            Some(String::from("credential_pool_exhausted")),
+            0,
+            1,
+        )
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn prepare_and_authorize_pool_call(
+    repository: &PostgresModelCallRepository,
+    session: SessionId,
+    seed: u128,
+) -> Result<(AuthorizedModelCall, String), Box<dyn Error>> {
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 1));
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 2)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 3)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 4)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 5)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 6)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the pool member must checkpoint")
+    };
+    assert_eq!(checkpointed, call);
+    let PrepareInitialModelCallOutcome::Ready {
+        request,
+        credential_reference,
+        ..
+    } = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 7)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 8)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 9)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 10)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 12)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the checkpointed call must reload")
+    };
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(session, request.call().id())
+        .await?
+    else {
+        panic!("the checkpointed call must authorize")
+    };
+    Ok((*authorized, credential_reference.as_str().to_owned()))
+}
+
+async fn expire_availability_backoff(
+    pool: &sqlx::PgPool,
+    successor_attempt: TurnAttemptId,
+) -> Result<(), Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "UPDATE credential_pool_transient_exclusion
+            SET reset_at = transaction_timestamp()
+          WHERE observation_model_call_id = (
+                SELECT predecessor_model_call_id
+                  FROM credential_pool_availability_successor
+                 WHERE successor_turn_attempt_id = $1
+          )",
+    )
+    .bind(successor_attempt.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE credential_pool_availability_successor
+            SET retry_not_before = transaction_timestamp()
+          WHERE successor_turn_attempt_id = $1",
+    )
+    .bind(successor_attempt.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn deferred_final_state_validation_claims_are_typed_and_transaction_local()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7730_u128;
-    let (_session, turn, _repository) =
-        active_credential_pool_fixture(&pool, seed, "claim-pool", "claim-member").await?;
+    let (_session, turn, _repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "claim-pool",
+        &["claim-member"],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
 
     let mut transaction = pool.begin().await?;
     sqlx::query("SELECT assert_turn_lifecycle_final_state($1)")
@@ -151,20 +381,26 @@ async fn deferred_final_state_validation_claims_are_typed_and_transaction_local(
     Ok(())
 }
 
-/// INV-007 / INV-009 / INV-012: model-call writers acquire one ordering guard,
+/// model-call writers acquire one ordering guard,
 /// finish credential action locking, and only then wait for the shared outbox
 /// allocator. Counted activation carries proof that it acquired the same guard
 /// before its earlier activation event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv007_inv009_inv012_model_call_writers_guard_credential_before_outbox()
--> Result<(), Box<dyn Error>> {
+async fn model_call_writers_guard_credential_before_outbox() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7720_u128;
     let pool_name = "ordered-pool";
     let member_reference = "ordered-member";
-    let (session, _turn, repository) =
-        active_credential_pool_fixture(&pool, seed, pool_name, member_reference).await?;
+    let (session, _turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        pool_name,
+        &[member_reference],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
 
     let allocator_holder = lock_outbox_sequence_allocator(&pool).await?;
     let preparation = tokio::spawn({
@@ -272,8 +508,8 @@ async fn inv007_inv009_inv012_model_call_writers_guard_credential_before_outbox(
 /// a distinct successor on member B; exhausting B is a typed pool cause.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result<(), Box<dyn Error>>
-{
+async fn configured_quota_failure_records_pool_rotation_action_end_to_end()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7710_u128;
     let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
@@ -521,16 +757,514 @@ async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result
     Ok(())
 }
 
-/// S01 / S20 / S21 / INV-014 / INV-015 / INV-032 / INV-035: the production
+/// A credential rejection authorizes only configured rotation: it does not
+/// require adapter non-acceptance proof and never retries the rejected member.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_rejection_switch_now_rotates_without_same_credential_retry()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x1534_2000_u128;
+    let (session, turn, mut repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "rejected-credential-pool",
+        &["rejected-member", "replacement-member"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::SwitchNow,
+    )
+    .await?;
+    let (first, first_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
+    assert_eq!(first_reference, "rejected-member");
+    let failed_call = first.observation_correlation().call();
+    let successor_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 120));
+    let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(successor)) = repository
+        .commit_observation(
+            session,
+            first
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::CredentialRejected,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    false,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                ),
+                successor_attempt,
+            },
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 123)),
+        )
+        .await?
+    else {
+        panic!("credential rejection with switch_now must create a successor")
+    };
+    assert_eq!(successor.backoff(), Duration::ZERO);
+
+    let (_second, second_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 200).await?;
+    assert_eq!(second_reference, "replacement-member");
+    let durable: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM model_call
+               WHERE session_id = $1 AND turn_id = $2
+                 AND credential_reference = 'rejected-member'),
+             (SELECT count(*) FROM credential_pool_chain_exclusion
+               WHERE predecessor_model_call_id = $3),
+             (SELECT count(*) FROM credential_pool_transient_exclusion
+               WHERE observation_model_call_id = $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(failed_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable, (1, 1, 0));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A transient successor's reset is also a credential-scoped durable
+/// exclusion, so another session cannot prepare that credential before reset.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn transient_cooldown_excludes_credential_from_every_session_preparation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x1534_3000_u128;
+    let (first_session, _first_turn, first_repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "shared-cooldown-pool",
+        &["cooling-member", "ready-member"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let (second_session, _second_turn, second_repository) = active_credential_pool_fixture(
+        &pool,
+        seed + 1000,
+        "shared-cooldown-pool",
+        &["cooling-member", "ready-member"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let mut first_repository = first_repository.with_same_credential_attempt_bound(
+        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
+    );
+    let (first, first_reference) =
+        prepare_and_authorize_pool_call(&first_repository, first_session, seed + 100).await?;
+    assert_eq!(first_reference, "cooling-member");
+    let failed_call = first.observation_correlation().call();
+    let successor_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 120));
+    let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(_)) = first_repository
+        .commit_observation(
+            first_session,
+            first
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::RateLimited,
+                    ProviderReportedTokenUsage::unreported(),
+                    Some(Duration::from_secs(300)),
+                    true,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                ),
+                successor_attempt,
+            },
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 123)),
+        )
+        .await?
+    else {
+        panic!("the rate limit must create a same-credential successor")
+    };
+    let durable_cooldown: (String, String, bool, bool) = sqlx::query_as(
+        "SELECT exclusion.credential_reference,
+                exclusion.cause_kind,
+                exclusion.reset_at > transaction_timestamp(),
+                exclusion.reset_at = successor.retry_not_before
+           FROM credential_pool_transient_exclusion AS exclusion
+           JOIN credential_pool_availability_successor AS successor
+             ON successor.predecessor_model_call_id =
+                exclusion.observation_model_call_id
+          WHERE exclusion.observation_model_call_id = $1",
+    )
+    .bind(failed_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        durable_cooldown,
+        (
+            String::from("cooling-member"),
+            String::from("rate_limited"),
+            true,
+            true,
+        )
+    );
+
+    let (_second, second_reference) =
+        prepare_and_authorize_pool_call(&second_repository, second_session, seed + 1100).await?;
+    assert_eq!(second_reference, "ready-member");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A transient failure retries the same credential after its reset, while the
+/// configured attempt bound turns the next failure into ordinary pool rotation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn transient_failure_retries_same_credential_until_bound_then_rotates()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x1534_0000_u128;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 3));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 4)));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 5,
+            seed + 1,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 6,
+                seed + 1,
+                "retry one credential before rotating",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 7)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 8),
+            starting_frontier: Uuid::from_u128(seed + 9),
+            initial_attempt: Uuid::from_u128(seed + 10),
+        },
+    )
+    .await?;
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one pool fixture target forms a catalog");
+    let policy = CredentialPoolRuntimePolicy::new(
+        "transient-retry-pool",
+        vec![
+            CredentialPoolRuntimeMember::new("warm-member", nonzero_priority(1)),
+            CredentialPoolRuntimeMember::new("rotation-member", nonzero_priority(2)),
+        ],
+        signalbox_persistence::model_execution::CredentialPoolRuntimeExhaustion::Fail,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    );
+    let mut repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("unused-default"),
+    )
+    .with_credential_pools(HashMap::from([(target, policy)]))
+    .with_same_credential_attempt_bound(
+        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
+    );
+
+    let (first, first_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
+    assert_eq!(first_reference, "warm-member");
+    let first_successor_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 120));
+    let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(first_successor)) =
+        repository
+            .commit_observation(
+                session,
+                first
+                    .observation_correlation()
+                    .bind_provider_failure_observation_with_retry_after(
+                        ProviderModelCallFailureCause::ProviderInternal,
+                        ProviderReportedTokenUsage::unreported(),
+                        Some(Duration::from_millis(1)),
+                        true,
+                    ),
+                signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                    failed: FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                    ),
+                    successor_attempt: first_successor_attempt,
+                },
+                |_| TurnId::from_uuid(Uuid::from_u128(seed + 123)),
+            )
+            .await?
+    else {
+        panic!("the first transient failure must create a successor")
+    };
+    assert!(!first_successor.backoff().is_zero());
+    expire_availability_backoff(&pool, first_successor_attempt).await?;
+
+    let (second, second_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 200).await?;
+    assert_eq!(second_reference, "warm-member");
+    let rotation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 220));
+    let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(rotation)) = repository
+        .commit_observation(
+            session,
+            second
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::Overloaded,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    true,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 221)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 222)),
+                ),
+                successor_attempt: rotation_attempt,
+            },
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 223)),
+        )
+        .await?
+    else {
+        panic!("the bound must create a rotation successor")
+    };
+    assert!(!rotation.backoff().is_zero());
+    expire_availability_backoff(&pool, rotation_attempt).await?;
+
+    let (_third, third_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 300).await?;
+    assert_eq!(third_reference, "rotation-member");
+    let durable_counts: (i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM model_call
+               WHERE session_id = $1 AND turn_id = $2
+                 AND credential_reference = 'warm-member'),
+             (SELECT count(*) FROM credential_pool_chain_exclusion
+               WHERE session_id = $1 AND turn_id = $2
+                 AND credential_reference = 'warm-member')",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_counts, (2, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A durable action that already excludes the failed credential prevents the
+/// same-credential retry; `stay` cannot substitute another pool member.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn excluded_failed_credential_with_stay_terminalizes_instead_of_retrying()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x1534_0800_u128;
+    let (session, turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "excluded-retry-pool",
+        &["failed-member", "unauthorized-fallback"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let mut repository = repository.with_same_credential_attempt_bound(
+        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
+    );
+    let (first, first_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
+    assert_eq!(first_reference, "failed-member");
+    let failed_call = first.observation_correlation().call();
+    sqlx::query(
+        "INSERT INTO credential_pool_member_action
+            (pool_name, credential_reference, action_kind,
+             observed_session_id, observed_turn_id,
+             observation_model_call_id, cause_kind)
+         VALUES ($1, $2, 'quarantine', $3, $4, $5, 'credential_rejected')",
+    )
+    .bind("excluded-retry-pool")
+    .bind("failed-member")
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(failed_call.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let outcome = repository
+        .commit_observation(
+            session,
+            first
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::Overloaded,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    true,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                ),
+                successor_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(seed + 120)),
+            },
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 123)),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        Some(ModelCallObservationCommitOutcome::Terminal(terminal))
+            if matches!(*terminal, ModelCallTerminalOutcome::Failed(_))
+    ));
+    let successor_counts: (i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM credential_pool_availability_successor
+               WHERE predecessor_model_call_id = $1),
+             (SELECT count(*) FROM credential_pool_chain_exclusion
+               WHERE predecessor_model_call_id = $1)",
+    )
+    .bind(failed_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(successor_counts, (0, 0));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A same-credential successor cannot become an implicit rotation when a
+/// durable action excludes its credential before preparation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn transient_retry_exhausts_if_its_credential_is_quarantined_before_preparation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x1534_1000_u128;
+    let (session, turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "retry-race-pool",
+        &["retry-member", "unauthorized-fallback"],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let mut repository = repository.with_same_credential_attempt_bound(
+        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
+    );
+    let (first, first_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
+    assert_eq!(first_reference, "retry-member");
+    let failed_call = first.observation_correlation().call();
+    let successor_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 120));
+    let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(_)) = repository
+        .commit_observation(
+            session,
+            first
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::Overloaded,
+                    ProviderReportedTokenUsage::unreported(),
+                    Some(Duration::from_millis(1)),
+                    true,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                ),
+                successor_attempt,
+            },
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 123)),
+        )
+        .await?
+    else {
+        panic!("the transient failure must authorize a retry successor")
+    };
+    expire_availability_backoff(&pool, successor_attempt).await?;
+    sqlx::query(
+        "INSERT INTO credential_pool_member_action
+            (pool_name, credential_reference, action_kind,
+             observed_session_id, observed_turn_id,
+             observation_model_call_id, cause_kind)
+         VALUES ($1, $2, 'quarantine', $3, $4, $5, 'credential_rejected')",
+    )
+    .bind("retry-race-pool")
+    .bind("retry-member")
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(failed_call.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let PrepareInitialModelCallOutcome::PoolExhausted(_) = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 130)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 131)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 132)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 133)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 134)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 135)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the retry successor must not rotate to another member")
+    };
+    let calls: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM model_call WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(calls, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// the production
 /// persistence chain checkpoints Prepared with its credential and input-token
 /// semantics pins, reloads them instead of changed deployment values,
 /// separately authorizes send, and atomically commits exact assistant content,
-/// completion, terminal frontier, lifecycle, call, attempt, and typed outbox
-/// records.
+/// provider compaction, completion, terminal frontier, lifecycle, call,
+/// attempt, and typed outbox records.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complete_first_reply()
--> Result<(), Box<dyn Error>> {
+async fn model_call_transactions_complete_first_reply() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e1));
     let direct_selection =
@@ -825,15 +1559,28 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         PrepareInitialModelCallOutcome::NoWork
     );
 
-    let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde2));
-    let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde3));
+    let provider_compaction_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde2));
+    let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde3));
+    let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde4));
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee2));
+    let provider_compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction", "content":"exact summary", "encrypted_content":"opaque=="}"#,
+    ))
+    .expect("fixture provider compaction block is admitted");
     let assistant_text = AssistantText::try_new("exact assistant reply".to_owned())
         .expect("fixture assistant content is admitted");
-    let observation = observation_correlation.bind_terminal_observation(
-        ModelCallTerminalObservation::Completed {
-            assistant_text: vec![assistant_text.clone()],
+    let observation = observation_correlation.bind_terminal_observation_with_usage(
+        ModelCallTerminalObservation::CompletedWithProviderCompaction {
+            response: vec![
+                AssistantResponsePart::ProviderCompaction(provider_compaction.clone()),
+                AssistantResponsePart::Text(assistant_text.clone()),
+            ],
+            retained_input_tokens: 17,
+            retained_output_tokens: 17,
         },
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(123))
+            .with_output_tokens(Some(17)),
     );
     assert_eq!(
         repository
@@ -841,12 +1588,18 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
             .await?,
         RetainedModelCallObservationStatus::Pending
     );
+    let projected_text_bytes_before: Decimal = sqlx::query_scalar(
+        "SELECT projected_text_bytes FROM session_timeline_fact WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
     let outcome = repository
         .apply_terminal_observation(
             session,
             observation.clone(),
             ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
-                vec![assistant_entry],
+                vec![provider_compaction_entry, assistant_entry],
                 completion_entry,
                 terminal_frontier,
             )),
@@ -863,14 +1616,45 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         panic!("the definitive response must complete the turn");
     };
     assert_eq!(completed.turn(), turn);
-    assert_eq!(completed.assistant_entries().len(), 1);
+    assert_eq!(completed.assistant_entries().len(), 2);
     assert_eq!(
         completed.assistant_entries()[0].payload(),
+        &signalbox_domain::SemanticTranscriptEntryPayload::ProviderCompaction {
+            producing_call: call,
+            block: provider_compaction.clone(),
+        }
+    );
+    assert_eq!(
+        completed.assistant_entries()[1].payload(),
         &signalbox_domain::SemanticTranscriptEntryPayload::AssistantText {
             producing_call: call,
             value: assistant_text.clone(),
         }
     );
+
+    let reported = repository
+        .latest_reported_usage(
+            session,
+            resolved_target,
+            FastMode::Disabled,
+            false,
+            terminal_frontier,
+        )
+        .await?
+        .expect("completed provider compaction reports retained-context semantics");
+    assert!(reported.input_is_retained());
+    assert_eq!(reported.retained_input_tokens(), Some(17));
+    assert_eq!(reported.retained_output_tokens(), Some(17));
+    let (retained_input_tokens, retained_output_tokens): (Decimal, Decimal) = sqlx::query_as(
+        "SELECT retained_input_tokens, retained_output_tokens
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retained_input_tokens, Decimal::from(17_u64));
+    assert_eq!(retained_output_tokens, Decimal::from(17_u64));
 
     let durable_shape: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -900,8 +1684,9 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
                 AND terminal_model_call_id = $1),
             (SELECT count(*) FROM model_call_transition_outbox_event
               WHERE model_call_id = $1),
-            (SELECT count(*) FROM turn_completed_outbox_event
-              WHERE turn_id = $5
+            (SELECT count(*) FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'completed'
+              AND turn_id = $5
                 AND model_call_id = $1
                 AND completion_entry_id = $4
                 AND terminal_frontier_id = $6),
@@ -924,11 +1709,37 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_shape, (1, 1, 1, 1, 1, 3, 1, 1, 1));
+    let durable_provider_compaction: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM semantic_transcript_entry
+          WHERE semantic_entry_id = $1
+            AND payload_kind = 'provider_compaction'
+            AND assistant_text_value = $2
+            AND producing_model_call_id = $3",
+    )
+    .bind(provider_compaction_entry.into_uuid())
+    .bind(provider_compaction.as_json())
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_provider_compaction, 1);
+    let projected_text_bytes_after: Decimal = sqlx::query_scalar(
+        "SELECT projected_text_bytes FROM session_timeline_fact WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        projected_text_bytes_after - projected_text_bytes_before,
+        Decimal::from(u64::try_from(assistant_text.as_str().len())?),
+        "opaque provider compaction bytes are excluded from transcript text accounting"
+    );
 
     let completion_sequence: Decimal = sqlx::query_scalar(
         "SELECT event_sequence
-           FROM turn_completed_outbox_event
-          WHERE turn_id = $1",
+           FROM turn_terminal_outbox_event
+          WHERE disposition_kind = 'completed'
+          AND turn_id = $1",
     )
     .bind(turn.into_uuid())
     .fetch_one(&pool)
@@ -958,23 +1769,23 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         .execute(&pool)
         .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1 - 1,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(completion_sequence)
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
@@ -1004,14 +1815,14 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         .execute(&pool)
         .await?;
 
-    sqlx::query("ALTER TABLE turn_completed_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_completed_outbox_event WHERE turn_id = $1")
+    sqlx::query("DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'completed' AND turn_id = $1")
         .bind(turn.into_uuid())
         .execute(&pool)
         .await?;
-    sqlx::query("ALTER TABLE turn_completed_outbox_event ENABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -1028,11 +1839,11 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     Ok(())
 }
 
-/// INV-092: a durable Prepared model call is a reconciliation-sweep hint, so
+/// a durable Prepared model call is a reconciliation-sweep hint, so
 /// temporary attachment unavailability can retry without process restart.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv092_prepared_model_call_remains_scheduler_eligible() -> Result<(), Box<dyn Error>> {
+async fn prepared_model_call_remains_scheduler_eligible() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e0_6201));
     let direct_selection =
@@ -1121,7 +1932,7 @@ async fn inv092_prepared_model_call_remains_scheduler_eligible() -> Result<(), B
     else {
         panic!("the fresh model call checkpoints Prepared")
     };
-    let (eligible, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -1135,7 +1946,7 @@ async fn inv092_prepared_model_call_remains_scheduler_eligible() -> Result<(), B
     Ok(())
 }
 
-/// S02 / S08 / INV-005 / INV-012 / INV-014 / INV-015 / INV-032 / INV-036: the scripted
+/// the scripted
 /// application path consumes multiple steering inputs at preparation, renders
 /// them immediately in the process projection and to the provider in acceptance
 /// order, rejects noncontiguous stored snapshot ordinals before resume,
@@ -1143,8 +1954,7 @@ async fn inv092_prepared_model_call_remains_scheduler_eligible() -> Result<(), B
 /// pending-steering receipt after consumption.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_inv014_inv015_application_service_completes_scripted_reply()
--> Result<(), Box<dyn Error>> {
+async fn application_service_completes_scripted_reply() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x18e1));
     let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0x1ce1));
@@ -1620,7 +2430,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     Ok(())
 }
 
-/// S03 / S04 / S07 / INV-006 / INV-016 / INV-029 / INV-034: a restart-parked
+/// a restart-parked
 /// ambiguous model call wedges the session — the scan classifies nothing, the
 /// wait stays visible across a second restart, and ordinary input is refused —
 /// and the user reconciliation decision then terminalizes the exact ambiguity
@@ -1635,8 +2445,8 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
 /// guarantee broke rather than only that the timeline broke.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_inv029_inv034_user_reconciliation_releases_a_restart_parked_ambiguous_turn()
--> Result<(), Box<dyn Error>> {
+async fn user_reconciliation_releases_a_restart_parked_ambiguous_turn() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, database_url) = migrated_postgres().await?;
     let parked = checkpoint_restart_model_call(&pool, 0xB100, true).await?;
 
@@ -1779,8 +2589,9 @@ async fn s04_inv029_inv034_user_reconciliation_releases_a_restart_parked_ambiguo
                 turn.terminal_attempt_id,
                 turn.terminal_model_call_id,
                 (SELECT count(*)
-                   FROM turn_reconciliation_required_outbox_event
-                  WHERE turn_id = $1
+                   FROM turn_terminal_outbox_event
+                  WHERE disposition_kind = 'reconciliation_required'
+                  AND turn_id = $1
                     AND model_call_id = $2)
            FROM turn_lifecycle AS turn
           WHERE turn.turn_id = $1",
@@ -1945,13 +2756,12 @@ async fn spend_automatic_reconciliation_budget(
     Ok(())
 }
 
-/// S04 / S10: the daemon claims a typed durable attempt and uses the existing
+/// the daemon claims a typed durable attempt and uses the existing
 /// reconciliation-required transition to release an automatically recovered
 /// ambiguous model-call wait without rewriting the call's unknown outcome.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_automatic_reconciliation_records_the_operator_transition() -> Result<(), Box<dyn Error>>
-{
+async fn automatic_reconciliation_records_the_operator_transition() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xC100).await?;
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone()).with_policy(
@@ -2070,18 +2880,24 @@ async fn s04_automatic_reconciliation_records_the_operator_transition() -> Resul
     Ok(())
 }
 
-/// S04: PostgreSQL, rather than a dropped client future, ends a recovery
+/// PostgreSQL, rather than a dropped client future, ends a recovery
 /// transaction that cannot reach the commit-ordered outbox allocator. The
 /// failed attempt therefore leaves no backend queued behind that allocator.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_automatic_reconciliation_server_bound_releases_its_database_work()
+async fn automatic_reconciliation_server_bound_releases_its_database_work()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xC500).await?;
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
     let batch = repository.claim_due().await?;
     let claimed = batch.claimed()[0];
+    // Keep the observer and both transaction connections established before
+    // opening the bounded wait. A cold observer connection can otherwise
+    // arrive after PostgreSQL's lock timeout and miss a wait that did happen.
+    let mut observer = pool.acquire().await?;
+    let established = [pool.acquire().await?, pool.acquire().await?];
+    drop(established);
     let mut allocator_holder = pool.begin().await?;
     let _: bool = sqlx::query_scalar(
         "SELECT singleton
@@ -2094,19 +2910,26 @@ async fn s04_automatic_reconciliation_server_bound_releases_its_database_work()
     let bounded_repository = repository.clone();
     let started = tokio::time::Instant::now();
     let reconciliation = tokio::spawn(async move { bounded_repository.reconcile(claimed).await });
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     // The probe counts blocked backends rather than one statement's text: the
     // reconciliation transaction reaches the commit-ordered allocator through a
     // durable trigger, and `pg_stat_activity` reports the top-level statement
     // that fired it, not the allocator lock the trigger takes.
-    let waiting_before_timeout: i64 = sqlx::query_scalar(
-        "SELECT count(*)
-           FROM pg_stat_activity
-          WHERE datname = current_database()
-            AND wait_event_type = 'Lock'",
-    )
-    .fetch_one(&pool)
-    .await?;
+    let mut waiting_before_timeout: i64 = 0;
+    for _ in 0..400 {
+        waiting_before_timeout = sqlx::query_scalar(
+            "SELECT count(*)
+               FROM pg_stat_activity
+              WHERE datname = current_database()
+                AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(&mut *observer)
+        .await?;
+        if waiting_before_timeout == 1 || reconciliation.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    drop(observer);
     let error = reconciliation
         .await?
         .expect_err("the database-side lock budget ends the blocked recovery");
@@ -2138,12 +2961,12 @@ async fn s04_automatic_reconciliation_server_bound_releases_its_database_work()
     Ok(())
 }
 
-/// S04 / S10: the existing operator reconciliation may win after an automatic
+/// the existing operator reconciliation may win after an automatic
 /// attempt is claimed; that attempt records supersession and never applies a
 /// second terminal transition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
+async fn operator_reconciliation_supersedes_a_claimed_automatic_attempt()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xE100;
@@ -2173,8 +2996,9 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
         "SELECT recovery.state_kind,
                 attempt.outcome_kind,
                 (SELECT count(*)
-                   FROM turn_reconciliation_required_outbox_event
-                  WHERE turn_id = recovery.turn_id)
+                   FROM turn_terminal_outbox_event
+                  WHERE disposition_kind = 'reconciliation_required'
+                  AND turn_id = recovery.turn_id)
            FROM automatic_reconciliation AS recovery
            JOIN automatic_reconciliation_attempt AS attempt
              ON attempt.turn_id = recovery.turn_id
@@ -2209,7 +3033,7 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
     Ok(())
 }
 
-/// S04 / S10: an attempt that meets a held session scheduler row gives the row
+/// an attempt that meets a held session scheduler row gives the row
 /// up inside the database, so a busy row costs one classified infrastructure
 /// failure with nothing written rather than a pooled connection checked out for
 /// the whole real wait.
@@ -2236,7 +3060,7 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
 /// was still using, which is the strand these tests exist to keep closed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database()
+async fn a_contended_automatic_attempt_gives_the_row_up_inside_the_database()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xF100).await?;
@@ -2339,7 +3163,7 @@ fn reconciliation_database_failure(
     }
 }
 
-/// S04 / S10: the durable failure record is bounded inside the database too, so
+/// the durable failure record is bounded inside the database too, so
 /// a run of contended attempts cannot strand a pooled connection apiece.
 ///
 /// This transaction updates the attempt row and its recovery row, and both are
@@ -2352,7 +3176,7 @@ fn reconciliation_database_failure(
 /// reaches a record this transaction could not write.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
+async fn a_contended_failure_record_gives_the_row_up_inside_the_database()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xF200).await?;
@@ -2426,7 +3250,7 @@ async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
     Ok(())
 }
 
-/// S04 / S10: the acquisition budget bounds reaching a pooled connection and
+/// the acquisition budget bounds reaching a pooled connection and
 /// nothing past it, so a pool with nothing left to hand out costs one
 /// classified infrastructure failure that wrote nothing, rather than a watchdog
 /// wake spent waiting out the driver's own thirty-second acquisition timeout.
@@ -2450,7 +3274,7 @@ async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
 /// budget while the acquisition behaved exactly as asserted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_begins()
+async fn an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_begins()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xF300).await?;
@@ -2521,14 +3345,14 @@ async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_b
     Ok(())
 }
 
-/// S04 / S10: infrastructure failures spend the exact automatic budget; only
+/// infrastructure failures spend the exact automatic budget; only
 /// then does the still-active ambiguity become a visible operator park.
-/// S04 / S10: infrastructure failures spend the exact automatic budget; the
+/// infrastructure failures spend the exact automatic budget; the
 /// visible operator park can still be interrupted without leaving its durable
 /// automatic record inconsistent with the terminal turn and queued successor.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
+async fn exhausted_automatic_reconciliation_is_visible_to_the_operator()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xD100;
@@ -2626,19 +3450,18 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     Ok(())
 }
 
-/// S04: first-time recovery discovery contends with an accepting operator
+/// first-time recovery discovery contends with an accepting operator
 /// interrupt on the turn row instead of racing past its uncommitted
 /// terminalization.
 ///
-/// Both sides used to read and write that row without a lock either could see,
-/// so discovery's `READ COMMITTED` snapshot could enrol a fresh `scheduled`
-/// recovery for a turn the interrupt was terminalizing, and the interrupt's own
-/// supersession could not see that uncommitted insert. The committed pair is
-/// the shape `process_read` rejects as corruption until a later supersession
-/// lap reaches it.
+/// Without a lock that either side can see, discovery's `READ COMMITTED` snapshot
+/// could enrol a fresh `scheduled` recovery for a turn the interrupt was
+/// terminalizing, and the interrupt's own supersession could not see that
+/// uncommitted insert. The committed pair is the shape `process_read` rejects as
+/// corruption until a later supersession lap reaches it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<(), Box<dyn Error>> {
+async fn recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xD1A0;
     let parked = park_restart_ambiguity(&pool, seed).await?;
@@ -2701,12 +3524,11 @@ async fn s04_recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<()
     Ok(())
 }
 
-/// S03 / INV-014: a prepared model call remains discoverable for ordinary
+/// a prepared model call remains discoverable for ordinary
 /// active-turn resumption even when no tool round is active.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_inv014_prepared_model_call_is_resumable_without_tool_round()
--> Result<(), Box<dyn Error>> {
+async fn prepared_model_call_is_resumable_without_tool_round() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0xc700, false).await?;
     let active_tool_round = sqlx::query_scalar::<_, Option<Uuid>>(
@@ -2732,7 +3554,7 @@ async fn s03_inv014_prepared_model_call_is_resumable_without_tool_round()
     Ok(())
 }
 
-/// S03 / S04 / S08 / INV-006 / INV-014 / INV-016 / INV-034: the production
+/// the production
 /// startup repository applies call-aware recovery under its session lock:
 /// Prepared remains retryable with its steering unchanged, an issued call becomes an exact
 /// ambiguity wait, a stopped call terminalizes as reconciliation while
@@ -2740,8 +3562,7 @@ async fn s03_inv014_prepared_model_call_is_resumable_without_tool_round()
 /// and replay changes neither.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issued_model_calls()
--> Result<(), Box<dyn Error>> {
+async fn startup_recovery_leaves_zero_failed_turns() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let prepared = checkpoint_restart_model_call(&pool, 0x2000, false).await?;
     let issued = checkpoint_restart_model_call(&pool, 0x3000, true).await?;
@@ -2859,6 +3680,23 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
 
     let first = scan.execute().await?;
     assert_eq!(first.recovered_turn_count(), 1);
+    let startup_recovery_failed_turns: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM turn_lifecycle
+          WHERE session_id = ANY($1::uuid[])
+            AND terminal_disposition_kind = 'failed'",
+    )
+    .bind(vec![
+        prepared.session.into_uuid(),
+        issued.session.into_uuid(),
+        stopped.session.into_uuid(),
+    ])
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        startup_recovery_failed_turns, 0,
+        "startup recovery leaves no failed turn in this call-aware fixture"
+    );
 
     let prepared_state: (
         String,
@@ -3143,12 +3981,12 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
     Ok(())
 }
 
-/// S04 / INV-014 / INV-034: restart recovery reconstructs a committed call
+/// restart recovery reconstructs a committed call
 /// from its durable provider target even after deployment configuration remaps
 /// the selected model.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_inv014_inv034_restart_recovery_preserves_durable_target_after_catalog_remap()
+async fn restart_recovery_preserves_durable_target_after_catalog_remap()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7000;
@@ -3195,15 +4033,14 @@ async fn s04_inv014_inv034_restart_recovery_preserves_durable_target_after_catal
     Ok(())
 }
 
-/// S04 / S08 / S09 / INV-016 / INV-053: steering accepted after send
+/// steering accepted after send
 /// authorization is atomically reclassified when the source completes. Its
 /// immutable command still replays PendingSteering, while the inherited
 /// successor enters the ordinary scheduler with the source's exact settings
 /// evidence and activates after the terminal source.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pending_steering()
--> Result<(), Box<dyn Error>> {
+async fn terminal_call_reclassifies_and_schedules_pending_steering() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e4));
     let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xce4));
@@ -3480,7 +4317,7 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
     };
     assert_eq!(pending.accepted_input(), steering_input);
     assert_eq!(pending.binding().source_turn(), source_turn);
-    let (eligible, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -3519,14 +4356,13 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
     Ok(())
 }
 
-/// S08 / S21 / INV-006 / INV-014 / INV-032 / INV-036: immutable target
+/// immutable target
 /// resolution failure creates no targetless call, reclassifies the complete
 /// pending steering prefix, and atomically closes the prepared attempt and turn
 /// with its semantic failure boundary and typed outbox event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_steering()
--> Result<(), Box<dyn Error>> {
+async fn target_unavailable_reclassifies_steering() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8f1));
     let direct_selection =
@@ -3699,8 +4535,9 @@ async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_ste
                 AND terminal_frontier_id = $5
                 AND terminal_attempt_id = $2
                 AND terminal_model_call_id IS NULL),
-            (SELECT count(*) FROM turn_failed_outbox_event
-              WHERE turn_id = $4
+            (SELECT count(*) FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'failed'
+              AND turn_id = $4
                 AND failure_entry_id = $3
                 AND terminal_frontier_id = $5)",
     )

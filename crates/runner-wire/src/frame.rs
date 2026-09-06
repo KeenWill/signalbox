@@ -240,6 +240,7 @@ pub const MAX_FAILURE_DETAIL_MEMBERS: usize = 64;
 /// Maximum root-to-value failure-detail payload containers.
 pub const MAX_FAILURE_DETAIL_DEPTH: usize = 8;
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded runner-specific structured failure detail.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,6 +249,8 @@ pub struct FailureDetail {
     pub code: DetailName,
     /// Exact nonempty retained message.
     pub message: String,
+    /// Borrows the checked JSON payload.
+    #[get]
     /// Bounded structured payload, `{}` when no additional facts exist.
     pub payload: Value,
 }
@@ -280,11 +283,6 @@ impl FailureDetail {
             return Err(ValueError::FailureDetail);
         }
         Ok(detail)
-    }
-
-    /// Borrows the checked JSON payload.
-    pub const fn payload(&self) -> &Value {
-        &self.payload
     }
 
     fn validate(&self) -> Result<(), ValueError> {

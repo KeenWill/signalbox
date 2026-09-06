@@ -33,6 +33,8 @@ mod runner;
 mod semantic_entry;
 mod session;
 mod session_delegation;
+mod session_lifecycle;
+mod session_lifecycle_command;
 mod session_metadata;
 mod session_placement;
 mod session_template;
@@ -84,12 +86,12 @@ pub use git_remote::{
     max_git_remote_name_bytes, max_git_remote_url_bytes,
 };
 pub use goal::{
-    Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalEvent, GoalEventKind, GoalEventOrdinal,
-    GoalGeneration, GoalGenerationSnapshot, GoalGuidance, GoalModelBlockedReasonKind,
-    GoalModelProvenance, GoalNeed, GoalReconstitutionError, GoalReconstitutionFailure,
-    GoalReconstitutionInput, GoalReport, GoalReportRef, GoalSchedulerProvenance, GoalState,
-    GoalStatement, GoalTextError, GoalTransitionError, GoalTransitionFailure, GoalTurnSource,
-    GoalUserProvenance,
+    FinishConditionStatement, Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalEvent,
+    GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGenerationSnapshot, GoalGuidance,
+    GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed, GoalReconstitutionError,
+    GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport, GoalReportRef,
+    GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
+    GoalTransitionFailure, GoalTurnSource, GoalUserProvenance,
 };
 pub use goal_command::{
     GoalCommandRejection, GoalCommandResult, GoalUserAction, GoalUserCommand,
@@ -185,19 +187,17 @@ pub use replace_session_defaults::{
     ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
 };
 pub use repo_watch::{
-    BranchContext, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
-    DispatchSessionAction, DispatchSessionParameters, GitHubObjectId, LabelName, MergeableState,
-    PullRequestBody, PullRequestContext, PullRequestEventContext, PullRequestEventContextInput,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
+    MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
     PullRequestNumber, PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject,
-    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError,
-    RepoWatchDispatchContextShape, RepoWatchEvent, RepoWatchEventConstructionError,
-    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher,
-    RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId,
-    RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest, RepoWatchRuleValidationError,
-    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
-    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepoWatchWorkflowRunAttempt,
-    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    RepoWatchAuthorLogin, RepoWatchDispatchContextShape, RepoWatchEvent,
+    RepoWatchEventConstructionError, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
+    RepoWatchEventTarget, RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1,
+    RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
+    RepoWatchRuleContentDigest, RepoWatchRuleId, RepoWatchRuleIdentityField,
+    RepoWatchRuleIdentityFieldDigest, RepoWatchRuleValidationError, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepoWatchTextError, RepoWatchWorkflowRunAttempt, RepositorySlug,
+    ReviewState, ReviewThreadId, WorkflowName,
 };
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
@@ -253,8 +253,8 @@ pub use runner::{
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
-    AssistantText, SemanticTranscriptEntry, SemanticTranscriptEntryPayload,
-    SemanticTranscriptEntryReconstitutionInput,
+    AssistantText, ProviderCompactionBlock, ProviderCompactionBlockError, SemanticTranscriptEntry,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
 };
 pub use session::{
     CreateSession, CreateSessionAppliedResult, CreateSessionFromImportedFrontier,
@@ -280,6 +280,19 @@ pub use session_delegation::{
     SessionDelegationReconstitutionFailure, SessionDelegationReconstitutionInput,
     TerminalChildTurn, await_session_tool_name, send_session_message_tool_name,
     spawn_session_tool_name,
+};
+pub use session_lifecycle::{
+    CoreAgency, DispatchingModule, LifecycleActor, ModuleDispatch, SessionClosureOutcome,
+    SessionDeadlineExpiry, SessionDeadlineKind, SessionFailureCause, SessionLifecycleState,
+    SessionLifecycleTransitionError, SessionOwnership, SessionOwnershipTransition,
+    SessionParkCause, SessionParkResponder, SessionRecoveryOperation, SessionRetirementCause,
+    SessionRetryableCause, SessionStructuralCause, SessionTerminalOutcome, SessionWait,
+    SessionWaitKind, SessionWaker, StopStickiness,
+};
+pub use session_lifecycle_command::{
+    CommandPrincipal, FinishCheckVerdict, FinishCondition, SessionLifecycleApplication,
+    SessionLifecycleCommand, SessionLifecycleCommandRejection, SessionLifecycleCommandResult,
+    SessionLifecycleOperation, StartGate,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,

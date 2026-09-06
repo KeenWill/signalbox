@@ -1,0 +1,22 @@
+{
+  "source": "escalation-followed-by-reply.json",
+  "edge": "later decline supersedes escalation",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/2/body",
+      "value": "Declined: outside this change."
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/2/body",
+      "value": "Declined: outside this change."
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/isResolved",
+      "value": true
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/isResolved",
+      "value": true
+    }
+  ]
+}

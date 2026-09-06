@@ -6,8 +6,6 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
-    error::Error,
-    fmt,
     num::NonZeroU64,
 };
 
@@ -42,20 +40,24 @@ use signalbox_domain::{
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
+    approval_judge::FailedApprovalJudgeDisposition,
     command_registry::{
         self, CommandKind, DECIDE_TOOL_REQUEST_KIND, OVERRIDE_DENIED_TOOL_REQUEST_KIND,
         RegistryCorruption, RegistryInspectionError,
     },
     commit_failure_is_ambiguous,
     mapping::{
+        ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         BlobReadRejectionStorageKind, ToolApprovalDecisionSourceStorageKind,
-        ToolAttemptDispositionStorageKind, blob_read_rejection_from_str,
+        ToolAttemptDispositionStorageKind, approval_judge_state_to_str,
+        approval_judge_terminal_disposition_to_str, blob_read_rejection_from_str,
         blob_read_rejection_to_str, dangerous_tool_auto_approval_from_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, positive_u64_from_numeric,
         session_id_from_uuid, session_id_to_uuid, tool_approval_decision_source_from_str,
-        tool_approval_posture_from_str, tool_attempt_disposition_from_str,
-        tool_attempt_disposition_to_str, tool_attempt_id_from_uuid, tool_attempt_id_to_uuid,
-        tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        tool_approval_decision_source_to_str, tool_approval_posture_from_str,
+        tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
+        tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
+        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     model_execution::{
         insert_prepared_call, insert_snapshot, lock_delegated_child_endpoint_sessions,
@@ -151,13 +153,17 @@ impl BlobReadAdmission {
 
 const STORAGE_VERSION: i16 = 1;
 
+#[derive(signalbox_derive::OperatorError)]
 /// Stored tool-loop facts failed checked domain reconstruction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolLoopCorruption {
+    #[error("missing tool-loop {field_0}")]
     /// A required row or value is absent.
     Missing(&'static str),
+    #[error("inconsistent tool-loop {field_0}")]
     /// Stored facts disagree about an exact relationship.
     Inconsistent(&'static str),
+    #[error("unsupported tool-loop {field}: {value}")]
     /// A closed discriminator has an unknown spelling.
     Unsupported {
         /// Storage field.
@@ -165,83 +171,39 @@ pub enum ToolLoopCorruption {
         /// Unsupported value.
         value: String,
     },
+    #[error("tool batch reconstitution failed: {field_0:?}")]
     /// Complete batch facts failed aggregate reconstruction.
     Batch(ToolBatchReconstitutionFailure),
 }
 
-impl fmt::Display for ToolLoopCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(value) => write!(formatter, "missing tool-loop {value}"),
-            Self::Inconsistent(value) => write!(formatter, "inconsistent tool-loop {value}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported tool-loop {field}: {value}")
-            }
-            Self::Batch(failure) => {
-                write!(formatter, "tool batch reconstitution failed: {failure:?}")
-            }
-        }
-    }
-}
-
-impl Error for ToolLoopCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database, replay, corruption, or rejected transition at the tool boundary.
 #[derive(Debug)]
 pub enum ToolLoopRepositoryError {
+    #[error("tool-loop database failure: {source}")]
     /// PostgreSQL failure.
     Database {
+        #[source]
         /// Original driver error.
         source: sqlx::Error,
         /// Whether a failed commit acknowledgement leaves outcome unknown.
         commit_ambiguous: bool,
     },
+    #[error("tool-loop identity candidate already exists")]
     /// A fresh application-owned identity collided with durable state.
     IdentityCollision,
+    #[error(transparent)]
     /// Durable facts failed closed reconstruction.
-    Corruption(ToolLoopCorruption),
+    Corruption(#[source] ToolLoopCorruption),
+    #[error("command identity already belongs to another kind")]
     /// The command identity belongs to another durable command kind.
     DifferentCommandKind,
+    #[error("command replay payload differs from the durable command")]
     /// The command identity is recorded with a different decision payload.
     ConflictingCommandReuse,
+    #[error("tool-loop transition rejected: {field_0}")]
     /// Caller supplied a transition the current batch does not authorize.
     InvalidTransition(&'static str),
-}
-
-impl fmt::Display for ToolLoopRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "tool-loop database failure: {source}")
-            }
-            Self::IdentityCollision => {
-                formatter.write_str("tool-loop identity candidate already exists")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::DifferentCommandKind => {
-                formatter.write_str("command identity already belongs to another kind")
-            }
-            Self::ConflictingCommandReuse => {
-                formatter.write_str("command replay payload differs from the durable command")
-            }
-            Self::InvalidTransition(value) => {
-                write!(formatter, "tool-loop transition rejected: {value}")
-            }
-        }
-    }
-}
-
-impl Error for ToolLoopRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
-            Self::IdentityCollision
-            | Self::DifferentCommandKind
-            | Self::ConflictingCommandReuse
-            | Self::InvalidTransition(_) => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for ToolLoopRepositoryError {
@@ -460,35 +422,6 @@ impl PostgresToolLoopRepository {
         Ok(turn.map(turn_id_from_uuid))
     }
 
-    /// Finds an active relevant turn that has not prepared its first model call.
-    pub async fn find_dispatch_start_turn(
-        &self,
-        session: SessionId,
-    ) -> Result<Option<TurnId>, ToolLoopRepositoryError> {
-        let turn = sqlx::query_scalar::<_, Uuid>(
-            "SELECT lifecycle.turn_id
-               FROM turn_lifecycle AS lifecycle
-              WHERE lifecycle.session_id = $1
-                AND lifecycle.state_kind = 'active'
-                AND NOT lifecycle.delegation_runtime_terminal
-                AND goal_turn_is_runtime_relevant(
-                    lifecycle.session_id, lifecycle.turn_id
-                )
-                AND NOT EXISTS (
-                    SELECT 1
-                      FROM model_call AS call
-                     WHERE call.session_id = lifecycle.session_id
-                       AND call.turn_id = lifecycle.turn_id
-                )
-              ORDER BY lifecycle.acceptance_position
-              LIMIT 1",
-        )
-        .bind(session_id_to_uuid(session))
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(turn.map(turn_id_from_uuid))
-    }
-
     /// Atomically reopens one delivered foreground child wait as a fresh turn attempt.
     pub async fn resume_child_wait(
         &self,
@@ -603,6 +536,7 @@ impl PostgresToolLoopRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle
                 | CommandKind::OverrideDeniedToolRequest,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
@@ -633,15 +567,21 @@ impl PostgresToolLoopRepository {
                 }
                 return Ok(receipt);
             }
+            let issuer = crate::command_registry::issuer_columns(
+                signalbox_domain::CommandPrincipal::Operator,
+            );
             let claimed = sqlx::query(
                 "INSERT INTO durable_command
-                    (command_id, command_kind, storage_version, claimed_at)
-                 VALUES ($1, $2, $3, transaction_timestamp())
+                    (command_id, command_kind, storage_version, claimed_at,
+                     issuer_kind, issuer_module)
+                 VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
                  ON CONFLICT DO NOTHING",
             )
             .bind(durable_command_id_to_uuid(command.command_id()))
             .bind(DECIDE_TOOL_REQUEST_KIND)
             .bind(STORAGE_VERSION)
+            .bind(issuer.0)
+            .bind(issuer.1)
             .execute(&mut *transaction)
             .await?
             .rows_affected()
@@ -676,14 +616,18 @@ impl PostgresToolLoopRepository {
                     let session = session_id_from_uuid(stored_session);
                     let turn = turn_id_from_uuid(stored_turn);
                     lock_tool_session(&mut transaction, session).await?;
-                    if decision_exists(&mut transaction, command.request()).await? {
+                    if decision_exists(&mut transaction, command.request()).await?
+                        || request_closed_by_turn_end(&mut transaction, command.request()).await?
+                    {
                         let prepared = command.prepare_already_resolved();
-                        persist_decision_command(&mut transaction, &prepared).await?;
-                        return Ok(prepared);
-                    }
-                    if request_closed_by_turn_end(&mut transaction, command.request()).await? {
-                        let prepared = command.prepare_already_resolved();
-                        persist_decision_command(&mut transaction, &prepared).await?;
+                        persist_decision_command(
+                            &mut transaction,
+                            &prepared,
+                            signalbox_domain::CommandPrincipal::Operator,
+                        )
+                        .await?;
+                        settle_decision_injection(&mut transaction, session, turn, &prepared)
+                            .await?;
                         return Ok(prepared);
                     }
                     let batch = load_active_batch_from_connection(&mut transaction, session, turn)
@@ -709,10 +653,22 @@ impl PostgresToolLoopRepository {
                             )
                         })?;
                     persist_batch_decision(&mut transaction, &decision).await?;
+                    settle_decision_injection(
+                        &mut transaction,
+                        session,
+                        turn,
+                        decision.prepared_command(),
+                    )
+                    .await?;
                     return Ok(decision.prepared_command().clone());
                 }
             };
-            persist_decision_command(&mut transaction, &prepared).await?;
+            persist_decision_command(
+                &mut transaction,
+                &prepared,
+                signalbox_domain::CommandPrincipal::Operator,
+            )
+            .await?;
             Ok(prepared)
         }
         .await;
@@ -748,7 +704,8 @@ impl PostgresToolLoopRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }
@@ -779,15 +736,21 @@ impl PostgresToolLoopRepository {
                 }
                 return Ok(receipt);
             }
+            let issuer = crate::command_registry::issuer_columns(
+                signalbox_domain::CommandPrincipal::Operator,
+            );
             let claimed = sqlx::query(
                 "INSERT INTO durable_command
-                    (command_id, command_kind, storage_version, claimed_at)
-                 VALUES ($1, $2, $3, transaction_timestamp())
+                    (command_id, command_kind, storage_version, claimed_at,
+                     issuer_kind, issuer_module)
+                 VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
                  ON CONFLICT DO NOTHING",
             )
             .bind(durable_command_id_to_uuid(command.command_id()))
             .bind(OVERRIDE_DENIED_TOOL_REQUEST_KIND)
             .bind(STORAGE_VERSION)
+            .bind(issuer.0)
+            .bind(issuer.1)
             .execute(&mut *transaction)
             .await?
             .rows_affected()
@@ -1838,6 +1801,75 @@ pub(crate) async fn load_active_batch_from_connection(
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
+pub(crate) async fn deny_awaiting_approvals_for_interrupt<NextDecision, NextContinuation>(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    next_decision: &mut NextDecision,
+    next_continuation: &mut NextContinuation,
+) -> Result<(), ToolLoopRepositoryError>
+where
+    NextDecision: FnMut() -> DurableCommandId,
+    NextContinuation: FnMut() -> signalbox_domain::TurnAttemptId,
+{
+    loop {
+        let Some(batch) = load_active_batch_from_connection(connection, session, turn).await?
+        else {
+            return Ok(());
+        };
+        let Some(waiting) = batch.awaiting_approval() else {
+            return Ok(());
+        };
+        let request = waiting.request();
+        let last_undecided = batch
+            .requests()
+            .iter()
+            .filter(|request| batch.approval(request.id()).is_none())
+            .count()
+            == 1;
+        let continuation = last_undecided.then(&mut *next_continuation);
+        let command = DecideToolRequest::try_new(
+            next_decision(),
+            request,
+            ToolApprovalDecision::Deny { reason: None },
+        )
+        .map_err(|_| {
+            ToolLoopRepositoryError::InvalidTransition("closure denial command identity is invalid")
+        })?;
+        let decision = batch
+            .prepare_lifecycle_closure_denial(command, continuation)
+            .map_err(|_| {
+                ToolLoopRepositoryError::InvalidTransition(
+                    "closure denial does not match the approval wait",
+                )
+            })?;
+        sqlx::query(
+            "UPDATE tool_approval_judge_model_call
+                SET state_kind = $1, terminal_disposition_kind = $2
+              WHERE request_id = $3
+                AND (state_kind = $4 OR state_kind = $5)",
+        )
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::Terminal,
+        ))
+        .bind(approval_judge_terminal_disposition_to_str(
+            ApprovalJudgeTerminalDispositionStorageKind::Failed(
+                FailedApprovalJudgeDisposition::Cancelled,
+            ),
+        ))
+        .bind(tool_request_id_to_uuid(request))
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::Prepared,
+        ))
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::InFlight,
+        ))
+        .execute(&mut *connection)
+        .await?;
+        persist_batch_decision(connection, &decision).await?;
+    }
+}
+
 /// Loads the exact frontier from which a runner-recovery interrupt must
 /// continue. A recovery wait retaining a tool round uses that round's yielded
 /// boundary; a wait without one uses the turn's starting frontier.
@@ -2579,6 +2611,28 @@ async fn decode_approval(
             }
             ToolApprovalResolutionReconstitutionInput::runtime_safety(request)
         }
+        ToolApprovalDecisionSourceStorageKind::LifecycleClosure
+            if decision == (ToolApprovalDecision::Deny { reason: None }) =>
+        {
+            let command_id = durable_command_id_from_uuid(
+                user_command.ok_or(ToolLoopCorruption::Missing("closure decision command"))?,
+            )
+            .map_err(|_| ToolLoopCorruption::Inconsistent("closure decision command identity"))?;
+            let command = user_receipts
+                .get(&command_id)
+                .ok_or(ToolLoopCorruption::Missing(
+                    "closure decision command receipt",
+                ))?;
+            if command.command().request() != request
+                || command.command().decision() != &decision
+                || !matches!(command.result(), DecideToolRequestResult::Applied(_))
+            {
+                return Err(
+                    ToolLoopCorruption::Inconsistent("closure decision command receipt").into(),
+                );
+            }
+            ToolApprovalResolutionReconstitutionInput::lifecycle_closure(request)
+        }
         ToolApprovalDecisionSourceStorageKind::Delegate if user_command.is_none() => {
             let delegate_model: Option<Uuid> = row.try_get("delegate_model_selection_id")?;
             let delegate_call: Option<Uuid> = row.try_get("delegate_model_call_id")?;
@@ -2649,6 +2703,11 @@ async fn decode_approval(
                 ToolLoopCorruption::Inconsistent("runtime safety approval evidence").into(),
             );
         }
+        ToolApprovalDecisionSourceStorageKind::LifecycleClosure => {
+            return Err(
+                ToolLoopCorruption::Inconsistent("lifecycle closure approval evidence").into(),
+            );
+        }
         ToolApprovalDecisionSourceStorageKind::UserOverride => {
             return Err(ToolLoopCorruption::Inconsistent("user-override approval evidence").into());
         }
@@ -2674,6 +2733,7 @@ async fn load_user_decision_receipts(
                 command.decision_kind, command.denial_reason,
                 command.result_kind, command.rejection_kind,
                 command.result_earliest_undecided_request_id,
+                approval.decision_source,
                 request.request_ordinal, request.tool_name,
                 request.arguments_kind, request.arguments_text,
                 request.approval_posture,
@@ -2682,6 +2742,8 @@ async fn load_user_decision_receipts(
            FROM decide_tool_request_command AS command
            JOIN tool_request AS request
              ON request.request_id = command.request_id
+           LEFT JOIN tool_approval_decision AS approval
+             ON approval.user_command_id = command.command_id
           WHERE command.command_id = ANY($1)
             AND command.command_kind = 'decide_tool_request'
             AND command.storage_version = 1",
@@ -2707,10 +2769,14 @@ async fn load_user_decision_receipts(
             signalbox_domain::ModelCallId::from_uuid(required(&row, "producing_model_call_id")?);
         let session = session_id_from_uuid(required(&row, "session_id")?);
         let turn = turn_id_from_uuid(required(&row, "turn_id")?);
+        let source: Option<String> = row.try_get("decision_source")?;
         let request_record = decode_request(row, producing_call, session, turn)?;
-        let prepared = command
-            .prepare_applied(&request_record)
-            .map_err(|_| ToolLoopCorruption::Inconsistent("applied decision receipt"))?;
+        let prepared = if source.as_deref() == Some("lifecycle_closure") {
+            command.prepare_lifecycle_closure_applied(&request_record)
+        } else {
+            command.prepare_applied(&request_record)
+        }
+        .map_err(|_| ToolLoopCorruption::Inconsistent("applied decision receipt"))?;
         if receipts.insert(command_id, prepared).is_some() {
             return Err(ToolLoopCorruption::Inconsistent(
                 "duplicate approval user command receipt",
@@ -3340,7 +3406,33 @@ async fn persist_batch_decision(
     connection: &mut PgConnection,
     decision: &PreparedToolBatchDecision,
 ) -> Result<(), ToolLoopRepositoryError> {
-    persist_decision_command(connection, decision.prepared_command()).await?;
+    let (source, principal) = match decision.prepared_command().result() {
+        DecideToolRequestResult::Applied(applied) => match applied.resolution().source() {
+            signalbox_domain::ToolDecisionSource::UserCommand => (
+                ToolApprovalDecisionSourceStorageKind::UserCommand,
+                signalbox_domain::CommandPrincipal::Operator,
+            ),
+            signalbox_domain::ToolDecisionSource::LifecycleClosure => (
+                ToolApprovalDecisionSourceStorageKind::LifecycleClosure,
+                signalbox_domain::CommandPrincipal::Core,
+            ),
+            _ => {
+                return Err(ToolLoopRepositoryError::InvalidTransition(
+                    "explicit decision used an unsupported source",
+                ));
+            }
+        },
+        DecideToolRequestResult::Rejected(_) => {
+            persist_decision_command(
+                connection,
+                decision.prepared_command(),
+                signalbox_domain::CommandPrincipal::Operator,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    persist_decision_command(connection, decision.prepared_command(), principal).await?;
     let DecideToolRequestResult::Applied(applied) = decision.prepared_command().result() else {
         return Ok(());
     };
@@ -3349,10 +3441,11 @@ async fn persist_batch_decision(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source, denial_reason,
              user_command_id)
-         VALUES ($1, $2, 'user_command', $3, $4)",
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(tool_request_id_to_uuid(applied.resolution().request()))
     .bind(decision_kind)
+    .bind(tool_approval_decision_source_to_str(source))
     .bind(denial_reason)
     .bind(durable_command_id_to_uuid(
         decision.prepared_command().command().command_id(),
@@ -3446,12 +3539,52 @@ async fn persist_batch_decision(
             ));
         }
     }
+    if applied.resolution().decider().is_some() {
+        outbox::append(
+            connection,
+            OutboxEvent::ToolApprovalDecided {
+                session: decision.batch().session(),
+                turn: decision.batch().turn(),
+                request: applied.resolution().request(),
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Settles a decision's injection receipt: applied decisions deliver to
+/// the request's turn; a decision that arrives after its request was decided
+/// or its turn ended is `not_delivered`. A decision naming no request has no
+/// session to carry a receipt.
+async fn settle_decision_injection(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    prepared: &PreparedDecideToolRequest,
+) -> Result<(), ToolLoopRepositoryError> {
+    let outcome = match prepared.result() {
+        DecideToolRequestResult::Applied(_) => {
+            outbox::InjectionOutcomeOutbox::Delivered { turn: Some(turn) }
+        }
+        DecideToolRequestResult::Rejected(DecideToolRequestRejectedResult::AlreadyResolved {
+            ..
+        }) => outbox::InjectionOutcomeOutbox::NotDelivered,
+        DecideToolRequestResult::Rejected(DecideToolRequestRejectedResult::RequestNotFound {
+            ..
+        }) => return Ok(()),
+        DecideToolRequestResult::Rejected(
+            DecideToolRequestRejectedResult::NotEarliestUndecided { .. },
+        ) => outbox::InjectionOutcomeOutbox::Rejected {
+            kind: "not_earliest_undecided",
+        },
+    };
     outbox::append(
         connection,
-        OutboxEvent::ToolApprovalDecided {
-            session: decision.batch().session(),
-            turn: decision.batch().turn(),
-            request: applied.resolution().request(),
+        OutboxEvent::InjectionSettled {
+            session,
+            command: prepared.command().command_id(),
+            outcome,
         },
     )
     .await?;
@@ -3461,6 +3594,7 @@ async fn persist_batch_decision(
 async fn persist_decision_command(
     connection: &mut PgConnection,
     prepared: &PreparedDecideToolRequest,
+    principal: signalbox_domain::CommandPrincipal,
 ) -> Result<(), ToolLoopRepositoryError> {
     let command = prepared.command();
     let (decision_kind, denial_reason) = encode_approval(command.decision());
@@ -3480,15 +3614,19 @@ async fn persist_decision_command(
             Some(tool_request_id_to_uuid(*earliest)),
         ),
     };
+    let issuer = crate::command_registry::issuer_columns(principal);
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(DECIDE_TOOL_REQUEST_KIND)
     .bind(STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?;
     sqlx::query(
@@ -3517,13 +3655,16 @@ async fn load_decision_receipt(
     command_id: signalbox_domain::DurableCommandId,
 ) -> Result<Option<PreparedDecideToolRequest>, ToolLoopRepositoryError> {
     let row = sqlx::query(
-        "SELECT request_id, decision_kind, denial_reason,
+        "SELECT command.request_id, command.decision_kind, command.denial_reason,
                 result_kind, rejection_kind,
-                result_earliest_undecided_request_id
-           FROM decide_tool_request_command
-          WHERE command_id = $1
-            AND command_kind = 'decide_tool_request'
-            AND storage_version = 1",
+                result_earliest_undecided_request_id,
+                approval.decision_source
+           FROM decide_tool_request_command AS command
+           LEFT JOIN tool_approval_decision AS approval
+             ON approval.user_command_id = command.command_id
+          WHERE command.command_id = $1
+            AND command.command_kind = 'decide_tool_request'
+            AND command.storage_version = 1",
     )
     .bind(durable_command_id_to_uuid(command_id))
     .fetch_optional(&mut *connection)
@@ -3542,9 +3683,13 @@ async fn load_decision_receipt(
             let request_record = load_request_by_id(connection, request)
                 .await?
                 .ok_or(ToolLoopCorruption::Missing("applied decision request"))?;
-            command
-                .prepare_applied(&request_record)
-                .map_err(|_| ToolLoopCorruption::Inconsistent("applied decision receipt"))?
+            let source: Option<String> = row.try_get("decision_source")?;
+            if source.as_deref() == Some("lifecycle_closure") {
+                command.prepare_lifecycle_closure_applied(&request_record)
+            } else {
+                command.prepare_applied(&request_record)
+            }
+            .map_err(|_| ToolLoopCorruption::Inconsistent("applied decision receipt"))?
         }
         ("rejected", Some("request_not_found")) => command.prepare_request_not_found(),
         ("rejected", Some("already_resolved")) => command.prepare_already_resolved(),
@@ -3583,15 +3728,20 @@ async fn persist_override_command(
             signalbox_domain::OverrideDeniedToolRequestRejectedResult::AlreadyOverridden { .. },
         ) => ("rejected", Some("already_overridden")),
     };
+    let issuer =
+        crate::command_registry::issuer_columns(signalbox_domain::CommandPrincipal::Operator);
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(OVERRIDE_DENIED_TOOL_REQUEST_KIND)
     .bind(STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?;
     sqlx::query(
@@ -4035,6 +4185,14 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
             DelegationProvenanceReconstitutionInput::ParentGoalCommand {
                 session: provenance_session,
                 generation: GoalGeneration::new(generation),
+                command: durable_command_id_from_uuid(command).map_err(|_| {
+                    ToolLoopCorruption::Inconsistent("delegation provenance command")
+                })?,
+            }
+        }
+        ("parent_lifecycle_command", None, None, Some(command)) => {
+            DelegationProvenanceReconstitutionInput::ParentLifecycleCommand {
+                session: provenance_session,
                 command: durable_command_id_from_uuid(command).map_err(|_| {
                     ToolLoopCorruption::Inconsistent("delegation provenance command")
                 })?,

@@ -1,16 +1,15 @@
 //! PostgreSQL loading for the current long-lived [`Session`] aggregate.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::SessionReader;
 use signalbox_domain::{
-    DirectModelSelection, ModelAlias, ModelSelectionRequest, Session, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionPlacementEventKind, SessionPlacementVersion, SessionReconstitutionFailure,
-    SessionReconstitutionInput, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, TranscriptAncestry, VersionedSessionPlacement,
+    CommissionedDispatchId, DirectModelSelection, DispatchingModule, ModelAlias,
+    ModelSelectionRequest, ModuleDispatch, RepoWatchDispatchId, Session,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionPlacementEventKind, SessionPlacementVersion,
+    SessionReconstitutionFailure, SessionReconstitutionInput, SessionTemplateContentDigest,
+    SessionTemplateName, SessionTemplateProvenance, TranscriptAncestry, VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -26,11 +25,14 @@ use crate::mapping::{
 
 const NO_ANCESTRY: &str = "none";
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct one complete current session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionCorruption {
+    #[error("missing durable Session {field_0}")]
     /// One required row or field is absent.
     Missing(&'static str),
+    #[error("unsupported Session {field}: {value}")]
     /// A closed discriminator has no admitted storage mapping.
     Unsupported {
         /// The record field that could not be decoded.
@@ -38,8 +40,10 @@ pub enum SessionCorruption {
         /// The durable spelling that was observed.
         value: String,
     },
+    #[error("inconsistent Session {field_0}")]
     /// A discriminator and its variant-specific fields disagree.
     Inconsistent(&'static str),
+    #[error("invalid Session {field}: {reason}")]
     /// A stored defaults version cannot construct the positive domain ordinal.
     InvalidOrdinal {
         /// The ordinal-bearing record field.
@@ -47,63 +51,24 @@ pub enum SessionCorruption {
         /// Why the numeric value is outside the domain.
         reason: PositiveOrdinalMappingError,
     },
+    #[error("Session domain reconstitution failed: {field_0:?}")]
     /// Complete checked values fail domain-owned aggregate correlation.
     Domain(SessionReconstitutionFailure),
+    #[error(transparent)]
     /// Imported ancestry or its immutable seed projection is corrupt.
     Imported(ImportedSessionCorruption),
 }
 
-impl fmt::Display for SessionCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing durable Session {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported Session {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent Session {relationship}")
-            }
-            Self::InvalidOrdinal { field, reason } => {
-                write!(formatter, "invalid Session {field}: {reason}")
-            }
-            Self::Domain(failure) => {
-                write!(
-                    formatter,
-                    "Session domain reconstitution failed: {failure:?}"
-                )
-            }
-            Self::Imported(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for SessionCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database failure or fail-closed current-session shape failure.
 #[derive(Debug)]
 pub enum SessionRepositoryError {
+    #[error("Session database failure: {field_0}")]
     /// PostgreSQL could not complete the load.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Durable records cannot reconstruct the requested session.
-    Corruption(SessionCorruption),
-}
-
-impl fmt::Display for SessionRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "Session database failure: {error}"),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for SessionRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] SessionCorruption),
 }
 
 impl From<sqlx::Error> for SessionRepositoryError {
@@ -173,6 +138,8 @@ pub(crate) async fn load_session_from_connection(
             s.creation_cause AS stored_cause,
             s.ancestry_kind AS stored_ancestry,
             s.spawning_tool_request_id AS stored_spawning_request_id,
+            s.dispatching_module AS stored_dispatching_module,
+            s.dispatch_ref AS stored_dispatch_ref,
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
             creation.storage_version AS create_storage_version,
@@ -313,6 +280,8 @@ fn decode_complete(
         validate_imported_creation_provenance(
             required(&row, "stored_cause")?,
             row.try_get("stored_spawning_request_id")?,
+            row.try_get("stored_dispatching_module")?,
+            row.try_get("stored_dispatch_ref")?,
         )?;
         if row
             .try_get::<Option<String>, _>("stored_template_name")?
@@ -350,6 +319,8 @@ fn decode_complete(
         required(&row, "stored_cause")?,
         ancestry,
         row.try_get("stored_spawning_request_id")?,
+        row.try_get("stored_dispatching_module")?,
+        row.try_get("stored_dispatch_ref")?,
     )?;
     let template_provenance = decode_template_provenance(
         row.try_get("stored_template_name")?,
@@ -635,6 +606,8 @@ fn decode_provenance(
     cause: String,
     ancestry: String,
     spawning_request: Option<Uuid>,
+    dispatching_module: Option<String>,
+    dispatch_ref: Option<Uuid>,
 ) -> Result<SessionCreationProvenance, SessionRepositoryError> {
     if ancestry != NO_ANCESTRY {
         return Err(SessionCorruption::Unsupported {
@@ -650,27 +623,64 @@ fn decode_provenance(
         }
         .into());
     };
-    match (cause_kind, spawning_request) {
-        (SessionCreationCauseStorageKind::UserInitiated, None) => {
+    match (
+        cause_kind,
+        spawning_request,
+        dispatching_module,
+        dispatch_ref,
+    ) {
+        (SessionCreationCauseStorageKind::Interactive, None, None, None) => {
             Ok(SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
             ))
         }
-        (SessionCreationCauseStorageKind::Delegated, Some(request)) => Ok(
+        (SessionCreationCauseStorageKind::Delegated, Some(request), None, None) => Ok(
             SessionCreationProvenance::delegated(tool_request_id_from_uuid(request)),
         ),
+        (SessionCreationCauseStorageKind::ModuleDispatched, None, Some(module), Some(dispatch)) => {
+            decode_module_dispatch(&module, dispatch)
+                .map(SessionCreationProvenance::module_dispatched)
+        }
         (
-            SessionCreationCauseStorageKind::UserInitiated
-            | SessionCreationCauseStorageKind::Delegated,
+            SessionCreationCauseStorageKind::Interactive
+            | SessionCreationCauseStorageKind::Delegated
+            | SessionCreationCauseStorageKind::ModuleDispatched,
+            _,
+            _,
             _,
         ) => Err(SessionCorruption::Inconsistent("creation cause provenance").into()),
+    }
+}
+
+/// Rebuilds the exact dispatch a module-dispatched creation names.
+///
+/// The module spelling selects which identity kind the reference is, so a
+/// dispatch identity never silently changes hands between modules.
+fn decode_module_dispatch(
+    module: &str,
+    dispatch: Uuid,
+) -> Result<ModuleDispatch, SessionRepositoryError> {
+    match crate::mapping::dispatching_module_from_str(module) {
+        Some(DispatchingModule::RepositoryWatch) => Ok(ModuleDispatch::RepositoryWatch {
+            dispatch: RepoWatchDispatchId::from_uuid(dispatch),
+        }),
+        Some(DispatchingModule::CommissionedDispatch) => Ok(ModuleDispatch::Commissioned {
+            dispatch: CommissionedDispatchId::from_uuid(dispatch),
+        }),
+        None => Err(SessionCorruption::Unsupported {
+            field: "dispatching module",
+            value: String::from(module),
+        }
+        .into()),
     }
 }
 
 fn validate_imported_creation_provenance(
     cause: String,
     spawning_request: Option<Uuid>,
+    dispatching_module: Option<String>,
+    dispatch_ref: Option<Uuid>,
 ) -> Result<(), SessionRepositoryError> {
     let Some(cause_kind) = session_creation_cause_from_str(&cause) else {
         return Err(SessionCorruption::Unsupported {
@@ -679,11 +689,19 @@ fn validate_imported_creation_provenance(
         }
         .into());
     };
-    match (cause_kind, spawning_request) {
-        (SessionCreationCauseStorageKind::UserInitiated, None) => Ok(()),
+    match (
+        cause_kind,
+        spawning_request,
+        dispatching_module,
+        dispatch_ref,
+    ) {
+        (SessionCreationCauseStorageKind::Interactive, None, None, None) => Ok(()),
         (
-            SessionCreationCauseStorageKind::UserInitiated
-            | SessionCreationCauseStorageKind::Delegated,
+            SessionCreationCauseStorageKind::Interactive
+            | SessionCreationCauseStorageKind::Delegated
+            | SessionCreationCauseStorageKind::ModuleDispatched,
+            _,
+            _,
             _,
         ) => Err(SessionCorruption::Inconsistent("creation cause provenance").into()),
     }
@@ -781,9 +799,9 @@ mod tests {
         ));
     }
 
-    /// S18 / INV-003: the durable delegated spelling retains its exact request.
+    /// the durable delegated spelling retains its exact request.
     #[test]
-    fn s18_inv003_delegated_provenance_decodes_exactly() {
+    fn delegated_provenance_decodes_exactly() {
         let request = spawning_request();
         let provenance = decode_provenance(
             String::from(session_creation_cause_to_str(
@@ -793,6 +811,8 @@ mod tests {
             )),
             String::from(NO_ANCESTRY),
             Some(request),
+            None,
+            None,
         )
         .expect("the complete delegated storage shape decodes");
 
@@ -805,15 +825,17 @@ mod tests {
         assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
     }
 
-    /// S18 / INV-003: delegated storage cannot omit its spawning request.
+    /// delegated storage cannot omit its spawning request.
     #[test]
-    fn s18_inv003_delegated_provenance_requires_spawning_request() {
+    fn delegated_provenance_requires_spawning_request() {
         let delegated = SessionCreationCause::Delegated {
             spawning_request: signalbox_domain::ToolRequestId::from_uuid(spawning_request()),
         };
         let error = decode_provenance(
             String::from(session_creation_cause_to_str(&delegated)),
             String::from(NO_ANCESTRY),
+            None,
+            None,
             None,
         )
         .expect_err("delegated provenance without its request is corrupt");
@@ -824,17 +846,19 @@ mod tests {
         );
     }
 
-    /// S01 / INV-003: user-initiated storage cannot claim a spawning request.
+    /// interactive storage cannot claim a spawning request.
     #[test]
-    fn s01_inv003_user_initiated_provenance_rejects_spawning_request() {
+    fn interactive_provenance_rejects_spawning_request() {
         let error = decode_provenance(
             String::from(session_creation_cause_to_str(
-                &SessionCreationCause::UserInitiated,
+                &SessionCreationCause::Interactive,
             )),
             String::from(NO_ANCESTRY),
             Some(spawning_request()),
+            None,
+            None,
         )
-        .expect_err("user-initiated provenance cannot carry delegated authority");
+        .expect_err("interactive provenance cannot carry delegated authority");
 
         assert_eq!(
             corruption(error),
@@ -842,17 +866,19 @@ mod tests {
         );
     }
 
-    /// S28 / INV-003: an imported user-initiated row cannot silently discard
+    /// an imported interactive row cannot silently discard
     /// a contradictory delegated spawning identity.
     #[test]
-    fn s28_inv003_imported_provenance_rejects_spawning_request() {
+    fn imported_provenance_rejects_spawning_request() {
         let error = validate_imported_creation_provenance(
             String::from(session_creation_cause_to_str(
-                &SessionCreationCause::UserInitiated,
+                &SessionCreationCause::Interactive,
             )),
             Some(spawning_request()),
+            None,
+            None,
         )
-        .expect_err("imported user-initiated provenance cannot carry a spawning request");
+        .expect_err("imported interactive provenance cannot carry a spawning request");
 
         assert_eq!(
             corruption(error),
@@ -860,9 +886,9 @@ mod tests {
         );
     }
 
-    /// S18 / INV-003: delegated creation cannot acquire transcript ancestry.
+    /// delegated creation cannot acquire transcript ancestry.
     #[test]
-    fn s18_inv003_delegated_provenance_rejects_non_none_ancestry() {
+    fn delegated_provenance_rejects_non_none_ancestry() {
         let error =
             decode_provenance(
                 String::from(session_creation_cause_to_str(
@@ -874,6 +900,8 @@ mod tests {
                 )),
                 String::from(NON_NONE_ANCESTRY),
                 Some(spawning_request()),
+                None,
+                None,
             )
             .expect_err("delegated provenance cannot inherit transcript ancestry");
 

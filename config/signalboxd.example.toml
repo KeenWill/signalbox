@@ -20,10 +20,6 @@
 version = 1
 
 [numeric_bounds]
-# Reconciliation work performed before observing another repository wake.
-repository_reconciliation_quantum = 16
-# Time a progressing webhook drain works before yielding and rearming itself.
-webhook_drain_work_budget = "45s"
 # Physical database sessions established before daemon work begins.
 fenced_pool_min_connections = 48
 # Delay between checks that restore retired fenced pool sessions.
@@ -124,6 +120,8 @@ max_metadata_page_size = 100
 max_review_findings_per_run = 32
 # Automatic model tool rounds spent in one turn.
 max_automatic_tool_rounds_per_turn = 32
+# Recorded attempts allowed on one credential within a turn.
+max_same_credential_attempts_per_turn = 2
 # Required tags admitted by one metadata query.
 max_required_tags = 256
 # Time between scheduler reconciliation sweeps.
@@ -158,6 +156,14 @@ max_code_host_result_text_bytes = 65536
 max_code_host_result_items = 100
 # Repository-file bytes retained in one code-host result.
 max_repository_file_content_bytes = 65536
+# Time an owned session has to start working before it is retired.
+session_admission_deadline = "900s"
+# Time an active or recovering session may make no progress before it parks.
+session_active_stall_deadline = "1800s"
+# Time a waiting session may wait before it parks for a human.
+session_waiting_deadline = "86400s"
+# How often the daemon refreshes the exported lifecycle-metric gauges.
+session_lifecycle_metric_scan_interval = "300s"
 
 # Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
 # one namespace UUID per physical store. Both directories must already exist,
@@ -348,6 +354,7 @@ credential_pool = "anthropic-main"
 # [codex_cli]
 # executable = "/absolute/path/to/codex"
 # working_directory = "/absolute/path/to/workspace"
+# model_context_window_overrides = { "gpt-5.6-sol" = 1000000 }
 
 # To serve a Claude Code model family with an API credential, provision the file
 # named by the profile below, then add this mapping and process configuration.
@@ -445,62 +452,6 @@ allowed_origins = [
   "https://github.com",
 ]
 
-# Optional repository-watch polling and shadow-mode webhook intake. Each
-# repository has its own least-scope polling credential; it is reread for each
-# request and is never shared with the general GitHub tool credential. Omitting
-# the webhook table and per-repository hook fields disables webhook intake. The
-# reference deployment exposes public /github/webhooks with Tailscale Funnel
-# --set-path, which strips that prefix and forwards local path / to this listener.
-# [repository_watch]
-# version = 1
-# signal_reviewers = ["signal-reviewer", "review-bot[bot]"]
-#
-# The sweep remains disabled unless this policy and at least one repository's
-# explicit pull-request list are both present. Deployments may lower, never
-# raise, the five-minute census and thirty-minute cool-off ceilings.
-# [repository_watch.convergence_sweep]
-# template = "review-response"
-# interval_seconds = 300
-# cool_off_seconds = 1800
-#
-# [repository_watch.webhook]
-# bind_address = "127.0.0.1:3333"
-# path = "/"
-#
-# A repository whose webhook intake is primary may hold the complete sweep to an
-# hourly cadence: the delivery stream carries the mapped set and the poll is the
-# reconciliation backstop. Omitting webhook_mode selects "shadow", where the
-# poll stays the freshness path and the interval stays short. A present value
-# that is not "shadow" or "primary", of any TOML type, fails startup.
-# [[repository_watch.repositories]]
-# repository = "namespace/project"
-# poll_interval_seconds = 3600
-# credential_file = "/run/credentials/repository-watch-namespace-project"
-# convergence_pull_requests = [892]
-# webhook_hook_id = 123456789
-# webhook_secret_file = "/etc/signalbox/github-webhook-secret"
-# webhook_mode = "primary"
-#
-# [[repository_watch.rules]]
-# id = "merge-forward-on-base-advance"
-# Increment this revision whenever matcher, actions, singleton_per, or cooldown
-# changes. Keeping the ID preserves history; startup retires the old revision
-# and activates the new one after the current event tail.
-# The schema upgrade that introduced rule fingerprints retires every existing
-# revision, so increment each configured rule's version once on the first boot.
-# version = 1
-# singleton_per = "pull_request"
-# cooldown_seconds = 0
-#
-# [repository_watch.rules.matcher]
-# event_kinds = ["base_advanced"]
-# repo = "namespace/project"
-# head_branch_regex = "^agent/.+$"
-#
-# [[repository_watch.rules.actions]]
-# kind = "dispatch_session"
-# template = "merge-forward"
-
 # Tool dependencies use the same closed mapping-table pattern as model
 # adapters. The two GitHub-backed families share one non-secret profile; the
 # credential value still arrives only through GITHUB_TOKEN_FILE. Workspace,
@@ -576,6 +527,10 @@ web_search = "human"
 # [approval_judge]
 # selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"
 
+# `provider_compaction = true` is an exact per-target capability. Omission is
+# fail-closed: the adapter neither enables server compaction nor replays opaque
+# compaction blocks for that resolved target.
+#
 # Anthropic's most capable widely released model. Hard cap: 128000.
 #
 # This model rejects a forced tool choice, which is how the Anthropic adapter
@@ -591,6 +546,7 @@ selection_id = "3aa432ca-488e-4237-ac2b-7496a2ccc2b4"
 target_id = "ba705029-f367-4da8-a0bf-dbc6bf798e17"
 model_family = "anthropic"
 provider_model = "claude-fable-5-1"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -603,6 +559,7 @@ selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"
 target_id = "c74d2c41-8c70-4537-ab5d-7bbeac25562a"
 model_family = "anthropic"
 provider_model = "claude-fable-5"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -621,6 +578,7 @@ selection_id = "2a7ae424-975b-423a-a050-c6699ef694cd"
 target_id = "cce0f90e-8420-4894-8850-eaf262e7c82a"
 model_family = "anthropic"
 provider_model = "claude-opus-5"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -633,6 +591,7 @@ selection_id = "4f809b2b-ca94-421a-8dd4-b8534d2c0b93"
 target_id = "ef1a6d7b-07dd-47ab-ac9b-321c8baa9b14"
 model_family = "anthropic"
 provider_model = "claude-opus-4-8"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -645,6 +604,7 @@ selection_id = "09570a21-e49a-4a9a-910b-b372bbd3cd03"
 target_id = "06e3f786-fb7d-4d03-842f-38091a01f094"
 model_family = "anthropic"
 provider_model = "claude-opus-4-7"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -656,6 +616,7 @@ selection_id = "954dba51-f084-4327-b7d9-d55cc2e96ba5"
 target_id = "ff1c508a-f0a8-4a60-bc41-8cb956486bc6"
 model_family = "anthropic"
 provider_model = "claude-opus-4-6"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "max"]
@@ -667,6 +628,7 @@ selection_id = "2669e033-22f8-4ea9-b046-cbf21fe8b2d7"
 target_id = "86a42a25-e050-4d38-b45b-fb3a13ae72f9"
 model_family = "anthropic"
 provider_model = "claude-sonnet-5"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -678,6 +640,7 @@ selection_id = "18e345d7-61a4-47f4-92af-93e3817a075a"
 target_id = "c1bd20ea-c5f4-407a-922f-206d6f3e02be"
 model_family = "anthropic"
 provider_model = "claude-sonnet-4-6"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "max"]
@@ -706,9 +669,10 @@ service_tiers = ["auto", "standard_only"]
 # others leave free and records what it gave up; a deployment that would rather
 # serve a model through the other family moves the row instead of copying it.
 #
-# Every capability value below was read from its provider on 2026-08-06 and
-# will go stale. A row whose value could not be established from a provider
-# source says so in place and carries the conservative value instead.
+# Except for a catalog that records a later date, every capability value below
+# was read from its provider on 2026-08-06 and will go stale. A row whose value
+# could not be established from a provider source says so in place and carries
+# the conservative value instead.
 
 # OpenAI Chat Completions catalog, read from the provider's model, pricing, and
 # deprecation pages under developers.openai.com/api/docs on 2026-08-06. Every
@@ -880,12 +844,12 @@ service_tiers = ["auto", "standard_only"]
 # fast_mode = "request_control"
 # service_tiers = ["auto", "default", "fast"]
 
-# Codex CLI catalog, read on 2026-08-06 from the model catalog the pinned CLI
-# fetches from its provider (`codex debug models`, client 0.146) and from the
-# provider's published CLI documentation. The CLI's set is not the API's: it
-# publishes no dated snapshots, it serves a model the API does not, and the
-# models it shares with the API carry a 272000 raw window where Chat Completions
-# advertises 1050000 for the same spelling. The CLI reserves 5% of the raw
+# Codex CLI catalog, read on 2026-09-03 from the model catalog bundled with the
+# pinned 0.153.1 CLI and from the provider's published CLI documentation. The
+# CLI's set is not the API's: it publishes no dated snapshots, it serves a model
+# the API does not, and the models it shares with the API carry a 272000 raw
+# window where Chat Completions advertises 1050000 for the same spelling. The
+# CLI reserves 5% of the raw
 # window internally, so each configured context ceiling below is the 95% usable
 # window that the CLI actually admits. The CLI validates neither a model
 # spelling nor an effort at startup — a wrong value fails at the provider — so
@@ -896,21 +860,36 @@ service_tiers = ["auto", "standard_only"]
 # the one-adapter rule; serving one of them here means moving its row. The
 # provider marks gpt-5.4 and gpt-5.4-mini for retirement.
 #
-# `max_output_tokens` is conservative-unverified on both rows: the fetched
+# `max_output_tokens` is conservative-unverified on all rows: the fetched
 # catalog carries no output-token field under any name and the CLI exposes no
 # setting, so no provider ceiling is known and the value is purely the operator
 # budget the header describes. The catalog advertises no "none" or "minimal"
 # effort for any model, so no row declares them. A declared service tier is the
-# "priority" request value behind the CLI's fast speed tier.
+# "priority" request value behind the CLI's fast speed tier. Astra's bundled
+# entry advertises neither a service tier nor request-controlled fast mode.
 
 # [[models]]
-# # The CLI's own default model. Raw window: 272000; usable window: 258400.
+# # Explicitly configurable but hidden from the CLI picker. Raw default window:
+# # 272000; usable window: 258400. The bundled catalog also carries an 872000
+# # maximum, but does not claim that window for every account.
+# selection_id = "4965fe4f-a9dd-45e5-b09e-21e9a88d6462"
+# target_id = "11b9520a-0491-4164-9fb6-cf2692419d08"
+# model_family = "codex"
+# provider_model = "gpt-6-astra"
+# max_output_tokens = 8192
+# context_window_tokens = 258400
+# reasoning_levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
+
+# [[models]]
+# # The CLI's own default model. Its configured 1000000-token window is capped
+# # by the pinned CLI at 872000, of which 95 percent (828400) is the usable
+# # total context ceiling.
 # selection_id = "ff15fc0a-bac0-45df-9d59-ab3b79282a95"
 # target_id = "4d4a9f4c-ce89-4c75-ae2e-695cda3ae4bc"
 # model_family = "codex"
 # provider_model = "gpt-5.6-sol"
 # max_output_tokens = 8192
-# context_window_tokens = 258400
+# context_window_tokens = 828400
 # reasoning_levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
 # fast_mode = "request_control"
 # service_tiers = ["priority"]

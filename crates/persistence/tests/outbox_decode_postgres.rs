@@ -1,9 +1,8 @@
 //! What the outbox decoder admits, and the stall a row it cannot decode imposes.
 //!
-//! The outbox dispatcher is a singleton over a single global cursor: one
-//! committed row it cannot decode is not a lost event for one session, it is a
-//! cursor that never advances again for *any* session. Two separate lines are
-//! held against that here.
+//! Each outbox dispatcher advances one consumer's global cursor: one committed
+//! row it cannot decode is not a lost event for one session, it stalls that
+//! consumer for *every* session. Two separate lines are held against that here.
 //!
 //! The first is a compile-time line. Every dispatched enum below is enumerated
 //! by an exhaustive `match` with no wildcard arm, which *produces* the
@@ -35,8 +34,8 @@ use std::{collections::BTreeSet, error::Error, fmt};
 use signalbox_domain::{
     ContextFrontierId, CreateSession, DelegationMessageId, DirectModelSelection, DurableCommandId,
     ModelCallId, ModelSelectionRequest, PreparedCreateSession, SessionConfigurationDefaults,
-    SessionCreationCause, SessionCreationProvenance, SessionId, ToolAttemptId, ToolRequestId,
-    TranscriptAncestry, TurnId,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionOwnership, ToolAttemptId,
+    ToolRequestId, TranscriptAncestry, TurnId,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -52,10 +51,10 @@ use signalbox_persistence::{
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
         DispatchedDelegationWaitMode, DispatchedDelegationWake, DispatchedModelCallDisposition,
         DispatchedModelCallState, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
-        DispatchedToolBatchState, OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError,
-        OutboxDispatcher, decode_bound_action, decode_delegation_outcome,
-        decode_delegation_policy_kind, decode_delegation_reason, decode_delegation_update_kind,
-        decode_delegation_wake_subject, decode_wait_mode,
+        DispatchedSessionCreation, DispatchedToolBatchState, OutboxCorruption,
+        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatcher, decode_bound_action,
+        decode_delegation_outcome, decode_delegation_policy_kind, decode_delegation_reason,
+        decode_delegation_update_kind, decode_delegation_wake_subject, decode_wait_mode,
     },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -135,10 +134,7 @@ fn credential_pin() -> SessionCredentialPin {
 fn creation(session_seed: u128, command_seed: u128) -> PreparedCreateSession {
     CreateSession::new(
         command(command_seed),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(Uuid::from_u128(ARBITRARY_MODEL_SELECTION_SEED)),
         )),
@@ -360,7 +356,13 @@ fn every_delegation_provenance() -> Vec<DispatchedDelegationProvenance> {
                     command: command(ARBITRARY_COMMAND_SEED),
                 })
             }
-            DispatchedDelegationProvenance::ParentGoalCommand { .. } => None,
+            DispatchedDelegationProvenance::ParentGoalCommand { .. } => {
+                Some(DispatchedDelegationProvenance::ParentLifecycleCommand {
+                    session: session(UNDECODABLE_SESSION),
+                    command: command(ARBITRARY_COMMAND_SEED),
+                })
+            }
+            DispatchedDelegationProvenance::ParentLifecycleCommand { .. } => None,
         };
         provenances.push(current);
     }
@@ -635,7 +637,7 @@ fn assert_storage_and_decoder_agree<Value: PartialEq + fmt::Debug>(
                 panic!(
                     "durable {column} admits {spelling:?}, which the outbox decoder rejects \
                      ({corruption:?}); a committed row carrying it can never be decoded, and \
-                     stalls the singleton outbox cursor for every session"
+                     stalls each outbox consumer cursor for every session"
                 )
             })
         })
@@ -691,7 +693,7 @@ fn row_decoded_families_are_enumerated() {
     // The storage discriminator is decoder-driven above; this is the dispatched
     // projection, which is still decoded from the row's shape.
     assert_eq!(every_delegation_policy().len(), 2);
-    assert_eq!(every_delegation_provenance().len(), 3);
+    assert_eq!(every_delegation_provenance().len(), 4);
     assert_eq!(every_model_call_state().len(), 4);
     assert_eq!(every_model_call_disposition().len(), 5);
     assert_eq!(every_tool_batch_state().len(), 3);
@@ -713,7 +715,7 @@ fn row_decoded_families_are_enumerated() {
 /// This is the arm the tripwire analysis named: `child_result` and
 /// `child_lifecycle_disposition` are written by production code, and mistyping
 /// either routes a committed row to the fail-closed arm, which stalls the
-/// singleton cursor for every session.
+/// selected consumer cursor for every session.
 #[test]
 fn each_delegation_update_kind_spelling_decodes_to_its_variant() {
     assert_eq!(
@@ -913,8 +915,8 @@ async fn delegation_storage_and_decoder_close_over_the_same_spellings() -> Resul
 /// A committed row the dispatcher cannot decode stalls every session, today.
 ///
 /// This pins current behavior rather than endorsing it. The dispatcher offers
-/// exactly the next committed sequence and advances the singleton
-/// `outbox_delivery_state` cursor only after the consumer accepts; a row that
+/// exactly the next committed sequence and advances its `outbox_consumer_cursor`
+/// cursor only after the consumer accepts; a row that
 /// fails to decode never reaches a consumer, so the cursor cannot move and no
 /// later sequence — for any session — is ever offered. The assertions below
 /// state that as a conjunction because it is one contract: the error repeats,
@@ -923,7 +925,7 @@ async fn delegation_storage_and_decoder_close_over_the_same_spellings() -> Resul
 /// behavior regressed.
 ///
 /// The concern this documents: with delegation events flowing through the same
-/// singleton cursor, an undecodable persisted variant is a system-wide stall,
+/// selected consumer cursor, an undecodable persisted variant is a consumer-wide stall,
 /// not a per-session one.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -974,7 +976,7 @@ async fn an_undecodable_committed_row_stalls_every_session() -> Result<(), Box<d
     );
 
     let delivered: rust_decimal::Decimal =
-        sqlx::query_scalar("SELECT delivered_through FROM outbox_delivery_state WHERE singleton")
+        sqlx::query_scalar("SELECT delivered_through FROM outbox_consumer_cursor WHERE consumer_name = 'process_protocol'")
             .fetch_one(&pool)
             .await?;
     assert_eq!(
@@ -1292,7 +1294,7 @@ async fn dispatch_next_kind(
 ///
 /// This is the end the tripwire analysis pointed at: `child_result` and
 /// `child_lifecycle_disposition` are written by production code, and an arm
-/// that cannot decode its own committed row stalls the singleton cursor for
+/// that cannot decode its own committed row stalls its consumer cursor for
 /// every session rather than losing one event.
 ///
 /// Both spawn policies are planted, because `background` and `bound` take
@@ -1363,7 +1365,10 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
     let dispatcher = OutboxDispatcher::new(pool.clone());
     assert_eq!(
         dispatch_next_kind(&dispatcher).await?,
-        DispatchedOutboxEventKind::SessionCreated,
+        DispatchedOutboxEventKind::SessionCreated(DispatchedSessionCreation {
+            cause: SessionCreationCause::Interactive,
+            ownership: SessionOwnership::Unmonitored,
+        }),
         "the session's own creation event is committed ahead of the planted updates"
     );
     assert_eq!(

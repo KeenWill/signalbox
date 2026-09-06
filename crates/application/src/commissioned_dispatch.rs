@@ -1,36 +1,27 @@
 //! Operator-commissioned dispatch of one session under an immutable authority fence.
 //!
-//! Repository watch is not the only source of dispatched work: an operator may
-//! commission a session directly, stating up front the repository authority the
-//! session acts under. Without a recorded fence such a session reaches the
-//! approval judge as an ordinary anonymous one, and the judge — correctly —
-//! escalates its first mutable Git operation to a human who is not there. The
-//! commissioned dispatch records the same repository/head/base fence a
-//! repository-watch dispatch records, in the same transaction that creates the
-//! session, submits its first input, and commissions its goal, so the judge
-//! consumes it identically and the unattended-escalation closeout covers it.
-
-use std::{error::Error, fmt};
+//! An operator commissions a session with the repository authority the session
+//! acts under. The commissioned dispatch records that repository/head/base
+//! fence in the same transaction that creates the session, submits its first
+//! input, and commissions its goal. The approval judge consumes the fence when
+//! deciding mutable Git operations for the unattended session.
 
 use signalbox_domain::{
-    AcceptedInputId, BranchName, CommissionedDispatchId, CommitSha, ContextFrontierId,
-    CreateSession, DeliveryRequest, DurableCommandId, GoalStatement, GoalUserAction,
-    GoalUserCommand, ModelSelectionOverride, PerInputConfigurationChoices, PreparedCreateSession,
-    PullRequestNumber, RepositorySlug, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionTemplateName, SessionTemplateProvenance, SubmitInput, TranscriptAncestry,
-    TurnId, UserContent, UserContentPart,
+    BranchName, CommissionedDispatchId, CommitSha, CreateSession, DeliveryRequest,
+    DurableCommandId, GoalStatement, GoalUserAction, GoalUserCommand, ModelSelectionOverride,
+    ModuleDispatch, PerInputConfigurationChoices, PreparedCreateSession, PullRequestNumber,
+    RepositorySlug, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationProvenance, SessionId, SessionTemplateName, SessionTemplateProvenance,
+    SubmitInput, UserContent, UserContentPart,
 };
 
 use crate::create_session::InvalidDurableCommandId;
 
 /// Immutable repository authority an operator asserts for one commissioned session.
 ///
-/// The shapes mirror the repository-watch dispatch fence exactly, because the
-/// approval judge consumes both through one authority rendering: a pull-request
-/// fence names the pull request, its exact head commit, the repository and
-/// branch holding that head, and the base branch; a branch fence names the
-/// repository and branch alone.
+/// A pull-request fence names the pull request, its exact head commit, the
+/// repository and branch holding that head, and the base branch; a branch fence
+/// names the repository and branch alone.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommissionedDispatchFence {
     /// Exact pull-request authority the session is commissioned with.
@@ -62,10 +53,6 @@ pub trait CommissionedDispatchIdGenerator {
     fn next_dispatch_id(&mut self) -> CommissionedDispatchId;
     fn next_command_id(&mut self) -> DurableCommandId;
     fn next_session_id(&mut self) -> SessionId;
-    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
-    fn next_turn_id(&mut self) -> TurnId;
-    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
 }
 
 /// Production UUIDv7 identity source for commissioned dispatch.
@@ -83,22 +70,6 @@ impl CommissionedDispatchIdGenerator for UuidV7CommissionedDispatchIdGenerator {
 
     fn next_session_id(&mut self) -> SessionId {
         SessionId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_accepted_input_id(&mut self) -> AcceptedInputId {
-        AcceptedInputId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_turn_id(&mut self) -> TurnId {
-        TurnId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId {
-        SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_context_frontier_id(&mut self) -> ContextFrontierId {
-        ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
     }
 }
 
@@ -173,13 +144,12 @@ impl CommissionDispatchRequest {
 
     /// Prepares the complete composite the durable transaction commits.
     ///
-    /// The composition is the repository-watch dispatch action's, minus the
-    /// rule machinery: one created session from the resolved template, one
-    /// initial input through the start-when-idle path carrying the operator's
-    /// context, and one goal commissioned from the operator's statement that
-    /// adopts the reserved turn as its own first turn. The fence rides beside
-    /// them into the same transaction, so no commissioned session is durably
-    /// visible without the authority it was commissioned under.
+    /// The composition contains one session created from the resolved template,
+    /// one initial input through the start-when-idle path carrying the
+    /// operator's context, and one goal commissioned from the operator's
+    /// statement that adopts the reserved turn as its own first turn. The fence
+    /// rides beside them into the same transaction, so no commissioned session
+    /// is durably visible without the authority it was commissioned under.
     pub fn prepare(
         self,
         ids: &mut impl CommissionedDispatchIdGenerator,
@@ -189,12 +159,12 @@ impl CommissionDispatchRequest {
         if template_provenance.name() != &self.template {
             return Err(CommissionDispatchPreparationError::TemplateMismatch);
         }
+        let dispatch_id = ids.next_dispatch_id();
         let command = CreateSession::new_from_template(
             self.command_id,
-            SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
-                TranscriptAncestry::None,
-            ),
+            SessionCreationProvenance::module_dispatched(ModuleDispatch::Commissioned {
+                dispatch: dispatch_id,
+            }),
             template_provenance,
             resolved_defaults,
         );
@@ -219,14 +189,10 @@ impl CommissionDispatchRequest {
             GoalUserAction::Attach(self.statement),
         );
         Ok(PreparedCommissionedDispatch {
-            dispatch_id: ids.next_dispatch_id(),
+            dispatch_id,
             fence: self.fence,
             prepared_session,
             initial_input,
-            accepted_input: ids.next_accepted_input_id(),
-            turn: ids.next_turn_id(),
-            cancellation_entry: ids.next_semantic_entry_id(),
-            cancellation_frontier: ids.next_context_frontier_id(),
             goal,
         })
     }
@@ -292,20 +258,15 @@ const fn attachment_kind_digest_tag(kind: signalbox_domain::AttachmentKind) -> u
 
 /// One commissioned dispatch whose session creation has been domain-prepared.
 ///
-/// The turn reserved here is the only one the commissioned session receives.
-/// It carries the operator's context, and the goal commissioned in the same
-/// transaction adopts it as that generation's own first turn, exactly as a
-/// repository-watch dispatch action does.
+/// The turn reserved here carries the operator's context, and the goal
+/// commissioned in the same transaction adopts it as that generation's own
+/// first turn.
 #[derive(Debug)]
 pub struct PreparedCommissionedDispatch {
     dispatch_id: CommissionedDispatchId,
     fence: CommissionedDispatchFence,
     prepared_session: PreparedCreateSession,
     initial_input: SubmitInput,
-    accepted_input: AcceptedInputId,
-    turn: TurnId,
-    cancellation_entry: SemanticTranscriptEntryId,
-    cancellation_frontier: ContextFrontierId,
     goal: GoalUserCommand,
 }
 
@@ -347,10 +308,6 @@ impl PreparedCommissionedDispatch {
     }
 
     /// Decomposes into exactly the parts the durable transaction commits.
-    #[allow(
-        clippy::type_complexity,
-        reason = "one-shot decomposition mirrors the dispatch action"
-    )]
     pub fn into_parts(
         self,
     ) -> (
@@ -358,10 +315,6 @@ impl PreparedCommissionedDispatch {
         CommissionedDispatchFence,
         PreparedCreateSession,
         SubmitInput,
-        AcceptedInputId,
-        TurnId,
-        SemanticTranscriptEntryId,
-        ContextFrontierId,
         GoalUserCommand,
     ) {
         (
@@ -369,36 +322,22 @@ impl PreparedCommissionedDispatch {
             self.fence,
             self.prepared_session,
             self.initial_input,
-            self.accepted_input,
-            self.turn,
-            self.cancellation_entry,
-            self.cancellation_frontier,
             self.goal,
         )
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a commissioned dispatch could not be prepared for its atomic port.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommissionDispatchPreparationError {
+    #[error("commissioned dispatch resolved a template other than the requested one")]
     /// The resolved template's name is not the requested template.
     TemplateMismatch,
+    #[error("commissioned dispatch session preparation failed")]
     /// Session preparation refused the composed creation command.
     SessionPreparation,
 }
-
-impl fmt::Display for CommissionDispatchPreparationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::TemplateMismatch => {
-                "commissioned dispatch resolved a template other than the requested one"
-            }
-            Self::SessionPreparation => "commissioned dispatch session preparation failed",
-        })
-    }
-}
-
-impl Error for CommissionDispatchPreparationError {}
 
 #[cfg(test)]
 mod tests {
@@ -514,7 +453,7 @@ mod tests {
             prepared.prepared_session().command().command_id(),
             commanded
         );
-        let (_, _, _, initial_input, _, _, _, _, goal) = prepared.into_parts();
+        let (_, _, _, initial_input, goal) = prepared.into_parts();
         assert_eq!(initial_input.session(), session);
         assert_eq!(goal.session(), session);
         assert!(matches!(goal.action(), GoalUserAction::Attach(_)));

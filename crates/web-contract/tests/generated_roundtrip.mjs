@@ -1680,6 +1680,7 @@ function attentionSummary(overrides = {}) {
     goal_block: null,
     judge: { actionable: "0", completed: "0", escalated: "0", failed: "0" },
     last_activity: { unix_milliseconds: "0", kind: "session" },
+    lifecycle_state: "terminal",
     ...overrides,
   };
 }

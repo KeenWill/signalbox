@@ -1,6 +1,6 @@
 //! Bounded daemon-owned fleet attention read model.
 
-use std::{collections::BTreeSet, fmt, future::Future, time::SystemTime};
+use std::{collections::BTreeSet, future::Future, time::SystemTime};
 
 use signalbox_domain::{SessionId, TurnId};
 
@@ -86,7 +86,25 @@ pub enum AttentionState {
     AwaitingToolRecovery,
     AwaitingReconciliation,
     RunnerLost,
+    Parked,
     Idle,
+}
+
+/// The durable session state this attention state projects.
+///
+/// The eight members of the lifecycle's own closed vocabulary, without their
+/// typed detail. A reader that wants the authoritative state rather than the
+/// attention reading of it takes this.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttentionLifecycleState {
+    Created,
+    Dispatched,
+    Active,
+    Waiting,
+    Recovering,
+    Blocked,
+    Parked,
+    Terminal,
 }
 
 /// Stable server-owned catalog order.
@@ -219,23 +237,23 @@ impl AttentionQuery {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(signalbox_derive::OperatorError, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttentionQueryError {
+    #[error("session catalog query is malformed or outside its hard bounds: too many tags")]
     TooManyTags,
+    #[error("session catalog query is malformed or outside its hard bounds: invalid tag")]
     InvalidTag,
+    #[error("session catalog query is malformed or outside its hard bounds: duplicate tag")]
     DuplicateTag,
+    #[error("session catalog query is malformed or outside its hard bounds: invalid search text")]
     InvalidSearch,
+    #[error("session catalog query is malformed or outside its hard bounds: filter is too large")]
     FilterTooLarge,
+    #[error(
+        "session catalog query is malformed or outside its hard bounds: continuation sort does not match query sort"
+    )]
     ContinuationSortMismatch,
 }
-
-impl fmt::Display for AttentionQueryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("session catalog query is malformed or outside its hard bounds")
-    }
-}
-
-impl std::error::Error for AttentionQueryError {}
 
 /// Exact operator action owed by the current facts, when any.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,6 +270,8 @@ pub enum AttentionBlockedReason {
     ExternalChangeRequired,
     AuthorizationRequired,
     ExecutionFailure,
+    /// A failing finish check blocked the goal; the need is its result.
+    FinishCheckFailed,
 }
 
 /// Current blocked-goal evidence.
@@ -299,6 +319,7 @@ pub struct AttentionSummary {
     pub active_turn_count: u64,
     pub queued_turn_count: u64,
     pub state: AttentionState,
+    pub lifecycle_state: AttentionLifecycleState,
     pub action: Option<AttentionAction>,
     pub goal_block: Option<AttentionGoalBlock>,
     pub judge: AttentionJudgeFacts,
@@ -345,6 +366,28 @@ pub trait AttentionReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_error_messages_distinguish_catalog_query_failures() {
+        let errors = [
+            AttentionQueryError::TooManyTags,
+            AttentionQueryError::InvalidTag,
+            AttentionQueryError::DuplicateTag,
+            AttentionQueryError::InvalidSearch,
+            AttentionQueryError::FilterTooLarge,
+            AttentionQueryError::ContinuationSortMismatch,
+        ];
+        let messages = errors.map(|error| error.to_string()).join("\n");
+
+        expect_test::expect![[r#"
+            session catalog query is malformed or outside its hard bounds: too many tags
+            session catalog query is malformed or outside its hard bounds: invalid tag
+            session catalog query is malformed or outside its hard bounds: duplicate tag
+            session catalog query is malformed or outside its hard bounds: invalid search text
+            session catalog query is malformed or outside its hard bounds: filter is too large
+            session catalog query is malformed or outside its hard bounds: continuation sort does not match query sort"#]]
+        .assert_eq(&messages);
+    }
 
     #[test]
     fn cursor_preserves_empty_frontier() {

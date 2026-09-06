@@ -28,9 +28,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{
-    Decimal, TestSubmitInputHandle, commission_fixture_session_goal, insert_frontier,
-    migrated_postgres, prepared_complete_delegation_outbox, start_input_with_attachment,
-    stop_fixture_session_goal, test_session_credential_pin,
+    Decimal, TestSubmitInputHandle, commission_fixture_session_goal, migrated_postgres,
+    prepared_complete_delegation_outbox, start_input_with_attachment, stop_fixture_session_goal,
+    test_session_credential_pin,
 };
 
 fn credential_pin() -> signalbox_persistence::SessionCredentialPin {
@@ -44,10 +44,7 @@ fn session(value: u128) -> SessionId {
 async fn create_session(pool: &PgPool, identity: SessionId) -> Result<(), Box<dyn Error>> {
     let prepared = CreateSession::new(
         DurableCommandId::from_uuid(identity.into_uuid()),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(Uuid::from_u128(0x0009_9102)),
         )),
@@ -721,7 +718,14 @@ async fn empty_endpoint_and_around_windows_are_corruption() -> Result<(), Box<dy
     )
     .execute(&pool)
     .await?;
+    sqlx::query("DROP TRIGGER session_timeline_item_is_append_only ON session_timeline_item")
+        .execute(&pool)
+        .await?;
     sqlx::query("DELETE FROM outbox_event WHERE session_id = $1")
+        .bind(identity.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM session_timeline_item WHERE session_id = $1")
         .bind(identity.into_uuid())
         .execute(&pool)
         .await?;
@@ -924,9 +928,15 @@ async fn relevance_predicates_disagree(
           WHERE turn.session_id = $1
             AND goal_turn_is_queue_order_relevant(turn.session_id, turn.turn_id)
                 IS DISTINCT FROM (
-                    turn.state_kind <> 'queued'
-                    OR goal_turn_generation_is_pursued(
-                        turn.session_id, turn.turn_id
+                    NOT (
+                        turn.state_kind = 'terminal'
+                        AND turn.terminal_disposition_kind = 'retired'
+                    )
+                    AND (
+                        turn.state_kind <> 'queued'
+                        OR goal_turn_generation_is_pursued(
+                            turn.session_id, turn.turn_id
+                        )
                     )
                 )",
     )
@@ -938,19 +948,10 @@ async fn relevance_predicates_disagree(
 
 /// A queued goal turn whose generation a goal event retired is no longer
 /// credited to `queued_turn_count`, so the lifecycle trigger must not subtract
-/// it again when that turn later leaves the queue.
-///
-/// No repository path reaches this state today, which is exactly why it is
-/// asserted here rather than through one. Activation refuses a retired turn
-/// (`start_eligible_turn` filters on `goal_turn_is_runtime_relevant`) and every
-/// terminalization requires `state_kind = 'active'`, so a retired queued turn
-/// merely lingers. The delegation cascade cannot reach it either: a goal turn is
-/// `origin_kind = 'accepted_input'` by `goal_turn_lifecycle_fk`, and
-/// `turn_lifecycle_delegation_runtime_terminal_shape` admits that flag only on
-/// `origin_kind = 'delegation'`. The fact triggers still have to agree with the
-/// backfill on their own terms instead of borrowing those gates, because an
-/// unguarded subtraction removes credit that was never granted and drives the
-/// count to -1, aborting the writing transaction on the nonnegative check.
+/// it again when the same transaction moves that turn to `terminal{retired}`.
+/// An unguarded subtraction would remove credit that was never granted and
+/// drive the count to -1, aborting the writing transaction on the nonnegative
+/// check.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_retired_queued_goal_turn_is_never_subtracted_twice() -> Result<(), Box<dyn Error>> {
@@ -979,56 +980,20 @@ async fn a_retired_queued_goal_turn_is_never_subtracted_twice() -> Result<(), Bo
         0
     );
 
-    // The retired turn leaves the queue. Only the final-state assertion is
-    // suspended -- it demands the attempts and boundary entries a turn that
-    // never ran does not have. The transition guard and the fact trigger both
-    // stay enabled, so this exercises exactly the subtraction under test. The
-    // suspension spans its own statements rather than the cancelling
-    // transaction because a deferred trigger the update leaves pending blocks
-    // any `ALTER TABLE` that would re-enable it in that same transaction.
+    // The stop retired the turn: it left the queue as `terminal{retired}`.
     let goal_turn = Uuid::from_u128(seed + 2);
-    let frontier = Uuid::from_u128(seed + 0x200);
-    let mut connection = pool.acquire().await?;
-    insert_frontier(
-        &mut connection,
-        identity.into_uuid(),
-        frontier,
-        Decimal::ZERO,
-        &[],
+    let retired: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
     )
-    .await?;
-    drop(connection);
-    sqlx::raw_sql(
-        "ALTER TABLE turn_lifecycle
-             DISABLE TRIGGER turn_lifecycle_requires_complete_final_state",
-    )
-    .execute(&pool)
-    .await?;
-    let cancelling = sqlx::query(
-        "UPDATE turn_lifecycle
-            SET state_kind = 'terminal',
-                start_lineage_kind = 'first_in_session',
-                starting_frontier_id = $1,
-                terminal_frontier_id = $1,
-                terminal_disposition_kind = 'cancelled',
-                terminal_cause_kind = 'interrupt_applied'
-          WHERE session_id = $2 AND turn_id = $3",
-    )
-    .bind(frontier)
     .bind(identity.into_uuid())
     .bind(goal_turn)
-    .execute(&pool)
-    .await;
-    sqlx::raw_sql(
-        "ALTER TABLE turn_lifecycle
-             ENABLE TRIGGER turn_lifecycle_requires_complete_final_state",
-    )
-    .execute(&pool)
+    .fetch_one(&pool)
     .await?;
     assert_eq!(
-        cancelling?.rows_affected(),
-        1,
-        "the retired queued goal turn leaves the queue"
+        retired,
+        (String::from("terminal"), Some(String::from("retired")))
     );
 
     let cancelled = repository
@@ -1305,4 +1270,99 @@ async fn around_windows_reach_both_sides_of_an_interior_anchor() -> Result<(), B
     pool.close().await;
     drop(container);
     Ok(())
+}
+
+/// The durable projection the window and region reads now read is exactly the
+/// union of both header families, so a read over it returns what the raw join
+/// returned. A fixture exercising both families and every disposition-bearing
+/// kind leaves no row unmatched in either direction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn timeline_projection_matches_both_raw_header_families() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_complete_delegation_outbox(0x9975).await?;
+
+    let projected_only: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (
+             SELECT event_sequence, session_id, event_kind, turn_disposition
+               FROM session_timeline_item
+             EXCEPT ALL
+             SELECT event_sequence, session_id, event_kind, turn_disposition
+               FROM outbox_event
+             EXCEPT ALL
+             SELECT event_sequence, session_id, event_kind, NULL::text
+               FROM delegation_outbox_event
+         ) AS unmatched",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let raw_only: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (
+             SELECT event_sequence, session_id, event_kind, turn_disposition
+               FROM outbox_event
+             UNION ALL
+             SELECT event_sequence, session_id, event_kind, NULL::text
+               FROM delegation_outbox_event
+             EXCEPT ALL
+             SELECT event_sequence, session_id, event_kind, turn_disposition
+               FROM session_timeline_item
+         ) AS unmatched",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(projected_only, 0);
+    assert_eq!(raw_only, 0);
+
+    let repository = SessionTimelineRepository::new(pool.clone());
+    let parent_window = projected_addresses(&repository, fixture.parent).await?;
+    let child_window = projected_addresses(&repository, fixture.child).await?;
+    let parent_raw = raw_session_addresses(&pool, fixture.parent).await?;
+    let child_raw = raw_session_addresses(&pool, fixture.child).await?;
+    assert_eq!(parent_window, parent_raw);
+    assert_eq!(child_window, child_raw);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Reads one session's whole address order straight from the raw headers.
+async fn raw_session_addresses(
+    pool: &PgPool,
+    identity: SessionId,
+) -> Result<Vec<TimelineAddress>, Box<dyn Error>> {
+    let sequences: Vec<i64> = sqlx::query_scalar(
+        "SELECT event_sequence::bigint FROM (
+             SELECT event_sequence FROM outbox_event WHERE session_id = $1
+             UNION ALL
+             SELECT event_sequence FROM delegation_outbox_event WHERE session_id = $1
+         ) AS header
+         ORDER BY event_sequence",
+    )
+    .bind(identity.into_uuid())
+    .fetch_all(pool)
+    .await?;
+    sequences
+        .into_iter()
+        .map(|sequence| {
+            Ok(TimelineAddress::new(
+                NonZeroU64::new(u64::try_from(sequence)?).expect("outbox sequence is positive"),
+            ))
+        })
+        .collect()
+}
+
+/// Reads one session's whole address order through the projection-backed
+/// window, exhausted in both directions.
+async fn projected_addresses(
+    repository: &SessionTimelineRepository,
+    identity: SessionId,
+) -> Result<Vec<TimelineAddress>, Box<dyn Error>> {
+    let unbounded = TimelineWindowLimits::new(256, 64 * 1024).expect("fixture limits are bounded");
+    let window = repository
+        .read_window(identity, TimelineWindowAnchor::First, unbounded)
+        .await?
+        .expect("the fixture session has a first window");
+    assert_eq!(window.continuation_before, TimelineContinuation::Exhausted);
+    assert_eq!(window.continuation_after, TimelineContinuation::Exhausted);
+    Ok(window.items.iter().map(|item| item.address).collect())
 }

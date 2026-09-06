@@ -4,7 +4,7 @@ use std::{
     fs,
     io::{Read, Seek, Write},
     os::{
-        fd::OwnedFd,
+        fd::{AsFd, OwnedFd},
         unix::fs::{MetadataExt, PermissionsExt},
     },
     path::{Component, Path, PathBuf},
@@ -22,6 +22,7 @@ use crate::descriptor::{
     FileIdentity, QuarantineDirectory, descriptor_entry_exists, file_identity,
     mode_from_metadata_bits, permission_bits, remove_entry_if_identity, stat_file_identity,
 };
+use crate::descriptor_identity::descriptor_and_path_agree;
 use crate::failure::LocalGitFailure;
 use crate::layout::valid_reference_name;
 use crate::limits::{MAX_REFERENCE_BYTES, MAX_REVISION_BYTES};
@@ -604,21 +605,12 @@ impl ReferenceLock {
     }
 
     fn path_still_owned(&self) -> bool {
-        let descriptor_identity = self
-            .lock
-            .metadata()
-            .map(|metadata| file_identity(&metadata))
-            .ok();
-        let path_identity = openat(
-            &self.parent,
+        descriptor_and_path_agree(
+            &self.lock,
+            self.parent.as_fd(),
             &self.lock_name,
-            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
+            self.identity,
         )
-        .ok()
-        .and_then(|descriptor| fs::File::from(descriptor).metadata().ok())
-        .map(|metadata| file_identity(&metadata));
-        descriptor_identity == Some(self.identity) && path_identity == Some(self.identity)
     }
 
     fn record_prepared_reference(&mut self, expected: &[u8]) -> Result<(), LocalGitFailure> {

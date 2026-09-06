@@ -2,12 +2,13 @@
 
 use std::sync::LazyLock;
 
-use signalbox_domain::DurableCommandId;
+use signalbox_domain::{CommandPrincipal, DurableCommandId};
 use sqlx::{PgConnection, Row};
 
 pub(crate) use crate::mapping::DurableCommandKind as CommandKind;
 use crate::mapping::{
-    durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
+    command_principal_module_to_str, command_principal_to_str, durable_command_id_to_uuid,
+    durable_command_kind_from_str, durable_command_kind_to_str,
 };
 
 pub(crate) const CREATE_SESSION_KIND: &str =
@@ -38,6 +39,18 @@ pub(crate) const MINT_GIT_REMOTE_KIND: &str =
     durable_command_kind_to_str(CommandKind::MintGitRemote);
 pub(crate) const WITHDRAW_GIT_REMOTE_KIND: &str =
     durable_command_kind_to_str(CommandKind::WithdrawGitRemote);
+pub(crate) const SESSION_LIFECYCLE_KIND: &str =
+    durable_command_kind_to_str(CommandKind::SessionLifecycle);
+
+/// Returns the envelope's `issuer_kind` and `issuer_module` spellings.
+pub(crate) const fn issuer_columns(
+    principal: CommandPrincipal,
+) -> (&'static str, Option<&'static str>) {
+    (
+        command_principal_to_str(principal),
+        command_principal_module_to_str(principal),
+    )
+}
 
 pub(crate) const fn create_session_storage_version_is_supported(version: i16) -> bool {
     matches!(version, 1..=4 | 6..=7)
@@ -56,7 +69,7 @@ struct CommandKindDefinition {
     maximum_version: i16,
 }
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 15] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 16] = [
     CommandKindDefinition {
         kind: CommandKind::CreateSession,
         spelling: CREATE_SESSION_KIND,
@@ -159,6 +172,13 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 15] = [
         kind: CommandKind::WithdrawGitRemote,
         spelling: WITHDRAW_GIT_REMOTE_KIND,
         typed_table: "configured_git_remote_withdrawal",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::SessionLifecycle,
+        spelling: SESSION_LIFECYCLE_KIND,
+        typed_table: "session_lifecycle_command",
         minimum_version: 1,
         maximum_version: 1,
     },

@@ -1,0 +1,14 @@
+{
+  "source": "settled.json",
+  "edge": "review request edited after the completed review",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/comments/nodes/0/lastEditedAt",
+      "value": "2026-09-05T13:00:00Z"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/comments/nodes/0/lastEditedAt",
+      "value": "2026-09-05T13:00:00Z"
+    }
+  ]
+}

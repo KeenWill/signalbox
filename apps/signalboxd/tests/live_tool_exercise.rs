@@ -874,7 +874,8 @@ fn operation_tool_results(
             MessagePart::Text(_)
             | MessagePart::ToolCall(_)
             | MessagePart::Thinking { .. }
-            | MessagePart::RedactedThinking { .. } => None,
+            | MessagePart::RedactedThinking { .. }
+            | MessagePart::ProviderCompaction { .. } => None,
         })
         .collect::<Result<Vec<_>, _>>()?)
 }
@@ -1178,6 +1179,7 @@ async fn create_session(connection: &mut Connection) -> SmokeResult<CanonicalUui
             model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(None),
             placement: SessionPlacement::Pathless {},
+            lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
         })
         .await?;
     let response = connection.response_within().await?;

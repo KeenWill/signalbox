@@ -10,10 +10,7 @@ exactly the state a merge of two independently green pull requests produces.
 Git does not conflict, because the filenames differ. Pull-request CI checks
 out the merge of the branch into `main` and so does see both files, but only
 as of the run: a branch whose last run predates the other branch's merge
-stays green, and the collision lands on the default branch. This happened on
-2026-07-31: two pull requests each added a migration versioned 202608020003,
-each was green alone, and every Postgres job on main failed from the moment
-both merged until one was renumbered.
+stays green, and the collision lands on the default branch.
 
 The check fails when
 

@@ -14,6 +14,7 @@ const summary = {
   goal_block: null,
   judge: { actionable: '2', completed: '7', escalated: '1', failed: '0' },
   last_activity: { kind: 'approval_judge', unix_milliseconds: '1724200000000' },
+  lifecycle_state: 'waiting',
   session_id: sessionId,
   state: 'awaiting_approval',
 } as const

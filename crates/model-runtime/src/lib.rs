@@ -47,7 +47,6 @@ mod cli_redaction;
 mod credential;
 mod evidence;
 mod input_count;
-mod json;
 mod message;
 mod observation;
 mod operation;
@@ -94,7 +93,9 @@ pub use message::{
     AssistantPart, ConversationMessage, ConversationRole, MessagePart, ToolResultRecord,
 };
 pub use observation::{Observation, ObservationFact, ObservationSink};
-pub use operation::{DeliveryMode, ModelOperation, ModelOperationValidationError, ToolChoice};
+pub use operation::{
+    DeliveryMode, ModelOperation, ModelOperationValidationError, ProviderCompactionMode, ToolChoice,
+};
 pub use output::{
     DomainValidator, NoDomainConstraints, StructuredDecodeFailure, StructuredOutputContract,
     decode_structured, decode_structured_json,

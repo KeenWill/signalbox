@@ -287,7 +287,8 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
         // silently inheriting this panic path — a new terminal classification
         // must be reviewed for whether it counts as decoded compatibility
         // evidence, not absorbed as an ordinary rejection.
-        rejected @ (TerminalEvidence::ProviderError(_)
+        rejected @ (TerminalEvidence::CompletedWithProviderCompaction { .. }
+        | TerminalEvidence::ProviderError(_)
         | TerminalEvidence::CancellationConfirmed(_)
         | TerminalEvidence::ProvenUnsent(_)
         | TerminalEvidence::BoundaryLoss(_)) => {
@@ -517,7 +518,8 @@ async fn assert_pinned_version(executable: &std::path::Path) {
 
     assert_eq!(
         version,
-        SUPPORTED_CLAUDE_CLI_VERSION,
+        semver::Version::parse(SUPPORTED_CLAUDE_CLI_VERSION)
+            .expect("the build-validated pin is SemVer"),
         "the executable at `{}` reports {version}, but this smoke can \
          only produce compatibility evidence for the pinned \
          {SUPPORTED_CLAUDE_CLI_VERSION}; install the version pinned in \
@@ -531,25 +533,35 @@ async fn assert_pinned_version(executable: &std::path::Path) {
 /// Reading the leading token rather than the trailing one keeps the parenthesized
 /// product name out of the comparison; a banner reduced to the version alone
 /// still parses.
-fn reported_version(banner: &str) -> Option<&str> {
-    banner.lines().next()?.split_whitespace().next()
+fn reported_version(banner: &str) -> Option<semver::Version> {
+    banner
+        .lines()
+        .next()?
+        .split_whitespace()
+        .find_map(|token| semver::Version::parse(token).ok())
 }
 
 #[test]
 fn reported_version_reads_the_leading_token_of_the_banner() {
-    assert_eq!(reported_version("2.1.220 (Claude Code)\n"), Some("2.1.220"));
+    assert_eq!(
+        reported_version("2.1.220 (Claude Code)\n"),
+        semver::Version::parse("2.1.220").ok()
+    );
 }
 
 #[test]
 fn reported_version_accepts_a_bare_version_banner() {
-    assert_eq!(reported_version("2.1.220\n"), Some("2.1.220"));
+    assert_eq!(
+        reported_version("2.1.220\n"),
+        semver::Version::parse("2.1.220").ok()
+    );
 }
 
 #[test]
 fn reported_version_reads_only_the_first_line() {
     assert_eq!(
         reported_version("2.1.220 (Claude Code)\ntrailing notice\n"),
-        Some("2.1.220")
+        semver::Version::parse("2.1.220").ok()
     );
 }
 
@@ -1715,6 +1727,8 @@ fn decoded_response_accepts_refusal_without_completion_material() {
         reported_model: Some(fixture_reported_model()),
         content: Vec::new(),
         usage: fixture_usage(),
+        retained_input_tokens: None,
+        retained_output_tokens: None,
     });
 
     let decoded = require_decoded_response(evidence);
@@ -2045,9 +2059,7 @@ impl EffectivePrivilege {
     /// skips the shadow and finds the runnable file in the later directory. As
     /// root the shadow is genuinely executable, so returning it is correct rather
     /// than a defect — the case has a real answer in both environments, which
-    /// is why the test asserts one instead of returning early. It previously
-    /// returned early under root and reported success without creating a
-    /// fixture or running an assertion at all.
+    /// is why the test asserts one instead of returning early.
     fn other_only_resolution(self, candidates: OtherOnlyCandidates) -> std::path::PathBuf {
         match self {
             Self::Root => candidates.shadow,

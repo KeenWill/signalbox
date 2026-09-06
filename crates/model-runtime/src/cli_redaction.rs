@@ -4082,7 +4082,7 @@ mod tests {
     }
 
     /// The JSON-key suffix scan stays linear on text ending in many
-    /// backslash-escaped quotes. The scan no longer requires a JSON-eligible
+    /// backslash-escaped quotes. The scan does not require a JSON-eligible
     /// key position, so the first quote is reported rather than none; what
     /// keeps it linear is that it returns there instead of rescanning the
     /// suffix from every later quote. A quadratic scan would not finish.
@@ -5204,9 +5204,9 @@ safe-line"
     /// text that keeps both the JSON-key heuristic and the `"<name>":` marker
     /// prefixes from recognizing it, is held from its opening quote so the
     /// rejoined `"client_secret" = value` is recognized rather than emitted with
-    /// the opener stripped (which left the value unredactable). A bare composite
-    /// key is caught only by the identifier scanner, which previously folded
-    /// from the name and dropped the opening quote.
+    /// the opener stripped (which would leave the value unredactable). A bare
+    /// composite key is caught only by the identifier scanner, which would
+    /// otherwise fold from the name and drop the opening quote.
     #[test]
     fn credential_stream_retains_opening_quote_for_split_toml_key() {
         assert_eq!(unsafe_stream_suffix_start("data \"client_secret"), Some(5));

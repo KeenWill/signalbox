@@ -19,12 +19,13 @@ use std::time::Duration;
 
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, ConversationMessage,
-    DeliveryMode, FastMode, FastModeTarget, InputTokenCountOutcome, LossCause, ModelCapabilities,
-    ModelCapabilityCatalog, ModelCapabilityDefinition, ModelInputTokenCounter, ModelOperation,
-    ModelRuntime, ModelSettings, Observation, ObservationFact, PROVIDER_JSON_NESTING_LIMIT,
-    PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderRequestId, ReasoningLevel,
-    RequestedTarget, ResolvedTarget, StreamInterruption, StructuredOutputContract,
-    TerminalEvidence, TerminalReport, ToolCallId, ToolCallProposal, ToolName, UnsentCause,
+    ConversationRole, DeliveryMode, FastMode, FastModeTarget, InputTokenCountOutcome, LossCause,
+    MessagePart, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
+    ModelInputTokenCounter, ModelOperation, ModelRuntime, ModelSettings, Observation,
+    ObservationFact, PROVIDER_JSON_NESTING_LIMIT, PreparationFailure, PreparationOutcome,
+    ProviderCompactionMode, ProviderErrorKind, ProviderRequestId, ReasoningLevel, RequestedTarget,
+    ResolvedTarget, StreamInterruption, StructuredOutputContract, TerminalEvidence, TerminalReport,
+    ToolCallId, ToolCallProposal, ToolName, UnsentCause,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
@@ -157,6 +158,18 @@ fn operation(correlation: &str) -> ModelOperation<String> {
         vec![ConversationMessage::user_text("hello")],
         ModelSettings::new(64),
     )
+}
+
+fn append_provider_compaction(operation: &mut ModelOperation<String>) {
+    operation.messages.push(ConversationMessage {
+        role: ConversationRole::Assistant,
+        parts: vec![
+            MessagePart::Text(String::from("preserved output")),
+            MessagePart::ProviderCompaction {
+                block_json: String::from(r#"{"type":"compaction","content":"preserved summary"}"#),
+            },
+        ],
+    });
 }
 
 async fn execute<A: CredentialAccess>(
@@ -397,12 +410,14 @@ async fn buffered_completion_end_to_end_sends_the_documented_request_shape() {
     assert!(request.starts_with("POST /v1/messages HTTP/1.1\r\n"));
     assert!(request.contains("x-api-key: key_loop\r\n"));
     assert!(request.contains("anthropic-version: 2023-06-01\r\n"));
+    assert!(!request.contains("anthropic-beta:"));
     assert!(request.contains("content-type: application/json\r\n"));
     let json_start = request.find("\r\n\r\n").expect("request has a body") + 4;
     let sent: serde_json::Value =
         serde_json::from_str(&request[json_start..]).expect("request body is JSON");
     assert_eq!(sent["model"], serde_json::json!("model-exact-1"));
     assert_eq!(sent["max_tokens"], serde_json::json!(64));
+    assert!(sent.get("context_management").is_none());
     assert_eq!(sent["stream"], serde_json::json!(false));
 
     assert!(observations.iter().any(|observation| matches!(
@@ -856,7 +871,153 @@ async fn input_count_uses_the_declared_fast_target() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains(&format!(r#""model":"{}""#, mapped.as_str())));
     assert!(!requests[0].contains(r#""speed":"fast""#));
-    assert!(!requests[0].contains("anthropic-beta: fast-mode-2026-02-01"));
+    assert!(!requests[0].contains("anthropic-beta:"));
+    assert!(
+        sent_request_body(&server)
+            .get("context_management")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn preparation_omits_compaction_for_an_unsupported_effective_fast_target() {
+    let server = CannedServer::serving(vec![text_response()]).await;
+    let selected = ResolvedTarget::new("claude-opus-5");
+    let mapped = ResolvedTarget::new("claude-haiku-4-5");
+    let definitions = [ModelCapabilityDefinition::new(
+        selected.clone(),
+        ModelCapabilities::new(
+            BTreeSet::new(),
+            Some(FastModeTarget::Mapped(mapped.clone())),
+            BTreeSet::new(),
+        ),
+    )];
+    let mut config = AnthropicConfig::new(None);
+    config.base_url = server.base_url.clone();
+    config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
+        .expect("fixture capabilities are unique");
+    let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+    let mut generated = operation("generate-fast-unsupported");
+    generated.resolved_target = selected;
+    generated.settings.fast_mode = FastMode::Enabled;
+    append_provider_compaction(&mut generated);
+
+    let _ = execute(&runtime, generated, CancellationSignal::never()).await;
+    let body = sent_request_body(&server);
+
+    assert_eq!(body["model"], mapped.as_str());
+    assert!(body.get("context_management").is_none());
+    assert!(!body.to_string().contains("preserved summary"));
+    assert!(body.to_string().contains("preserved output"));
+}
+
+#[tokio::test]
+async fn input_count_replays_compaction_for_a_supported_effective_fast_target() {
+    let server =
+        CannedServer::serving(vec![http_response("200 OK", &[], br#"{"input_tokens":7}"#)]).await;
+    let selected = ResolvedTarget::new("claude-haiku-4-5");
+    let mapped = ResolvedTarget::new("claude-opus-5");
+    let definitions = [ModelCapabilityDefinition::new(
+        selected.clone(),
+        ModelCapabilities::new(
+            BTreeSet::new(),
+            Some(FastModeTarget::Mapped(mapped.clone())),
+            BTreeSet::new(),
+        ),
+    )];
+    let mut config = AnthropicConfig::new(None);
+    config.base_url = server.base_url.clone();
+    config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
+        .expect("fixture capabilities are unique");
+    let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+    let mut counted = operation("count-fast-supported");
+    counted.resolved_target = selected;
+    counted.settings.fast_mode = FastMode::Enabled;
+    counted.provider_compaction_supported = true;
+    append_provider_compaction(&mut counted);
+
+    let outcome = runtime
+        .count_input_tokens(counted, CancellationSignal::never())
+        .await;
+    let body = sent_request_body(&server);
+
+    assert_eq!(
+        outcome,
+        InputTokenCountOutcome::Counted {
+            correlation: String::from("count-fast-supported"),
+            input_tokens: 7,
+        }
+    );
+    assert_eq!(body["model"], mapped.as_str());
+    assert_eq!(
+        body["context_management"],
+        serde_json::json!({"edits": [{"type": "compact_20260112"}]})
+    );
+    assert!(body.to_string().contains("preserved summary"));
+}
+
+#[tokio::test]
+async fn suppressed_generation_replay_still_sends_compaction_beta() {
+    let server = CannedServer::serving(vec![text_response()]).await;
+    let target = ResolvedTarget::new("claude-opus-5");
+    let mut config = AnthropicConfig::new(None);
+    config.base_url = server.base_url.clone();
+    let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+    let mut generated = operation("generate-suppressed-replay");
+    generated.resolved_target = target;
+    generated.provider_compaction = ProviderCompactionMode::Suppressed;
+    generated.provider_compaction_supported = true;
+    append_provider_compaction(&mut generated);
+
+    let _ = execute(&runtime, generated, CancellationSignal::never()).await;
+    let requests = server.recorded_requests();
+
+    assert!(
+        requests[0]
+            .contains("anthropic-beta: context-management-2025-06-27,compact-2026-01-12\r\n")
+    );
+    assert!(
+        sent_request_body(&server)
+            .get("context_management")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn suppressed_input_count_replay_still_sends_compaction_beta() {
+    let server =
+        CannedServer::serving(vec![http_response("200 OK", &[], br#"{"input_tokens":7}"#)]).await;
+    let target = ResolvedTarget::new("claude-opus-5");
+    let mut config = AnthropicConfig::new(None);
+    config.base_url = server.base_url.clone();
+    let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+    let mut counted = operation("count-suppressed-replay");
+    counted.resolved_target = target;
+    counted.provider_compaction = ProviderCompactionMode::Suppressed;
+    counted.provider_compaction_supported = true;
+    append_provider_compaction(&mut counted);
+
+    let outcome = runtime
+        .count_input_tokens(counted, CancellationSignal::never())
+        .await;
+    let requests = server.recorded_requests();
+
+    assert_eq!(
+        outcome,
+        InputTokenCountOutcome::Counted {
+            correlation: String::from("count-suppressed-replay"),
+            input_tokens: 7,
+        }
+    );
+    assert!(
+        requests[0]
+            .contains("anthropic-beta: context-management-2025-06-27,compact-2026-01-12\r\n")
+    );
+    assert!(
+        sent_request_body(&server)
+            .get("context_management")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -867,6 +1028,7 @@ async fn input_count_preserves_reasoning_and_same_target_fast_controls() {
     let server =
         CannedServer::serving(vec![http_response("200 OK", &[], response_body.as_bytes())]).await;
     let mut counted = operation(correlation);
+    counted.resolved_target = ResolvedTarget::new("claude-opus-5");
     counted.settings.reasoning_level = Some(ReasoningLevel::Low);
     counted.settings.fast_mode = FastMode::Enabled;
     let selected = counted.resolved_target.clone();
@@ -883,6 +1045,7 @@ async fn input_count_preserves_reasoning_and_same_target_fast_controls() {
     config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
         .expect("fixture capabilities are unique");
     let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+    counted.provider_compaction_supported = true;
 
     let outcome = runtime
         .count_input_tokens(counted, CancellationSignal::never())
@@ -900,7 +1063,13 @@ async fn input_count_preserves_reasoning_and_same_target_fast_controls() {
     assert!(requests[0].contains(&format!(r#""model":"{}""#, selected.as_str())));
     assert!(requests[0].contains(r#""output_config":{"effort":"low"}"#));
     assert!(requests[0].contains(r#""speed":"fast""#));
-    assert!(requests[0].contains("anthropic-beta: fast-mode-2026-02-01"));
+    assert!(requests[0].contains(
+        "anthropic-beta: context-management-2025-06-27,compact-2026-01-12,fast-mode-2026-02-01\r\n"
+    ));
+    assert_eq!(
+        sent_request_body(&server)["context_management"],
+        serde_json::json!({"edits": [{"type": "compact_20260112"}]})
+    );
 }
 
 #[derive(Debug)]
@@ -1165,7 +1334,7 @@ impl CredentialAccess for RotatingKey {
 }
 
 #[tokio::test]
-async fn inv_035_api_key_rotation_is_visible_to_the_next_preparation() {
+async fn api_key_rotation_is_visible_to_the_next_preparation() {
     // `docs/spec/configuration-and-credentials.md`: the credential is read
     // during send preparation of each physical request; a rotated value must
     // reach the next request without reconstructing the runtime.
@@ -1261,7 +1430,7 @@ async fn a_401_with_an_unrecognized_error_token_still_classifies_by_status() {
 }
 
 #[tokio::test]
-async fn inv_035_provider_error_text_reflecting_the_key_is_redacted() {
+async fn provider_error_text_reflecting_the_key_is_redacted() {
     // Per `docs/spec/runtime-substrate.md`, evidence carries typed classes
     // and rendered detail, never credential values — even when an endpoint
     // reflects the key.
@@ -1319,7 +1488,7 @@ async fn json_escaped_credential_in_fallback_error_body_is_redacted() {
 }
 
 #[tokio::test]
-async fn inv_035_success_content_reflecting_the_key_is_redacted() {
+async fn success_content_reflecting_the_key_is_redacted() {
     let body = br#"{
         "id": "msg_key_loop",
         "type": "message",
@@ -1358,7 +1527,7 @@ async fn inv_035_success_content_reflecting_the_key_is_redacted() {
 }
 
 #[tokio::test]
-async fn inv_035_streamed_delta_reflecting_the_key_is_redacted_before_observation() {
+async fn streamed_delta_reflecting_the_key_is_redacted_before_observation() {
     let sse: &[u8] = b"event: message_start\n\
         data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
         \"role\":\"assistant\",\"id\":\"msg_1\",\"model\":\"model-exact-1\",\

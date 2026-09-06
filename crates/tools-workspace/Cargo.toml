@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+signalbox-derive = { path = "../derive" }
 glob = "0.3.3"
 regex = "1.12.2"
 rustix = { version = "1.1.4", default-features = false, features = ["fs", "std"] }

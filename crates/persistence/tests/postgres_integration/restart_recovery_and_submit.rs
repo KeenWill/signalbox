@@ -2,13 +2,12 @@
 
 use crate::*;
 
-/// S08 / INV-016: pending-steering acceptance and source terminalization
+/// pending-steering acceptance and source terminalization
 /// serialize on the source lifecycle row, so racing commits cannot both
 /// succeed from snapshots in which the reciprocal effect is not yet visible.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv016_pending_steering_and_source_terminalization_serialize() -> Result<(), Box<dyn Error>>
-{
+async fn pending_steering_and_source_terminalization_serialize() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x471, 0x871, direct(0xc71)))
@@ -153,13 +152,13 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
     Ok(())
 }
 
-/// S03 / S04 / INV-006 / INV-034: after a real pool restart, startup atomically
+/// after a real pool restart, startup atomically
 /// ends the prior-process attempt as Lost, retains it as attempt-only terminal
 /// provenance, appends `TurnFailed`, terminalizes Failed, remains idempotent on
 /// replay, and exposes the queued successor to the ordinary scheduler path.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblocks_successor()
+async fn restart_scan_recovers_lost_attempt_once_and_unblocks_successor()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let session_uuid = Uuid::from_u128(0x7b1);
@@ -291,8 +290,9 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
                 failed.failure_entry_id,
                 failed.terminal_frontier_id
            FROM outbox_event AS header
-           JOIN turn_failed_outbox_event AS failed
-             ON failed.event_sequence = header.event_sequence
+           JOIN turn_terminal_outbox_event AS failed
+             ON failed.disposition_kind = 'failed'
+             AND failed.event_sequence = header.event_sequence
           ORDER BY header.event_sequence",
     )
     .fetch_all(&restarted_pool)
@@ -300,7 +300,7 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
     assert_eq!(
         recovery_events,
         vec![(
-            "turn_failed".into(),
+            "turn_terminal".into(),
             1,
             session_uuid,
             first_turn_uuid,
@@ -317,9 +317,11 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
             (SELECT count(*) FROM turn_attempt
               WHERE turn_id = $1),
             (SELECT count(*) FROM outbox_event
-              WHERE event_kind = 'turn_failed' AND session_id = $2),
-            (SELECT count(*) FROM turn_failed_outbox_event
-              WHERE turn_id = $1)",
+              WHERE event_kind = 'turn_terminal' AND turn_disposition = 'failed'
+                AND session_id = $2),
+            (SELECT count(*) FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'failed'
+              AND turn_id = $1)",
     )
     .bind(first_turn_uuid)
     .bind(session_uuid)
@@ -338,9 +340,11 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
             (SELECT count(*) FROM turn_attempt
               WHERE turn_id = $1),
             (SELECT count(*) FROM outbox_event
-              WHERE event_kind = 'turn_failed' AND session_id = $2),
-            (SELECT count(*) FROM turn_failed_outbox_event
-              WHERE turn_id = $1)",
+              WHERE event_kind = 'turn_terminal' AND turn_disposition = 'failed'
+                AND session_id = $2),
+            (SELECT count(*) FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'failed'
+              AND turn_id = $1)",
     )
     .bind(first_turn_uuid)
     .bind(session_uuid)
@@ -351,11 +355,10 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
         committed_counts_before_replay
     );
 
-    let (eligible_sessions, _dispatch_starts, continuation) =
-        PostgresEligibilitySweep::new(restarted_pool.clone())
-            .find_sessions()
-            .await?
-            .into_parts();
+    let (eligible_sessions, continuation) = PostgresEligibilitySweep::new(restarted_pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
     assert!(!continuation);
     assert_eq!(eligible_sessions, vec![SessionId::from_uuid(session_uuid)]);
     let activated = activate_earliest_queued_turn(
@@ -381,12 +384,11 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
     Ok(())
 }
 
-/// S03 / INV-032 / INV-034: failure after the typed outbox append rolls the
+/// failure after the typed outbox append rolls the
 /// complete Lost recovery back; retry then commits the state and event once.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_together()
--> Result<(), Box<dyn Error>> {
+async fn startup_recovery_and_outbox_commit_or_roll_back_together() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session_uuid = Uuid::from_u128(0x7d1);
     let turn_uuid = Uuid::from_u128(0xad1);
@@ -431,7 +433,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     sqlx::query(
         "CREATE CONSTRAINT TRIGGER zz_test_fail_turn_failed_outbox_commit
-         AFTER INSERT ON turn_failed_outbox_event
+         AFTER INSERT ON turn_terminal_outbox_event
          DEFERRABLE INITIALLY DEFERRED
          FOR EACH ROW
          EXECUTE FUNCTION fail_test_turn_failed_outbox_commit()",
@@ -455,8 +457,9 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
                 attempt.state_kind,
                 (SELECT count(*) FROM semantic_transcript_entry
                   WHERE failed_turn_id = $1),
-                (SELECT count(*) FROM turn_failed_outbox_event
-                  WHERE turn_id = $1),
+                (SELECT count(*) FROM turn_terminal_outbox_event
+                  WHERE disposition_kind = 'failed'
+                  AND turn_id = $1),
                 (SELECT last_sequence FROM outbox_sequence_state
                   WHERE singleton)
            FROM turn_lifecycle AS turn
@@ -469,12 +472,12 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     assert_eq!(
         rolled_back,
-        ("active".into(), "prepared".into(), 0, 0, Decimal::from(4))
+        ("active".into(), "prepared".into(), 0, 0, Decimal::from(5))
     );
 
     sqlx::query(
         "DROP TRIGGER zz_test_fail_turn_failed_outbox_commit
-            ON turn_failed_outbox_event",
+            ON turn_terminal_outbox_event",
     )
     .execute(&pool)
     .await?;
@@ -492,8 +495,9 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
                 attempt.state_kind,
                 (SELECT count(*) FROM semantic_transcript_entry
                   WHERE failed_turn_id = $1),
-                (SELECT count(*) FROM turn_failed_outbox_event
-                  WHERE turn_id = $1),
+                (SELECT count(*) FROM turn_terminal_outbox_event
+                  WHERE disposition_kind = 'failed'
+                  AND turn_id = $1),
                 (SELECT last_sequence FROM outbox_sequence_state
                   WHERE singleton)
            FROM turn_lifecycle AS turn
@@ -507,7 +511,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     assert_eq!(
         committed,
-        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(5))
+        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(6))
     );
 
     pool.close().await;
@@ -515,13 +519,12 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     Ok(())
 }
 
-/// S08 / S09 / INV-016 / INV-034 / INV-036: evidence-free restart recovery
+/// evidence-free restart recovery
 /// ends the abandoned source attempt and atomically reclassifies pending
 /// steering, leaving no startup blocker on replay.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
--> Result<(), Box<dyn Error>> {
+async fn restart_reclassifies_pending_steering() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let session_uuid = Uuid::from_u128(0x7c1);
     let turn_uuid = Uuid::from_u128(0xac1);
@@ -604,9 +607,11 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
     let recovery_events: (i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM outbox_event
-              WHERE event_kind = 'turn_failed' AND session_id = $1),
-            (SELECT count(*) FROM turn_failed_outbox_event
-              WHERE session_id = $1)",
+              WHERE event_kind = 'turn_terminal' AND turn_disposition = 'failed'
+                AND session_id = $1),
+            (SELECT count(*) FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'failed'
+              AND session_id = $1)",
     )
     .bind(session_uuid)
     .fetch_one(&restarted_pool)
@@ -650,6 +655,19 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
             "queued".into(),
         )
     );
+    let receipt: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT outcome_kind, delivered_turn_id
+           FROM injection_settled_outbox_event
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x3c2))
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        receipt,
+        (String::from("delivered"), Some(Uuid::from_u128(0xac2))),
+        "reclassification at the restart boundary settles the steering delivered"
+    );
     let mut completed_recovery_ids = FixedStartupScanIds::new([], []);
     assert_eq!(
         PostgresStartupScanRepository::new(restarted_pool.clone())
@@ -670,15 +688,13 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
     Ok(())
 }
 
-/// S01 / S03 / S07 / S08 / S09 / INV-001 / INV-008 / INV-012 / INV-029 /
-/// INV-037: occupied-slot rejection evidence is recorded exactly, generated
+/// occupied-slot rejection evidence is recorded exactly, generated
 /// identities cannot reuse the active origin, and a matching interrupt
 /// atomically cancels prepared work while recording and prioritizing its exact
 /// immediate successor ahead of previously queued ordinary work.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
--> Result<(), Box<dyn Error>> {
+async fn prepared_interrupt_is_exact() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let prepared_session = prepared(0x441, 0x841, direct(0xc41));
     let session = prepared_session.session().id();
@@ -1135,12 +1151,11 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     Ok(())
 }
 
-/// INV-007 / INV-009 / INV-015: an incomplete frontier cannot expose any
+/// an incomplete frontier cannot expose any
 /// semantic entry, start binding, slot owner, or attempt after rollback.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv007_inv009_inv015_malformed_atomic_start_rolls_back_every_fact()
--> Result<(), Box<dyn Error>> {
+async fn malformed_atomic_start_rolls_back_every_fact() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x411, 0x811, direct(0xc11)))
@@ -1226,14 +1241,13 @@ async fn inv007_inv009_inv015_malformed_atomic_start_rolls_back_every_fact()
     Ok(())
 }
 
-/// INV-001 / INV-005 / INV-006 / INV-009 / INV-015: the initial semantic variants
+/// the initial semantic variants
 /// preserve globally unique identities and exact source correlations; eligible
 /// failure records origin then failure without putting the later failure
 /// marker in the starting frontier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlated()
--> Result<(), Box<dyn Error>> {
+async fn initial_semantic_entries_are_turn_correlated() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x421, 0x821, direct(0xc21)))
@@ -1873,12 +1887,11 @@ async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlate
     Ok(())
 }
 
-/// INV-009 / INV-015: direct queued failure and immutable frontier membership
+/// direct queued failure and immutable frontier membership
 /// remain closed under transactions that begin from stale concurrent snapshots.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv009_inv015_concurrent_attempt_and_frontier_inserts_fail_closed()
--> Result<(), Box<dyn Error>> {
+async fn concurrent_attempt_and_frontier_inserts_fail_closed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x451, 0x851, direct(0xc51)))
@@ -2043,13 +2056,13 @@ async fn inv009_inv015_concurrent_attempt_and_frontier_inserts_fail_closed()
     Ok(())
 }
 
-/// S01 / INV-008 / INV-012: all baseline authoritative rejections are typed
+/// all baseline authoritative rejections are typed
 /// terminal records. Active-work delivery modes reject `NoActiveTurn`, stale
 /// defaults and unresolved aliases retain their exact evidence, and missing
 /// sessions create no aggregate or queued-work effects.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(), Box<dyn Error>> {
+async fn submit_records_authoritative_rejections() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let direct_session_fixture = prepared(0x311, 0x711, direct(0x811));
@@ -2272,13 +2285,12 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
     Ok(())
 }
 
-/// INV-007 / INV-008 / INV-012: the locked session row serializes concurrent
+/// the locked session row serializes concurrent
 /// assignments into one gap-free position order, and a post-claim database
 /// failure explicitly rolls back the claim and does not consume a position.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failures()
--> Result<(), Box<dyn Error>> {
+async fn submit_serializes_positions_and_rolls_back_failures() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x321, 0x721, direct(0x821)))
@@ -2418,7 +2430,7 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
     Ok(())
 }
 
-/// INV-007 / INV-008 / INV-012: a defaults replacement holds the pointer-row
+/// a defaults replacement holds the pointer-row
 /// lock when its version-row insert requests `FOR KEY SHARE` on the session
 /// row through the non-deferrable session foreign key, while submit orders
 /// the session row before the pointer row. The forced interleaving completes
@@ -2426,8 +2438,8 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
 /// `FOR NO KEY UPDATE`; `FOR UPDATE` deadlocks here (Postgres 40P01).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv007_inv008_inv012_submit_and_defaults_replacement_interleave_without_deadlock()
--> Result<(), Box<dyn Error>> {
+async fn submit_and_defaults_replacement_interleave_without_deadlock() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x341, 0x751, direct(0x851)))
@@ -2524,13 +2536,12 @@ async fn inv007_inv008_inv012_submit_and_defaults_replacement_interleave_without
     Ok(())
 }
 
-/// INV-002 / INV-008 / INV-012: checked loads reject cross-wired immutable
+/// checked loads reject cross-wired immutable
 /// effects even when database protections are deliberately disabled, and the
 /// maximum stored position produces a durable exhaustion rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_closed()
--> Result<(), Box<dyn Error>> {
+async fn submit_corruption_and_position_exhaustion_fail_closed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x331, 0x731, direct(0x831)))

@@ -563,31 +563,23 @@ impl ConversationToolKind {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A static conversation declaration could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversationToolConstructionError {
+    #[error("conversation-tool static name is invalid")]
     /// One static contract name was invalid.
     Name,
+    #[error("conversation-tool static schema is invalid")]
     /// One static contract schema was invalid.
     Schema,
+    #[error("conversation-tool static error detail is invalid")]
     /// One static sanitized error detail was invalid.
     ErrorDetail,
+    #[error("conversation-tool catalog is duplicated")]
     /// The catalog unexpectedly contained a duplicate.
     Duplicate,
 }
-
-impl fmt::Display for ConversationToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Name => "conversation-tool static name is invalid",
-            Self::Schema => "conversation-tool static schema is invalid",
-            Self::ErrorDetail => "conversation-tool static error detail is invalid",
-            Self::Duplicate => "conversation-tool catalog is duplicated",
-        })
-    }
-}
-
-impl Error for ConversationToolConstructionError {}
 
 /// Compiled conversation catalog and executor around one injected read port.
 #[derive(Clone, Debug)]
@@ -814,47 +806,26 @@ impl<Port> ConversationExecutor<Port> {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[operator(
+    display_bound = "PortError : fmt :: Display",
+    error_bound = "PortError : Error + 'static"
+)]
 /// Failure inside the conversation executor.
 #[derive(Debug)]
 pub enum ConversationExecutorError<PortError> {
+    #[error("conversation-tool argument validation drifted")]
     /// Executor argument decoding disagreed with catalog validation.
     ArgumentValidationDrift,
+    #[error(transparent)]
     /// The injected port failed without trustworthy tool evidence.
-    Port(PortError),
+    Port(#[source] PortError),
+    #[error("conversation read port contract was violated")]
     /// The injected port violated ordering or requested bounds.
     PortContract,
+    #[error("conversation-tool result encoding failed")]
     /// Compact result encoding unexpectedly failed.
     ResultEncoding,
-}
-
-impl<PortError> fmt::Display for ConversationExecutorError<PortError>
-where
-    PortError: fmt::Display,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ArgumentValidationDrift => {
-                formatter.write_str("conversation-tool argument validation drifted")
-            }
-            Self::Port(error) => error.fmt(formatter),
-            Self::PortContract => {
-                formatter.write_str("conversation read port contract was violated")
-            }
-            Self::ResultEncoding => formatter.write_str("conversation-tool result encoding failed"),
-        }
-    }
-}
-
-impl<PortError> Error for ConversationExecutorError<PortError>
-where
-    PortError: Error + 'static,
-{
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Port(error) => Some(error),
-            Self::ArgumentValidationDrift | Self::PortContract | Self::ResultEncoding => None,
-        }
-    }
 }
 
 impl<PortError> ClassifyOperatorFailure for ConversationExecutorError<PortError>
