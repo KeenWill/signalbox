@@ -21,9 +21,9 @@ pub struct PreparedAttemptIdentities {
 
 ```rust
 pub struct PreparedAttemptProposal {
-    pub name: tool::ToolName,
-    pub arguments: tool::NormalizedToolArguments,
-    pub effect_class: tool::ToolEffectClass,
+    pub name: name::ToolName,
+    pub arguments: arguments::NormalizedToolArguments,
+    pub effect_class: policy::ToolEffectClass,
     pub approval: PreparedAttemptApproval,
 }
 // derives: clone::Clone, fmt::Debug
@@ -101,7 +101,7 @@ where
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _attempt: signalbox_domain::ToolAttemptId,
-        _effect_class: tool::ToolEffectClass,
+        _effect_class: policy::ToolEffectClass,
     ) -> result::Result<
         option::Option<tool_attempt::CurrentToolAttempt>,
         <Self as ToolExecutionTransaction>::Error,

@@ -190,25 +190,27 @@ jobs:
         run: /tmp/mdformat-venv/bin/mdformat --check *.md docs/
       # Conservative inventory for the recorded session-lock protocols. The
       # checksum makes changes to the small
-      # reviewed inventory explicit; the scan rejects strongest-mode row-lock
-      # clauses anywhere else in production Rust. This deliberately performs
+      # reviewed inventory explicit; the scan rejects row-lock clauses and
+      # advisory-lock calls elsewhere in production Rust. This deliberately performs
       # no Rust or SQL parsing.
       - name: Check explicit-lock inventory
         run: |
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            80db3d39fb4d52a1731477dbc55ab8392e4220ecd044b0a52e1ea32f3487aaad
+            4da7adc13c029c73b72fec67f87d264ffef2ea27ec04196e158870496d3910c4
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
               s{/[*].*?[*]/}{ }gs;
+              s{^\s*//[^\n]*}{ }gm;
               s{--[^\n]*}{ }g;
               s/\s+/ /g;
-              print "$ARGV\n" if /\bfor update\b/i;
+              print "$ARGV\n" if /\bfor (?:no key update|key share|share|update)\b/i
+                || /\bpg_(?:try_)?advisory_(?:xact_)?lock(?:_shared)?\s*\(/i;
             ')"
           test -z "$unexpected" || {
-            printf 'explicit row lock outside inventory:\n%s\n' "$unexpected"
+            printf 'explicit lock outside inventory:\n%s\n' "$unexpected"
             exit 1
           }
   rust-checks:
