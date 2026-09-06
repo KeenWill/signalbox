@@ -619,12 +619,75 @@ fn provider_compaction_contains_credential(
         };
         block_json.contains(key)
             || json_escapes_decode_to_credential(block_json, key)
+            || provider_compaction_suffix_completes_durable_prefix(
+                block_json,
+                &content[..index],
+                key,
+            )
             || provider_compaction_prefix_completed_by_durable_parts(
                 block_json,
                 &content[index + 1..],
                 key,
             )
     })
+}
+
+fn provider_compaction_suffix_completes_durable_prefix(
+    block_json: &str,
+    preceding: &[AssistantPart],
+    credential: &str,
+) -> bool {
+    let Ok(block) = serde_json::from_str::<serde_json::Value>(block_json) else {
+        return false;
+    };
+    ["content", "encrypted_content"]
+        .into_iter()
+        .filter_map(|field| block.get(field).and_then(serde_json::Value::as_str))
+        .any(|value| {
+            credential.char_indices().skip(1).any(|(split, _)| {
+                value.starts_with(&credential[split..])
+                    && preceding_durable_parts_end_with(preceding, &credential[..split])
+            })
+        })
+}
+
+fn preceding_durable_parts_end_with(parts: &[AssistantPart], expected: &str) -> bool {
+    parts.iter().any(|part| match part {
+        AssistantPart::Text(text) => text.ends_with(expected),
+        AssistantPart::Thinking { text, signature } => {
+            text.ends_with(expected)
+                || signature
+                    .as_deref()
+                    .is_some_and(|signature| signature.ends_with(expected))
+        }
+        AssistantPart::RedactedThinking { data } => data.ends_with(expected),
+        AssistantPart::ProviderCompaction { block_json } => {
+            serde_json::from_str::<serde_json::Value>(block_json)
+                .is_ok_and(|block| json_strings_end_with(&block, expected))
+        }
+        AssistantPart::ToolCall(proposal) => {
+            proposal.id.as_str().ends_with(expected)
+                || proposal.name.as_str().ends_with(expected)
+                || serde_json::from_str::<serde_json::Value>(&proposal.arguments_json)
+                    .is_ok_and(|arguments| json_strings_end_with(&arguments, expected))
+        }
+        AssistantPart::SuppressedToolCall(name) => name.as_str().ends_with(expected),
+    })
+}
+
+fn json_strings_end_with(value: &serde_json::Value, expected: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => value.ends_with(expected),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_strings_end_with(value, expected)),
+        serde_json::Value::Object(fields) => fields.iter().any(|(name, value)| {
+            name.ends_with(expected) || json_strings_end_with(value, expected)
+        }),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
 }
 
 fn provider_compaction_prefix_completed_by_durable_parts(
@@ -1810,6 +1873,51 @@ mod tests {
 
             let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
                 panic!("cross-part credential evidence is rejected");
+            };
+            assert_eq!(
+                error.native.error_token.as_deref(),
+                Some("credential_in_provider_compaction")
+            );
+        }
+    }
+
+    #[test]
+    fn credential_spanning_tool_part_and_following_provider_compaction_is_rejected() {
+        let preceding_parts = [
+            AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call-1"),
+                name: ToolName::new("key_"),
+                arguments_json: r#"{"value":"safe"}"#.to_string(),
+            }),
+            AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call-2"),
+                name: ToolName::new("lookup"),
+                arguments_json: r#"{"value":"key_"}"#.to_string(),
+            }),
+        ];
+
+        for preceding in preceding_parts {
+            let key = credential("key_loop");
+            let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+                completion: CompletionEvidence {
+                    exchange: ExchangeFacts::default(),
+                    message_id: None,
+                    reported_model: None,
+                    finish: CompletionFinish::ToolUse,
+                    content: vec![
+                        preceding,
+                        AssistantPart::ProviderCompaction {
+                            block_json: r#"{"type":"compaction","content":"loop summary","encrypted_content":"opaque"}"#.to_string(),
+                        },
+                    ],
+                    usage: TokenUsage::unreported(),
+                },
+                retained_input_tokens: 12,
+                retained_output_tokens: 4,
+            };
+
+            let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+                panic!("credential crossing into compaction evidence is rejected");
             };
             assert_eq!(
                 error.native.error_token.as_deref(),

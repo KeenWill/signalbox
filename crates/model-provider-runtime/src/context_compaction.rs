@@ -119,6 +119,7 @@ where
             operation.system = Some(request.system_prompt);
             operation.delivery = DeliveryMode::Buffered;
             operation.provider_compaction = ProviderCompactionMode::Suppressed;
+            operation.provider_compaction_supported = definition.provider_compaction_supported();
             let prepared = match self
                 .runtime
                 .prepare(operation, CancellationSignal::never())

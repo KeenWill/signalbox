@@ -242,6 +242,7 @@ where
             operation.output_contract = Some(contract.clone());
             operation.delivery = DeliveryMode::Buffered;
             operation.provider_compaction = ProviderCompactionMode::Suppressed;
+            operation.provider_compaction_supported = definition.provider_compaction_supported();
             let preparation = self
                 .runtime
                 .prepare(operation, CancellationSignal::never())

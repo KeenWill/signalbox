@@ -130,13 +130,14 @@ impl ProviderTextDeltaSink for DiscardProviderTextDeltas {
     fn publish(&self, _delta: ProviderTextDelta) {}
 }
 
-/// One exact provider-model spelling and baseline request limit for a durable
-/// domain target.
+/// One exact provider-model spelling, delivery capability, and request limits
+/// for a durable domain target.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeModelDefinition {
     target: ResolvedProviderTarget,
     provider_model: String,
     fast_target: Option<ResolvedProviderTarget>,
+    provider_compaction_supported: bool,
     max_output_tokens: u32,
     context_window_tokens: u32,
 }
@@ -165,6 +166,7 @@ impl RuntimeModelDefinition {
             target,
             provider_model,
             fast_target: None,
+            provider_compaction_supported: false,
             max_output_tokens,
             context_window_tokens,
         })
@@ -190,6 +192,17 @@ impl RuntimeModelDefinition {
     /// Returns the authorized mapped fast target, when one is declared.
     pub const fn fast_target(&self) -> Option<ResolvedProviderTarget> {
         self.fast_target
+    }
+
+    /// Declares provider compaction for this exact durable target.
+    pub const fn with_provider_compaction(mut self) -> Self {
+        self.provider_compaction_supported = true;
+        self
+    }
+
+    /// Returns whether this exact durable target supports provider compaction.
+    pub const fn provider_compaction_supported(&self) -> bool {
+        self.provider_compaction_supported
     }
 
     /// Returns the required provider output-token ceiling.
@@ -1142,6 +1155,8 @@ where
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
         runtime_operation.delivery = DeliveryMode::Streamed;
+        runtime_operation.provider_compaction_supported =
+            effective_definition.provider_compaction_supported();
         classify_runtime_input_count(
             self.runtime
                 .count_input_tokens(runtime_operation, CancellationSignal::when(cancellation))
@@ -1253,6 +1268,8 @@ where
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
         runtime_operation.delivery = DeliveryMode::Streamed;
+        runtime_operation.provider_compaction_supported =
+            effective_definition.provider_compaction_supported();
         match self
             .runtime
             .prepare(runtime_operation, CancellationSignal::when(cancellation))
@@ -3931,6 +3948,7 @@ mod tests {
             200_000,
         )
         .expect("ordinary fixture definition is valid")
+        .with_provider_compaction()
         .with_fast_target(target(2));
         let fast = RuntimeModelDefinition::try_new(
             target(2),
@@ -3965,6 +3983,12 @@ mod tests {
                 .max_output_tokens(),
             selected_output_limit
         );
+        assert!(
+            catalog
+                .effective_definition(source, FastMode::Disabled)
+                .expect("ordinary target resolves")
+                .provider_compaction_supported()
+        );
         assert_eq!(
             catalog
                 .effective_definition(source, FastMode::Enabled)
@@ -3978,6 +4002,12 @@ mod tests {
                 .expect("mapped fast target resolves")
                 .max_output_tokens(),
             serving_output_limit
+        );
+        assert!(
+            !catalog
+                .effective_definition(source, FastMode::Enabled)
+                .expect("mapped fast target resolves")
+                .provider_compaction_supported()
         );
     }
 

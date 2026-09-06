@@ -369,8 +369,7 @@ impl ReportedUsageCompaction {
                 session,
                 target,
                 fast_mode,
-                self.model_configuration
-                    .replays_anthropic_provider_compaction(definition.provider_model()),
+                definition.provider_compaction_supported(),
                 prospective.prospective_input(),
             )
             .await

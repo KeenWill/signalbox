@@ -929,13 +929,11 @@ async fn input_count_replays_compaction_for_a_supported_effective_fast_target() 
     config.base_url = server.base_url.clone();
     config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
         .expect("fixture capabilities are unique");
-    config
-        .provider_compaction_targets
-        .insert(mapped.as_str().to_string());
     let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
     let mut counted = operation("count-fast-supported");
     counted.resolved_target = selected;
     counted.settings.fast_mode = FastMode::Enabled;
+    counted.provider_compaction_supported = true;
     append_provider_compaction(&mut counted);
 
     let outcome = runtime
@@ -964,13 +962,11 @@ async fn suppressed_generation_replay_still_sends_compaction_beta() {
     let target = ResolvedTarget::new("claude-opus-5");
     let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
-    config
-        .provider_compaction_targets
-        .insert(target.as_str().to_string());
     let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
     let mut generated = operation("generate-suppressed-replay");
     generated.resolved_target = target;
     generated.provider_compaction = ProviderCompactionMode::Suppressed;
+    generated.provider_compaction_supported = true;
     append_provider_compaction(&mut generated);
 
     let _ = execute(&runtime, generated, CancellationSignal::never()).await;
@@ -994,13 +990,11 @@ async fn suppressed_input_count_replay_still_sends_compaction_beta() {
     let target = ResolvedTarget::new("claude-opus-5");
     let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
-    config
-        .provider_compaction_targets
-        .insert(target.as_str().to_string());
     let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
     let mut counted = operation("count-suppressed-replay");
     counted.resolved_target = target;
     counted.provider_compaction = ProviderCompactionMode::Suppressed;
+    counted.provider_compaction_supported = true;
     append_provider_compaction(&mut counted);
 
     let outcome = runtime
@@ -1050,10 +1044,8 @@ async fn input_count_preserves_reasoning_and_same_target_fast_controls() {
     config.base_url = server.base_url.clone();
     config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
         .expect("fixture capabilities are unique");
-    config
-        .provider_compaction_targets
-        .insert(selected.as_str().to_string());
     let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+    counted.provider_compaction_supported = true;
 
     let outcome = runtime
         .count_input_tokens(counted, CancellationSignal::never())

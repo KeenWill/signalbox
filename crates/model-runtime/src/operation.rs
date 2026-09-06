@@ -137,6 +137,9 @@ pub struct ModelOperation<C> {
     pub delivery: DeliveryMode,
     /// Whether the adapter may enable provider-side compaction.
     pub provider_compaction: ProviderCompactionMode,
+    /// Whether the exact effective target supports provider-side compaction
+    /// and replay of its provider-qualified blocks.
+    pub provider_compaction_supported: bool,
 }
 
 impl<C> ModelOperation<C> {
@@ -164,6 +167,7 @@ impl<C> ModelOperation<C> {
             output_contract: None,
             delivery: DeliveryMode::Buffered,
             provider_compaction: ProviderCompactionMode::Allowed,
+            provider_compaction_supported: false,
         }
     }
 

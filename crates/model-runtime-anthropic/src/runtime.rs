@@ -1,9 +1,6 @@
 //! The adapter runtime: one operation, at most one HTTP interaction.
 
-use std::{
-    collections::BTreeSet,
-    time::{Duration, SystemTime},
-};
+use std::time::{Duration, SystemTime};
 
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -87,7 +84,6 @@ pub struct AnthropicRuntime<A> {
     sse_record_limit: usize,
     native_message_limit: Option<usize>,
     model_capabilities: ModelCapabilityCatalog,
-    provider_compaction_targets: BTreeSet<String>,
 }
 
 /// An opaque, one-shot Anthropic request capability prepared per
@@ -128,10 +124,6 @@ impl<A> std::fmt::Debug for AnthropicRuntime<A> {
             .field("version_header", &"[sensitive]")
             .field("sse_record_limit", &self.sse_record_limit)
             .field("model_capabilities", &self.model_capabilities)
-            .field(
-                "provider_compaction_targets",
-                &self.provider_compaction_targets,
-            )
             .finish()
     }
 }
@@ -346,7 +338,6 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             sse_record_limit: config.sse_record_limit,
             native_message_limit: config.native_message_limit,
             model_capabilities: config.model_capabilities,
-            provider_compaction_targets: config.provider_compaction_targets,
         })
     }
 
@@ -367,9 +358,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                 };
             }
         };
-        let provider_compaction_supported = self
-            .provider_compaction_targets
-            .contains(operation.resolved_target.as_str());
+        let provider_compaction_supported = operation.provider_compaction_supported;
         let wire_request = match build_request_with_fast_mode(
             &operation,
             request_fast_mode,
@@ -725,9 +714,7 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             Ok(request_fast_mode) => request_fast_mode,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };
-        let provider_compaction_supported = self
-            .provider_compaction_targets
-            .contains(operation.resolved_target.as_str());
+        let provider_compaction_supported = operation.provider_compaction_supported;
         let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
             && provider_compaction_supported;
         let provider_compaction_beta = provider_compaction_beta_required(
