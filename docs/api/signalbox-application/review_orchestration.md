@@ -50,10 +50,10 @@ pub struct ReviewConcernSpec {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewConcernSpec {
     pub const fn new(
-        key: review_workflow::ReviewKey,
+        key: signalbox_domain::ReviewKey,
         template_digest: ReviewTemplateDigest,
     ) -> Self;
-    pub const fn key(&self) -> &review_workflow::ReviewKey;
+    pub const fn key(&self) -> &signalbox_domain::ReviewKey;
     pub const fn template_digest(&self) -> ReviewTemplateDigest;
 }
 ```
@@ -67,15 +67,15 @@ impl ReviewOrchestrationAttempt {
     pub fn try_new(
         id: ReviewOrchestrationAttemptId,
         target: signalbox_domain::ReviewTargetId,
-        policy: review_workflow::ReviewPolicy,
-        concern_set_version: review_workflow::ReviewKey,
+        policy: signalbox_domain::ReviewPolicy,
+        concern_set_version: signalbox_domain::ReviewKey,
         stage_templates: ReviewStageTemplateDigests,
         concerns: vec::Vec<ReviewConcernSpec>,
     ) -> result::Result<Self, ReviewOrchestrationAttemptError>;
     pub const fn id(&self) -> ReviewOrchestrationAttemptId;
     pub const fn target(&self) -> signalbox_domain::ReviewTargetId;
-    pub const fn policy(&self) -> review_workflow::ReviewPolicy;
-    pub const fn concern_set_version(&self) -> &review_workflow::ReviewKey;
+    pub const fn policy(&self) -> signalbox_domain::ReviewPolicy;
+    pub const fn concern_set_version(&self) -> &signalbox_domain::ReviewKey;
     pub const fn stage_templates(&self) -> ReviewStageTemplateDigests;
     pub fn concerns(&self) -> &[ReviewConcernSpec];
 }
@@ -86,7 +86,9 @@ impl ReviewOrchestrationAttempt {
 ```rust
 pub enum ReviewOrchestrationAttemptError {
     EmptyConcernInventory,
-    RepeatedConcern { concern: review_workflow::ReviewKey },
+    RepeatedConcern {
+        concern: signalbox_domain::ReviewKey,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewOrchestrationAttemptError {
@@ -125,8 +127,8 @@ pub enum ReviewPassIncompleteStatus {
 pub struct ReviewImportedContextEvidence {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewImportedContextEvidence {
-    pub const fn new(producer: review_workflow::ReviewPassRef, digest: [u8; 32]) -> Self;
-    pub const fn producer(self) -> review_workflow::ReviewPassRef;
+    pub const fn new(producer: signalbox_domain::ReviewPassRef, digest: [u8; 32]) -> Self;
+    pub const fn producer(self) -> signalbox_domain::ReviewPassRef;
     pub const fn digest(self) -> [u8; 32];
 }
 ```
@@ -136,15 +138,15 @@ impl ReviewImportedContextEvidence {
 ```rust
 pub enum ReviewImportOutcome {
     Succeeded {
-        pass: boxed::Box<review_workflow::ReviewPassEvidence>,
-        run: review_workflow::ReviewRunEvidence,
-        external_link: option::Option<boxed::Box<review_workflow::ReviewExternalLink>>,
+        pass: boxed::Box<signalbox_domain::ReviewPassEvidence>,
+        run: signalbox_domain::ReviewRunEvidence,
+        external_link: option::Option<boxed::Box<signalbox_domain::ReviewExternalLink>>,
         template_digest: ReviewTemplateDigest,
         context: ReviewImportedContextEvidence,
     },
     Incomplete {
-        pass: option::Option<boxed::Box<review_workflow::ReviewPassEvidence>>,
-        run: option::Option<review_workflow::ReviewRunEvidence>,
+        pass: option::Option<boxed::Box<signalbox_domain::ReviewPassEvidence>>,
+        run: option::Option<signalbox_domain::ReviewRunEvidence>,
         template_digest: ReviewTemplateDigest,
         status: ReviewPassIncompleteStatus,
     },
@@ -178,16 +180,16 @@ pub struct ReviewConcernSuccess {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewConcernSuccess {
     pub fn new(
-        producer: review_workflow::ReviewPassEvidence,
-        run: review_workflow::ReviewRunEvidence,
+        producer: signalbox_domain::ReviewPassEvidence,
+        run: signalbox_domain::ReviewRunEvidence,
         template_digest: ReviewTemplateDigest,
-        findings: vec::Vec<review_workflow::ReviewFinding>,
+        findings: vec::Vec<signalbox_domain::ReviewFinding>,
     ) -> Self;
-    pub const fn producer(&self) -> review_workflow::ReviewPassRef;
-    pub const fn producer_evidence(&self) -> &review_workflow::ReviewPassEvidence;
-    pub const fn run_evidence(&self) -> review_workflow::ReviewRunEvidence;
+    pub const fn producer(&self) -> signalbox_domain::ReviewPassRef;
+    pub const fn producer_evidence(&self) -> &signalbox_domain::ReviewPassEvidence;
+    pub const fn run_evidence(&self) -> signalbox_domain::ReviewRunEvidence;
     pub const fn template_digest(&self) -> ReviewTemplateDigest;
-    pub fn findings(&self) -> &[review_workflow::ReviewFinding];
+    pub fn findings(&self) -> &[signalbox_domain::ReviewFinding];
 }
 ```
 
@@ -197,16 +199,16 @@ impl ReviewConcernSuccess {
 pub enum ReviewConcernOutcome {
     Succeeded(boxed::Box<ReviewConcernSuccess>),
     Failed {
-        pass: review_workflow::ReviewPassRef,
+        pass: signalbox_domain::ReviewPassRef,
     },
     Blocked {
-        pass: review_workflow::ReviewPassRef,
+        pass: signalbox_domain::ReviewPassRef,
     },
     Cancelled {
-        pass: option::Option<review_workflow::ReviewPassRef>,
+        pass: option::Option<signalbox_domain::ReviewPassRef>,
     },
     Superseded {
-        pass: review_workflow::ReviewPassRef,
+        pass: signalbox_domain::ReviewPassRef,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -219,11 +221,11 @@ pub struct ReviewConcernClaim {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewConcernClaim {
     pub const fn new(
-        concern: review_workflow::ReviewKey,
+        concern: signalbox_domain::ReviewKey,
         template_digest: ReviewTemplateDigest,
         outcome: ReviewConcernOutcome,
     ) -> Self;
-    pub const fn concern(&self) -> &review_workflow::ReviewKey;
+    pub const fn concern(&self) -> &signalbox_domain::ReviewKey;
     pub const fn template_digest(&self) -> ReviewTemplateDigest;
     pub const fn outcome(&self) -> &ReviewConcernOutcome;
 }
@@ -246,35 +248,35 @@ impl ReviewConcernWork {
 ```rust
 pub enum ReviewFanoutBarrierFailure {
     MissingConcern {
-        concern: review_workflow::ReviewKey,
+        concern: signalbox_domain::ReviewKey,
     },
     ExtraConcern {
-        concern: review_workflow::ReviewKey,
+        concern: signalbox_domain::ReviewKey,
     },
     RepeatedConcern {
-        concern: review_workflow::ReviewKey,
+        concern: signalbox_domain::ReviewKey,
     },
     TemplateMismatch {
-        concern: review_workflow::ReviewKey,
+        concern: signalbox_domain::ReviewKey,
     },
     MemberIncomplete {
-        concern: review_workflow::ReviewKey,
+        concern: signalbox_domain::ReviewKey,
     },
     ForeignProducerTarget {
-        concern: review_workflow::ReviewKey,
+        concern: signalbox_domain::ReviewKey,
     },
     ForeignProducerPolicy {
-        concern: review_workflow::ReviewKey,
+        concern: signalbox_domain::ReviewKey,
     },
     ForeignProducerTemplate {
-        concern: review_workflow::ReviewKey,
+        concern: signalbox_domain::ReviewKey,
     },
     InvalidSealedFinding {
-        concern: review_workflow::ReviewKey,
-        finding: review_workflow::ReviewFindingRef,
+        concern: signalbox_domain::ReviewKey,
+        finding: signalbox_domain::ReviewFindingRef,
     },
     RepeatedFinding {
-        finding: review_workflow::ReviewFindingRef,
+        finding: signalbox_domain::ReviewFindingRef,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -292,13 +294,13 @@ impl error::Error for ReviewFanoutBarrierFailure {
 pub enum ReviewPlannedDisposition {
     Accepted,
     Rejected {
-        reason: review_workflow::ReviewText,
+        reason: signalbox_domain::ReviewText,
     },
     Duplicate {
-        canonical: review_workflow::ReviewFindingRef,
+        canonical: signalbox_domain::ReviewFindingRef,
     },
     Superseded {
-        successor: review_workflow::ReviewFindingRef,
+        successor: signalbox_domain::ReviewFindingRef,
     },
     Stale,
 }
@@ -312,10 +314,10 @@ pub struct ReviewJudgmentPlanMember {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewJudgmentPlanMember {
     pub const fn new(
-        finding: review_workflow::ReviewFindingRef,
+        finding: signalbox_domain::ReviewFindingRef,
         disposition: ReviewPlannedDisposition,
     ) -> Self;
-    pub const fn finding(&self) -> review_workflow::ReviewFindingRef;
+    pub const fn finding(&self) -> signalbox_domain::ReviewFindingRef;
     pub const fn disposition(&self) -> &ReviewPlannedDisposition;
 }
 ```
@@ -327,14 +329,14 @@ pub struct ReviewJudgmentPlan {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewJudgmentPlan {
     pub fn new(
-        analysis_pass: review_workflow::ReviewPassEvidence,
-        analysis_run: review_workflow::ReviewRunEvidence,
+        analysis_pass: signalbox_domain::ReviewPassEvidence,
+        analysis_run: signalbox_domain::ReviewRunEvidence,
         template_digest: ReviewTemplateDigest,
         members: vec::Vec<ReviewJudgmentPlanMember>,
     ) -> Self;
-    pub const fn analysis_pass(&self) -> review_workflow::ReviewPassRef;
-    pub const fn analysis_pass_evidence(&self) -> &review_workflow::ReviewPassEvidence;
-    pub const fn analysis_run_evidence(&self) -> review_workflow::ReviewRunEvidence;
+    pub const fn analysis_pass(&self) -> signalbox_domain::ReviewPassRef;
+    pub const fn analysis_pass_evidence(&self) -> &signalbox_domain::ReviewPassEvidence;
+    pub const fn analysis_run_evidence(&self) -> signalbox_domain::ReviewRunEvidence;
     pub const fn template_digest(&self) -> ReviewTemplateDigest;
     pub fn members(&self) -> &[ReviewJudgmentPlanMember];
 }
@@ -350,16 +352,16 @@ pub enum ReviewJudgmentPlanFailure {
     IncompatibleAnalysisPass,
     InexactFindingInventory,
     AcceptedBelowThreshold {
-        finding: review_workflow::ReviewFindingRef,
+        finding: signalbox_domain::ReviewFindingRef,
     },
     InvalidReferencedFinding {
-        finding: review_workflow::ReviewFindingRef,
+        finding: signalbox_domain::ReviewFindingRef,
     },
     ReferenceCycle {
-        finding: review_workflow::ReviewFindingRef,
+        finding: signalbox_domain::ReviewFindingRef,
     },
     ReferencedFindingTerminalBeforeAdmission {
-        finding: review_workflow::ReviewFindingRef,
+        finding: signalbox_domain::ReviewFindingRef,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -379,10 +381,10 @@ pub struct ReviewJudgmentEffectId {/* private */}
 impl ReviewJudgmentEffectId {
     pub const fn new(
         attempt: ReviewOrchestrationAttemptId,
-        finding: review_workflow::ReviewFindingRef,
+        finding: signalbox_domain::ReviewFindingRef,
     ) -> Self;
     pub const fn attempt(self) -> ReviewOrchestrationAttemptId;
-    pub const fn finding(self) -> review_workflow::ReviewFindingRef;
+    pub const fn finding(self) -> signalbox_domain::ReviewFindingRef;
 }
 ```
 
@@ -405,10 +407,10 @@ pub struct ReviewJudgmentEffectSuccess {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewJudgmentEffectSuccess {
     pub const fn new(
-        event: review_workflow::ReviewFindingEvent,
+        event: signalbox_domain::ReviewFindingEvent,
         template_digest: ReviewTemplateDigest,
     ) -> Self;
-    pub const fn event(&self) -> &review_workflow::ReviewFindingEvent;
+    pub const fn event(&self) -> &signalbox_domain::ReviewFindingEvent;
     pub const fn template_digest(&self) -> ReviewTemplateDigest;
 }
 ```
@@ -452,11 +454,11 @@ pub struct ReviewRepairSuccess {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewRepairSuccess {
     pub const fn new(
-        event: review_workflow::ReviewFindingEvent,
+        event: signalbox_domain::ReviewFindingEvent,
         template_digest: ReviewTemplateDigest,
     ) -> Self;
-    pub const fn finding(&self) -> review_workflow::ReviewFindingRef;
-    pub const fn event(&self) -> &review_workflow::ReviewFindingEvent;
+    pub const fn finding(&self) -> signalbox_domain::ReviewFindingRef;
+    pub const fn event(&self) -> &signalbox_domain::ReviewFindingEvent;
     pub const fn template_digest(&self) -> ReviewTemplateDigest;
 }
 ```
@@ -466,9 +468,9 @@ impl ReviewRepairSuccess {
 ```rust
 pub enum ReviewRepairMemberOutcome {
     Fixed(boxed::Box<ReviewRepairSuccess>),
-    Failed(review_workflow::ReviewFindingRef),
-    Cancelled(review_workflow::ReviewFindingRef),
-    Blocked(review_workflow::ReviewFindingRef),
+    Failed(signalbox_domain::ReviewFindingRef),
+    Cancelled(signalbox_domain::ReviewFindingRef),
+    Blocked(signalbox_domain::ReviewFindingRef),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -480,7 +482,7 @@ pub struct ReviewRepairWork {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewRepairWork {
     pub const fn attempt(&self) -> &ReviewOrchestrationAttempt;
-    pub fn findings(&self) -> &[review_workflow::ReviewFindingRef];
+    pub fn findings(&self) -> &[signalbox_domain::ReviewFindingRef];
 }
 ```
 
@@ -491,13 +493,13 @@ pub struct ReviewPublicationSuccess {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewPublicationSuccess {
     pub const fn new(
-        link: review_workflow::ReviewFindingExternalLinkRef,
-        run: review_workflow::ReviewRunEvidence,
+        link: signalbox_domain::ReviewFindingExternalLinkRef,
+        run: signalbox_domain::ReviewRunEvidence,
         template_digest: ReviewTemplateDigest,
     ) -> Self;
-    pub const fn finding(&self) -> review_workflow::ReviewFindingRef;
-    pub const fn link(&self) -> &review_workflow::ReviewFindingExternalLinkRef;
-    pub const fn run(&self) -> review_workflow::ReviewRunEvidence;
+    pub const fn finding(&self) -> signalbox_domain::ReviewFindingRef;
+    pub const fn link(&self) -> &signalbox_domain::ReviewFindingExternalLinkRef;
+    pub const fn run(&self) -> signalbox_domain::ReviewRunEvidence;
     pub const fn template_digest(&self) -> ReviewTemplateDigest;
 }
 ```
@@ -507,9 +509,9 @@ impl ReviewPublicationSuccess {
 ```rust
 pub enum ReviewPublicationMemberOutcome {
     Published(boxed::Box<ReviewPublicationSuccess>),
-    Failed(review_workflow::ReviewFindingRef),
-    Blocked(review_workflow::ReviewFindingRef),
-    Cancelled(review_workflow::ReviewFindingRef),
+    Failed(signalbox_domain::ReviewFindingRef),
+    Blocked(signalbox_domain::ReviewFindingRef),
+    Cancelled(signalbox_domain::ReviewFindingRef),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -521,7 +523,7 @@ pub struct ReviewPublicationWork {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewPublicationWork {
     pub const fn attempt(&self) -> &ReviewOrchestrationAttempt;
-    pub fn findings(&self) -> &[review_workflow::ReviewFindingRef];
+    pub fn findings(&self) -> &[signalbox_domain::ReviewFindingRef];
 }
 ```
 
@@ -654,7 +656,7 @@ pub trait ReviewOrchestrationAttemptStore {
     fn seal_repair_inventory(
         &mut self,
         attempt: ReviewOrchestrationAttemptId,
-        findings: vec::Vec<review_workflow::ReviewFindingRef>,
+        findings: vec::Vec<signalbox_domain::ReviewFindingRef>,
     ) -> impl future::Future<
         Output = result::Result<
             ReviewDurableSealOutcome,
@@ -683,7 +685,7 @@ pub trait ReviewOrchestrationAttemptStore {
     fn seal_publication_inventory(
         &mut self,
         attempt: ReviewOrchestrationAttemptId,
-        findings: vec::Vec<review_workflow::ReviewFindingRef>,
+        findings: vec::Vec<signalbox_domain::ReviewFindingRef>,
     ) -> impl future::Future<
         Output = result::Result<
             ReviewDurableSealOutcome,
@@ -739,7 +741,7 @@ pub trait ReviewOrchestrationPassRunner: marker::Send + marker::Sync + 'static {
     fn judge(
         &self,
         attempt: ReviewOrchestrationAttempt,
-        findings: vec::Vec<review_workflow::ReviewFinding>,
+        findings: vec::Vec<signalbox_domain::ReviewFinding>,
     ) -> impl future::Future<
         Output = result::Result<ReviewJudgmentPlan, <Self as ReviewOrchestrationPassRunner>::Error>,
     > + marker::Send;

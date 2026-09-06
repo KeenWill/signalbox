@@ -22,12 +22,6 @@ pub enum ResponsePrefixBudget {
     Overflowed { accepted_len: usize },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ResponsePrefixBudget
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## provider_response_prefix_len

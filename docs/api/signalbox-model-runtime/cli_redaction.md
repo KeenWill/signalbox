@@ -16,12 +16,6 @@ pub enum ToolArgumentRedaction {
     Suppressed,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ToolArgumentRedaction
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## redact_text
@@ -56,12 +50,6 @@ pub enum DiscardedField {
     Repeated,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for DiscardedField
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## RedactingSink

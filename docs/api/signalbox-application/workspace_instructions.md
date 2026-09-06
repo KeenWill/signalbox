@@ -9,11 +9,11 @@ pub struct InstructionDiscoveryRoot {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl InstructionDiscoveryRoot {
     pub const fn new(
-        kind: workspace_instruction::InstructionDiscoveryRootKind,
-        path: workspace_instruction::InstructionPath,
+        kind: signalbox_domain::InstructionDiscoveryRootKind,
+        path: signalbox_domain::InstructionPath,
     ) -> Self;
-    pub const fn kind(&self) -> workspace_instruction::InstructionDiscoveryRootKind;
-    pub const fn path(&self) -> &workspace_instruction::InstructionPath;
+    pub const fn kind(&self) -> signalbox_domain::InstructionDiscoveryRootKind;
+    pub const fn path(&self) -> &signalbox_domain::InstructionPath;
 }
 ```
 
@@ -49,7 +49,7 @@ pub enum InstructionDiscoveryLimitKind {
 pub struct InstructionDiscoveryFinding {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl InstructionDiscoveryFinding {
-    pub const fn path(&self) -> &workspace_instruction::InstructionPath;
+    pub const fn path(&self) -> &signalbox_domain::InstructionPath;
     pub const fn kind(&self) -> InstructionDiscoveryFindingKind;
 }
 ```
@@ -61,7 +61,7 @@ pub struct InstructionDiscoverySnapshot {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl InstructionDiscoverySnapshot {
     pub fn roots(&self) -> &[InstructionDiscoveryRoot];
-    pub fn bundles(&self) -> &[workspace_instruction::InstructionBundleRegistration];
+    pub fn bundles(&self) -> &[signalbox_domain::InstructionBundleRegistration];
     pub fn findings(&self) -> &[InstructionDiscoveryFinding];
     pub const fn limit_set_version(&self) -> u16;
     pub const fn classified_entries(&self) -> u64;

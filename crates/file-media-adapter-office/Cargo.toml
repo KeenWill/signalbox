@@ -14,7 +14,7 @@ path = "src/bin/signalbox-file-media-office-worker.rs"
 [dependencies]
 crc32fast = "1.5.0"
 flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
-quick-xml = "0.41.0"
+quick-xml = "0.42.0"
 serde_json = "1.0.140"
 signalbox-file-media-processor-runtime = { path = "../file-media-processor-runtime" }
 signalbox-file-media-runtime = { path = "../file-media-runtime" }

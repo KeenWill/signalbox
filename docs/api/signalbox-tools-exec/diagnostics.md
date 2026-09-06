@@ -17,13 +17,6 @@ pub enum CargoDiagnosticsCommand {
     Test,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, ser::Serialize, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for CargoDiagnosticsCommand
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for CargoDiagnosticsCommand where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## CargoDiagnosticsArguments
@@ -34,13 +27,6 @@ pub struct CargoDiagnosticsArguments {
     pub timeout_seconds: u64,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for CargoDiagnosticsArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for CargoDiagnosticsArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## CargoDiagnosticsToolConstructionError
@@ -70,12 +56,6 @@ impl convert::From<ExecToolConstructionError> for CargoDiagnosticsToolConstructi
 ```rust
 pub struct CargoDiagnosticsTool<Runner> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for CargoDiagnosticsTool<Runner>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Runner: ProcessRunner> CargoDiagnosticsTool<Runner> {
     pub fn try_new(
         runner: Runner,
@@ -89,7 +69,7 @@ impl<Runner: ProcessRunner> CargoDiagnosticsTool<Runner> {
     pub fn into_parts(
         self,
     ) -> (
-        tool_loop::CompiledToolCatalog,
+        signalbox_application::CompiledToolCatalog,
         CargoDiagnosticsExecutor<Runner>,
     );
 }
@@ -106,12 +86,6 @@ impl CargoDiagnosticsTool<TokioProcessRunner> {
 ```rust
 pub struct InvalidCargoDiagnosticsArguments;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for InvalidCargoDiagnosticsArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for InvalidCargoDiagnosticsArguments {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -125,20 +99,16 @@ impl error::Error for InvalidCargoDiagnosticsArguments {
 ```rust
 pub struct CargoDiagnosticsExecutor<Runner> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for CargoDiagnosticsExecutor<Runner>
-where
-    T: clone::Clone,
+impl<Runner: ProcessRunner> signalbox_application::ToolExecutor
+    for CargoDiagnosticsExecutor<Runner>
 {
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<Runner: ProcessRunner> tool_loop::ToolExecutor for CargoDiagnosticsExecutor<Runner> {
     type Error = CargoDiagnosticsExecutorError;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -151,20 +121,14 @@ pub enum CargoDiagnosticsExecutorError {
     ResultEncoding,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for CargoDiagnosticsExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for CargoDiagnosticsExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for CargoDiagnosticsExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for CargoDiagnosticsExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for CargoDiagnosticsExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -173,12 +137,6 @@ impl operator_failure::ClassifyOperatorFailure for CargoDiagnosticsExecutorError
 ```rust
 pub struct CargoDiagnosticsRunner<Runner> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for CargoDiagnosticsRunner<Runner>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
     pub fn try_new(
         runner: Runner,
@@ -205,12 +163,6 @@ pub struct CargoDiagnosticsResult {
     pub diagnostics: CargoDiagnosticRecords,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoDiagnosticsResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CargoDiagnosticsExecution
@@ -224,12 +176,6 @@ pub struct CargoDiagnosticsExecution {
     pub cargo_failure: option::Option<CargoFailureDetail>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoDiagnosticsExecution
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CargoFailureDetail
@@ -240,12 +186,6 @@ pub struct CargoFailureDetail {
     pub message_completeness: CaptureCompleteness,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoFailureDetail
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CargoDiagnosticsStream
@@ -256,12 +196,6 @@ pub struct CargoDiagnosticsStream {
     pub encoding: OutputEncoding,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoDiagnosticsStream
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CargoDiagnosticRecords
@@ -274,12 +208,6 @@ pub struct CargoDiagnosticRecords {
     pub known_truncated: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoDiagnosticRecords
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CargoEvidenceProvenance
@@ -289,12 +217,6 @@ pub enum CargoEvidenceProvenance {
     WorkspaceInfluenced,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoEvidenceProvenance
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CargoDiagnostic
@@ -310,12 +232,6 @@ pub struct CargoDiagnostic {
     pub message_completeness: CaptureCompleteness,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoDiagnostic
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CargoDiagnosticSpan
@@ -328,10 +244,4 @@ pub struct CargoDiagnosticSpan {
     pub column_end: u64,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoDiagnosticSpan
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```

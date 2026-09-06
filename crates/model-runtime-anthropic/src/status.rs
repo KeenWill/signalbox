@@ -79,27 +79,19 @@ pub(crate) fn classify_error_with_proof(
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use super::{
         classify_error, classify_error_status, classify_error_token, classify_error_with_proof,
     };
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct TokenRow {
         token: &'static str,
         kind: String,
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct StatusRow {
         status: u16,
         kind: String,
@@ -218,7 +210,7 @@ mod tests {
             │ billing_error_from_the_future │ Unrecognized       │
             └───────────────────────────────┴────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 
     #[test]
@@ -240,6 +232,6 @@ mod tests {
             │    503 │ Unrecognized       │
             └────────┴────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 }

@@ -36,7 +36,6 @@ pub struct ConvergencePolicy {
     pub extended_wave_cap: usize,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, ser::Serialize
-impl<T> de::DeserializeOwned for ConvergencePolicy where T: for<'de> de::Deserialize<'de> {}
 impl ConvergencePolicy {
     pub fn read(path: &path::Path) -> result::Result<Self, Error>;
     pub fn validate(&self) -> result::Result<(), Error>;
@@ -59,7 +58,6 @@ pub struct ReviewerPolicy {
     pub completion_reaction: string::String,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, ser::Serialize
-impl<T> de::DeserializeOwned for ReviewerPolicy where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Response
@@ -71,7 +69,6 @@ pub struct Response {
     pub response: value::Value,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, ser::Serialize
-impl<T> de::DeserializeOwned for Response where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Recording
@@ -87,7 +84,6 @@ pub struct Recording {
     pub observed_at: option::Option<string::String>,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, ser::Serialize
-impl<T> de::DeserializeOwned for Recording where T: for<'de> de::Deserialize<'de> {}
 impl Recording {
     pub fn snapshot(&self, policy: &ConvergencePolicy) -> result::Result<Snapshot, Error>;
 }

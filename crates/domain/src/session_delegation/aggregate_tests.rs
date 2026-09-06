@@ -164,7 +164,7 @@ fn completed_child_relation(policy: ChildRelationshipPolicy) -> SessionDelegatio
         .expect("completed-turn fixture child is distinct from parent")
 }
 
-/// S18: restart restores one complete active history.
+/// restart restores one complete active history.
 #[test]
 fn relation_reconstitution_round_trips_complete_active_history() {
     let policy = ChildRelationshipPolicy::Background;
@@ -190,7 +190,7 @@ fn relation_reconstitution_round_trips_complete_active_history() {
     assert_eq!(reconstituted, relation);
 }
 
-/// S18: restart derives lifecycle from terminal history.
+/// restart derives lifecycle from terminal history.
 #[test]
 fn relation_reconstitution_derives_terminal_lifecycle_from_history() {
     let policy = ChildRelationshipPolicy::Background;
@@ -213,7 +213,7 @@ fn relation_reconstitution_derives_terminal_lifecycle_from_history() {
     assert_eq!(reconstituted.lifecycle(), relation.lifecycle());
 }
 
-/// S18: restart rejects a gap in relationship history.
+/// restart rejects a gap in relationship history.
 #[test]
 fn relation_reconstitution_rejects_noncontiguous_history() {
     let policy = ChildRelationshipPolicy::Background;
@@ -257,7 +257,7 @@ fn relation_reconstitution_rejects_noncontiguous_history() {
     );
 }
 
-/// S18: restart rejects cross-wired message provenance.
+/// restart rejects cross-wired message provenance.
 #[test]
 fn relation_reconstitution_rejects_cross_wired_message_direction() {
     let policy = ChildRelationshipPolicy::Background;
@@ -300,10 +300,10 @@ fn relation_reconstitution_rejects_cross_wired_message_direction() {
     );
 }
 
-/// S18: restart rejects two parent authorities that
+/// restart rejects two parent authorities that
 /// reuse one durable command identity.
 #[test]
-fn s18_reconstitution_rejects_reused_parent_command_identity() {
+fn reconstitution_rejects_reused_parent_command_identity() {
     let policy = ChildRelationshipPolicy::Background;
     let spawning = spawn_request(policy);
     let relation = SessionDelegation::spawn_fixture(spawning.clone(), session_id(3), turn_id(7))
@@ -357,7 +357,7 @@ fn s18_reconstitution_rejects_reused_parent_command_identity() {
     );
 }
 
-/// S18: restart binds waits to one request and relation.
+/// restart binds waits to one request and relation.
 #[test]
 fn wait_reconstitution_uses_exact_relation_and_request() {
     let relation = relation(ChildRelationshipPolicy::Background);
@@ -377,9 +377,9 @@ fn wait_reconstitution_uses_exact_relation_and_request() {
     assert_eq!(reconstituted, recorded);
 }
 
-/// S18: stored waits cannot reconstitute a self relationship.
+/// stored waits cannot reconstitute a self relationship.
 #[test]
-fn s18_wait_reconstitution_rejects_same_session_endpoints() {
+fn wait_reconstitution_rejects_same_session_endpoints() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let awaiting = await_request(
         RequestFixture::Await,
@@ -399,7 +399,7 @@ fn s18_wait_reconstitution_rejects_same_session_endpoints() {
     );
 }
 
-/// S18: immutable endpoint facts reconstitute an exact
+/// immutable endpoint facts reconstitute an exact
 /// wait without loading the relationship event stream.
 #[test]
 fn wait_reconstitution_uses_stored_endpoints_and_mode() {
@@ -668,10 +668,10 @@ fn delegation_public_errors_implement_standard_error_contract() {
     assert_standard_error::<DelegationTransitionError>();
 }
 
-/// S18: spawn retains the exact sealed request facts
+/// spawn retains the exact sealed request facts
 /// and derives delegated creation without ancestry.
 #[test]
-fn s18_aggregate_spawn_retains_policy_task_and_provenance() {
+fn aggregate_spawn_retains_policy_task_and_provenance() {
     let policy = ChildRelationshipPolicy::Bound {
         on_parent_stopped: BoundChildAction::Stop,
         on_parent_cancelled: BoundChildAction::Cancel,
@@ -698,9 +698,9 @@ fn s18_aggregate_spawn_retains_policy_task_and_provenance() {
     );
 }
 
-/// S18: a session cannot delegate to itself, and rejection is lossless.
+/// a session cannot delegate to itself, and rejection is lossless.
 #[test]
-fn s18_same_session_spawn_rejection_returns_exact_inputs() {
+fn same_session_spawn_rejection_returns_exact_inputs() {
     let request = spawn_request(ChildRelationshipPolicy::Background);
     let child = session_id(2);
     let child_turn = turn_id(7);
@@ -714,9 +714,9 @@ fn s18_same_session_spawn_rejection_returns_exact_inputs() {
     assert_eq!(returned_child_turn, child_turn);
 }
 
-/// S18: foreground wait retains the exact child subject.
+/// foreground wait retains the exact child subject.
 #[test]
-fn s18_foreground_registration_yields_exact_child_wait() {
+fn foreground_registration_yields_exact_child_wait() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let awaiting = await_request(
         RequestFixture::Await,
@@ -737,9 +737,9 @@ fn s18_foreground_registration_yields_exact_child_wait() {
     assert_eq!(subject.child(), relation.child());
 }
 
-/// S18: background wait releases the parent turn subject.
+/// background wait releases the parent turn subject.
 #[test]
-fn s18_background_registration_has_no_child_wait() {
+fn background_registration_has_no_child_wait() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let awaiting = await_request(
         RequestFixture::Await,
@@ -755,9 +755,9 @@ fn s18_background_registration_has_no_child_wait() {
     assert_eq!(wait.foreground_subject(), None);
 }
 
-/// S18: a typed await for another child cannot cross relations.
+/// a typed await for another child cannot cross relations.
 #[test]
-fn s18_wait_registration_rejects_relation_child_cross_wiring() {
+fn wait_registration_rejects_relation_child_cross_wiring() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let awaiting = await_request(
         RequestFixture::Await,
@@ -775,9 +775,9 @@ fn s18_wait_registration_rejects_relation_child_cross_wiring() {
     );
 }
 
-/// S18: one request cannot both spawn and await a child.
+/// one request cannot both spawn and await a child.
 #[test]
-fn s18_wait_registration_requires_distinct_parent_work() {
+fn wait_registration_requires_distinct_parent_work() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let awaiting = await_request(
         RequestFixture::Spawn,
@@ -795,9 +795,9 @@ fn s18_wait_registration_requires_distinct_parent_work() {
     );
 }
 
-/// S18: wait registration requires its exact in-flight dispatch.
+/// wait registration requires its exact in-flight dispatch.
 #[test]
-fn s18_wait_registration_rejects_foreign_dispatch_authority() {
+fn wait_registration_rejects_foreign_dispatch_authority() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let awaiting = await_request(
         RequestFixture::Await,
@@ -820,9 +820,9 @@ fn s18_wait_registration_rejects_foreign_dispatch_authority() {
     );
 }
 
-/// S18: dispatch authority binds the complete await request.
+/// dispatch authority binds the complete await request.
 #[test]
-fn s18_wait_registration_rejects_same_identity_argument_drift() {
+fn wait_registration_rejects_same_identity_argument_drift() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let dispatched = await_request(
         RequestFixture::Await,
@@ -845,9 +845,9 @@ fn s18_wait_registration_rejects_same_identity_argument_drift() {
     );
 }
 
-/// S18: each relation peer derives one exact message direction.
+/// each relation peer derives one exact message direction.
 #[test]
-fn s18_messages_are_bidirectional() {
+fn messages_are_bidirectional() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let parent_message = message_request(
         RequestFixture::ParentMessage,
@@ -878,9 +878,9 @@ fn s18_messages_are_bidirectional() {
     );
 }
 
-/// S18: distinct message deliveries receive contiguous ordinals.
+/// distinct message deliveries receive contiguous ordinals.
 #[test]
-fn s18_message_delivery_ordinals_are_contiguous() {
+fn message_delivery_ordinals_are_contiguous() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let parent_message = message_request(
         RequestFixture::ParentMessage,
@@ -905,10 +905,10 @@ fn s18_message_delivery_ordinals_are_contiguous() {
     assert_eq!(second.ordinal().get(), 3);
 }
 
-/// S18: nonterminal messages preserve the final
+/// nonterminal messages preserve the final
 /// relationship ordinal for a typed terminal outcome.
 #[test]
-fn s18_message_reserves_terminal_event_ordinal() {
+fn message_reserves_terminal_event_ordinal() {
     let policy = ChildRelationshipPolicy::Background;
     let spawning = spawn_request(policy);
     let mut relation = relation(policy);
@@ -934,9 +934,9 @@ fn s18_message_reserves_terminal_event_ordinal() {
     );
 }
 
-/// S18: a typed message for another peer returns exact inputs.
+/// a typed message for another peer returns exact inputs.
 #[test]
-fn s18_message_rejects_relation_peer_cross_wiring_and_returns_input() {
+fn message_rejects_relation_peer_cross_wiring_and_returns_input() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let request = message_request(RequestFixture::ParentMessage, session_id(9), "misdirected");
     let id = delegation_message_id(5);
@@ -952,9 +952,9 @@ fn s18_message_rejects_relation_peer_cross_wiring_and_returns_input() {
     assert_eq!(returned_id, id);
 }
 
-/// S18: message delivery requires its exact in-flight dispatch.
+/// message delivery requires its exact in-flight dispatch.
 #[test]
-fn s18_message_rejects_foreign_dispatch_and_returns_input() {
+fn message_rejects_foreign_dispatch_and_returns_input() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let request = message_request(
         RequestFixture::ParentMessage,
@@ -979,9 +979,9 @@ fn s18_message_rejects_foreign_dispatch_and_returns_input() {
     assert_eq!(returned_id, id);
 }
 
-/// S18: dispatch authority binds the complete message request.
+/// dispatch authority binds the complete message request.
 #[test]
-fn s18_message_rejects_same_identity_content_drift() {
+fn message_rejects_same_identity_content_drift() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let dispatched = message_request(
         RequestFixture::ParentMessage,
@@ -1006,9 +1006,9 @@ fn s18_message_rejects_same_identity_content_drift() {
     assert_eq!(returned_id, id);
 }
 
-/// S18: one logical message request appends at most one event.
+/// one logical message request appends at most one event.
 #[test]
-fn s18_message_request_replay_returns_persisted_event() {
+fn message_request_replay_returns_persisted_event() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let request = message_request(RequestFixture::ParentMessage, relation.child(), "once");
     let dispatch = dispatch_for(request.request());
@@ -1023,9 +1023,9 @@ fn s18_message_request_replay_returns_persisted_event() {
     assert_eq!(relation.events().len(), 2);
 }
 
-/// S18: a message identity cannot name another logical request.
+/// a message identity cannot name another logical request.
 #[test]
-fn s18_duplicate_message_identity_returns_attempted_request() {
+fn duplicate_message_identity_returns_attempted_request() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let first = message_request(RequestFixture::ParentMessage, relation.child(), "first");
     let second = message_request(
@@ -1050,9 +1050,9 @@ fn s18_duplicate_message_identity_returns_attempted_request() {
     assert_eq!(returned_id, id);
 }
 
-/// S18: a replay cannot change content under one request authority.
+/// a replay cannot change content under one request authority.
 #[test]
-fn s18_conflicting_message_replay_reports_code_and_returns_inputs() {
+fn conflicting_message_replay_reports_code_and_returns_inputs() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let first = message_request(RequestFixture::ParentMessage, relation.child(), "first");
     let conflicting = message_request(RequestFixture::ParentMessage, relation.child(), "changed");
@@ -1077,9 +1077,9 @@ fn s18_conflicting_message_replay_reports_code_and_returns_inputs() {
     assert_eq!(returned_id, conflicting_id);
 }
 
-/// S18: returned child result terminalizes exactly once.
+/// returned child result terminalizes exactly once.
 #[test]
-fn s18_returned_result_terminalizes_and_replays() {
+fn returned_result_terminalizes_and_replays() {
     let relation = completed_child_relation(ChildRelationshipPolicy::Background);
     let outcome = returned_outcome("child result");
     let relation = relation
@@ -1095,9 +1095,9 @@ fn s18_returned_result_terminalizes_and_replays() {
     assert_eq!(relation.events().len(), 2);
 }
 
-/// S18: terminal evidence must name this spawn's delegated-task turn.
+/// terminal evidence must name this spawn's delegated-task turn.
 #[test]
-fn s18_result_rejects_a_later_child_turn() {
+fn result_rejects_a_later_child_turn() {
     let relation = completed_child_relation(ChildRelationshipPolicy::Background);
     let returned = content("later turn result");
     let terminal = TerminalChildTurn {
@@ -1124,9 +1124,9 @@ fn s18_result_rejects_a_later_child_turn() {
     assert_eq!(returned_outcome, outcome);
 }
 
-/// S18: later descendant evaluation is explicit on a child-terminal edge.
+/// later descendant evaluation is explicit on a child-terminal edge.
 #[test]
-fn s18_child_terminal_edge_records_parent_command_disposition() {
+fn child_terminal_edge_records_parent_command_disposition() {
     let relation = completed_child_relation(ChildRelationshipPolicy::Background)
         .record_outcome(returned_outcome("terminal result"))
         .expect("returned result terminalizes relation");
@@ -1152,9 +1152,9 @@ fn s18_child_terminal_edge_records_parent_command_disposition() {
     assert_eq!(relation.events().len(), 3);
 }
 
-/// S18: a prior policy terminal result remains explicit on re-evaluation.
+/// a prior policy terminal result remains explicit on re-evaluation.
 #[test]
-fn s18_policy_terminal_edge_records_later_command_disposition() {
+fn policy_terminal_edge_records_later_command_disposition() {
     let policy = ChildRelationshipPolicy::Bound {
         on_parent_stopped: BoundChildAction::Stop,
         on_parent_cancelled: BoundChildAction::Cancel,
@@ -1190,9 +1190,9 @@ fn s18_policy_terminal_edge_records_later_command_disposition() {
     assert_eq!(relation.events().len(), 3);
 }
 
-/// S18: parent-alone scope never evaluates a child edge.
+/// parent-alone scope never evaluates a child edge.
 #[test]
-fn s18_parent_alone_transition_returns_exact_unevaluated_inputs() {
+fn parent_alone_transition_returns_exact_unevaluated_inputs() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let authority = parent_authority(
         TerminationAuthoritySource::Parent,
@@ -1213,9 +1213,9 @@ fn s18_parent_alone_transition_returns_exact_unevaluated_inputs() {
     assert_eq!(returned_authority, authority);
 }
 
-/// S18: a different authority cannot append after terminalization.
+/// a different authority cannot append after terminalization.
 #[test]
-fn s18_already_terminal_rejection_reports_code_and_returns_inputs() {
+fn already_terminal_rejection_reports_code_and_returns_inputs() {
     let relation = completed_child_relation(ChildRelationshipPolicy::Background)
         .record_outcome(returned_outcome("terminal result"))
         .expect("returned result terminalizes relation");
@@ -1234,9 +1234,9 @@ fn s18_already_terminal_rejection_reports_code_and_returns_inputs() {
     assert_eq!(returned_outcome, outcome);
 }
 
-/// S18: one authority cannot replay with a different outcome.
+/// one authority cannot replay with a different outcome.
 #[test]
-fn s18_duplicate_outcome_authority_reports_code_and_returns_inputs() {
+fn duplicate_outcome_authority_reports_code_and_returns_inputs() {
     let policy = ChildRelationshipPolicy::Bound {
         on_parent_stopped: BoundChildAction::Stop,
         on_parent_cancelled: BoundChildAction::Cancel,
@@ -1268,9 +1268,9 @@ fn s18_duplicate_outcome_authority_reports_code_and_returns_inputs() {
     assert_eq!(returned_outcome, conflicting);
 }
 
-/// S18: another child's sealed result returns unchanged.
+/// another child's sealed result returns unchanged.
 #[test]
-fn s18_returned_result_rejects_foreign_child_proof() {
+fn returned_result_rejects_foreign_child_proof() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let outcome = returned_outcome("foreign child result");
     let error = relation
@@ -1283,9 +1283,9 @@ fn s18_returned_result_rejects_foreign_child_proof() {
     assert_eq!(returned_outcome, outcome);
 }
 
-/// S18: a terminal result still accepts a late wait registration.
+/// a terminal result still accepts a late wait registration.
 #[test]
-fn s18_terminal_result_accepts_late_wait() {
+fn terminal_result_accepts_late_wait() {
     let relation = completed_child_relation(ChildRelationshipPolicy::Background)
         .record_outcome(returned_outcome("late result"))
         .expect("child result terminalizes relation");
@@ -1303,9 +1303,9 @@ fn s18_terminal_result_accepts_late_wait() {
     assert_eq!(wait.child(), relation.child());
 }
 
-/// S18: messages remain available after child terminalization.
+/// messages remain available after child terminalization.
 #[test]
-fn s18_message_is_recorded_after_child_terminalizes() {
+fn message_is_recorded_after_child_terminalizes() {
     let relation = completed_child_relation(ChildRelationshipPolicy::Background)
         .record_outcome(returned_outcome("done"))
         .expect("child result terminalizes relation");
@@ -1319,9 +1319,9 @@ fn s18_message_is_recorded_after_child_terminalizes() {
     assert_eq!(event.ordinal().get(), 3);
 }
 
-/// S19: child cancellation retains child-turn provenance.
+/// child cancellation retains child-turn provenance.
 #[test]
-fn s19_child_cancel_records_child_turn_provenance() {
+fn child_cancel_records_child_turn_provenance() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let outcome = cancelled_outcome(relation.child());
     let relation = relation
@@ -1336,9 +1336,9 @@ fn s19_child_cancel_records_child_turn_provenance() {
     );
 }
 
-/// S19: a bound keep-running action remains active and explicit.
+/// a bound keep-running action remains active and explicit.
 #[test]
-fn s19_bound_keep_running_records_no_change() {
+fn bound_keep_running_records_no_change() {
     let policy = ChildRelationshipPolicy::Bound {
         on_parent_stopped: BoundChildAction::KeepRunning,
         on_parent_cancelled: BoundChildAction::Cancel,
@@ -1357,9 +1357,9 @@ fn s19_bound_keep_running_records_no_change() {
     assert_eq!(relation.events().len(), 2);
 }
 
-/// S19: continue-running replay does not append another event.
+/// continue-running replay does not append another event.
 #[test]
-fn s19_continue_running_replay_is_idempotent() {
+fn continue_running_replay_is_idempotent() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let authority = parent_authority(
         TerminationAuthoritySource::Parent,
@@ -1378,9 +1378,9 @@ fn s19_continue_running_replay_is_idempotent() {
     assert_eq!(relation.events().len(), 2);
 }
 
-/// S19: background child survives parent stop explicitly.
+/// background child survives parent stop explicitly.
 #[test]
-fn s19_background_child_survives_parent_stop_with_typed_outcome() {
+fn background_child_survives_parent_stop_with_typed_outcome() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let authority = parent_authority(
         TerminationAuthoritySource::Parent,
@@ -1401,9 +1401,9 @@ fn s19_background_child_survives_parent_stop_with_typed_outcome() {
     );
 }
 
-/// S19: background child survives parent cancellation explicitly.
+/// background child survives parent cancellation explicitly.
 #[test]
-fn s19_background_child_survives_parent_cancel_with_typed_outcome() {
+fn background_child_survives_parent_cancel_with_typed_outcome() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let authority = parent_authority(
         TerminationAuthoritySource::Parent,
@@ -1426,9 +1426,9 @@ fn s19_background_child_survives_parent_cancel_with_typed_outcome() {
     );
 }
 
-/// S19: bound child follows its chosen parent-stop policy.
+/// bound child follows its chosen parent-stop policy.
 #[test]
-fn s19_bound_child_follows_parent_stop_policy() {
+fn bound_child_follows_parent_stop_policy() {
     let policy = ChildRelationshipPolicy::Bound {
         on_parent_stopped: BoundChildAction::Stop,
         on_parent_cancelled: BoundChildAction::Cancel,
@@ -1453,9 +1453,9 @@ fn s19_bound_child_follows_parent_stop_policy() {
     );
 }
 
-/// S19: bound child follows its chosen parent-cancel policy.
+/// bound child follows its chosen parent-cancel policy.
 #[test]
-fn s19_bound_child_follows_parent_cancel_policy() {
+fn bound_child_follows_parent_cancel_policy() {
     let policy = ChildRelationshipPolicy::Bound {
         on_parent_stopped: BoundChildAction::Stop,
         on_parent_cancelled: BoundChildAction::Cancel,
@@ -1480,9 +1480,9 @@ fn s19_bound_child_follows_parent_cancel_policy() {
     );
 }
 
-/// S19: parent authority cannot override the chosen edge action.
+/// parent authority cannot override the chosen edge action.
 #[test]
-fn s19_parent_outcome_rejects_wrong_policy_action() {
+fn parent_outcome_rejects_wrong_policy_action() {
     let policy = ChildRelationshipPolicy::Bound {
         on_parent_stopped: BoundChildAction::Stop,
         on_parent_cancelled: BoundChildAction::Cancel,
@@ -1505,9 +1505,9 @@ fn s19_parent_outcome_rejects_wrong_policy_action() {
     assert_eq!(returned_outcome, outcome);
 }
 
-/// S19: foreign parent authority returns aggregate and outcome.
+/// foreign parent authority returns aggregate and outcome.
 #[test]
-fn s19_parent_outcome_rejects_foreign_termination_authority() {
+fn parent_outcome_rejects_foreign_termination_authority() {
     let relation = relation(ChildRelationshipPolicy::Background);
     let authority = parent_authority(
         TerminationAuthoritySource::ForeignParent,

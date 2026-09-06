@@ -8,8 +8,8 @@
 pub trait DelegationMessageDeliveryProjection {
     fn tool_request(&self) -> signalbox_domain::ToolRequestId;
     fn message(&self) -> signalbox_domain::DelegationMessageId;
-    fn direction(&self) -> message::DelegationMessageDirection;
-    fn ordinal(&self) -> event::DelegationEventOrdinal;
+    fn direction(&self) -> signalbox_domain::DelegationMessageDirection;
+    fn ordinal(&self) -> signalbox_domain::DelegationEventOrdinal;
     fn delivery_sequence(&self) -> nonzero::NonZeroU64;
 }
 ```

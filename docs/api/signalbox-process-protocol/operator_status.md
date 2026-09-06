@@ -15,10 +15,6 @@ pub enum OperatorStatusLifecycleState {
     Parked,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusLifecycleState where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## OperatorStatusLifecycleWeekMessage
@@ -26,55 +22,43 @@ impl<T> de::DeserializeOwned for operator_status::OperatorStatusLifecycleState w
 ```rust
 pub struct OperatorStatusLifecycleWeekMessage {
     pub week_start_date: string::String,
-    pub completion_failure_numerator: scalars::CanonicalU64,
-    pub completion_failure_denominator: scalars::CanonicalU64,
-    pub failed_unknown_count: scalars::CanonicalU64,
-    pub overflow_numerator: scalars::CanonicalU64,
-    pub overflow_denominator: scalars::CanonicalU64,
-    pub finish_given_overflow_numerator: scalars::CanonicalU64,
-    pub wall_numerator: scalars::CanonicalU64,
-    pub wall_denominator: scalars::CanonicalU64,
-    pub wall_occurrence_count: scalars::CanonicalU64,
-    pub classified_terminal_turn_count: scalars::CanonicalU64,
-    pub terminal_turn_count: scalars::CanonicalU64,
-    pub classified_known_failed_call_count: scalars::CanonicalU64,
-    pub known_failed_call_count: scalars::CanonicalU64,
+    pub completion_failure_numerator: CanonicalU64,
+    pub completion_failure_denominator: CanonicalU64,
+    pub failed_unknown_count: CanonicalU64,
+    pub overflow_numerator: CanonicalU64,
+    pub overflow_denominator: CanonicalU64,
+    pub finish_given_overflow_numerator: CanonicalU64,
+    pub wall_numerator: CanonicalU64,
+    pub wall_denominator: CanonicalU64,
+    pub wall_occurrence_count: CanonicalU64,
+    pub classified_terminal_turn_count: CanonicalU64,
+    pub terminal_turn_count: CanonicalU64,
+    pub classified_known_failed_call_count: CanonicalU64,
+    pub known_failed_call_count: CanonicalU64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusLifecycleWeekMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## OperatorStatusLifecycleDeadlineViolationMessage
 
 ```rust
 pub struct OperatorStatusLifecycleDeadlineViolationMessage {
-    pub session_id: scalars::CanonicalUuid,
-    pub state: operator_status::OperatorStatusLifecycleState,
+    pub session_id: CanonicalUuid,
+    pub state: OperatorStatusLifecycleState,
     pub deadline_missing: bool,
-    pub expired_for_seconds: option::Option<scalars::CanonicalU64>,
+    pub expired_for_seconds: option::Option<CanonicalU64>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusLifecycleDeadlineViolationMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## OperatorStatusEndMessage
 
 ```rust
 pub struct OperatorStatusEndMessage {
-    pub lifecycle_week_count: scalars::CanonicalU64,
-    pub lifecycle_deadline_violation_count: scalars::CanonicalU64,
+    pub lifecycle_week_count: CanonicalU64,
+    pub lifecycle_deadline_violation_count: CanonicalU64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusEndMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## OperatorStatusMessage
@@ -82,15 +66,9 @@ impl<T> de::DeserializeOwned for operator_status::OperatorStatusEndMessage where
 ```rust
 pub enum OperatorStatusMessage {
     Start {},
-    LifecycleWeek(boxed::Box<operator_status::OperatorStatusLifecycleWeekMessage>),
-    LifecycleDeadlineViolation(
-        boxed::Box<operator_status::OperatorStatusLifecycleDeadlineViolationMessage>,
-    ),
-    End(boxed::Box<operator_status::OperatorStatusEndMessage>),
+    LifecycleWeek(boxed::Box<OperatorStatusLifecycleWeekMessage>),
+    LifecycleDeadlineViolation(boxed::Box<OperatorStatusLifecycleDeadlineViolationMessage>),
+    End(boxed::Box<OperatorStatusEndMessage>),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```

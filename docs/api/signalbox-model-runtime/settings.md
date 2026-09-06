@@ -16,12 +16,6 @@ pub enum ReasoningLevel {
     Ultra,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq, cmp::PartialOrd, cmp::Ord, hash::Hash
-impl<T> dyn_clone::DynClone for ReasoningLevel
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## FastMode
@@ -32,12 +26,6 @@ pub enum FastMode {
     Enabled,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq, cmp::PartialOrd, cmp::Ord, hash::Hash
-impl<T> dyn_clone::DynClone for FastMode
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## AnthropicServiceTier
@@ -48,12 +36,6 @@ pub enum AnthropicServiceTier {
     StandardOnly,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq, cmp::PartialOrd, cmp::Ord, hash::Hash
-impl<T> dyn_clone::DynClone for AnthropicServiceTier
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## OpenAiServiceTier
@@ -68,12 +50,6 @@ pub enum OpenAiServiceTier {
     Fast,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq, cmp::PartialOrd, cmp::Ord, hash::Hash
-impl<T> dyn_clone::DynClone for OpenAiServiceTier
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CodexCliServiceTier
@@ -85,12 +61,6 @@ pub enum CodexCliServiceTier {
     Flex,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq, cmp::PartialOrd, cmp::Ord, hash::Hash
-impl<T> dyn_clone::DynClone for CodexCliServiceTier
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ServiceTier
@@ -102,12 +72,6 @@ pub enum ServiceTier {
     CodexCli(CodexCliServiceTier),
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq, cmp::PartialOrd, cmp::Ord, hash::Hash
-impl<T> dyn_clone::DynClone for ServiceTier
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ModelSettings
@@ -123,12 +87,6 @@ pub struct ModelSettings {
     pub service_tier: option::Option<ServiceTier>,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ModelSettings
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ModelSettings {
     pub fn new(max_output_tokens: u32) -> Self;
     pub fn has_explicit_provider_controls(&self) -> bool;
