@@ -644,13 +644,12 @@ Before submission, the module ledger retains an opaque core encoding of every
 complete checked command payload. Pending ledger rows remain recoverable without
 the removed or inactive rule, and newly resolved template or configuration
 values cannot replace the committed payload. A repository-watch `SessionCreated`
-event settles the next
-pending create action for its dispatch and records the new session; replaying
-that event cannot settle another action. Every action and every lifecycle
-reaction in a batch has its own one-based ordinal. A release-start or
-sticky-stop reaction remains admissible after rule deactivation when it names a
-committed dispatch from that rule revision; deactivation prevents new matching
-dispatches, not reactions owed by an existing one.
+event settles the next pending create action for its dispatch and records the
+new session; replaying that event cannot settle another action. Every action and
+every lifecycle reaction in a batch has its own one-based ordinal. A
+release-start or sticky-stop reaction remains admissible after rule deactivation
+when it names a committed dispatch from that rule revision; deactivation
+prevents new matching dispatches, not reactions owed by an existing one.
 
 An operator commission through `commission_session`, and every sweep dispatch,
 commits in one transaction the template session, the append-only
