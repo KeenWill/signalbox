@@ -43,10 +43,10 @@
             "author": {
               "login": "chatgpt-codex-connector"
             },
-            "authorAssociation": "OWNER",
+            "authorAssociation": "NONE",
             "body": "<!-- codex-pull-request-review-summary -->\n| \ud83d\udcdd **Code Review** | \u2705 **Completed** <time datetime=\"2026-09-05T12:00:00Z\">done</time> | `417a88fd53464ef0783ec39f5c4da3c50a3ef5e2` |",
             "createdAt": "2026-09-05T12:00:00Z",
-            "id": "IC_kwDOTWhy-88AAAABSvedMg",
+            "id": "IC_kwDOTWhy-88AAAABSvefOg",
             "lastEditedAt": null
           }
         ],
@@ -75,10 +75,10 @@
             "author": {
               "login": "chatgpt-codex-connector"
             },
-            "authorAssociation": "OWNER",
+            "authorAssociation": "NONE",
             "body": "<!-- codex-pull-request-review-summary -->\n| \ud83d\udcdd **Code Review** | \u2705 **Completed** <time datetime=\"2026-09-05T12:00:00Z\">done</time> | `417a88fd53464ef0783ec39f5c4da3c50a3ef5e2` |",
             "createdAt": "2026-09-05T12:00:00Z",
-            "id": "IC_kwDOTWhy-88AAAABSvedMg",
+            "id": "IC_kwDOTWhy-88AAAABSvefOg",
             "lastEditedAt": null
           }
         ],

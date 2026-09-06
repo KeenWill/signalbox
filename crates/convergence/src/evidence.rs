@@ -346,98 +346,9 @@ fn exempt_change(snapshot: &Snapshot, reviewed: &str, head: &str, base: &str) ->
             return true;
         }
     }
-    !files.is_empty() && files.iter().all(comment_only_patch)
+    false
 }
 
-fn comment_only_patch(file: &Value) -> bool {
-    if !text(&file["filename"]).to_lowercase().ends_with(".py") {
-        return false;
-    }
-    let Some(patch) = file["patch"].as_str() else {
-        return false;
-    };
-    let mut saw_change = false;
-    for side in ['+', '-'] {
-        let mut triple: Option<char> = None;
-        let mut inside = false;
-        for line in patch.lines() {
-            if line.starts_with("@@") {
-                inside = true;
-                continue;
-            }
-            if !inside || line.is_empty() {
-                continue;
-            }
-            let marker = line.chars().next().unwrap_or_default();
-            if marker != ' ' && marker != side {
-                continue;
-            }
-            let source = &line[1..];
-            if marker == side {
-                saw_change = true;
-                let trimmed = source.trim();
-                if !trimmed.is_empty()
-                    && (triple.is_some()
-                        || !trimmed.starts_with('#')
-                        || trimmed.starts_with("#!")
-                        || executable_cookie(trimmed))
-                {
-                    return false;
-                }
-            }
-            // Track Python string boundaries so a hash inside a multiline literal is data.
-            let chars: Vec<_> = source.chars().collect();
-            let mut index = 0;
-            let mut single = None;
-            while index < chars.len() {
-                let c = chars[index];
-                if c == '\\' {
-                    index += 2;
-                    continue;
-                }
-                if let Some(quote) = triple {
-                    if chars
-                        .get(index..index + 3)
-                        .is_some_and(|span| span.iter().all(|c| *c == quote))
-                    {
-                        triple = None;
-                        index += 3;
-                    } else {
-                        index += 1;
-                    }
-                } else if let Some(quote) = single {
-                    if c == quote {
-                        single = None;
-                    }
-                    index += 1;
-                } else if c == '#' {
-                    break;
-                } else if c == '\'' || c == '"' {
-                    if chars
-                        .get(index..index + 3)
-                        .is_some_and(|span| span.iter().all(|other| *other == c))
-                    {
-                        triple = Some(c);
-                        index += 3;
-                    } else {
-                        single = Some(c);
-                        index += 1;
-                    }
-                } else {
-                    index += 1;
-                }
-            }
-        }
-        if triple.is_some() {
-            return false;
-        }
-    }
-    saw_change
-}
-fn executable_cookie(line: &str) -> bool {
-    line.find("coding")
-        .is_some_and(|index| line[index + 6..].starts_with([':', '=']))
-}
 pub(crate) fn planning_blob(blob: &Value) -> bool {
     text(&blob["text"]).lines().take(10).any(|line| {
         line == "> **Non-authoritative planning scratchpad — do not review for consistency.**"
@@ -448,7 +359,25 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
     policy.validate()?;
     let node = &snapshot.initial;
     let current = &snapshot.current;
-    let previous = &snapshot.previous;
+    let policy_identity = serde_json::to_value(policy)?;
+    let mut previous = snapshot.previous.clone();
+    if previous["policy_identity"] != policy_identity {
+        for key in [
+            "authenticated_review_head",
+            "authenticated_review_id",
+            "authenticated_review_request",
+            "authenticated_review_body",
+            "authenticated_review_check_inventory",
+            "known_codex_review_ids",
+            "review_wave_ids",
+            "review_wave_base_oid",
+        ] {
+            if let Some(value) = previous.get_mut(key) {
+                *value = Value::Null;
+            }
+        }
+    }
+    let previous = &previous;
     let head = text(&node["headRefOid"]);
     let base = text(&node["baseRefOid"]);
     let rollup = &node["headRef"]["target"]["statusCheckRollup"];
@@ -758,6 +687,7 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
     if !state.is_object() {
         state = json!({});
     }
+    state["policy_identity"] = policy_identity;
     state["head_oid"] = json!(head);
     state["check_inventory"] = json!(check_inventory);
     state["known_codex_review_ids"] = json!(known_ids);

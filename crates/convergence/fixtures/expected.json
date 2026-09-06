@@ -64,7 +64,8 @@
   "mutations/comment-only-head.json": {
     "converged": false,
     "reasons": [
-      "check-inventory-unsettled"
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/completed-summary.json": {
@@ -207,6 +208,18 @@
     ]
   },
   "mutations/persisted-request-edited.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/policy-tightened.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/policy-unbound.json": {
     "converged": false,
     "reasons": [
       "quiet-review-not-completed-for-current-head"

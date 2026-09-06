@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "crates/convergence/fixtures"
 POLICY = ROOT / "crates/convergence/examples/repository.toml"
 
+# The active contract exempts rename-only changes and clean base forwards.
+reference.comment_only_patch = lambda _file: False
+
 
 def append_page(connection, page):
     if connection["totalCount"] != page["totalCount"]:
@@ -104,6 +107,15 @@ def reference_evaluation(recording):
     client = RecordedGitHub(recording, current)
     pr = reference.normalize_pull_request(initial)
     pr["_persisted_record"] = copy.deepcopy(recording.get("previous", {}))
+    policy = tomllib.loads(POLICY.read_text())
+    if pr["_persisted_record"].get("policy_identity") != policy:
+        for key in (
+            "authenticated_review_head", "authenticated_review_id",
+            "authenticated_review_request", "authenticated_review_body",
+            "authenticated_review_check_inventory", "known_codex_review_ids",
+            "review_wave_ids", "review_wave_base_oid",
+        ):
+            pr["_persisted_record"].pop(key, None)
     pr["review_threads"] = reference.normalize_review_threads(initial["reviewThreads"]["nodes"], pr["author_login"])
     pr["_review_thread_evidence"] = reference.review_thread_signature(pr["review_threads"])
     for thread in pr["review_threads"]:
@@ -156,6 +168,8 @@ def main():
     parser.add_argument("--write-expectations", action="store_true")
     parser.add_argument("fixtures", nargs="*", type=Path)
     args = parser.parse_args()
+    if args.write_expectations and args.fixtures:
+        parser.error("--write-expectations requires the complete fixture corpus")
     cases = [path.resolve() for path in args.fixtures] or list(fixtures())
     if not cases:
         parser.error("fixture corpus is empty")

@@ -27,6 +27,10 @@ resolved threads so later review requests can authenticate their dispositions.
 The final identity read follows pagination and checks; `checks_green` describes
 those refreshed checks.
 
+State records the complete policy value as its identity. A policy change
+discards retained review authentication and wave counts and qualifies current
+evidence again; check inventories and resolution observation times remain facts.
+
 The [policy example](examples/repository.toml) supplies reviewer identities,
 request and summary grammars, root completion reaction, check exemptions,
 pagination bounds, and escalation wave caps. Check patterns use case-insensitive
@@ -45,11 +49,15 @@ at least one gating check. An empty or entirely exempt inventory cannot
 converge. The harness also applies the
 [review-workflow identity contract](../../docs/spec/review-workflows.md): a
 change of open or closed state between observations invalidates the snapshot.
+Policy-bound state and the removal of the comment-only exemption apply to both
+evaluations. Comment-only changes require a fresh quiet review; rename-only
+changes and clean base forwards remain exempt.
 
 Run `python3 tooling/convergence-reconciler/differential.py` after building the
 CLI. The harness compares convergence and the complete reason set for every
 fixture. `--write-expectations` writes the Python outcomes for Rust corpus tests
-only after every comparison agrees.
+only after every comparison agrees. It rejects explicit fixture selections when
+writing expectations.
 
 [Fixtures](fixtures/) contain losslessly compressed, unredacted provider
 responses for thirty real pull requests. Each [mutation](fixtures/mutations/)
@@ -57,8 +65,8 @@ names its source, the evidence edge it exercises, and explicit JSON-pointer
 replacements. Recorded responses remain unchanged. Mutations cover request edits
 and deletions, body-only findings, completion summaries, pre-green requests,
 review edits after disposition, wave boundaries and check reruns, rename-only
-and comment-only heads, clean and material base forwards, 101-thread pagination,
-and disappearing checks.
+and comment-only heads requiring a fresh review, clean and material base
+forwards, 101-thread pagination, and disappearing checks.
 
 Not built: consumer changes, provider abstractions, new convergence gates,
 schedulers, storage tables, or migrations.

@@ -1,0 +1,10 @@
+{
+  "source": "check-rerun.json",
+  "edge": "unbound persisted evidence cannot authenticate a request after a check rerun",
+  "mutations": [
+    {
+      "path": "/previous/policy_identity",
+      "value": null
+    }
+  ]
+}
