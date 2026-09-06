@@ -542,7 +542,7 @@ impl RepoWatchStore {
         let expected = Decimal::from(expected_generation);
         if current_generation != expected {
             let exact_replay: bool = sqlx::query_scalar(
-                "SELECT frontier_generation > $2
+                "SELECT last_frontier_commit_predecessor = $2
                         AND last_frontier_commit_digest = sha256($3)
                    FROM repository_state WHERE repository = $1",
             )
@@ -710,12 +710,14 @@ impl RepoWatchStore {
             "UPDATE repository_state
                 SET frontier_generation = $2,
                     last_frontier_commit_digest = sha256($3),
+                    last_frontier_commit_predecessor = $5,
                     updated_at = statement_timestamp()
               WHERE repository = $1 AND frontier_generation = $4",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(next_generation))
         .bind(candidate_identity.as_slice())
+        .bind(expected)
         .bind(expected)
         .execute(&mut *transaction)
         .await?;
@@ -790,6 +792,7 @@ impl RepoWatchStore {
             "UPDATE repository_state
                 SET frontier_generation = $2,
                     last_frontier_commit_digest = sha256($3),
+                    last_frontier_commit_predecessor = $4,
                     updated_at = statement_timestamp()
               WHERE repository = $1 AND frontier_generation = $4",
         )

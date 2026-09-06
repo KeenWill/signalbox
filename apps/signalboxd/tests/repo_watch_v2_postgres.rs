@@ -1185,6 +1185,54 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             events: Box::new([EventAdmission::Replayed]),
         }
     );
+    let intervening_title = PullRequestTitle::try_new(String::from("Intervening projection"))?;
+    projection.pull_requests[0].title = &intervening_title;
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &projection,
+                restored_generation,
+                &frontier_entries(&restored_frontier),
+                &[],
+                EventProducer::Poll,
+                observed_at + Duration::from_secs(7),
+            )
+            .await?,
+        FrontierEventAdmission::Committed {
+            generation: restored_generation + 1,
+            events: Box::new([]),
+        }
+    );
+    projection.pull_requests[0].title = &eventful_projection_title;
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &projection,
+                restored_generation + 1,
+                &frontier_entries(&restored_frontier),
+                &[restored_occurrence],
+                EventProducer::Poll,
+                observed_at + Duration::from_secs(8),
+            )
+            .await?,
+        FrontierEventAdmission::Committed {
+            generation: restored_generation + 2,
+            events: Box::new([EventAdmission::Replayed]),
+        }
+    );
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &projection,
+                0,
+                &frontier_entries(&restored_frontier),
+                &[restored_occurrence],
+                EventProducer::Poll,
+                observed_at + Duration::from_secs(8),
+            )
+            .await?,
+        FrontierEventAdmission::Stale
+    );
     let retained_sequence: Decimal = sqlx::query_scalar(
         "SELECT sequence FROM frontier
           WHERE repository = $1 AND stream_identity = $2",
