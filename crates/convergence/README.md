@@ -27,6 +27,12 @@ resolved threads so later review requests can authenticate their dispositions.
 The final identity read follows pagination and checks; `checks_green` describes
 those refreshed checks.
 
+JSON also includes the revalidated pull-request identity for operational
+drivers. `--repo owner/name` selects the live repository instead of the policy's
+repository. The Python
+[reconciler](../../tooling/convergence-reconciler/README.md) delegates its
+evidence evaluation to this CLI.
+
 The [policy example](examples/repository.toml) supplies reviewer identities,
 request and summary grammars, root completion reaction, check exemptions,
 pagination bounds, and escalation wave caps. Check patterns use case-insensitive

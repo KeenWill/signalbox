@@ -1,13 +1,12 @@
 # Pull-request convergence reconciler
 
-`reconcile.py` is a standalone operational loop for keeping a selected set of
-GitHub pull requests moving. It reads GitHub directly with `gh api graphql`,
-decides from that snapshot whether each pull request has converged, and invokes
-operator-supplied commands when an unconverged pull request has no active work.
-Only pull requests whose head repository is the configured repository are
-eligible; matching branch names from forks are never tracked or dispatched. It
-has no Signalbox daemon, service, or database integration and uses only the
-Python 3 standard library.
+`reconcile.py` keeps selected GitHub pull requests moving. It lists candidates
+with `gh api graphql` and calls `signalbox-converge evaluate` for each current
+snapshot and verdict. It invokes operator-supplied commands when an unconverged
+pull request has no active work. Only pull requests whose head repository is the
+configured repository are eligible. The loop, dispatch fence, and cool-off state
+are Python; evidence rules are in
+[signalbox-convergence](../../crates/convergence/README.md).
 
 The script writes one JSON log record for every decision. By default those
 records go to standard error and a compact operator summary goes to standard
@@ -18,8 +17,13 @@ file is bound to one repository and is rejected under another.
 
 ## Requirements and invocation
 
-The only runtime requirements are Python 3 and an authenticated `gh` CLI whose
-token can read the configured repository. Run one non-mutating tick first:
+Runtime requires Python 3, an authenticated `gh` CLI, and `signalbox-converge`
+on `PATH`. Build the CLI and run one non-mutating tick:
+
+```console
+cargo build -p signalbox-convergence --bin signalbox-converge
+export PATH="$PWD/target/debug:$PATH"
+```
 
 ```console
 python3 tooling/convergence-reconciler/reconcile.py \
@@ -40,70 +44,18 @@ service manager provides a persistent runtime directory. Writes use a temporary
 file, atomic replacement, and synchronization of both the file and its parent
 directory before a dispatch child can start.
 
-## Convergence predicate
+## Convergence evaluation
 
-An open, watched pull request is converged exactly when all seven facts hold on
-one current GitHub snapshot:
+The [shared policy](../../crates/convergence/examples/repository.toml)
+configures reviewers, evidence grammars, check exemptions, and limits.
+`--policy` selects a TOML or JSON policy file; `--repo` selects the repository
+for live reads.
 
-1. Every ordinary review thread is resolved and has a recognized in-thread fix
-   or decline disposition from a repository owner, member, or collaborator.
-   Question, informational, and note threads require a substantive answer. A
-   thread carrying the exact terminal marker `Escalated without disposition`
-   remains open and is reported separately without causing another dispatch.
-2. Unless every changed file is planning-only under the repository banner rule,
-   a trusted repository member explicitly requested Codex review naming the
-   current head OID, and `chatgpt-codex-connector` subsequently completed either
-   a comment-free review or a review whose findings were all validly declined
-   and resolved. Authenticated evidence is retained for an unchanged head across
-   later check reruns.
-3. A check rollup exists on the commit whose OID equals the current head OID,
-   and every gating check is green.
-4. GitHub reports the pull request `MERGEABLE` against its current base.
-5. The current head contains every commit in the current base branch.
-6. The description contains at most 350 words.
-7. The pull request is not a draft.
-
-The escalation marker is valid at wave five only when no extension was taken,
-and at the wave-eight hard stop. It is not accepted during extension waves six
-or seven.
-
-A completed check run is green when its conclusion is `SUCCESS`, `NEUTRAL`, or
-`SKIPPED`; a commit status is green only when it is `SUCCESS`. Queued, pending,
-in-progress, cancelled, timed-out, stale, action-required, and failed results
-block convergence. A missing check rollup blocks convergence. Once a rollup is
-present, only the filtered gating contexts determine green status, so pending or
-failed informational contexts do not re-enter through GitHub's aggregate state.
-A mismatched commit OID blocks convergence even when every returned check is
-successful.
-
-Check names ending with the exact, case-sensitive suffix `(report only)` are
-non-gating. The case-insensitive names `codecov/project` and `codecov/patch` are
-also non-gating, matching the repository's declared informational coverage
-posture. These results are still included in the computed state passed to
-operator commands.
-
-`CONFLICTING` and `UNKNOWN` mergeability both block convergence. Draft pull
-requests also remain unconverged.
-
-The initial lightweight query retrieves 100 open pull-request identities and
-their head repositories at a time. It requires the head repository to equal the
-configured repository, then filters head branches locally with Python's
-case-sensitive shell-pattern matching. Matching and previously tracked open pull
-requests are then fetched in batches of 20, including their first 100 review
-threads, changed files, and check contexts. Each current base/head OID pair is
-compared and then re-read in a separate request so a racing base advance cannot
-converge from stale evidence. Planning-only status checks changed files one at a
-time and stops at the first ineligible file; every file must carry the banner at
-the head and, unless newly added, at the base. Additional thread or check pages
-use dynamically aliased GraphQL fields, up to 20 continuations in one request.
-Review-thread comments, top-level comments, and reviews are also paginated. REST
-compare requests conservatively classify post-review rename-only,
-source-comment-only, and proven clean base-forward changes; a base forward must
-be a single merge of the reviewed head and exact current base whose complete
-patch matches the base delta. REST pull-request-file requests recover base paths
-for renamed planning files. Previously watched node IDs are folded into the
-listing call so merged and closed pull requests can be recorded once and then
-omitted from future queries.
+Each evaluation receives its pull request's prior state through the CLI's
+`--state` file. The returned state is persisted with driver timing and dispatch
+records. The CLI supplies refreshed identity, checks, thread evidence, verdict,
+and every reason; an evaluation error takes the tick-error path without
+dispatch. A new check inventory must settle across observations.
 
 ## Decision flow
 
@@ -138,9 +90,9 @@ Commands must therefore accept those final two arguments. Shell pipelines and
 redirection belong in an operator-owned wrapper script, not in the configured
 command. Standard output or error from a failing command, and standard output
 from a successful dispatch, is truncated to 512 characters and attached to the
-decision log. The configurable command timeout bounds both GitHub GraphQL and
-operator-command subprocesses to protect tick latency; its default is 60
-seconds.
+decision log. The configurable command timeout bounds GitHub listing,
+convergence evaluation, and operator-command subprocesses to protect tick
+latency; its default is 60 seconds.
 
 An unconverged observation starts `unconverged_since`. An inactive result starts
 `idle_since`; active work or a successful dispatch clears it after the
@@ -158,6 +110,7 @@ required. `dispatch_command` is required unless dry-run is enabled.
 | JSON key                  | Environment variable                             | Flag                        | Default                       |
 | ------------------------- | ------------------------------------------------ | --------------------------- | ----------------------------- |
 | `repository`              | `CONVERGENCE_RECONCILER_REPOSITORY`              | `--repo`                    | required                      |
+| `convergence_policy`      | `CONVERGENCE_RECONCILER_CONVERGENCE_POLICY`      | `--policy`                  | repository policy example     |
 | `head_pattern`            | `CONVERGENCE_RECONCILER_HEAD_PATTERN`            | `--head-pattern`            | `agent/*`                     |
 | `interval_seconds`        | `CONVERGENCE_RECONCILER_INTERVAL_SECONDS`        | `--interval-seconds`        | `300`                         |
 | `cool_off_seconds`        | `CONVERGENCE_RECONCILER_COOL_OFF_SECONDS`        | `--cool-off-seconds`        | `1800`                        |
@@ -178,6 +131,7 @@ avoid quoting ambiguity:
 {
   "repository": "OWNER/REPOSITORY",
   "head_pattern": "agent/*",
+  "convergence_policy": "crates/convergence/examples/repository.toml",
   "interval_seconds": 300,
   "cool_off_seconds": 1800,
   "command_timeout_seconds": 60,
@@ -206,12 +160,13 @@ service supervision owns that singleton policy.
 
 ## Tests
 
-The unit tests use explicit synthetic inputs and expectations and never invoke
-`gh` or an operator command:
+Driver tests exercise decisions, state persistence, and dispatch fences with
+recorded convergence results. The
+[fixture corpus](../../crates/convergence/fixtures/) and differential harness
+cover evidence rules against the frozen Python reference.
 
 ```console
+cargo build -p signalbox-convergence --bin signalbox-converge
 python3 tooling/convergence-reconciler/test_reconcile.py
+python3 tooling/convergence-reconciler/differential.py
 ```
-
-To validate GitHub schema compatibility separately, run the first dry-run
-example against a repository the current `gh` identity can read.

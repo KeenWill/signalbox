@@ -252,7 +252,8 @@ authenticated quiet reviews and exempt head changes, retained review waves,
 settled check inventories, current-head checks, mergeability, base ancestry,
 draft status, and description length. Incomplete pagination or a changed
 pull-request identity during decision revalidation is an error; the predicate
-performs no I/O.
+performs no I/O. The Python reconciler delegates evidence evaluation to the
+crate's CLI and retains its loop, dispatch fence, and cool-off state.
 
 ## Planned
 
