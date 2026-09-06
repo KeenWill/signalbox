@@ -7,27 +7,6 @@
 ```rust
 pub struct ToolContinuationUsageLimit {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ToolContinuationUsageLimit
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for model_execution::ToolContinuationUsageLimit {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::ToolContinuationUsageLimit {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ToolContinuationUsageLimit {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl model_execution::ToolContinuationUsageLimit {
     pub const fn new(
         target: signalbox_domain::ResolvedProviderTarget,
@@ -57,27 +36,6 @@ pub type ToolContinuationUsageLimitCatalog = map::HashMap<
 ```rust
 pub struct ProspectiveModelCall {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ProspectiveModelCall
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for model_execution::ProspectiveModelCall {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::ProspectiveModelCall {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ProspectiveModelCall {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl model_execution::ProspectiveModelCall {
     pub fn render(
         &self,
@@ -101,27 +59,6 @@ pub enum ProspectiveModelInput<'a> {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ProspectiveModelInput<'a>
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for model_execution::ProspectiveModelInput<'a> {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::ProspectiveModelInput<'a> {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ProspectiveModelInput<'a> {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl convert::From<signalbox_domain::ContextFrontierId>
     for model_execution::ProspectiveModelInput<'_>
 {
@@ -134,27 +71,6 @@ impl convert::From<signalbox_domain::ContextFrontierId>
 ```rust
 pub struct ReportedModelCallUsage {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ReportedModelCallUsage
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for model_execution::ReportedModelCallUsage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::ReportedModelCallUsage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ReportedModelCallUsage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl model_execution::ReportedModelCallUsage {
     pub const fn usage(self) -> signalbox_domain::ProviderReportedTokenUsage;
     pub const fn input_includes_cache_tokens(self) -> bool;
@@ -176,27 +92,6 @@ pub enum ModelCallIdentityCollision {
     ReclassifiedTurn,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ModelCallIdentityCollision
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for model_execution::ModelCallIdentityCollision {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::ModelCallIdentityCollision {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ModelCallIdentityCollision {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for model_execution::ModelCallIdentityCollision {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -220,27 +115,6 @@ pub enum ModelCallCorruption {
     Execution(signalbox_domain::ModelCallExecutionReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ModelCallCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for model_execution::ModelCallCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::ModelCallCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ModelCallCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for model_execution::ModelCallCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -263,21 +137,6 @@ pub enum ModelCallRepositoryError {
     InvalidTransition(&'static str),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for model_execution::ModelCallRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::ModelCallRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ModelCallRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for model_execution::ModelCallRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -314,27 +173,6 @@ pub enum CredentialPoolRuntimeAction {
     Quarantine,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::CredentialPoolRuntimeAction
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for model_execution::CredentialPoolRuntimeAction {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::CredentialPoolRuntimeAction {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::CredentialPoolRuntimeAction {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## CredentialPoolRuntimeExhaustion
@@ -345,27 +183,6 @@ pub enum CredentialPoolRuntimeExhaustion {
     Fail,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::CredentialPoolRuntimeExhaustion
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for model_execution::CredentialPoolRuntimeExhaustion {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::CredentialPoolRuntimeExhaustion {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::CredentialPoolRuntimeExhaustion {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## CredentialPoolRuntimeMember
@@ -373,27 +190,6 @@ impl<L> layered::LayerExt<L> for model_execution::CredentialPoolRuntimeExhaustio
 ```rust
 pub struct CredentialPoolRuntimeMember {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::CredentialPoolRuntimeMember
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for model_execution::CredentialPoolRuntimeMember {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::CredentialPoolRuntimeMember {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::CredentialPoolRuntimeMember {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl model_execution::CredentialPoolRuntimeMember {
     pub fn credential_reference(&self) -> &str;
 }
@@ -411,27 +207,6 @@ impl model_execution::CredentialPoolRuntimeMember {
 ```rust
 pub struct CredentialPoolRuntimePolicy {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::CredentialPoolRuntimePolicy
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for model_execution::CredentialPoolRuntimePolicy {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::CredentialPoolRuntimePolicy {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::CredentialPoolRuntimePolicy {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl model_execution::CredentialPoolRuntimePolicy {
     pub fn name(&self) -> &str;
 }
@@ -463,27 +238,6 @@ pub type CredentialPoolRuntimeCatalog = map::HashMap<
 ```rust
 pub struct PostgresModelCallRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for model_execution::PostgresModelCallRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for model_execution::PostgresModelCallRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for model_execution::PostgresModelCallRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::PostgresModelCallRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl model_execution::PostgresModelCallRepository {
     pub const fn pool(&self) -> &sqlx_postgres::PgPool;
 }

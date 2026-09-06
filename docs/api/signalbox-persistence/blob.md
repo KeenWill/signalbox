@@ -7,27 +7,6 @@
 ```rust
 pub struct BlobStoreBindingRecord {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for blob::BlobStoreBindingRecord
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for blob::BlobStoreBindingRecord {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for blob::BlobStoreBindingRecord {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for blob::BlobStoreBindingRecord {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl blob::BlobStoreBindingRecord {
     pub const fn store(&self) -> &signalbox_blob_store::BlobStoreName;
 }
@@ -42,27 +21,6 @@ impl blob::BlobStoreBindingRecord {
 ```rust
 pub struct BlobReplicaRecord {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for blob::BlobReplicaRecord
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for blob::BlobReplicaRecord {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for blob::BlobReplicaRecord {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for blob::BlobReplicaRecord {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl blob::BlobReplicaRecord {
     pub const fn store(&self) -> &signalbox_blob_store::BlobStoreName;
     pub const fn object_key(&self) -> &signalbox_blob_store::BlobObjectKey;
@@ -80,27 +38,6 @@ impl blob::BlobReplicaRecord {
 ```rust
 pub struct BlobCatalogEntry {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for blob::BlobCatalogEntry
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for blob::BlobCatalogEntry {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for blob::BlobCatalogEntry {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for blob::BlobCatalogEntry {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl blob::BlobCatalogEntry {
     pub fn replicas(&self) -> &[blob::BlobReplicaRecord];
 }
@@ -133,27 +70,6 @@ pub enum BlobCatalogCorruption {
     StoreLimitExceeded,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for blob::BlobCatalogCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for blob::BlobCatalogCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for blob::BlobCatalogCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for blob::BlobCatalogCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for blob::BlobCatalogCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -171,21 +87,6 @@ pub enum BlobCatalogRepositoryError {
     Corruption(blob::BlobCatalogCorruption),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for blob::BlobCatalogRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for blob::BlobCatalogRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for blob::BlobCatalogRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for blob::BlobCatalogRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -208,27 +109,6 @@ impl convert::From<blob::BlobCatalogCorruption> for blob::BlobCatalogRepositoryE
 ```rust
 pub struct BlobCatalogRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for blob::BlobCatalogRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for blob::BlobCatalogRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for blob::BlobCatalogRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for blob::BlobCatalogRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl blob::BlobCatalogRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     #[cfg(feature = "test-support")]
@@ -261,24 +141,6 @@ impl blob::BlobCatalogRepository {
 ```rust
 #[cfg(feature = "test-support")]
 pub struct BlobCatalogRegistrationFault {/* private */}
-#[cfg(feature = "test-support")]
-impl<T> parse_display::IntoResult<T> for blob::BlobCatalogRegistrationFault {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-#[cfg(feature = "test-support")]
-impl<T> request::IntoRequest<T> for blob::BlobCatalogRegistrationFault {
-    fn into_request(self) -> request::Request<T>;
-}
-#[cfg(feature = "test-support")]
-impl<L> layered::LayerExt<L> for blob::BlobCatalogRegistrationFault {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 #[cfg(feature = "test-support")]
 impl blob::BlobCatalogRegistrationFault {
     pub async fn restore(self) -> result::Result<(), blob::BlobCatalogRepositoryError>;

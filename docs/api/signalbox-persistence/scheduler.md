@@ -7,21 +7,6 @@
 ```rust
 pub struct PostgresEligibilitySweepError(/* private */);
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for scheduler::PostgresEligibilitySweepError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for scheduler::PostgresEligibilitySweepError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for scheduler::PostgresEligibilitySweepError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for scheduler::PostgresEligibilitySweepError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -41,27 +26,6 @@ impl signalbox_application::ClassifyOperatorFailure for scheduler::PostgresEligi
 ```rust
 pub struct PostgresEligibilitySweep {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for scheduler::PostgresEligibilitySweep
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for scheduler::PostgresEligibilitySweep {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for scheduler::PostgresEligibilitySweep {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for scheduler::PostgresEligibilitySweep {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl scheduler::PostgresEligibilitySweep {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn find_sessions(

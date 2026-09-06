@@ -21,27 +21,6 @@ pub struct PrepareContextCompactionRequest {
     pub result_frontier: signalbox_domain::ContextFrontierId,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for context_compaction::PrepareContextCompactionRequest
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for context_compaction::PrepareContextCompactionRequest {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for context_compaction::PrepareContextCompactionRequest {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for context_compaction::PrepareContextCompactionRequest {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## PreparedContextCompaction
@@ -49,27 +28,6 @@ impl<L> layered::LayerExt<L> for context_compaction::PrepareContextCompactionReq
 ```rust
 pub struct PreparedContextCompaction {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for context_compaction::PreparedContextCompaction
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for context_compaction::PreparedContextCompaction {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for context_compaction::PreparedContextCompaction {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for context_compaction::PreparedContextCompaction {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl context_compaction::PreparedContextCompaction {
     pub fn credential_reference(&self) -> &str;
     pub fn summarized_entries(&self) -> &[signalbox_domain::SemanticTranscriptEntryRef];
@@ -98,27 +56,6 @@ impl context_compaction::PreparedContextCompaction {
 ```rust
 pub struct AutomaticContextCompactionPreview {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for context_compaction::AutomaticContextCompactionPreview
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for context_compaction::AutomaticContextCompactionPreview {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for context_compaction::AutomaticContextCompactionPreview {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for context_compaction::AutomaticContextCompactionPreview {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl context_compaction::AutomaticContextCompactionPreview {
     pub fn members(&self) -> &[context_compaction::AutomaticContextCompactionPreviewMember];
 }
@@ -132,29 +69,6 @@ impl context_compaction::AutomaticContextCompactionPreview {
 ```rust
 pub struct AutomaticContextCompactionPreviewMember {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for context_compaction::AutomaticContextCompactionPreviewMember
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for context_compaction::AutomaticContextCompactionPreviewMember
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for context_compaction::AutomaticContextCompactionPreviewMember {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for context_compaction::AutomaticContextCompactionPreviewMember {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl context_compaction::AutomaticContextCompactionPreviewMember {
     pub const fn position(self) -> u64;
     pub const fn reference(self) -> signalbox_domain::SemanticTranscriptEntryRef;
@@ -173,27 +87,6 @@ pub struct AppliedContextCompaction {
     pub result_frontier: signalbox_domain::ContextFrontierId,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for context_compaction::AppliedContextCompaction
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for context_compaction::AppliedContextCompaction {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for context_compaction::AppliedContextCompaction {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for context_compaction::AppliedContextCompaction {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## PrepareContextCompactionOutcome
@@ -212,27 +105,6 @@ pub enum PrepareContextCompactionOutcome {
     AutomaticAlreadyAttempted,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for context_compaction::PrepareContextCompactionOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for context_compaction::PrepareContextCompactionOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for context_compaction::PrepareContextCompactionOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for context_compaction::PrepareContextCompactionOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ContextCompactionCommandLookup
@@ -246,27 +118,6 @@ pub enum ContextCompactionCommandLookup {
     Failed,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for context_compaction::ContextCompactionCommandLookup
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for context_compaction::ContextCompactionCommandLookup {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for context_compaction::ContextCompactionCommandLookup {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for context_compaction::ContextCompactionCommandLookup {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## FailedContextCompactionDisposition
@@ -279,27 +130,6 @@ pub enum FailedContextCompactionDisposition {
     Ambiguous,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for context_compaction::FailedContextCompactionDisposition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for context_compaction::FailedContextCompactionDisposition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for context_compaction::FailedContextCompactionDisposition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for context_compaction::FailedContextCompactionDisposition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ContextCompactionRepository
@@ -307,27 +137,6 @@ impl<L> layered::LayerExt<L> for context_compaction::FailedContextCompactionDisp
 ```rust
 pub struct ContextCompactionRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for context_compaction::ContextCompactionRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for context_compaction::ContextCompactionRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for context_compaction::ContextCompactionRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for context_compaction::ContextCompactionRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl context_compaction::ContextCompactionRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn prepare(
@@ -392,27 +201,6 @@ pub enum ContextCompactionCorruption {
     InvalidSummary,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for context_compaction::ContextCompactionCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for context_compaction::ContextCompactionCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for context_compaction::ContextCompactionCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for context_compaction::ContextCompactionCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for context_compaction::ContextCompactionCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -431,21 +219,6 @@ pub enum ContextCompactionRepositoryError {
     Corruption(context_compaction::ContextCompactionCorruption),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for context_compaction::ContextCompactionRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for context_compaction::ContextCompactionRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for context_compaction::ContextCompactionRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for context_compaction::ContextCompactionRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

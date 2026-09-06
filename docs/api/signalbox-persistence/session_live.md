@@ -15,21 +15,6 @@ pub enum SessionLiveRepositoryError {
     },
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for session_live::SessionLiveRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_live::SessionLiveRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_live::SessionLiveRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for session_live::SessionLiveRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -49,27 +34,6 @@ impl convert::From<process_read::ProcessReadError> for session_live::SessionLive
 ```rust
 pub struct SessionLiveRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for session_live::SessionLiveRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for session_live::SessionLiveRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_live::SessionLiveRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_live::SessionLiveRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl session_live::SessionLiveRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn read_live_snapshot(

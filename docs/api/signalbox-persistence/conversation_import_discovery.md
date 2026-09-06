@@ -13,29 +13,6 @@ pub struct ImportedConversationPageRequest {
     pub limit: nonzero::NonZeroU32,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedConversationPageRequest
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationPageRequest
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedConversationPageRequest {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationPageRequest {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ImportedTextProjection
@@ -46,27 +23,6 @@ pub struct ImportedTextProjection {
     pub complete: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedTextProjection
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for conversation_import_discovery::ImportedTextProjection {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedTextProjection {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedTextProjection {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ImportedConversationSummary
@@ -81,29 +37,6 @@ pub struct ImportedConversationSummary {
     pub entry_count: u64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedConversationSummary
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationSummary
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedConversationSummary {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationSummary {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ImportedConversationPage
@@ -114,27 +47,6 @@ pub struct ImportedConversationPage {
     pub next_after: option::Option<signalbox_domain::ImportedConversationId>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedConversationPage
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for conversation_import_discovery::ImportedConversationPage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedConversationPage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationPage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ImportedConversationSizeFacts
@@ -146,29 +58,6 @@ pub struct ImportedConversationSizeFacts {
     pub normalized_entry_bytes: u64,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedConversationSizeFacts
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationSizeFacts
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedConversationSizeFacts {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationSizeFacts {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ImportedContinuationReference
@@ -180,29 +69,6 @@ pub struct ImportedContinuationReference {
     pub position: u64,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedContinuationReference
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedContinuationReference
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedContinuationReference {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedContinuationReference {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ImportedConversationDescriptor
@@ -221,29 +87,6 @@ pub struct ImportedConversationDescriptor {
     pub latest: conversation_import_discovery::ImportedContinuationReference,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedConversationDescriptor
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationDescriptor
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedConversationDescriptor {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationDescriptor {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ImportedEntryWindowAnchor
@@ -255,27 +98,6 @@ pub enum ImportedEntryWindowAnchor {
     Position(u64),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedEntryWindowAnchor
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for conversation_import_discovery::ImportedEntryWindowAnchor {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedEntryWindowAnchor {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedEntryWindowAnchor {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ImportedEntryProjection
@@ -290,27 +112,6 @@ pub struct ImportedEntryProjection {
     pub content: conversation_import_discovery::ImportedEntryContentProjection,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedEntryProjection
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for conversation_import_discovery::ImportedEntryProjection {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedEntryProjection {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedEntryProjection {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ImportedEntryContentProjection
@@ -332,29 +133,6 @@ pub enum ImportedEntryContentProjection {
     SourceMessageBlock,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedEntryContentProjection
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedEntryContentProjection
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedEntryContentProjection {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedEntryContentProjection {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ImportedEntryWindow
@@ -369,27 +147,6 @@ pub struct ImportedEntryWindow {
     pub items: vec::Vec<conversation_import_discovery::ImportedEntryProjection>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedEntryWindow
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for conversation_import_discovery::ImportedEntryWindow {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedEntryWindow {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedEntryWindow {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ImportedConversationDiscoveryCorruption
@@ -406,34 +163,6 @@ pub enum ImportedConversationDiscoveryCorruption {
     InvalidEntryEncoding,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L>
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-{
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for conversation_import_discovery::ImportedConversationDiscoveryCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -450,34 +179,6 @@ pub enum ImportedConversationDiscoveryRequestError {
     WindowTooLarge,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-{
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for conversation_import_discovery::ImportedConversationDiscoveryRequestError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -495,25 +196,6 @@ pub enum ImportedConversationDiscoveryError {
     Corruption(conversation_import_discovery::ImportedConversationDiscoveryCorruption),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryError
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryError
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationDiscoveryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for conversation_import_discovery::ImportedConversationDiscoveryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -544,34 +226,6 @@ impl convert::From<conversation_import_discovery::ImportedConversationDiscoveryR
 ```rust
 pub struct ImportedConversationDiscoveryRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L>
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-{
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl conversation_import_discovery::ImportedConversationDiscoveryRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn list(

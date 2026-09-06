@@ -7,27 +7,6 @@
 ```rust
 pub struct RunnerRegistrationRevision(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerRegistrationRevision
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerRegistrationRevision {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerRegistrationRevision {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerRegistrationRevision {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::RunnerRegistrationRevision {
     pub const MIN: Self;
     pub const fn new(value: nonzero::NonZeroU64) -> Self;
@@ -42,27 +21,6 @@ impl runner_protocol::RunnerRegistrationRevision {
 ```rust
 pub struct RunnerConnectionEpoch(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerConnectionEpoch
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionEpoch {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionEpoch {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionEpoch {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::RunnerConnectionEpoch {
     pub const MIN: Self;
     pub const fn new(value: nonzero::NonZeroU64) -> Self;
@@ -77,27 +35,6 @@ impl runner_protocol::RunnerConnectionEpoch {
 ```rust
 pub struct RunnerConnectionLossEpoch(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerConnectionLossEpoch
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionLossEpoch {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionLossEpoch {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionLossEpoch {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::RunnerConnectionLossEpoch {
     pub const MIN: Self;
     pub const fn new(value: nonzero::NonZeroU64) -> Self;
@@ -117,27 +54,6 @@ pub enum RunnerConnectionState {
     Lost,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerConnectionState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## RunnerConnectionCause
@@ -155,27 +71,6 @@ pub enum RunnerConnectionCause {
     EnrollmentRevoked,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerConnectionCause
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionCause {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionCause {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionCause {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## RunnerConnectionSnapshot
@@ -183,27 +78,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionCause {
 ```rust
 pub struct RunnerConnectionSnapshot {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerConnectionSnapshot
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionSnapshot {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionSnapshot {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionSnapshot {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::RunnerConnectionSnapshot {
     pub const fn epoch(self) -> runner_protocol::RunnerConnectionEpoch;
     pub const fn event_ordinal(self) -> u64;
@@ -217,27 +91,6 @@ impl runner_protocol::RunnerConnectionSnapshot {
 ```rust
 pub struct RunnerConnectionLossSnapshot {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerConnectionLossSnapshot
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionLossSnapshot {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionLossSnapshot {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionLossSnapshot {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::RunnerConnectionLossSnapshot {
     pub const fn enrollment(self) -> signalbox_domain::RunnerEnrollmentId;
     pub const fn loss_epoch(self) -> runner_protocol::RunnerConnectionLossEpoch;
@@ -251,27 +104,6 @@ impl runner_protocol::RunnerConnectionLossSnapshot {
 ```rust
 pub struct RunnerConnectionLossPropagationPage {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerConnectionLossPropagationPage
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionLossPropagationPage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionLossPropagationPage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionLossPropagationPage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::RunnerConnectionLossPropagationPage {
     pub fn sessions(&self) -> &[signalbox_domain::SessionId];
 }
@@ -294,27 +126,6 @@ pub enum RunnerConnectionLossSessionDisposition {
     Replayed,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerConnectionLossSessionDisposition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionLossSessionDisposition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionLossSessionDisposition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionLossSessionDisposition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## RunnerConnectionTransition
@@ -331,27 +142,6 @@ pub enum RunnerConnectionTransition {
     ProtocolFailure,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerConnectionTransition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionTransition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionTransition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionTransition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## RunnerConnectionTransitionOutcome
@@ -365,27 +155,6 @@ pub enum RunnerConnectionTransitionOutcome {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerConnectionTransitionOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionTransitionOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionTransitionOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionTransitionOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## NonterminalRunnerConnection
@@ -393,27 +162,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionTransitionOutc
 ```rust
 pub struct NonterminalRunnerConnection {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::NonterminalRunnerConnection
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::NonterminalRunnerConnection {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::NonterminalRunnerConnection {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::NonterminalRunnerConnection {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::NonterminalRunnerConnection {
     pub const fn enrollment(self) -> signalbox_domain::RunnerEnrollmentId;
     pub const fn epoch(self) -> runner_protocol::RunnerConnectionEpoch;
@@ -425,27 +173,6 @@ impl runner_protocol::NonterminalRunnerConnection {
 ```rust
 pub struct AppliedRunnerConnectionTransition {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::AppliedRunnerConnectionTransition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::AppliedRunnerConnectionTransition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::AppliedRunnerConnectionTransition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::AppliedRunnerConnectionTransition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::AppliedRunnerConnectionTransition {
     pub const fn enrollment(self) -> signalbox_domain::RunnerEnrollmentId;
     pub const fn snapshot(self) -> runner_protocol::RunnerConnectionSnapshot;
@@ -460,27 +187,6 @@ pub enum RunnerConnectionTransitionEffect {
     Unchanged(runner_protocol::RunnerConnectionTransitionOutcome),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerConnectionTransitionEffect
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionTransitionEffect {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionTransitionEffect {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionTransitionEffect {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::RunnerConnectionTransitionEffect {
     pub const fn outcome(self) -> runner_protocol::RunnerConnectionTransitionOutcome;
 }
@@ -491,27 +197,6 @@ impl runner_protocol::RunnerConnectionTransitionEffect {
 ```rust
 pub struct StoredValidatedRunnerRegistration {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::StoredValidatedRunnerRegistration
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::StoredValidatedRunnerRegistration {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::StoredValidatedRunnerRegistration {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::StoredValidatedRunnerRegistration {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::StoredValidatedRunnerRegistration {
     pub const fn registration(&self) -> &signalbox_domain::ValidatedRunnerRegistration;
 }
@@ -525,27 +210,6 @@ impl runner_protocol::StoredValidatedRunnerRegistration {
 ```rust
 pub struct RunnerEnrollmentRequestId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerEnrollmentRequestId
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerEnrollmentRequestId {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerEnrollmentRequestId {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerEnrollmentRequestId {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::RunnerEnrollmentRequestId {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
     pub const fn as_uuid(&self) -> &uuid::Uuid;
@@ -558,27 +222,6 @@ impl runner_protocol::RunnerEnrollmentRequestId {
 ```rust
 pub struct IssuedRunnerEnrollmentIdentities {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::IssuedRunnerEnrollmentIdentities
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::IssuedRunnerEnrollmentIdentities {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::IssuedRunnerEnrollmentIdentities {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::IssuedRunnerEnrollmentIdentities {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::IssuedRunnerEnrollmentIdentities {
     pub const fn enrollment(self) -> signalbox_domain::RunnerEnrollmentId;
     pub const fn runner(self) -> signalbox_domain::RunnerId;
@@ -598,27 +241,6 @@ impl runner_protocol::IssuedRunnerEnrollmentIdentities {
 ```rust
 pub struct PristineRunnerEnrollmentRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::PristineRunnerEnrollmentRequest
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::PristineRunnerEnrollmentRequest {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::PristineRunnerEnrollmentRequest {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::PristineRunnerEnrollmentRequest {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::PristineRunnerEnrollmentRequest {
     pub const fn advertisement(&self) -> &signalbox_domain::RunnerAdvertisement;
 }
@@ -645,27 +267,6 @@ pub enum RunnerEnrollmentDisposition {
     Replayed,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerEnrollmentDisposition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerEnrollmentDisposition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerEnrollmentDisposition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerEnrollmentDisposition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## RunnerEnrollmentReceipt
@@ -673,21 +274,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerEnrollmentDisposition {
 ```rust
 pub struct RunnerEnrollmentReceipt {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerEnrollmentReceipt {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerEnrollmentReceipt {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerEnrollmentReceipt {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::RunnerEnrollmentReceipt {
     pub const fn enrollment(&self) -> &signalbox_domain::RunnerEnrollment;
     pub const fn registration(&self) -> &runner_protocol::StoredValidatedRunnerRegistration;
@@ -711,21 +297,6 @@ impl runner_protocol::RunnerEnrollmentReceipt {
 ```rust
 pub struct RunnerEnrollmentOutcome {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerEnrollmentOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerEnrollmentOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerEnrollmentOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::RunnerEnrollmentOutcome {
     pub const fn receipt(&self) -> &runner_protocol::RunnerEnrollmentReceipt;
 }
@@ -740,21 +311,6 @@ impl runner_protocol::RunnerEnrollmentOutcome {
 ```rust
 pub struct StoredSessionRunnerPlacement {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> parse_display::IntoResult<T> for runner_protocol::StoredSessionRunnerPlacement {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::StoredSessionRunnerPlacement {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::StoredSessionRunnerPlacement {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::StoredSessionRunnerPlacement {
     pub const fn placement(&self) -> &signalbox_domain::SessionRunnerPlacement;
 }
@@ -783,27 +339,6 @@ impl runner_protocol::StoredSessionRunnerPlacement {
 ```rust
 pub struct StoredRunnerRecoveryWait {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::StoredRunnerRecoveryWait
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::StoredRunnerRecoveryWait {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::StoredRunnerRecoveryWait {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::StoredRunnerRecoveryWait {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::StoredRunnerRecoveryWait {
     pub const fn turn(&self) -> signalbox_domain::TurnId;
     pub const fn runner(&self) -> signalbox_domain::RunnerId;
@@ -818,27 +353,6 @@ impl runner_protocol::StoredRunnerRecoveryWait {
 ```rust
 pub struct RunnerProtocolStore {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerProtocolStore
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerProtocolStore {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerProtocolStore {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerProtocolStore {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl runner_protocol::RunnerProtocolStore {
     pub fn new(pool: sqlx_postgres::PgPool, catalog: signalbox_domain::RunnerCatalog) -> Self;
     pub async fn open_connection(
@@ -1097,27 +611,6 @@ pub enum RunnerEnrollmentRequestFailure {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for runner_protocol::RunnerEnrollmentRequestFailure
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerEnrollmentRequestFailure {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for runner_protocol::RunnerEnrollmentRequestFailure {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for runner_protocol::RunnerEnrollmentRequestFailure {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for runner_protocol::RunnerEnrollmentRequestFailure {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

@@ -19,27 +19,6 @@ pub const FENCED_POOL_MAX_CONNECTIONS: u32;
 ```rust
 pub struct HubFenceGeneration(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> from_ref::FromRef<T> for hub_fence::HubFenceGeneration
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for hub_fence::HubFenceGeneration {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for hub_fence::HubFenceGeneration {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for hub_fence::HubFenceGeneration {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl hub_fence::HubFenceGeneration {
     pub const fn get(self) -> u64;
 }
@@ -59,21 +38,6 @@ pub async fn initialize_hub_fence(
 #[must_use = "the advanced fence must construct its pool while its session remains live"]
 pub struct AdvancedHubFence<'guard> {/* private */}
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for hub_fence::AdvancedHubFence<'guard> {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for hub_fence::AdvancedHubFence<'guard> {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for hub_fence::AdvancedHubFence<'guard> {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl hub_fence::AdvancedHubFence<'_> {
     pub const fn generation(&self) -> hub_fence::HubFenceGeneration;
     pub async fn connect_pool(
@@ -113,27 +77,6 @@ pub enum HubFenceCorruption {
     FenceRetentionFailed,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for hub_fence::HubFenceCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for hub_fence::HubFenceCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for hub_fence::HubFenceCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for hub_fence::HubFenceCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for hub_fence::HubFenceCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -150,21 +93,6 @@ pub enum HubFenceError {
     Corruption(hub_fence::HubFenceCorruption),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for hub_fence::HubFenceError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for hub_fence::HubFenceError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for hub_fence::HubFenceError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for hub_fence::HubFenceError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

@@ -12,21 +12,6 @@ pub const PROGRAM_SDK_V1_SPECIFIER: &str;
 
 ```rust
 pub struct signalbox_program_sdk_v1 {}
-impl<T> parse_display::IntoResult<T> for signalbox_program_sdk_v1 {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for signalbox_program_sdk_v1 {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for signalbox_program_sdk_v1 {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl signalbox_program_sdk_v1 {
     pub fn init() -> extensions::Extension;
     pub fn lazy_init() -> extensions::Extension;
@@ -39,27 +24,6 @@ impl signalbox_program_sdk_v1 {
 ```rust
 pub struct ProgramArtifact(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for ProgramArtifact
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for ProgramArtifact {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for ProgramArtifact {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ProgramArtifact {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl ProgramArtifact {
     pub fn new(source: impl convert::Into<boxed::Box<str>>) -> Self;
     pub fn source(&self) -> &str;
@@ -88,27 +52,6 @@ pub trait LiveDeliverySource {
 ```rust
 pub struct LiveDeliveryFailure(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for LiveDeliveryFailure
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for LiveDeliveryFailure {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for LiveDeliveryFailure {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for LiveDeliveryFailure {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl LiveDeliveryFailure {
     pub fn new(message: impl convert::Into<boxed::Box<str>>) -> Self;
     pub fn message(&self) -> &str;
@@ -128,27 +71,6 @@ pub enum ProgramExecutionOutcome {
     Faulted(signalbox_domain::ProgramFault),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for ProgramExecutionOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for ProgramExecutionOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for ProgramExecutionOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ProgramExecutionOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProgramHostError
@@ -167,21 +89,6 @@ pub enum ProgramHostError {
     Protocol(ProgramHostProtocolError),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for ProgramHostError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for ProgramHostError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ProgramHostError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for ProgramHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -220,34 +127,6 @@ pub enum ProgramHostProtocolError {
     Stalled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for ProgramHostProtocolError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> outref::AsOut<T> for ProgramHostProtocolError
-where
-    T: marker::Copy,
-{
-    #[must_use]
-    fn as_out(&mut self) -> outref::Out<'_, T>;
-}
-impl<T> parse_display::IntoResult<T> for ProgramHostProtocolError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for ProgramHostProtocolError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ProgramHostProtocolError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for ProgramHostProtocolError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -259,27 +138,6 @@ impl error::Error for ProgramHostProtocolError {}
 ```rust
 pub struct ProgramHost {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for ProgramHost
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for ProgramHost {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for ProgramHost {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ProgramHost {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl ProgramHost {
     pub const fn new(
         journal: signalbox_persistence::program_journal::ProgramJournalRepository,

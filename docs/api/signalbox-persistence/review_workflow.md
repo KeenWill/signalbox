@@ -7,27 +7,6 @@
 ```rust
 pub struct ReviewWorkflowStore {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewWorkflowStore
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewWorkflowStore {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewWorkflowStore {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewWorkflowStore {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl review_workflow::ReviewWorkflowStore {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn insert_target(
@@ -264,27 +243,6 @@ impl signalbox_application::ReviewWorkflowTransaction for review_workflow::Revie
 ```rust
 pub struct ReviewAcceptedInputOrigin {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewAcceptedInputOrigin
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewAcceptedInputOrigin {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewAcceptedInputOrigin {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewAcceptedInputOrigin {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl review_workflow::ReviewAcceptedInputOrigin {
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn origin_turn(&self) -> option::Option<signalbox_domain::TurnId>;
@@ -300,27 +258,6 @@ pub enum ReviewTurnLifecycleState {
     Terminal(signalbox_domain::ReviewPassTurnOutcome),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewTurnLifecycleState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewTurnLifecycleState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewTurnLifecycleState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewTurnLifecycleState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ReviewTurnLifecycle
@@ -328,27 +265,6 @@ impl<L> layered::LayerExt<L> for review_workflow::ReviewTurnLifecycleState {
 ```rust
 pub struct ReviewTurnLifecycle {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewTurnLifecycle
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewTurnLifecycle {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewTurnLifecycle {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewTurnLifecycle {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl review_workflow::ReviewTurnLifecycle {
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn accepted_input(&self) -> option::Option<signalbox_domain::AcceptedInputId>;
@@ -365,27 +281,6 @@ pub enum ReserveExternalLinkOutcome {
     Existing(signalbox_domain::ReviewExternalLink),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReserveExternalLinkOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReserveExternalLinkOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReserveExternalLinkOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReserveExternalLinkOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ReviewExternalLinkReservationConflict
@@ -393,27 +288,6 @@ impl<L> layered::LayerExt<L> for review_workflow::ReserveExternalLinkOutcome {
 ```rust
 pub struct ReviewExternalLinkReservationConflict {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewExternalLinkReservationConflict
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewExternalLinkReservationConflict {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewExternalLinkReservationConflict {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewExternalLinkReservationConflict {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl review_workflow::ReviewExternalLinkReservationConflict {
     pub fn existing(&self) -> &signalbox_domain::ReviewExternalLink;
     pub fn requested(&self) -> &signalbox_domain::ReviewExternalLink;
@@ -451,27 +325,6 @@ pub enum ReviewWorkflowInsertionError {
     ExternalLinkNotPending,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewWorkflowInsertionError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewWorkflowInsertionError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewWorkflowInsertionError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewWorkflowInsertionError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for review_workflow::ReviewWorkflowInsertionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -490,27 +343,6 @@ pub enum ReviewWorkflowTransitionError {
     ExternalLink(signalbox_domain::ReviewExternalLinkTransitionError),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewWorkflowTransitionError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewWorkflowTransitionError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewWorkflowTransitionError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewWorkflowTransitionError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for review_workflow::ReviewWorkflowTransitionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -524,27 +356,6 @@ impl error::Error for review_workflow::ReviewWorkflowTransitionError {
 ```rust
 pub struct ReviewWorkflowCorruption {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewWorkflowCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewWorkflowCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewWorkflowCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewWorkflowCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl review_workflow::ReviewWorkflowCorruption {
     pub fn detail(&self) -> &str;
 }
@@ -574,21 +385,6 @@ pub enum ReviewWorkflowStoreError {
     ReservationConflict(review_workflow::ReviewExternalLinkReservationConflict),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewWorkflowStoreError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewWorkflowStoreError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewWorkflowStoreError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for review_workflow::ReviewWorkflowStoreError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

@@ -12,27 +12,6 @@ pub enum StartEligibleTurnIdentityCollision {
     InitialAttempt,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for start_eligible_turn::StartEligibleTurnIdentityCollision
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for start_eligible_turn::StartEligibleTurnIdentityCollision {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for start_eligible_turn::StartEligibleTurnIdentityCollision {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for start_eligible_turn::StartEligibleTurnIdentityCollision {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for start_eligible_turn::StartEligibleTurnIdentityCollision {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -51,27 +30,6 @@ pub enum StartEligibleTurnCorruption {
     Scheduling(submit_input::SubmitInputCorruption),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for start_eligible_turn::StartEligibleTurnCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for start_eligible_turn::StartEligibleTurnCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for start_eligible_turn::StartEligibleTurnCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for start_eligible_turn::StartEligibleTurnCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for start_eligible_turn::StartEligibleTurnCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -93,21 +51,6 @@ pub enum StartEligibleTurnRepositoryError {
     HubInvariant(&'static str),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for start_eligible_turn::StartEligibleTurnRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for start_eligible_turn::StartEligibleTurnRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for start_eligible_turn::StartEligibleTurnRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for start_eligible_turn::StartEligibleTurnRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -138,21 +81,6 @@ pub enum CommitActivationPreviewError {
     WorkspaceInstructions(workspace_instructions::WorkspaceInstructionRepositoryError),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for start_eligible_turn::CommitActivationPreviewError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for start_eligible_turn::CommitActivationPreviewError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for start_eligible_turn::CommitActivationPreviewError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for start_eligible_turn::CommitActivationPreviewError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -171,27 +99,6 @@ impl signalbox_application::ClassifyOperatorFailure
 ```rust
 pub struct PreparedActivationPreview {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for start_eligible_turn::PreparedActivationPreview
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for start_eligible_turn::PreparedActivationPreview {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for start_eligible_turn::PreparedActivationPreview {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for start_eligible_turn::PreparedActivationPreview {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl start_eligible_turn::PreparedActivationPreview {
     pub const fn prepared(&self) -> &signalbox_domain::PreparedTurnActivation;
 }
@@ -205,27 +112,6 @@ pub enum CommitActivationPreviewOutcome {
     Stale,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for start_eligible_turn::CommitActivationPreviewOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for start_eligible_turn::CommitActivationPreviewOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for start_eligible_turn::CommitActivationPreviewOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for start_eligible_turn::CommitActivationPreviewOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## CommitCompactionFailurePreviewOutcome
@@ -236,29 +122,6 @@ pub enum CommitCompactionFailurePreviewOutcome {
     Stale,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for start_eligible_turn::CommitCompactionFailurePreviewOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for start_eligible_turn::CommitCompactionFailurePreviewOutcome
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for start_eligible_turn::CommitCompactionFailurePreviewOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for start_eligible_turn::CommitCompactionFailurePreviewOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## CommitCountedAttachmentFailurePreviewOutcome
@@ -269,31 +132,6 @@ pub enum CommitCountedAttachmentFailurePreviewOutcome {
     Stale,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T>
-    for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## StartEligibleTurnRepository
@@ -301,27 +139,6 @@ impl<L> layered::LayerExt<L> for start_eligible_turn::CommitCountedAttachmentFai
 ```rust
 pub struct StartEligibleTurnRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for start_eligible_turn::StartEligibleTurnRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for start_eligible_turn::StartEligibleTurnRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for start_eligible_turn::StartEligibleTurnRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for start_eligible_turn::StartEligibleTurnRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl start_eligible_turn::StartEligibleTurnRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn preview(

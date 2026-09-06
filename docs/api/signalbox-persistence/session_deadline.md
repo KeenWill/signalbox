@@ -7,27 +7,6 @@
 ```rust
 pub struct SessionDeadlineBounds {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for session_deadline::SessionDeadlineBounds
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for session_deadline::SessionDeadlineBounds {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_deadline::SessionDeadlineBounds {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_deadline::SessionDeadlineBounds {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl session_deadline::SessionDeadlineBounds {
     pub const fn new(
         admission: option::Option<time::Duration>,
@@ -52,27 +31,6 @@ pub enum SessionDeadlinePassOutcome {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for session_deadline::SessionDeadlinePassOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for session_deadline::SessionDeadlinePassOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_deadline::SessionDeadlinePassOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_deadline::SessionDeadlinePassOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## SessionDeadlineRepositoryError
@@ -84,21 +42,6 @@ pub enum SessionDeadlineRepositoryError {
     Lifecycle(boxed::Box<session_lifecycle::SessionLifecycleRepositoryError>),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for session_deadline::SessionDeadlineRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_deadline::SessionDeadlineRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_deadline::SessionDeadlineRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for session_deadline::SessionDeadlineRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -120,27 +63,6 @@ impl convert::From<session_lifecycle::SessionLifecycleRepositoryError>
 ```rust
 pub struct PostgresSessionDeadlineRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for session_deadline::PostgresSessionDeadlineRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for session_deadline::PostgresSessionDeadlineRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_deadline::PostgresSessionDeadlineRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_deadline::PostgresSessionDeadlineRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl session_deadline::PostgresSessionDeadlineRepository {
     pub const fn new(
         pool: sqlx_postgres::PgPool,

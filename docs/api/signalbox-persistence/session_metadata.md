@@ -12,27 +12,6 @@ pub enum ReplaceSessionMetadataHandlingOutcome {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for session_metadata::ReplaceSessionMetadataHandlingOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for session_metadata::ReplaceSessionMetadataHandlingOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_metadata::ReplaceSessionMetadataHandlingOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_metadata::ReplaceSessionMetadataHandlingOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## SessionMetadataCorruption
@@ -51,27 +30,6 @@ pub enum SessionMetadataCorruption {
     Domain(signalbox_domain::ReplaceSessionMetadataReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for session_metadata::SessionMetadataCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for session_metadata::SessionMetadataCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_metadata::SessionMetadataCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_metadata::SessionMetadataCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for session_metadata::SessionMetadataCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -92,21 +50,6 @@ pub enum SessionMetadataRepositoryError {
     Corruption(session_metadata::SessionMetadataCorruption),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for session_metadata::SessionMetadataRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_metadata::SessionMetadataRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_metadata::SessionMetadataRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for session_metadata::SessionMetadataRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -128,27 +71,6 @@ impl convert::From<session_metadata::SessionMetadataCorruption>
 ```rust
 pub struct SessionMetadataRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for session_metadata::SessionMetadataRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for session_metadata::SessionMetadataRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_metadata::SessionMetadataRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_metadata::SessionMetadataRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl session_metadata::SessionMetadataRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn handle(
@@ -220,21 +142,6 @@ impl signalbox_application::SessionMetadataLister for session_metadata::SessionM
 ```rust
 pub struct PostgresSessionMetadataPage {/* private */}
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for session_metadata::PostgresSessionMetadataPage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_metadata::PostgresSessionMetadataPage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_metadata::PostgresSessionMetadataPage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl session_metadata::PostgresSessionMetadataPage {
     pub async fn next_item(
         &mut self,

@@ -275,7 +275,6 @@ pub struct Directive<T> {
     pub action: DirectiveAction,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for Directive<T> where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReconnectDirectives

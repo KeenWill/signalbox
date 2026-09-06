@@ -7,27 +7,6 @@
 ```rust
 pub struct TurnLivenessPersistenceBounds {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for turn_liveness::TurnLivenessPersistenceBounds
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for turn_liveness::TurnLivenessPersistenceBounds {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for turn_liveness::TurnLivenessPersistenceBounds {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for turn_liveness::TurnLivenessPersistenceBounds {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl turn_liveness::TurnLivenessPersistenceBounds {
     pub const fn new(
         lock_wait: option::Option<time::Duration>,
@@ -55,21 +34,6 @@ pub enum TurnLivenessRepositoryError {
     Terminalization(startup::StartupScanRepositoryError),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for turn_liveness::TurnLivenessRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for turn_liveness::TurnLivenessRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for turn_liveness::TurnLivenessRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for turn_liveness::TurnLivenessRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -95,27 +59,6 @@ pub enum TurnLivenessObservationMode {
     Advance,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for turn_liveness::TurnLivenessObservationMode
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for turn_liveness::TurnLivenessObservationMode {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for turn_liveness::TurnLivenessObservationMode {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for turn_liveness::TurnLivenessObservationMode {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## PostgresTurnLivenessRepository
@@ -123,27 +66,6 @@ impl<L> layered::LayerExt<L> for turn_liveness::TurnLivenessObservationMode {
 ```rust
 pub struct PostgresTurnLivenessRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for turn_liveness::PostgresTurnLivenessRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for turn_liveness::PostgresTurnLivenessRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for turn_liveness::PostgresTurnLivenessRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for turn_liveness::PostgresTurnLivenessRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl turn_liveness::PostgresTurnLivenessRepository {
     pub fn new(
         pool: sqlx_postgres::PgPool,
@@ -221,27 +143,6 @@ impl turn_liveness::PostgresTurnLivenessRepository {
 ```rust
 pub struct QuiescentActiveTurnPage {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for turn_liveness::QuiescentActiveTurnPage
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for turn_liveness::QuiescentActiveTurnPage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for turn_liveness::QuiescentActiveTurnPage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for turn_liveness::QuiescentActiveTurnPage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl turn_liveness::QuiescentActiveTurnPage {
     pub fn candidates(&self) -> &[signalbox_application::StaleTurnCandidate];
 }

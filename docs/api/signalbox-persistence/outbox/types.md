@@ -7,27 +7,6 @@
 ```rust
 pub struct DispatchedOutboxEvent {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedOutboxEvent
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedOutboxEvent {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedOutboxEvent {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedOutboxEvent {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl outbox::DispatchedOutboxEvent {
     pub const fn kind(&self) -> &outbox::DispatchedOutboxEventKind;
 }
@@ -104,27 +83,6 @@ pub enum DispatchedOutboxEventKind {
     DelegationWake(outbox::DispatchedDelegationWake),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedOutboxEventKind
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedOutboxEventKind {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedOutboxEventKind {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedOutboxEventKind {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedSessionCreation
@@ -135,27 +93,6 @@ pub struct DispatchedSessionCreation {
     pub ownership: signalbox_domain::SessionOwnership,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedSessionCreation
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedSessionCreation {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedSessionCreation {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedSessionCreation {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedSessionStateChange
@@ -167,27 +104,6 @@ pub struct DispatchedSessionStateChange {
     pub actor: signalbox_domain::LifecycleActor,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedSessionStateChange
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedSessionStateChange {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedSessionStateChange {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedSessionStateChange {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedSessionTerminal
@@ -200,27 +116,6 @@ pub struct DispatchedSessionTerminal {
     pub actor: signalbox_domain::LifecycleActor,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedSessionTerminal
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedSessionTerminal {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedSessionTerminal {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedSessionTerminal {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedSessionStateKind
@@ -236,27 +131,6 @@ pub enum DispatchedSessionStateKind {
     Parked,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedSessionStateKind
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedSessionStateKind {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedSessionStateKind {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedSessionStateKind {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedTurnTerminalDisposition
@@ -287,27 +161,6 @@ pub enum DispatchedTurnTerminalDisposition {
     Retired,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedTurnTerminalDisposition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedTurnTerminalDisposition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedTurnTerminalDisposition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedTurnTerminalDisposition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedGoalChange
@@ -319,27 +172,6 @@ pub struct DispatchedGoalChange {
     pub kind: mapping::GoalEventDiscriminator,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedGoalChange
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedGoalChange {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedGoalChange {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedGoalChange {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedOwnershipChange
@@ -351,27 +183,6 @@ pub struct DispatchedOwnershipChange {
     pub actor: signalbox_domain::LifecycleActor,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedOwnershipChange
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedOwnershipChange {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedOwnershipChange {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedOwnershipChange {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedCommandSettlement
@@ -382,27 +193,6 @@ pub enum DispatchedCommandSettlement {
     Rejected { kind: string::String },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedCommandSettlement
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedCommandSettlement {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedCommandSettlement {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedCommandSettlement {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedInjectionOutcome
@@ -418,27 +208,6 @@ pub enum DispatchedInjectionOutcome {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedInjectionOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedInjectionOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedInjectionOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedInjectionOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedDelegationUpdate
@@ -483,27 +252,6 @@ pub enum DispatchedDelegationUpdate {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedDelegationUpdate
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationUpdate {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationUpdate {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationUpdate {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedDelegationPolicy
@@ -517,27 +265,6 @@ pub enum DispatchedDelegationPolicy {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedDelegationPolicy
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationPolicy {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationPolicy {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationPolicy {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedBoundChildAction
@@ -549,27 +276,6 @@ pub enum DispatchedBoundChildAction {
     Cancel,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedBoundChildAction
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedBoundChildAction {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedBoundChildAction {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedBoundChildAction {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedDelegationWaitMode
@@ -580,27 +286,6 @@ pub enum DispatchedDelegationWaitMode {
     Background,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedDelegationWaitMode
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationWaitMode {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationWaitMode {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationWaitMode {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedDelegationOutcome
@@ -615,27 +300,6 @@ pub enum DispatchedDelegationOutcome {
     AlreadyTerminal,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedDelegationOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedDelegationReason
@@ -650,27 +314,6 @@ pub enum DispatchedDelegationReason {
     ParentCancelledWithDescendants,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedDelegationReason
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationReason {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationReason {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationReason {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedDelegationProvenance
@@ -697,27 +340,6 @@ pub enum DispatchedDelegationProvenance {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedDelegationProvenance
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationProvenance {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationProvenance {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationProvenance {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedDelegationWake
@@ -734,27 +356,6 @@ pub enum DispatchedDelegationWake {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedDelegationWake
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationWake {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationWake {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationWake {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedToolBatchState
@@ -772,27 +373,6 @@ pub enum DispatchedToolBatchState {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedToolBatchState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedToolBatchState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedToolBatchState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedToolBatchState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedRunnerState
@@ -809,27 +389,6 @@ pub enum DispatchedRunnerState {
     Abandoned,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedRunnerState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedRunnerState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedRunnerState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedRunnerState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedReconciliationOperation
@@ -840,27 +399,6 @@ pub enum DispatchedReconciliationOperation {
     ToolAttempt(signalbox_domain::ToolAttemptId),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedReconciliationOperation
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedReconciliationOperation {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedReconciliationOperation {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedReconciliationOperation {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedModelCallState
@@ -873,27 +411,6 @@ pub enum DispatchedModelCallState {
     Terminal(outbox::DispatchedModelCallDisposition),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedModelCallState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedModelCallState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedModelCallState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedModelCallState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## DispatchedModelCallDisposition
@@ -907,27 +424,6 @@ pub enum DispatchedModelCallDisposition {
     Ambiguous,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::DispatchedModelCallDisposition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::DispatchedModelCallDisposition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::DispatchedModelCallDisposition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::DispatchedModelCallDisposition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## OutboxDeliveryDecision
@@ -938,27 +434,6 @@ pub enum OutboxDeliveryDecision {
     Retry,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::OutboxDeliveryDecision
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::OutboxDeliveryDecision {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::OutboxDeliveryDecision {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::OutboxDeliveryDecision {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## OutboxDispatchOutcome
@@ -970,27 +445,6 @@ pub enum OutboxDispatchOutcome {
     Delivered { sequence: u64 },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::OutboxDispatchOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::OutboxDispatchOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::OutboxDispatchOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::OutboxDispatchOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## OutboxConsumer
@@ -1001,25 +455,4 @@ pub enum OutboxConsumer {
     RepoWatch,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::OutboxConsumer
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::OutboxConsumer {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::OutboxConsumer {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::OutboxConsumer {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```

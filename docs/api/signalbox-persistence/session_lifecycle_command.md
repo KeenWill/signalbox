@@ -12,31 +12,6 @@ pub enum SessionLifecycleCommandHandlingOutcome {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T>
-    for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## SessionLifecycleCommandRepositoryError
@@ -49,25 +24,6 @@ pub enum SessionLifecycleCommandRepositoryError {
     Lifecycle(boxed::Box<session_lifecycle::SessionLifecycleRepositoryError>),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T>
-    for session_lifecycle_command::SessionLifecycleCommandRepositoryError
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T>
-    for session_lifecycle_command::SessionLifecycleCommandRepositoryError
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_lifecycle_command::SessionLifecycleCommandRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for session_lifecycle_command::SessionLifecycleCommandRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -86,29 +42,6 @@ impl convert::From<error::Error>
 ```rust
 pub struct SessionLifecycleCommandRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for session_lifecycle_command::SessionLifecycleCommandRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for session_lifecycle_command::SessionLifecycleCommandRepository
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for session_lifecycle_command::SessionLifecycleCommandRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_lifecycle_command::SessionLifecycleCommandRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl session_lifecycle_command::SessionLifecycleCommandRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn handle(

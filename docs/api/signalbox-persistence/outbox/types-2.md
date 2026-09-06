@@ -28,27 +28,6 @@ pub enum OutboxCorruption {
     InvalidSettlementEvent,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for outbox::OutboxCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::OutboxCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::OutboxCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::OutboxCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for outbox::OutboxCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -65,21 +44,6 @@ pub enum OutboxDispatchError {
     Corruption(outbox::OutboxCorruption),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for outbox::OutboxDispatchError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::OutboxDispatchError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::OutboxDispatchError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for outbox::OutboxDispatchError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -99,27 +63,6 @@ impl convert::From<outbox::OutboxCorruption> for outbox::OutboxDispatchError {
 ```rust
 pub struct OutboxDispatcher {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for outbox::OutboxDispatcher
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::OutboxDispatcher {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::OutboxDispatcher {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::OutboxDispatcher {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl outbox::OutboxDispatcher {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn dispatch_next<Consumer>(
@@ -137,27 +80,6 @@ impl outbox::OutboxDispatcher {
 ```rust
 pub struct OutboxConsumerReader {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for outbox::OutboxConsumerReader
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for outbox::OutboxConsumerReader {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for outbox::OutboxConsumerReader {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for outbox::OutboxConsumerReader {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl outbox::OutboxConsumerReader {
     pub const fn new(pool: sqlx_postgres::PgPool, consumer: outbox::OutboxConsumer) -> Self;
     pub async fn read_next(

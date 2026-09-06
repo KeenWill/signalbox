@@ -10,27 +10,6 @@ pub enum ProcessModelSelection {
     Alias(signalbox_domain::ModelAlias),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessModelSelection
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessModelSelection {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessModelSelection {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessModelSelection {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessRunnerProjectionState
@@ -44,27 +23,6 @@ pub enum ProcessRunnerProjectionState {
     RunnerAbandoned,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessRunnerProjectionState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessRunnerProjectionState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessRunnerProjectionState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessRunnerProjectionState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessRunnerConnectionHealth
@@ -77,27 +35,6 @@ pub enum ProcessRunnerConnectionHealth {
     Lost,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessRunnerConnectionHealth
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessRunnerConnectionHealth {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessRunnerConnectionHealth {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessRunnerConnectionHealth {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessRunnerProjection
@@ -105,27 +42,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessRunnerConnectionHealth {
 ```rust
 pub struct ProcessRunnerProjection {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessRunnerProjection
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessRunnerProjection {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessRunnerProjection {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessRunnerProjection {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl process_read::ProcessRunnerProjection {
     pub const fn selector(&self) -> &signalbox_domain::RunnerSelector;
 }
@@ -152,27 +68,6 @@ impl process_read::ProcessRunnerProjection {
 ```rust
 pub struct ProcessSessionSummary {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessSessionSummary
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessSessionSummary {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessSessionSummary {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessSessionSummary {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl process_read::ProcessSessionSummary {
     pub const fn placement(&self) -> &signalbox_domain::VersionedSessionPlacement;
 }
@@ -189,27 +84,6 @@ impl process_read::ProcessSessionSummary {
 ```rust
 pub struct ProcessSessionDefaults {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessSessionDefaults
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessSessionDefaults {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessSessionDefaults {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessSessionDefaults {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl process_read::ProcessSessionDefaults {
     pub const fn defaults(&self) -> &signalbox_domain::SessionConfigurationDefaults;
 }
@@ -228,27 +102,6 @@ pub enum ProcessSessionDefaultsRead {
     VersionNotFound,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessSessionDefaultsRead
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessSessionDefaultsRead {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessSessionDefaultsRead {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessSessionDefaultsRead {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessScopedTranscriptRead
@@ -260,21 +113,6 @@ pub enum ProcessScopedTranscriptRead {
     Refused(signalbox_domain::SessionReadScopeRefusal),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for process_read::ProcessScopedTranscriptRead {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessScopedTranscriptRead {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessScopedTranscriptRead {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessSessionSummaryReader
@@ -282,21 +120,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessScopedTranscriptRead {
 ```rust
 pub struct ProcessSessionSummaryReader {/* private */}
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for process_read::ProcessSessionSummaryReader {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessSessionSummaryReader {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessSessionSummaryReader {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl process_read::ProcessSessionSummaryReader {
     pub const fn summary_count(&self) -> option::Option<u64>;
     pub async fn next_summary(
@@ -317,27 +140,6 @@ pub enum ProcessCurrentModelCallState {
     CancellationRequested,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessCurrentModelCallState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessCurrentModelCallState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessCurrentModelCallState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessCurrentModelCallState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessCurrentModelCall
@@ -345,27 +147,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessCurrentModelCallState {
 ```rust
 pub struct ProcessCurrentModelCall {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessCurrentModelCall
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessCurrentModelCall {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessCurrentModelCall {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessCurrentModelCall {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl process_read::ProcessCurrentModelCall {
     pub const fn call(&self) -> signalbox_domain::ModelCallId;
     pub const fn state(&self) -> process_read::ProcessCurrentModelCallState;
@@ -380,27 +161,6 @@ pub enum ProcessFailedModelCallDisposition {
     Cancelled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessFailedModelCallDisposition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessFailedModelCallDisposition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessFailedModelCallDisposition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessFailedModelCallDisposition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessProviderModelCallFailureCause
@@ -419,27 +179,6 @@ pub enum ProcessProviderModelCallFailureCause {
     Unrecognized,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessProviderModelCallFailureCause
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessProviderModelCallFailureCause {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessProviderModelCallFailureCause {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessProviderModelCallFailureCause {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessAttachmentPreparationFailureCause
@@ -451,27 +190,6 @@ pub enum ProcessAttachmentPreparationFailureCause {
     Corrupt,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessAttachmentPreparationFailureCause
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessAttachmentPreparationFailureCause {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessAttachmentPreparationFailureCause {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessAttachmentPreparationFailureCause {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessFailedTerminalModelCall
@@ -479,27 +197,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessAttachmentPreparationFailu
 ```rust
 pub struct ProcessFailedTerminalModelCall {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessFailedTerminalModelCall
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessFailedTerminalModelCall {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessFailedTerminalModelCall {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessFailedTerminalModelCall {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl process_read::ProcessFailedTerminalModelCall {
     pub const fn call(&self) -> signalbox_domain::ModelCallId;
     pub const fn disposition(&self) -> process_read::ProcessFailedModelCallDisposition;
@@ -521,27 +218,6 @@ pub enum ProcessModelCallRecoveryPrecondition {
     Parked { turn: signalbox_domain::TurnId },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessModelCallRecoveryPrecondition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessModelCallRecoveryPrecondition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessModelCallRecoveryPrecondition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessModelCallRecoveryPrecondition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessTurnState
@@ -624,27 +300,6 @@ pub enum ProcessTurnState {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessTurnState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessTurnState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessTurnState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessTurnState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessReconciliationOperation
@@ -655,27 +310,6 @@ pub enum ProcessReconciliationOperation {
     ToolAttempt(signalbox_domain::ToolAttemptId),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessReconciliationOperation
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessReconciliationOperation {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessReconciliationOperation {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessReconciliationOperation {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessTranscriptTurn
@@ -683,27 +317,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessReconciliationOperation {
 ```rust
 pub struct ProcessTranscriptTurn {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessTranscriptTurn
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessTranscriptTurn {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessTranscriptTurn {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessTranscriptTurn {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl process_read::ProcessTranscriptTurn {
     pub const fn state(&self) -> &process_read::ProcessTurnState;
 }
@@ -721,27 +334,6 @@ impl process_read::ProcessTranscriptTurn {
 ```rust
 pub struct ProcessModelCallTokenUsage {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessModelCallTokenUsage
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessModelCallTokenUsage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessModelCallTokenUsage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessModelCallTokenUsage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl process_read::ProcessModelCallTokenUsage {
     pub const fn input_tokens(self) -> option::Option<u64>;
     pub const fn output_tokens(self) -> option::Option<u64>;
@@ -758,27 +350,6 @@ pub enum ProcessModelCallUsageProvenance {
     Estimated,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessModelCallUsageProvenance
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessModelCallUsageProvenance {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessModelCallUsageProvenance {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessModelCallUsageProvenance {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessModelCallInputTokenSemantics
@@ -789,27 +360,6 @@ pub enum ProcessModelCallInputTokenSemantics {
     CacheInclusive,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessModelCallInputTokenSemantics
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessModelCallInputTokenSemantics {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessModelCallInputTokenSemantics {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessModelCallInputTokenSemantics {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessTranscriptModelCallUsage
@@ -817,27 +367,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessModelCallInputTokenSemanti
 ```rust
 pub struct ProcessTranscriptModelCallUsage {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessTranscriptModelCallUsage
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessTranscriptModelCallUsage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessTranscriptModelCallUsage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessTranscriptModelCallUsage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl process_read::ProcessTranscriptModelCallUsage {
     pub fn credential_profile(&self) -> &str;
 }
@@ -861,27 +390,6 @@ pub enum ProcessSessionAncestry {
     ImportedConversation,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessSessionAncestry
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessSessionAncestry {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessSessionAncestry {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessSessionAncestry {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessImportedSourceSpeaker
@@ -894,27 +402,6 @@ pub enum ProcessImportedSourceSpeaker {
     Assistant,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessImportedSourceSpeaker
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessImportedSourceSpeaker {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessImportedSourceSpeaker {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessImportedSourceSpeaker {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessImportedContentKind
@@ -932,27 +419,6 @@ pub enum ProcessImportedContentKind {
     MessageContentAbsent,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessImportedContentKind
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessImportedContentKind {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessImportedContentKind {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessImportedContentKind {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessToolExecutionResultDisposition
@@ -963,25 +429,4 @@ pub enum ProcessToolExecutionResultDisposition {
     KnownFailed,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessToolExecutionResultDisposition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessToolExecutionResultDisposition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessToolExecutionResultDisposition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessToolExecutionResultDisposition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```

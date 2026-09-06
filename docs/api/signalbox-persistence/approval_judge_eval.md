@@ -19,27 +19,6 @@ pub const APPROVAL_JUDGE_EVAL_CASE_CATEGORIES: [&str; 9];
 ```rust
 pub struct ApprovalJudgeEvalRunId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge_eval::ApprovalJudgeEvalRunId
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for approval_judge_eval::ApprovalJudgeEvalRunId {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge_eval::ApprovalJudgeEvalRunId {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge_eval::ApprovalJudgeEvalRunId {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl approval_judge_eval::ApprovalJudgeEvalRunId {
     #[must_use]
     pub const fn from_uuid(id: uuid::Uuid) -> Self;
@@ -65,27 +44,6 @@ pub struct ApprovalJudgeEvalRunRecord {
     pub scorecard: value::Value,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge_eval::ApprovalJudgeEvalRunRecord
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for approval_judge_eval::ApprovalJudgeEvalRunRecord {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge_eval::ApprovalJudgeEvalRunRecord {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge_eval::ApprovalJudgeEvalRunRecord {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ApprovalJudgeEvalCallRecord
@@ -99,27 +57,6 @@ pub struct ApprovalJudgeEvalCallRecord {
     pub usage: signalbox_domain::ProviderReportedTokenUsage,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge_eval::ApprovalJudgeEvalCallRecord
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for approval_judge_eval::ApprovalJudgeEvalCallRecord {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge_eval::ApprovalJudgeEvalCallRecord {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge_eval::ApprovalJudgeEvalCallRecord {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ApprovalJudgeEvalRecordingSchema
@@ -127,27 +64,6 @@ impl<L> layered::LayerExt<L> for approval_judge_eval::ApprovalJudgeEvalCallRecor
 ```rust
 pub struct ApprovalJudgeEvalRecordingSchema {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for approval_judge_eval::ApprovalJudgeEvalRecordingSchema
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for approval_judge_eval::ApprovalJudgeEvalRecordingSchema {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge_eval::ApprovalJudgeEvalRecordingSchema {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge_eval::ApprovalJudgeEvalRecordingSchema {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## verify_recording_schema
@@ -198,21 +114,6 @@ pub enum ApprovalJudgeEvalRecordingError {
     },
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for approval_judge_eval::ApprovalJudgeEvalRecordingError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge_eval::ApprovalJudgeEvalRecordingError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge_eval::ApprovalJudgeEvalRecordingError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for approval_judge_eval::ApprovalJudgeEvalRecordingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

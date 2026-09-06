@@ -10,27 +10,6 @@ pub enum LifecycleMetricsCorruption {
     Invalid(&'static str),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for lifecycle_metrics::LifecycleMetricsCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleMetricsCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleMetricsCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleMetricsCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for lifecycle_metrics::LifecycleMetricsCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -47,21 +26,6 @@ pub enum LifecycleMetricsError {
     Corruption(lifecycle_metrics::LifecycleMetricsCorruption),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleMetricsError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleMetricsError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleMetricsError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for lifecycle_metrics::LifecycleMetricsError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -83,27 +47,6 @@ impl convert::From<lifecycle_metrics::LifecycleMetricsCorruption>
 ```rust
 pub struct LifecycleRate {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for lifecycle_metrics::LifecycleRate
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleRate {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleRate {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleRate {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl lifecycle_metrics::LifecycleRate {
     pub const fn numerator(self) -> u64;
     pub const fn denominator(self) -> u64;
@@ -118,27 +61,6 @@ impl lifecycle_metrics::LifecycleRate {
 ```rust
 pub struct LifecycleWeeklyMetrics {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for lifecycle_metrics::LifecycleWeeklyMetrics
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleWeeklyMetrics {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleWeeklyMetrics {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleWeeklyMetrics {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl lifecycle_metrics::LifecycleWeeklyMetrics {
     pub const fn week_start(&self) -> primitive_date_time::PrimitiveDateTime;
     pub fn week_start_date(&self) -> string::String;
@@ -166,27 +88,6 @@ pub enum LifecycleNonTerminalState {
     Parked,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for lifecycle_metrics::LifecycleNonTerminalState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleNonTerminalState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleNonTerminalState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleNonTerminalState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## LifecycleDeadlineViolation
@@ -194,27 +95,6 @@ impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleNonTerminalState {
 ```rust
 pub struct LifecycleDeadlineViolation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for lifecycle_metrics::LifecycleDeadlineViolation
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleDeadlineViolation {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleDeadlineViolation {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleDeadlineViolation {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl lifecycle_metrics::LifecycleDeadlineViolation {
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn state(&self) -> lifecycle_metrics::LifecycleNonTerminalState;
@@ -228,27 +108,6 @@ impl lifecycle_metrics::LifecycleDeadlineViolation {
 ```rust
 pub struct LifecycleMetricsReport {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for lifecycle_metrics::LifecycleMetricsReport
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleMetricsReport {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleMetricsReport {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleMetricsReport {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl lifecycle_metrics::LifecycleMetricsReport {
     pub fn weeks(&self) -> &[lifecycle_metrics::LifecycleWeeklyMetrics];
 }
@@ -270,27 +129,6 @@ impl lifecycle_metrics::LifecycleMetricsReport {
 ```rust
 pub struct LifecycleMetricsRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for lifecycle_metrics::LifecycleMetricsRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleMetricsRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleMetricsRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleMetricsRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl lifecycle_metrics::LifecycleMetricsRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn read(

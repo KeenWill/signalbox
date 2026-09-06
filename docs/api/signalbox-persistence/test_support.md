@@ -9,31 +9,6 @@
 pub struct FleetSoakCensus {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 #[cfg(feature = "test-support")]
-impl<T> from_ref::FromRef<T> for test_support::FleetSoakCensus
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-#[cfg(feature = "test-support")]
-impl<T> parse_display::IntoResult<T> for test_support::FleetSoakCensus {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-#[cfg(feature = "test-support")]
-impl<T> request::IntoRequest<T> for test_support::FleetSoakCensus {
-    fn into_request(self) -> request::Request<T>;
-}
-#[cfg(feature = "test-support")]
-impl<L> layered::LayerExt<L> for test_support::FleetSoakCensus {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-#[cfg(feature = "test-support")]
 impl test_support::FleetSoakCensus {
     pub const fn active_turns(self) -> i64;
     pub const fn terminal_turns(self) -> i64;
@@ -49,31 +24,6 @@ impl test_support::FleetSoakCensus {
 #[cfg(feature = "test-support")]
 pub struct FleetSoakCensusRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-#[cfg(feature = "test-support")]
-impl<T> from_ref::FromRef<T> for test_support::FleetSoakCensusRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-#[cfg(feature = "test-support")]
-impl<T> parse_display::IntoResult<T> for test_support::FleetSoakCensusRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-#[cfg(feature = "test-support")]
-impl<T> request::IntoRequest<T> for test_support::FleetSoakCensusRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-#[cfg(feature = "test-support")]
-impl<L> layered::LayerExt<L> for test_support::FleetSoakCensusRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 #[cfg(feature = "test-support")]
 impl test_support::FleetSoakCensusRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;

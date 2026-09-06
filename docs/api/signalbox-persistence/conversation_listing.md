@@ -19,27 +19,6 @@ pub enum ConversationListingCorruption {
     Inconsistent(&'static str),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_listing::ConversationListingCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for conversation_listing::ConversationListingCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_listing::ConversationListingCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_listing::ConversationListingCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for conversation_listing::ConversationListingCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -56,21 +35,6 @@ pub enum ConversationListingRepositoryError {
     Corruption(conversation_listing::ConversationListingCorruption),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for conversation_listing::ConversationListingRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_listing::ConversationListingRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_listing::ConversationListingRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for conversation_listing::ConversationListingRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -92,27 +56,6 @@ impl convert::From<conversation_listing::ConversationListingCorruption>
 ```rust
 pub struct ConversationListingRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for conversation_listing::ConversationListingRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for conversation_listing::ConversationListingRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_listing::ConversationListingRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_listing::ConversationListingRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl conversation_listing::ConversationListingRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn open_page(
@@ -143,21 +86,6 @@ impl signalbox_application::ConversationLister
 ```rust
 pub struct PostgresConversationPage {/* private */}
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for conversation_listing::PostgresConversationPage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for conversation_listing::PostgresConversationPage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_listing::PostgresConversationPage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl conversation_listing::PostgresConversationPage {
     pub async fn next_item(
         &mut self,

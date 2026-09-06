@@ -211,23 +211,25 @@ class RenderDomainSpineTests(unittest.TestCase):
         self.assertNotIn('DynClone', block)
         self.assertIn('impl Record', block)
 
-    def test_external_blanket_impl_keeps_a_parameter_used_in_trait_arguments(self):
+    def test_substituted_external_blanket_impl_is_excluded_with_generic_trait_arguments(self):
         document = fixture()
         implementation = document['index']['6']['inner']['impl']
-        implementation.update(trait=path('Convert', 104, {'angle_bracketed': {
+        implementation.update(trait=path('FromRef', 104, {'angle_bracketed': {
             'args': [{'type': {'generic': 'T'}}], 'constraints': []}}), blanket_impl={'generic': 'T'})
         implementation['generics'] = {'params': [{'name': 'T', 'kind': {'type': {
             'bounds': [], 'default': None, 'is_synthetic': False}}}], 'where_predicates': []}
-        document['paths']['104'] = {'crate_id': 1, 'path': ['external', 'Convert']}
+        document['paths']['104'] = {'crate_id': 1, 'path': ['axum', 'extract', 'FromRef']}
         block = Renderer(document).block(document['index']['1'])
-        self.assertIn('impl<T> external::Convert<T> for Record', block)
+        self.assertNotIn('FromRef', block)
+        self.assertIn('impl Record', block)
 
-    def test_external_blanket_impl_keeps_a_parameter_used_in_the_self_type(self):
+    def test_external_blanket_impl_keeps_its_unsubstituted_self_type(self):
         document = fixture()
         implementation = document['index']['6']['inner']['impl']
         implementation.update(trait=path('DynClone', 104), blanket_impl={'generic': 'T'})
         implementation['for']['resolved_path']['args'] = {'angle_bracketed': {
             'args': [{'type': {'generic': 'T'}}], 'constraints': []}}
+        implementation['blanket_impl'] = copy.deepcopy(implementation['for'])
         implementation['generics'] = {'params': [{'name': 'T', 'kind': {'type': {
             'bounds': [], 'default': None, 'is_synthetic': False}}}], 'where_predicates': []}
         document['paths']['104'] = {'crate_id': 1, 'path': ['dyn_clone', 'DynClone']}
@@ -594,6 +596,28 @@ pub struct Token;
         self.assertIn('## Event', files['example/types-2.md'])
         self.assertIn('## Token', files['example/types-2.md'])
         self.assertIn('](example/types-2.md)', files['README.md'])
+
+    def test_empty_module_render_is_stable_after_removing_all_split_declarations(self):
+        document = fixture()
+        document['index']['50'] = {
+            **copy.deepcopy(document['index']['0']), 'id': 50, 'name': 'example',
+            'inner': {'module': {'items': [], 'is_crate': False}},
+        }
+        document['index']['0']['inner']['module']['items'] = [50]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'docs/api/sample'
+            with patch('render_domain_spine.ROOT', root):
+                write_files(directory, {'example/types.md': '## Record\n',
+                                        'example/types-2.md': '## Event\n'})
+                files = Renderer(document).files('sample')
+                write_files(directory, files)
+                self.assertEqual(Renderer(document).files('sample'), files)
+                (directory / 'example').rmdir()
+                self.assertEqual(Renderer(document).files('sample'), files)
+        self.assertEqual(set(files), {'README.md', 'example.md'})
+        self.assertNotIn('## ', files['example.md'])
+        self.assertIn('| example | 0 | 0 | 0 | [example](example.md) |', files['README.md'])
 
     def test_oversized_type_group_continues_at_item_boundaries(self):
         document = fixture()

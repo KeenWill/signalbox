@@ -7,27 +7,6 @@
 ```rust
 pub struct ConvergenceSweepObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for convergence_sweep::ConvergenceSweepObservation
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepObservation {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepObservation {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepObservation {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl convergence_sweep::ConvergenceSweepObservation {
     pub const fn head_sha(&self) -> &signalbox_domain::CommitSha;
 }
@@ -48,27 +27,6 @@ pub enum ConvergenceSweepFailureKind {
     StateAccess,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for convergence_sweep::ConvergenceSweepFailureKind
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepFailureKind {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepFailureKind {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepFailureKind {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ConvergenceSweepDecision
@@ -80,27 +38,6 @@ pub enum ConvergenceSweepDecision {
     LiveSession,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for convergence_sweep::ConvergenceSweepDecision
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepDecision {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepDecision {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepDecision {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ConvergenceSweepDispatchState
@@ -108,27 +45,6 @@ impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepDecision {
 ```rust
 pub struct ConvergenceSweepDispatchState {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for convergence_sweep::ConvergenceSweepDispatchState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepDispatchState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepDispatchState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepDispatchState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl convergence_sweep::ConvergenceSweepDispatchState {
     pub const fn dispatch_id(&self) -> uuid::Uuid;
     pub const fn session_id(&self) -> signalbox_domain::SessionId;
@@ -143,27 +59,6 @@ impl convergence_sweep::ConvergenceSweepDispatchState {
 ```rust
 pub struct ConvergenceSweepTargetState {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for convergence_sweep::ConvergenceSweepTargetState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepTargetState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepTargetState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepTargetState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl convergence_sweep::ConvergenceSweepTargetState {
     pub const fn is_parked(&self) -> bool;
     pub const fn retry_ready(&self) -> bool;
@@ -200,27 +95,6 @@ pub enum ConvergenceSweepFailureDisposition {
     ActivityObserved,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for convergence_sweep::ConvergenceSweepFailureDisposition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepFailureDisposition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepFailureDisposition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepFailureDisposition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ConvergenceSweepRetryPolicy
@@ -231,27 +105,6 @@ pub struct ConvergenceSweepRetryPolicy {
     pub backoff_cap: option::Option<time::Duration>,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for convergence_sweep::ConvergenceSweepRetryPolicy
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepRetryPolicy {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepRetryPolicy {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepRetryPolicy {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ConvergenceSweepStoreError
@@ -264,21 +117,6 @@ pub enum ConvergenceSweepStoreError {
     Lifecycle(boxed::Box<session_lifecycle::SessionLifecycleRepositoryError>),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepStoreError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepStoreError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepStoreError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for convergence_sweep::ConvergenceSweepStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -298,27 +136,6 @@ impl convergence_sweep::ConvergenceSweepStoreError {
 ```rust
 pub struct PostgresConvergenceSweepStore {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for convergence_sweep::PostgresConvergenceSweepStore
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for convergence_sweep::PostgresConvergenceSweepStore {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for convergence_sweep::PostgresConvergenceSweepStore {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for convergence_sweep::PostgresConvergenceSweepStore {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl convergence_sweep::PostgresConvergenceSweepStore {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn reconcile_configured_targets(

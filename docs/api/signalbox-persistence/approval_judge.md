@@ -7,27 +7,6 @@
 ```rust
 pub struct SessionAuthorityContext {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge::SessionAuthorityContext
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for approval_judge::SessionAuthorityContext {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge::SessionAuthorityContext {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge::SessionAuthorityContext {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl approval_judge::SessionAuthorityContext {
     #[must_use]
     pub const fn new(
@@ -58,27 +37,6 @@ impl approval_judge::SessionAuthorityContext {
 ```rust
 pub struct PreparedApprovalJudge {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge::PreparedApprovalJudge
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for approval_judge::PreparedApprovalJudge {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge::PreparedApprovalJudge {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge::PreparedApprovalJudge {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl approval_judge::PreparedApprovalJudge {
     pub const fn request(&self) -> &signalbox_domain::ToolRequest;
     pub fn credential_reference(&self) -> &str;
@@ -97,21 +55,6 @@ impl approval_judge::PreparedApprovalJudge {
 ```rust
 pub struct AuthorizedApprovalJudge {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> parse_display::IntoResult<T> for approval_judge::AuthorizedApprovalJudge {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge::AuthorizedApprovalJudge {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge::AuthorizedApprovalJudge {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl signalbox_application::ApprovalJudgeAuthorization for approval_judge::AuthorizedApprovalJudge {
     fn request(&self) -> &signalbox_domain::ToolRequest;
     fn call(&self) -> signalbox_domain::ModelCallId;
@@ -129,21 +72,6 @@ pub enum AuthorizeApprovalJudgeOutcome {
     Authorized(boxed::Box<approval_judge::AuthorizedApprovalJudge>),
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> parse_display::IntoResult<T> for approval_judge::AuthorizeApprovalJudgeOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge::AuthorizeApprovalJudgeOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge::AuthorizeApprovalJudgeOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## PrepareApprovalJudgeOutcome
@@ -155,27 +83,6 @@ pub enum PrepareApprovalJudgeOutcome {
     InFlightAfterRestart(boxed::Box<approval_judge::PreparedApprovalJudge>),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge::PrepareApprovalJudgeOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for approval_judge::PrepareApprovalJudgeOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge::PrepareApprovalJudgeOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge::PrepareApprovalJudgeOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## CompleteApprovalJudgeOutcome
@@ -187,27 +94,6 @@ pub enum CompleteApprovalJudgeOutcome {
     HeadlessEscalationTerminalized,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge::CompleteApprovalJudgeOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for approval_judge::CompleteApprovalJudgeOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge::CompleteApprovalJudgeOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge::CompleteApprovalJudgeOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## FailedApprovalJudgeDisposition
@@ -220,27 +106,6 @@ pub enum FailedApprovalJudgeDisposition {
     Ambiguous,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge::FailedApprovalJudgeDisposition
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for approval_judge::FailedApprovalJudgeDisposition {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge::FailedApprovalJudgeDisposition {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge::FailedApprovalJudgeDisposition {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## PostgresApprovalJudgeRepository
@@ -248,27 +113,6 @@ impl<L> layered::LayerExt<L> for approval_judge::FailedApprovalJudgeDisposition 
 ```rust
 pub struct PostgresApprovalJudgeRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for approval_judge::PostgresApprovalJudgeRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for approval_judge::PostgresApprovalJudgeRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge::PostgresApprovalJudgeRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge::PostgresApprovalJudgeRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl approval_judge::PostgresApprovalJudgeRepository {
     pub async fn prepare(
         &self,
@@ -322,27 +166,6 @@ pub enum ApprovalJudgeCorruption {
     UnsupportedState(string::String),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge::ApprovalJudgeCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for approval_judge::ApprovalJudgeCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge::ApprovalJudgeCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge::ApprovalJudgeCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for approval_judge::ApprovalJudgeCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -365,21 +188,6 @@ pub enum ApprovalJudgeRepositoryError {
     Corruption(approval_judge::ApprovalJudgeCorruption),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for approval_judge::ApprovalJudgeRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for approval_judge::ApprovalJudgeRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge::ApprovalJudgeRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for approval_judge::ApprovalJudgeRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

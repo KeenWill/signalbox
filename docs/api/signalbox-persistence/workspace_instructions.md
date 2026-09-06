@@ -12,29 +12,6 @@ pub enum RecordTurnInstructionSnapshotOutcome {
     TurnUnavailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for workspace_instructions::RecordTurnInstructionSnapshotOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for workspace_instructions::RecordTurnInstructionSnapshotOutcome
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for workspace_instructions::RecordTurnInstructionSnapshotOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for workspace_instructions::RecordTurnInstructionSnapshotOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## TurnInstructionManifestPreflight
@@ -46,27 +23,6 @@ pub enum TurnInstructionManifestPreflight {
     TurnUnavailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for workspace_instructions::TurnInstructionManifestPreflight
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for workspace_instructions::TurnInstructionManifestPreflight {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for workspace_instructions::TurnInstructionManifestPreflight {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for workspace_instructions::TurnInstructionManifestPreflight {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## WorkspaceInstructionPlacementObservation
@@ -74,31 +30,6 @@ impl<L> layered::LayerExt<L> for workspace_instructions::TurnInstructionManifest
 ```rust
 pub struct WorkspaceInstructionPlacementObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for workspace_instructions::WorkspaceInstructionPlacementObservation
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for workspace_instructions::WorkspaceInstructionPlacementObservation
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T>
-    for workspace_instructions::WorkspaceInstructionPlacementObservation
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for workspace_instructions::WorkspaceInstructionPlacementObservation {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl workspace_instructions::WorkspaceInstructionPlacementObservation {
     pub const fn runner_owned(&self) -> bool;
 }
@@ -109,31 +40,6 @@ impl workspace_instructions::WorkspaceInstructionPlacementObservation {
 ```rust
 pub struct CountedActivationInstructionEvidence<'a> {/* private */}
 // derives: fmt::Debug, clone::Clone, marker::Copy
-impl<T> from_ref::FromRef<T> for workspace_instructions::CountedActivationInstructionEvidence<'a>
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for workspace_instructions::CountedActivationInstructionEvidence<'a>
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T>
-    for workspace_instructions::CountedActivationInstructionEvidence<'a>
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for workspace_instructions::CountedActivationInstructionEvidence<'a> {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl<'a> workspace_instructions::CountedActivationInstructionEvidence<'a> {
     pub const fn new(
         discovery: signalbox_domain::InstructionDiscoveryId,
@@ -157,23 +63,6 @@ pub enum WorkspaceInstructionRepositoryError {
     Corruption(&'static str),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T>
-    for workspace_instructions::WorkspaceInstructionRepositoryError
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for workspace_instructions::WorkspaceInstructionRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for workspace_instructions::WorkspaceInstructionRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for workspace_instructions::WorkspaceInstructionRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -196,27 +85,6 @@ impl signalbox_application::ClassifyOperatorFailure
 ```rust
 pub struct WorkspaceInstructionRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for workspace_instructions::WorkspaceInstructionRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for workspace_instructions::WorkspaceInstructionRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for workspace_instructions::WorkspaceInstructionRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for workspace_instructions::WorkspaceInstructionRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl workspace_instructions::WorkspaceInstructionRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn preflight_turn_start(

@@ -60,25 +60,6 @@ pub enum AutomaticReconciliationRepositoryError {
     Corruption(&'static str),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T>
-    for automatic_reconciliation::AutomaticReconciliationRepositoryError
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T>
-    for automatic_reconciliation::AutomaticReconciliationRepositoryError
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for automatic_reconciliation::AutomaticReconciliationRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for automatic_reconciliation::AutomaticReconciliationRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -106,33 +87,6 @@ impl convert::From<error::Error>
 ```rust
 pub struct PostgresAutomaticReconciliationRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for automatic_reconciliation::PostgresAutomaticReconciliationRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T>
-    for automatic_reconciliation::PostgresAutomaticReconciliationRepository
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T>
-    for automatic_reconciliation::PostgresAutomaticReconciliationRepository
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L>
-    for automatic_reconciliation::PostgresAutomaticReconciliationRepository
-{
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl automatic_reconciliation::PostgresAutomaticReconciliationRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub const fn with_policy(

@@ -7,27 +7,6 @@
 ```rust
 pub struct SessionModelCredential {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for SessionModelCredential
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for SessionModelCredential {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for SessionModelCredential {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for SessionModelCredential {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl SessionModelCredential {
     pub fn model_family(&self) -> &str;
     pub fn credential_reference(&self) -> &str;
@@ -45,27 +24,6 @@ impl SessionModelCredential {
 ```rust
 pub struct SessionCredentialPin {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for SessionCredentialPin
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for SessionCredentialPin {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for SessionCredentialPin {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for SessionCredentialPin {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl SessionCredentialPin {
     pub fn try_new(
         credentials: vec::Vec<SessionModelCredential>,
@@ -83,27 +41,6 @@ pub enum SessionCredentialPinError {
     DuplicateModelFamily,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for SessionCredentialPinError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for SessionCredentialPinError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for SessionCredentialPinError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for SessionCredentialPinError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ModelCredentialFamilyCatalog
@@ -111,27 +48,6 @@ impl<L> layered::LayerExt<L> for SessionCredentialPinError {
 ```rust
 pub struct ModelCredentialFamilyCatalog {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for ModelCredentialFamilyCatalog
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for ModelCredentialFamilyCatalog {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for ModelCredentialFamilyCatalog {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ModelCredentialFamilyCatalog {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl ModelCredentialFamilyCatalog {
     pub fn try_new(
         entries: impl collect::IntoIterator<
@@ -172,27 +88,6 @@ pub enum ModelCredentialFamilyCatalogError {
     ConflictingTarget,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for ModelCredentialFamilyCatalogError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for ModelCredentialFamilyCatalogError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for ModelCredentialFamilyCatalogError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ModelCredentialFamilyCatalogError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## current_session_credential

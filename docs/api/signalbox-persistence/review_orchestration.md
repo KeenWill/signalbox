@@ -7,27 +7,6 @@
 ```rust
 pub struct PostgresReviewOrchestrationStore {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for review_orchestration::PostgresReviewOrchestrationStore
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_orchestration::PostgresReviewOrchestrationStore {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_orchestration::PostgresReviewOrchestrationStore {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_orchestration::PostgresReviewOrchestrationStore {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl review_orchestration::PostgresReviewOrchestrationStore {
     pub async fn record_command_recovery(
         &self,
@@ -237,27 +216,6 @@ pub enum ReviewOrchestrationCurrentStage {
     Complete,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_orchestration::ReviewOrchestrationCurrentStage
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCurrentStage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCurrentStage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationCurrentStage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ReviewOrchestrationStage
@@ -279,27 +237,6 @@ pub enum ReviewOrchestrationStage {
     Complete,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_orchestration::ReviewOrchestrationStage
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationStage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationStage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationStage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ReviewOrchestrationProgress
@@ -317,27 +254,6 @@ pub struct ReviewOrchestrationProgress {
     pub publication_outcomes_recorded: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_orchestration::ReviewOrchestrationProgress
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationProgress {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationProgress {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationProgress {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ReviewOrchestrationSnapshotFacts
@@ -354,27 +270,6 @@ pub struct ReviewOrchestrationSnapshotFacts {
         option::Option<vec::Vec<signalbox_application::ReviewPublicationMemberOutcome>>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_orchestration::ReviewOrchestrationSnapshotFacts
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationSnapshotFacts {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationSnapshotFacts {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationSnapshotFacts {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ReviewOrchestrationCommandKind
@@ -390,27 +285,6 @@ pub enum ReviewOrchestrationCommandKind {
     Publication,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_orchestration::ReviewOrchestrationCommandKind
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCommandKind {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCommandKind {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationCommandKind {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ReviewOrchestrationCommand
@@ -423,27 +297,6 @@ pub struct ReviewOrchestrationCommand {
     pub kind: review_orchestration::ReviewOrchestrationCommandKind,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_orchestration::ReviewOrchestrationCommand
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCommand {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCommand {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationCommand {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ReviewOrchestrationCommandResult
@@ -455,27 +308,6 @@ pub struct ReviewOrchestrationCommandResult {
     pub progress: review_orchestration::ReviewOrchestrationProgress,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_orchestration::ReviewOrchestrationCommandResult
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCommandResult {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCommandResult {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationCommandResult {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ReviewOrchestrationCommandClaim
@@ -486,42 +318,12 @@ pub enum ReviewOrchestrationCommandClaim {
     Conflicting,
     New(review_orchestration::ReviewOrchestrationCommandGuard),
 }
-impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCommandClaim {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCommandClaim {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationCommandClaim {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ReviewOrchestrationCommandGuard
 
 ```rust
 pub struct ReviewOrchestrationCommandGuard {/* private */}
-impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCommandGuard {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCommandGuard {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationCommandGuard {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl review_orchestration::ReviewOrchestrationCommandGuard {
     pub const fn is_pending(&self) -> bool;
     pub async fn record(
@@ -544,21 +346,6 @@ pub enum ReviewOrchestrationStoreError {
     Corruption(&'static str),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationStoreError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationStoreError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationStoreError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for review_orchestration::ReviewOrchestrationStoreError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

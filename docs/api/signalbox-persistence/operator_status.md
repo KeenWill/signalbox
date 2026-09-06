@@ -10,27 +10,6 @@ pub enum ProcessOperatorStatusItem {
     LifecycleDeadlineViolation(lifecycle_metrics::LifecycleDeadlineViolation),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for operator_status::ProcessOperatorStatusItem
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for operator_status::ProcessOperatorStatusItem {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for operator_status::ProcessOperatorStatusItem {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for operator_status::ProcessOperatorStatusItem {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## ProcessOperatorStatusCounts
@@ -38,27 +17,6 @@ impl<L> layered::LayerExt<L> for operator_status::ProcessOperatorStatusItem {
 ```rust
 pub struct ProcessOperatorStatusCounts {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for operator_status::ProcessOperatorStatusCounts
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for operator_status::ProcessOperatorStatusCounts {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for operator_status::ProcessOperatorStatusCounts {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for operator_status::ProcessOperatorStatusCounts {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl operator_status::ProcessOperatorStatusCounts {
     pub const fn lifecycle_weeks(self) -> u64;
     pub const fn lifecycle_deadline_violations(self) -> u64;
@@ -70,27 +28,6 @@ impl operator_status::ProcessOperatorStatusCounts {
 ```rust
 pub struct ProcessOperatorStatusRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for operator_status::ProcessOperatorStatusRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for operator_status::ProcessOperatorStatusRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for operator_status::ProcessOperatorStatusRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for operator_status::ProcessOperatorStatusRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl operator_status::ProcessOperatorStatusRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn open(
@@ -106,21 +43,6 @@ impl operator_status::ProcessOperatorStatusRepository {
 
 ```rust
 pub struct ProcessOperatorStatusReader {/* private */}
-impl<T> parse_display::IntoResult<T> for operator_status::ProcessOperatorStatusReader {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for operator_status::ProcessOperatorStatusReader {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for operator_status::ProcessOperatorStatusReader {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl operator_status::ProcessOperatorStatusReader {
     pub async fn next_item(
         &mut self,
@@ -145,21 +67,6 @@ pub enum ProcessOperatorStatusCorruption {
     },
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for operator_status::ProcessOperatorStatusCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for operator_status::ProcessOperatorStatusCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for operator_status::ProcessOperatorStatusCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for operator_status::ProcessOperatorStatusCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -176,21 +83,6 @@ pub enum ProcessOperatorStatusError {
     Corruption(operator_status::ProcessOperatorStatusCorruption),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for operator_status::ProcessOperatorStatusError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for operator_status::ProcessOperatorStatusError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for operator_status::ProcessOperatorStatusError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for operator_status::ProcessOperatorStatusError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

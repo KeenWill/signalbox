@@ -144,12 +144,6 @@ def has_complementary_export(item):
     return False
 
 
-def contains_generic(value, name):
-    if isinstance(value, dict):
-        return value.get('generic') == name or any(contains_generic(child, name) for child in value.values())
-    return isinstance(value, list) and any(contains_generic(child, name) for child in value)
-
-
 def format_rust(code):
     with tempfile.TemporaryDirectory(prefix='domain-spine-rustfmt-') as temporary:
         path = Path(temporary) / 'declarations.rs'
@@ -530,11 +524,10 @@ class Renderer:
                 continue
             if value['blanket_impl'] and BLANKET_TRAIT.fullmatch(full):
                 continue
-            if value['blanket_impl'] and trait and self.paths.get(str(trait['id']), {}).get('crate_id') != self.crate_id:
-                if any('type' in param['kind'] and not contains_generic(
-                        [value['for'], trait], param['name'])
-                       for param in value['generics']['params']):
-                    continue
+            if (value['blanket_impl'] and trait
+                    and self.paths.get(str(trait['id']), {}).get('crate_id') != self.crate_id
+                    and value['blanket_impl'] != value['for']):
+                continue
             if 'automatically_derived' in implementation['attrs']:
                 derives.append(self.path(trait))
             else:
@@ -585,7 +578,7 @@ class Renderer:
             whole = page(module, blocks)
             links = []
             previous = list((ROOT / 'docs/api' / crate / module).glob('*.md'))
-            if fits(whole) and not previous:
+            if not items or (fits(whole) and not previous):
                 files[f'{module}.md'] = whole
                 links.append(f'[{module}]({module}.md)')
             else:

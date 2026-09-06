@@ -7,27 +7,6 @@
 ```rust
 pub struct GoalTurnCandidates {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for goal_turn::GoalTurnCandidates
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for goal_turn::GoalTurnCandidates {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for goal_turn::GoalTurnCandidates {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for goal_turn::GoalTurnCandidates {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl goal_turn::GoalTurnCandidates {
     pub const fn accepted_input(self) -> signalbox_domain::AcceptedInputId;
     pub const fn turn(self) -> signalbox_domain::TurnId;
@@ -63,25 +42,4 @@ pub enum GoalTurnContinuationOutcome {
     AlreadyScheduled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for goal_turn::GoalTurnContinuationOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for goal_turn::GoalTurnContinuationOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for goal_turn::GoalTurnContinuationOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for goal_turn::GoalTurnContinuationOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```

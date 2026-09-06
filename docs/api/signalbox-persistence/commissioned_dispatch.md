@@ -23,27 +23,6 @@ pub enum CommissionDispatchOutcome {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for commissioned_dispatch::CommissionDispatchOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for commissioned_dispatch::CommissionDispatchOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for commissioned_dispatch::CommissionDispatchOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for commissioned_dispatch::CommissionDispatchOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 ```
 
 ## CommissionedDispatchRepositoryError
@@ -60,23 +39,6 @@ pub enum CommissionedDispatchRepositoryError {
     Corruption(&'static str),
 }
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T>
-    for commissioned_dispatch::CommissionedDispatchRepositoryError
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for commissioned_dispatch::CommissionedDispatchRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for commissioned_dispatch::CommissionedDispatchRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl fmt::Display for commissioned_dispatch::CommissionedDispatchRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -96,27 +58,6 @@ impl convert::From<error::Error> for commissioned_dispatch::CommissionedDispatch
 ```rust
 pub struct PostgresCommissionedDispatchStore {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for commissioned_dispatch::PostgresCommissionedDispatchStore
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> parse_display::IntoResult<T> for commissioned_dispatch::PostgresCommissionedDispatchStore {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for commissioned_dispatch::PostgresCommissionedDispatchStore {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for commissioned_dispatch::PostgresCommissionedDispatchStore {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl commissioned_dispatch::PostgresCommissionedDispatchStore {
     pub fn new(pool: sqlx_postgres::PgPool, credential_pin: SessionCredentialPin) -> Self;
     pub async fn load(
@@ -169,21 +110,6 @@ impl commissioned_dispatch::PostgresCommissionedDispatchStore {
 ```rust
 pub struct RecordedCommissionedDispatch {/* private */}
 // derives: fmt::Debug
-impl<T> parse_display::IntoResult<T> for commissioned_dispatch::RecordedCommissionedDispatch {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<T> request::IntoRequest<T> for commissioned_dispatch::RecordedCommissionedDispatch {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for commissioned_dispatch::RecordedCommissionedDispatch {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
 impl commissioned_dispatch::RecordedCommissionedDispatch {
     #[must_use]
     pub const fn dispatch(&self) -> signalbox_domain::CommissionedDispatchId;
