@@ -41,7 +41,10 @@ use signalbox_application::{
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
     scheduler_ordinary_pass_limit,
 };
-use signalbox_blob_store::BlobObjectKey;
+use signalbox_blob_store::{
+    BlobObjectKey, BlobPutOutcome, BlobReader, BlobStore, BlobStoreError, BlobStoreFuture,
+    ExpectedBlob, OpenedBlob,
+};
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
     ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, BlobDigest, BranchName,
@@ -9653,6 +9656,47 @@ impl ModelCallInputTokenCounter for CountingProbe {
     }
 }
 
+struct TransientUnavailableBlobStore {
+    inner: Arc<dyn BlobStore>,
+    reads: Arc<AtomicUsize>,
+}
+
+impl BlobStore for TransientUnavailableBlobStore {
+    fn put<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        source: BlobReader,
+    ) -> BlobStoreFuture<'a, BlobPutOutcome> {
+        self.inner.put(expected, source)
+    }
+
+    fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob> {
+        if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            Box::pin(async { Err(BlobStoreError::unavailable("transient test read")) })
+        } else {
+            self.inner.open(key)
+        }
+    }
+
+    fn open_verified<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        self.inner.open_verified(expected, key)
+    }
+
+    fn open_range<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+        offset: u64,
+        byte_length: std::num::NonZeroU64,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        self.inner.open_range(expected, key, offset, byte_length)
+    }
+}
+
 /// the provider-native counter is behind attachment verification, so
 /// a missing replica closes the exact prospective call without provider I/O.
 #[tokio::test(flavor = "multi_thread")]
@@ -9804,8 +9848,6 @@ async fn inv062_transient_attachment_unavailability_recounts_after_recovery()
         )
         .await?;
     let queued_turn = accepted_successor_turn(&mut fixture.connection, session_id, 1).await?;
-    let object_path = fixture.object_path();
-    fs::set_permissions(&object_path, fs::Permissions::from_mode(0o000))?;
 
     let model_configuration = support::parse_model_configuration(
         &fixture
@@ -9815,6 +9857,22 @@ async fn inv062_transient_attachment_unavailability_recounts_after_recovery()
             .expect("the fixture owns blob configuration")
             .model_configuration(),
     )?;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut counting_registry = BlobStoreRegistry::initialize_for_conformance(
+        model_configuration.blob_storage(),
+        fixture.runtime.pool.clone(),
+    )
+    .await?
+    .expect("the fixture configures blob storage");
+    let (store_name, inner) = counting_registry.routed_store(BlobStorageClass::UserAttachment);
+    let store_name = store_name.clone();
+    assert!(counting_registry.replace_store_for_conformance(
+        &store_name,
+        Arc::new(TransientUnavailableBlobStore {
+            inner,
+            reads: Arc::clone(&reads),
+        }),
+    ));
     let runtime_models = model_configuration.runtime_model_catalog();
     let provider = RuntimeModelCallProvider::new(
         ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
@@ -9829,7 +9887,7 @@ async fn inv062_transient_attachment_unavailability_recounts_after_recovery()
             outcome: ModelCallInputTokenCount::Cancelled,
         },
         fixture.runtime.pool.clone(),
-        Some(fixture.runtime.blob_store_registry()),
+        Some(Arc::new(counting_registry)),
         model_configuration.provider_input_count_targets(),
     );
     let repository = PostgresModelCallRepository::new(
@@ -9876,6 +9934,7 @@ async fn inv062_transient_attachment_unavailability_recounts_after_recovery()
     let session = SessionId::from_uuid(session_id.into_uuid());
 
     pass.run(session).await?;
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
     assert_eq!(interactions.load(Ordering::SeqCst), 0);
     let call_count: i64 = sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
         .bind(queued_turn.into_uuid())
@@ -9883,7 +9942,6 @@ async fn inv062_transient_attachment_unavailability_recounts_after_recovery()
         .await?;
     assert_eq!(call_count, 0);
 
-    fs::set_permissions(&object_path, fs::Permissions::from_mode(0o600))?;
     let recovered = pass.run(session).await;
 
     assert!(matches!(
@@ -9891,6 +9949,7 @@ async fn inv062_transient_attachment_unavailability_recounts_after_recovery()
         Err(ContextGuardedTurnPassError::CountCancelled(turn))
             if turn == TurnId::from_uuid(queued_turn.into_uuid())
     ));
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
     assert_eq!(interactions.load(Ordering::SeqCst), 1);
     assert!(!fatal_execution.is_triggered());
     let call_count: i64 = sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
