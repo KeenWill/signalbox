@@ -19,7 +19,7 @@ use signalbox_ownership_seam::{
     CreateSession, CreateSessionOutcome, FinishCondition, LifecycleEvent, LifecycleEventKind,
     MergeableState, ModuleDispatch, OffsetDateTime, PullRequestBody, PullRequestNumber,
     PullRequestTitle, ReactionChange, ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId,
-    RepoWatchEvent, RepoWatchEventContentIdentityV1, RepoWatchEventId,
+    RepoWatchEvent, RepoWatchEventContentIdentityV1,
     RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
     RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
     RepoWatchRuleVersion, RepositorySlug, ReviewState, SessionCommand, SessionCreationCause,
@@ -221,37 +221,6 @@ pub enum FrontierReleaseAdmission {
     Absent,
     /// The repository frontier advanced after the caller observed it.
     Stale,
-}
-
-/// Durable coordinates used to evaluate retained facts in observation order.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EventEvaluationPosition {
-    event: RepoWatchEventId,
-    repository_event_ordinal: u64,
-    frontier_generation: u64,
-    event_ordinal: u64,
-}
-
-impl EventEvaluationPosition {
-    /// Returns the retained event identity.
-    pub const fn event(&self) -> RepoWatchEventId {
-        self.event
-    }
-
-    /// Returns the event's repository-wide durable order.
-    pub const fn repository_event_ordinal(&self) -> u64 {
-        self.repository_event_ordinal
-    }
-
-    /// Returns the cursor generation that committed the event.
-    pub const fn frontier_generation(&self) -> u64 {
-        self.frontier_generation
-    }
-
-    /// Returns the event's one-based position in its committed batch.
-    pub const fn event_ordinal(&self) -> u64 {
-        self.event_ordinal
-    }
 }
 
 /// Result of activating one configured rule revision.
@@ -771,48 +740,6 @@ impl RepoWatchStore {
         .execute(&self.pool)
         .await?;
         Ok(updated.rows_affected() == 1)
-    }
-
-    /// Reads retained event identities in repository-wide observation order.
-    pub async fn event_evaluation_order(
-        &self,
-        repository: &RepositorySlug,
-    ) -> Result<Box<[EventEvaluationPosition]>, StoreError> {
-        let rows: Vec<(Uuid, Decimal, Decimal, Decimal)> = sqlx::query_as(
-            "SELECT event_id, repository_event_ordinal,
-                    frontier_generation, event_ordinal
-               FROM gh_event
-              WHERE repository = $1
-              ORDER BY repository_event_ordinal",
-        )
-        .bind(repository.as_str())
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(
-                |(event, repository_event_ordinal, frontier_generation, event_ordinal)| {
-                    let repository_event_ordinal = repository_event_ordinal
-                        .to_u64()
-                        .filter(|ordinal| *ordinal > 0)
-                        .ok_or(StoreError::InvalidEventEvaluationPosition)?;
-                    let frontier_generation = frontier_generation
-                        .to_u64()
-                        .filter(|generation| *generation > 0)
-                        .ok_or(StoreError::InvalidEventEvaluationPosition)?;
-                    let event_ordinal = event_ordinal
-                        .to_u64()
-                        .filter(|ordinal| *ordinal > 0)
-                        .ok_or(StoreError::InvalidEventEvaluationPosition)?;
-                    Ok(EventEvaluationPosition {
-                        event: RepoWatchEventId::from_uuid(event),
-                        repository_event_ordinal,
-                        frontier_generation,
-                        event_ordinal,
-                    })
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()
-            .map(Vec::into_boxed_slice)
     }
 
     /// Atomically commits a complete frontier candidate and its ordered facts.

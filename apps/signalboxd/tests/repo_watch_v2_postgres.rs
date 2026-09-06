@@ -590,16 +590,30 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             events: Box::new([EventAdmission::Inserted, EventAdmission::Inserted]),
         }
     );
-    let evaluation_order = store.event_evaluation_order(&repository).await?;
-    assert_eq!(evaluation_order.len(), 2);
-    assert_eq!(evaluation_order[0].event(), earlier_event.id());
-    assert_eq!(evaluation_order[0].repository_event_ordinal(), 1);
-    assert_eq!(evaluation_order[0].frontier_generation(), 1);
-    assert_eq!(evaluation_order[0].event_ordinal(), 1);
-    assert_eq!(evaluation_order[1].event(), event.id());
-    assert_eq!(evaluation_order[1].repository_event_ordinal(), 2);
-    assert_eq!(evaluation_order[1].frontier_generation(), 1);
-    assert_eq!(evaluation_order[1].event_ordinal(), 2);
+    let evaluation_order: Vec<(Uuid, Decimal, Decimal, Decimal)> = sqlx::query_as(
+        "SELECT event_id, repository_event_ordinal, frontier_generation, event_ordinal
+           FROM gh_event WHERE repository = $1 ORDER BY repository_event_ordinal",
+    )
+    .bind(repository.as_str())
+    .fetch_all(&module_pool)
+    .await?;
+    assert_eq!(
+        evaluation_order,
+        vec![
+            (
+                earlier_event.id().into_uuid(),
+                Decimal::from(1_u64),
+                Decimal::from(1_u64),
+                Decimal::from(1_u64),
+            ),
+            (
+                event.id().into_uuid(),
+                Decimal::from(2_u64),
+                Decimal::from(1_u64),
+                Decimal::from(2_u64),
+            ),
+        ]
+    );
     let retained_event_source: (String, Decimal) = sqlx::query_as(
         "SELECT producer, repository_event_ordinal FROM gh_event WHERE event_id = $1",
     )
