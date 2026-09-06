@@ -134,6 +134,17 @@ class RecordedGitHub(reference.GitHubGraphQL):
                     del pr["authenticated_review_ids"][oid]
                     pr["authenticated_review_requests"].pop(oid, None)
 
+    def _is_clean_merge_forward(self, comparison, reviewed_oid, head_oid, base_oid):
+        merge = next((commit for commit in comparison["commits"]
+                      if commit.get("sha") == head_oid
+                      and [parent.get("sha") for parent in commit.get("parents", [])] == [reviewed_oid, base_oid]), None)
+        if merge is None:
+            return False
+        # Base commits are also reachable through the merge; select its head
+        # commit before applying the frozen file-delta and ancestry checks.
+        selected = dict(comparison, commits=[merge])
+        return super()._is_clean_merge_forward(selected, reviewed_oid, head_oid, base_oid)
+
     def execute_rest(self, path):
         key = path.split("/compare/", 1)[1]
         value = self.recording["comparisons"][key]

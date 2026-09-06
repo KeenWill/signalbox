@@ -1,0 +1,63 @@
+{
+  "source": "clean-base-forward.json",
+  "edge": "live clean base forward includes new base commits before its head merge commit",
+  "mutations": [
+    {
+      "path": "/comparisons/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...113746d23d6c7b398ef34464a071dca532791898/commits",
+      "value": [
+        {
+          "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parents": [
+            {
+              "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            }
+          ]
+        },
+        {
+          "sha": "113746d23d6c7b398ef34464a071dca532791898",
+          "parents": [
+            {
+              "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            {
+              "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "/comparisons/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...113746d23d6c7b398ef34464a071dca532791898/total_commits",
+      "value": 2
+    },
+    {
+      "path": "/comparisons/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/commits",
+      "value": [
+        {
+          "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parents": [
+            {
+              "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "/observations/0/0/query",
+      "value": "query($owner:String!,$name:String!,$number:Int!) { repository(owner:$owner,name:$name) { pullRequest(number:$number) { id number state title body lastEditedAt url isDraft reviewDecision author { login } baseRefName baseRefOid headRefName headRefOid headRepository { nameWithOwner } mergeable reviewThreads(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id isResolved comments(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } authorAssociation body createdAt lastEditedAt pullRequestReview { id } } } } } comments(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } authorAssociation body createdAt lastEditedAt } } reviews(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } state body submittedAt lastEditedAt commit { oid } comments(first:1) { totalCount } } } reactions(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { content createdAt user { login } } } files(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { path changeType additions deletions } } } } }"
+    },
+    {
+      "path": "/observations/0/1/variables/head",
+      "value": "113746d23d6c7b398ef34464a071dca532791898"
+    },
+    {
+      "path": "/observations/1/0/query",
+      "value": "query($owner:String!,$name:String!,$number:Int!) { repository(owner:$owner,name:$name) { pullRequest(number:$number) { id number state title body lastEditedAt url isDraft reviewDecision author { login } baseRefName baseRefOid headRefName headRefOid headRepository { nameWithOwner } mergeable reviewThreads(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id isResolved comments(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } authorAssociation body createdAt lastEditedAt pullRequestReview { id } } } } } comments(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } authorAssociation body createdAt lastEditedAt } } reviews(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } state body submittedAt lastEditedAt commit { oid } comments(first:1) { totalCount } } } reactions(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { content createdAt user { login } } } files(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { path changeType additions deletions } } } } }"
+    },
+    {
+      "path": "/observations/1/1/variables/head",
+      "value": "113746d23d6c7b398ef34464a071dca532791898"
+    }
+  ]
+}

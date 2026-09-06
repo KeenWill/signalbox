@@ -230,6 +230,12 @@
       "gating-checks-missing"
     ]
   },
+  "mutations/multi-commit-clean-base-forward.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled"
+    ]
+  },
   "mutations/no-gating-checks.json": {
     "converged": false,
     "reasons": [

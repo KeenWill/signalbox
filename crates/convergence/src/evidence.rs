@@ -344,13 +344,13 @@ fn exempt_change(snapshot: &Snapshot, reviewed: &str, head: &str, base: &str) ->
         return true;
     }
     let commits = array(&delta["commits"]);
-    if commits.len() == 1
-        && commits[0]["sha"] == head
-        && array(&commits[0]["parents"])
-            .iter()
-            .map(|p| text(&p["sha"]))
-            .eq([reviewed, base])
-    {
+    if commits.iter().any(|commit| {
+        commit["sha"] == head
+            && array(&commit["parents"])
+                .iter()
+                .map(|parent| text(&parent["sha"]))
+                .eq([reviewed, base])
+    }) {
         let merge_base = text(&comparison(snapshot, reviewed, base)["merge_base_commit"]["sha"]);
         let base_delta = comparison(snapshot, merge_base, base);
         if !merge_base.is_empty()
