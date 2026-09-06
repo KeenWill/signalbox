@@ -1771,6 +1771,41 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         active_unseen_repositories[0] == first_unseen_repository.as_str()
             || active_unseen_repositories[0] == second_unseen_repository.as_str()
     );
+    let rebuild_stream = [20; 32];
+    let retained_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+        RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+            rebuild_stream,
+            NonZeroU64::new(2).expect("two is positive"),
+            PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
+        ),
+    ])?;
+    let recurring_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(20)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("recurring"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    let recurring_occurrence = event_candidate(
+        &recurring_event,
+        RepoWatchEventContentIdentityV1::from_bytes([20; 32]),
+    );
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &projection,
+                6,
+                &frontier_entries(&retained_frontier),
+                &[recurring_occurrence],
+                EventProducer::Poll,
+                observed_at + Duration::from_secs(5),
+            )
+            .await?,
+        FrontierEventAdmission::Committed {
+            generation: 7,
+            events: Box::new([EventAdmission::Inserted]),
+        }
+    );
     let accepted_event_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE repository = $1")
             .bind(repository.as_str())
@@ -1787,21 +1822,33 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         .bind(repository.as_str())
         .execute(&module_pool)
         .await?;
-    let retained_after_projection_delete: (i64, i64) = sqlx::query_as(
+    let retained_after_projection_delete: (i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM repository_state WHERE repository = $1),
-            (SELECT count(*) FROM gh_event WHERE repository = $1)",
+            (SELECT count(*) FROM gh_event WHERE repository = $1),
+            (SELECT count(*) FROM frontier WHERE repository = $1)",
     )
     .bind(repository.as_str())
     .fetch_one(&module_pool)
     .await?;
-    assert_eq!(retained_after_projection_delete, (0, accepted_event_count));
+    assert_eq!(
+        retained_after_projection_delete,
+        (0, accepted_event_count, 1)
+    );
+
+    let restored_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+        RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+            rebuild_stream,
+            NonZeroU64::new(3).expect("three is positive"),
+            PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
+        ),
+    ])?;
 
     let restored_event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(19)),
         repository.clone(),
         default_branch.clone(),
-        WorkflowName::try_new(String::from("restore"))?,
+        WorkflowName::try_new(String::from("recurring"))?,
         signalbox_ownership_seam::CheckConclusion::Success,
     );
     let restored_occurrence = event_candidate(
@@ -1814,10 +1861,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &projection,
                 0,
-                &frontier_entries(&frontier),
+                &frontier_entries(&restored_frontier),
                 &[restored_occurrence],
                 EventProducer::Poll,
-                observed_at + Duration::from_secs(5),
+                observed_at + Duration::from_secs(6),
             )
             .await?,
         FrontierEventAdmission::Committed {
@@ -1836,6 +1883,31 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         restored_coordinates,
         (Decimal::from(restored_generation), Decimal::from(1_u64))
     );
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &projection,
+                0,
+                &frontier_entries(&restored_frontier),
+                &[restored_occurrence],
+                EventProducer::Poll,
+                observed_at + Duration::from_secs(6),
+            )
+            .await?,
+        FrontierEventAdmission::Committed {
+            generation: restored_generation,
+            events: Box::new([EventAdmission::Replayed]),
+        }
+    );
+    let retained_sequence: Decimal = sqlx::query_scalar(
+        "SELECT sequence FROM frontier
+          WHERE repository = $1 AND stream_identity = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rebuild_stream.as_slice())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(retained_sequence, Decimal::from(3_u64));
 
     module_pool.close().await;
     core_pool.close().await;
