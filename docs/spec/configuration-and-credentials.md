@@ -327,9 +327,11 @@ commits alone, so the default configuration can still commit a terminal
 observation.
 
 `switch_now` on `on_credential_rejected` rotates to the next admitted member;
-the rejected profile and `CredentialRejected` cause remain recorded durably on
-the failed attempt. `switch_now` remains refused on `on_headroom_low`, because
-low headroom is not a failure.
+`CredentialRejected` admits that successor without non-acceptance proof, and its
+`non_acceptance_proven` bit remains false. The rejected profile and
+`CredentialRejected` cause remain recorded durably on the failed attempt.
+`switch_now` remains refused on `on_headroom_low`, because low headroom is not a
+failure.
 
 A `codex_home` refresh race gets no delivery-layer bypass, because the Codex CLI
 reports one undifferentiated authentication failure the adapter cannot split;
