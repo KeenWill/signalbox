@@ -15,7 +15,7 @@ pub use signalbox_application::{
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
     RepoWatchRepositoryStateError, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
     RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
-    derive_repo_watch_events,
+    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 pub use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, ContextFrontierId,

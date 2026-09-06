@@ -59,7 +59,7 @@ commands. It cannot import core persistence, qualify `public` tables, or name
 another module schema.
 
 The module retains an authenticated, HTTPS-only GitHub client for API-relative
-GET requests. It is an external-I/O capability and receives no database handle.
+GET requests and GraphQL observation queries. It receives no database handle.
 The daemon's repository-specific client loader rereads the configured credential
 file on each load and returns only an authenticated client handle. Credential
 and client-construction failures have distinct redacted error classes.
@@ -163,9 +163,13 @@ is a replay; different content is a conflict. Settlement changes a pending
 disposition exactly once. A frontier release supplies its observed generation
 and is stale after any intervening frontier commit.
 
-The v2 module has no poller, webhook listener, command worker, lease-expiry
-task, operator routes, or public-schema persistence surface. Its durable state
-is the module-owned projection and command ledger described above.
+The module's repository task serializes polling and webhook wakes. Poll
+intervals are start-to-start; a wake received during an attempt waits for that
+attempt to finish. Each attempt reloads its committed comparison baseline and
+frontier, fetches a complete observation, and commits the differ's facts with
+their poll or webhook lineage. Failed observations leave the prior committed
+state intact. The daemon does not start these tasks, a webhook listener, or a
+command worker.
 
 Contracts this page relies on but does not own: module-state pruning and outbox
 retention permission in [persistence protocol](persistence-protocol.md), session

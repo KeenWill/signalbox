@@ -158,6 +158,12 @@ pub use signalbox_application::RepoWatchThreadState;
 pub use signalbox_application::RepoWatchWorkflowRunObservation;
 ```
 
+## UuidV7RepoWatchEventIdGenerator
+
+```rust
+pub use signalbox_application::UuidV7RepoWatchEventIdGenerator;
+```
+
 ## derive_repo_watch_events
 
 ```rust

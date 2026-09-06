@@ -626,6 +626,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             ),
         ]
     );
+    let loaded = RepoWatchStore::new(module_pool.clone())
+        .ingest_baseline(&repository)
+        .await?;
+    assert_eq!(loaded.generation, 1);
+    assert_eq!(loaded.observation.as_ref(), Some(&comparison_baseline));
+    assert_eq!(loaded.frontier, frontier);
     let retained_event_source: (String, Decimal) = sqlx::query_as(
         "SELECT producer, repository_event_ordinal FROM gh_event WHERE event_id = $1",
     )
@@ -1956,6 +1962,60 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_one(&module_pool)
     .await?;
     assert_eq!(retained_sequence, Decimal::from(3_u64));
+
+    // A separate repository exercises the runtime's empty-store and restart path.
+    let runtime_repository = RepositorySlug::try_new(String::from("runtime-restart/project"))?;
+    let empty_baseline = store.ingest_baseline(&runtime_repository).await?;
+    assert_eq!(empty_baseline.generation, 0);
+    assert!(empty_baseline.observation.is_none());
+    let observed = signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        repository: runtime_repository.clone(),
+        default_branch: default_branch.clone(),
+        default_head: default_head.clone(),
+        observation: comparison_baseline.clone(),
+        observed_at,
+    };
+    assert!(matches!(
+        store
+            .ingest_observation(&empty_baseline, &observed, EventProducer::Webhook)
+            .await?,
+        FrontierEventAdmission::Committed { generation: 1, .. }
+    ));
+    let restarted = RepoWatchStore::new(module_pool.clone());
+    let restart_baseline = restarted.ingest_baseline(&runtime_repository).await?;
+    assert_eq!(
+        restart_baseline.observation.as_ref(),
+        Some(&comparison_baseline)
+    );
+    assert_eq!(
+        restarted
+            .ingest_observation(&restart_baseline, &observed, EventProducer::Poll)
+            .await?,
+        FrontierEventAdmission::Unchanged
+    );
+    let retry = restarted
+        .ingest_observation(&empty_baseline, &observed, EventProducer::Poll)
+        .await?;
+    let FrontierEventAdmission::Committed { generation, events } = retry else {
+        panic!("an identical retry must recover its committed frontier");
+    };
+    assert_eq!(generation, 1);
+    assert!(!events.is_empty());
+    assert!(
+        events
+            .iter()
+            .all(|event| *event == EventAdmission::Replayed)
+    );
+    let lineage: (i64, bool) = sqlx::query_as(
+        "SELECT count(*), bool_and(producer = 'webhook'
+                AND frontier_generation = 1 AND repository_event_ordinal = event_ordinal)
+           FROM gh_event WHERE repository = $1",
+    )
+    .bind(runtime_repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert!(lineage.0 > 0);
+    assert!(lineage.1);
 
     module_pool.close().await;
     core_pool.close().await;

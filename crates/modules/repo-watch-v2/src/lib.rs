@@ -30,6 +30,9 @@ use uuid::Uuid;
 
 mod baseline;
 pub mod github;
+pub mod ingest;
+mod observation_decode;
+pub mod provider;
 
 use baseline::observation_payload;
 
@@ -521,6 +524,8 @@ impl WebhookDisposition {
 /// Module-local storage failure.
 #[derive(Debug)]
 pub enum StoreError {
+    /// The stored comparison baseline cannot be decoded into checked observations.
+    InvalidComparisonBaseline,
     /// PostgreSQL rejected or could not complete the operation.
     Database(sqlx::Error),
     /// A positive provider identity cannot fit the durable numeric shape.
@@ -550,6 +555,7 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::InvalidComparisonBaseline => "repository-watch comparison baseline is invalid",
             Self::Database(_) => "repository-watch module database operation failed",
             Self::InvalidProviderIdentity => "repository-watch provider identity is not positive",
             Self::InvalidWebhookExpiry => "repository-watch webhook expiry is not after receipt",
@@ -583,6 +589,7 @@ impl fmt::Display for StoreError {
 impl Error for StoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::InvalidComparisonBaseline => None,
             Self::Database(error) => Some(error),
             Self::InvalidProviderIdentity
             | Self::InvalidWebhookExpiry
