@@ -4,7 +4,7 @@ use std::num::NonZeroU64;
 #[derive(Accessors)]
 struct Record {
     /// The stored label.
-    #[get(str, into)]
+    #[get(str)]
     label: String,
     #[get(slice)]
     entries: Vec<u64>,
@@ -35,7 +35,6 @@ fn borrowing_modes_preserve_values_without_moving_the_record() {
     assert_eq!(record.entries(), [3, 5]);
     assert_eq!(*record.boxed(), 7);
     assert_eq!(*record.borrowed(), 11);
-    assert_eq!(record.into_label(), "label");
 }
 
 #[test]

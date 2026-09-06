@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 use syn::{
     Data, DeriveInput, GenericArgument, Ident, LitStr, Member, PathArguments, Type, ext::IdentExt,
     spanned::Spanned,
@@ -52,7 +52,6 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
         let mut mode = None;
         let mut name = field.ident.clone();
-        let mut into = false;
         for attr in attrs {
             if matches!(attr.meta, syn::Meta::Path(_)) {
                 continue;
@@ -64,8 +63,6 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                         .map_err(|error| syn::Error::new_spanned(&literal, error))?;
                     renamed.set_span(literal.span());
                     name = Some(renamed);
-                } else if meta.path.is_ident("into") {
-                    into = true;
                 } else {
                     let selected = meta
                         .path
@@ -164,13 +161,6 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         };
         methods.push(quote!(#(#docs)* #method));
-        if into {
-            let into_name = format_ident!("into_{}", name.unraw(), span = name.span());
-            if !names.insert(into_name.to_string()) {
-                return Err(syn::Error::new_spanned(&name, "duplicate accessor name"));
-            }
-            methods.push(quote!(#(#docs)* pub fn #into_name(self) -> #ty { self.#member }));
-        }
     }
     let name = &input.ident;
     let (implementation, generics, clause) = input.generics.split_for_impl();
