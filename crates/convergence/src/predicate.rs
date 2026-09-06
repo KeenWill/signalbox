@@ -12,7 +12,7 @@ pub enum Reason {
     UnresolvedReviewThreads { count: usize },
     UndispositionedReviewThreads { count: usize },
     QuietReviewNotCompletedForCurrentHead,
-    DescriptionExceeds350Words,
+    DescriptionWordLimitExceeded { limit: usize },
     ChecksNotForCurrentHead,
     CheckRollupMissing,
     GatingChecksMissing,
@@ -35,7 +35,9 @@ impl Reason {
             Self::QuietReviewNotCompletedForCurrentHead => {
                 "quiet-review-not-completed-for-current-head".into()
             }
-            Self::DescriptionExceeds350Words => "description-exceeds-350-words".into(),
+            Self::DescriptionWordLimitExceeded { limit } => {
+                format!("description-exceeds-{limit}-words")
+            }
             Self::ChecksNotForCurrentHead => "checks-not-for-current-head".into(),
             Self::CheckRollupMissing => "check-rollup-missing".into(),
             Self::GatingChecksMissing => "gating-checks-missing".into(),
@@ -71,7 +73,6 @@ impl Verdict {
 pub struct Facts {
     pub head_oid: String,
     pub checked_head_oid: Option<String>,
-    #[serde(default)]
     pub is_draft: bool,
     pub review_decision: Option<String>,
     pub check_inventory_stable: bool,
@@ -81,7 +82,7 @@ pub struct Facts {
     pub planning_only: bool,
     #[serde(default)]
     pub review_exempt_since_quiet_review: bool,
-    pub body: Option<String>,
+    pub body: String,
     pub check_rollup_state: Option<String>,
     pub checks: Vec<Value>,
     pub mergeable: String,
@@ -150,7 +151,7 @@ pub(crate) fn checks(node: &Value) -> &[Value] {
 
 pub fn evaluate_facts(facts: &Facts, policy: &ConvergencePolicy) -> Verdict {
     let mut reasons = Vec::new();
-    if facts.is_draft {
+    if policy.reject_drafts && facts.is_draft {
         reasons.push(Reason::PullRequestIsDraft);
     }
     if facts.review_decision.as_deref() == Some("CHANGES_REQUESTED") {
@@ -162,7 +163,7 @@ pub fn evaluate_facts(facts: &Facts, policy: &ConvergencePolicy) -> Verdict {
     let unresolved = facts
         .review_threads
         .iter()
-        .filter(|t| !t.is_resolved && !t.is_escalated)
+        .filter(|t| !t.is_resolved)
         .count();
     let undispositioned = facts
         .review_threads
@@ -183,12 +184,10 @@ pub fn evaluate_facts(facts: &Facts, policy: &ConvergencePolicy) -> Verdict {
     {
         reasons.push(Reason::QuietReviewNotCompletedForCurrentHead);
     }
-    if facts
-        .body
-        .as_ref()
-        .is_some_and(|body| word_count(body) > 350)
+    if let Some(limit) = policy.description_word_limit
+        && word_count(&facts.body) > limit
     {
-        reasons.push(Reason::DescriptionExceeds350Words);
+        reasons.push(Reason::DescriptionWordLimitExceeded { limit });
     }
     if facts.checked_head_oid.as_ref() != Some(&facts.head_oid) {
         reasons.push(Reason::ChecksNotForCurrentHead);

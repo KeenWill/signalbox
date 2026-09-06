@@ -156,6 +156,69 @@ fn unknown_cli_options_fail_before_policy_or_evidence_io() -> Result<(), Box<dyn
 }
 
 #[test]
+fn draft_and_description_evidence_require_their_declared_types() -> Result<(), Box<dyn Error>> {
+    let policy = policy()?;
+    let recording = Recording::read(&root().join("fixtures/mutations/settled.json"))?;
+    let snapshot = recording.snapshot(&policy)?;
+    let facts = serde_json::to_value(evaluate(&snapshot, &policy)?.facts)?;
+    for (provider_key, facts_key, malformed) in [
+        ("isDraft", "is_draft", json!("false")),
+        ("body", "body", json!({"text": ""})),
+    ] {
+        for value in [Some(Value::Null), Some(malformed), None] {
+            let mut candidate = snapshot.clone();
+            let mut projected = facts.clone();
+            for (object, key) in [
+                (&mut candidate.initial, provider_key),
+                (&mut candidate.current, provider_key),
+                (&mut projected, facts_key),
+            ] {
+                let object = object.as_object_mut().ok_or("evidence must be an object")?;
+                if let Some(value) = &value {
+                    object.insert(key.into(), value.clone());
+                } else {
+                    object.remove(key);
+                }
+            }
+            assert!(
+                evaluate(&candidate, &policy).is_err(),
+                "{provider_key}: {value:?}"
+            );
+            assert!(serde_json::from_value::<signalbox_convergence::Facts>(projected).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn dispositioned_escalation_remains_a_blocker_until_the_thread_closes() -> Result<(), Box<dyn Error>>
+{
+    let policy = policy()?;
+    let recording =
+        Recording::read(&root().join("fixtures/mutations/escalated-open-after-review.json"))?;
+    let result = evaluate(&recording.snapshot(&policy)?, &policy)?;
+    assert!(
+        result.facts.review_threads.iter().any(|thread| {
+            thread.is_dispositioned && thread.is_escalated && !thread.is_resolved
+        })
+    );
+    assert!(!result.converged);
+    assert_eq!(result.unresolved_review_threads, 1);
+    assert!(
+        result
+            .reasons
+            .iter()
+            .any(|reason| reason == "unresolved-review-threads:1")
+    );
+    let mut resolved = result.facts;
+    for thread in &mut resolved.review_threads {
+        thread.is_resolved = true;
+    }
+    assert!(evaluate_facts(&resolved, &policy).is_converged());
+    Ok(())
+}
+
+#[test]
 fn policy_load_rejects_incomplete_reviewer_rules() -> Result<(), Box<dyn Error>> {
     let path = std::env::temp_dir().join(format!("convergence-policy-{}.json", std::process::id()));
     let original = policy()?;
@@ -166,7 +229,7 @@ fn policy_load_rejects_incomplete_reviewer_rules() -> Result<(), Box<dyn Error>>
         let error = ConvergencePolicy::read(&path).expect_err("both verdict captures are required");
         assert!(error.to_string().contains("verdict_pattern must capture"));
     }
-    for login in ["", " ", "\t"] {
+    for login in ["", " ", "\t", "[bot]", "[BOT]"] {
         let mut policy = original.clone();
         policy.reviewers[0].login = login.into();
         std::fs::write(&path, serde_json::to_vec(&policy)?)?;
@@ -424,5 +487,105 @@ fn live_recording_fetches_old_review_comparison_and_finishes_with_identity()
         evaluate(&snapshot, &policy)?.converged,
         "an exempt head with settled new CI retains its review"
     );
+    Ok(())
+}
+
+#[test]
+fn policy_controls_repository_dispositions_and_optional_gates() -> Result<(), Box<dyn Error>> {
+    let original = policy()?;
+    let recording = Recording::read(&root().join("fixtures/mutations/settled.json"))?;
+    let mut facts = evaluate(&recording.snapshot(&original)?, &original)?.facts;
+    let mut policy_value = serde_json::to_value(&original)?;
+    policy_value
+        .as_object_mut()
+        .ok_or("policy object missing")?
+        .remove("description_word_limit");
+    let mut configured: ConvergencePolicy = serde_json::from_value(policy_value)?;
+    assert_eq!(configured.description_word_limit, None);
+    facts.body = "word ".repeat(
+        original
+            .description_word_limit
+            .ok_or("example limit missing")?
+            + 1,
+    );
+    assert!(evaluate_facts(&facts, &configured).is_converged());
+    configured.description_word_limit = Some(2);
+    assert!(
+        evaluate_facts(&facts, &configured)
+            .reasons()
+            .iter()
+            .any(|reason| matches!(
+                reason,
+                signalbox_convergence::Reason::DescriptionWordLimitExceeded { limit: 2 }
+            ))
+    );
+    facts.body.clear();
+    facts.is_draft = true;
+    assert!(!evaluate_facts(&facts, &configured).is_converged());
+    configured.reject_drafts = false;
+    assert!(evaluate_facts(&facts, &configured).is_converged());
+
+    for name in ["declined-finding.json", "informational-answer.json"] {
+        let recording = Recording::read(&root().join("fixtures/mutations").join(name))?;
+        let snapshot = recording.snapshot(&original)?;
+        assert!(evaluate(&snapshot, &original)?.converged, "{name}");
+        let mut changed = original.clone();
+        changed.declined_prefix.clear();
+        changed.informational_classes.clear();
+        assert!(!evaluate(&snapshot, &changed)?.converged, "{name}");
+    }
+    let mut invalid = original;
+    invalid.fixed_in_commit_pattern = "revision".into();
+    assert!(invalid.validate().is_err());
+    Ok(())
+}
+
+#[test]
+fn equivalent_timestamp_offsets_and_precision_preserve_corpus_verdicts()
+-> Result<(), Box<dyn Error>> {
+    fn rewrite(value: &mut Value) {
+        match value {
+            Value::String(text) => {
+                if let Ok(at) = chrono::DateTime::parse_from_rfc3339(text) {
+                    let seconds = if (at.timestamp() / 60) % 2 == 0 {
+                        19_800
+                    } else {
+                        -28_800
+                    };
+                    if let Some(offset) = chrono::FixedOffset::east_opt(seconds) {
+                        *text = at
+                            .with_timezone(&offset)
+                            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, false);
+                    }
+                }
+            }
+            Value::Object(object) => {
+                for child in object.values_mut() {
+                    rewrite(child);
+                }
+            }
+            Value::Array(array) => {
+                for child in array {
+                    rewrite(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let policy = policy()?;
+    let expected: BTreeMap<String, Value> =
+        serde_json::from_slice(&std::fs::read(root().join("fixtures/expected.json"))?)?;
+    for (name, expected) in expected {
+        if expected.get("error").is_some() {
+            continue;
+        }
+        let recording = Recording::read(&root().join("fixtures").join(&name))?;
+        let before = evaluate(&recording.snapshot(&policy)?, &policy)?;
+        let mut recording = serde_json::to_value(recording)?;
+        rewrite(&mut recording);
+        let recording: Recording = serde_json::from_value(recording)?;
+        let after = evaluate(&recording.snapshot(&policy)?, &policy)?;
+        assert_eq!(before.verdict, after.verdict, "{name}");
+    }
     Ok(())
 }

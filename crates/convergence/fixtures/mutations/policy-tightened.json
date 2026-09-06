@@ -6,6 +6,26 @@
       "path": "/previous/policy_identity",
       "value": {
         "repository": "KeenWill/signalbox",
+        "fixed_in_commit_pattern": "(?i)^fixed in commits?\\s+`?([0-9a-f]{7,40})`?",
+        "declined_prefix": "declined:",
+        "informational_classes": [
+          "question",
+          "informational",
+          "note"
+        ],
+        "acknowledgement_words": [
+          "ack",
+          "acknowledged",
+          "done",
+          "noted",
+          "ok",
+          "okay",
+          "thanks",
+          "thank you"
+        ],
+        "scratchpad_marker_line": "> **Non-authoritative planning scratchpad — do not review for consistency.**",
+        "description_word_limit": 350,
+        "reject_drafts": true,
         "non_gating_check_patterns": [],
         "exempt_smoke_workflow_names": [
           "tool live smokes (report only)",
@@ -21,7 +41,7 @@
             "bot": true,
             "request_pattern": "@codex review(?:$|[^\\w-])",
             "verdict_marker": "<!-- codex-pull-request-review-summary -->",
-            "verdict_pattern": "\\|\\s*\ud83d\udcdd\\s*\\*\\*Code Review\\*\\*\\s*\\|\\s*\u2705\\s*\\*\\*Completed\\*\\*.*?datetime=\"([^\"]+)\".*?\\|\\s*`([0-9a-f]{7,40})`\\s*\\|",
+            "verdict_pattern": "\\|\\s*📝\\s*\\*\\*Code Review\\*\\*\\s*\\|\\s*✅\\s*\\*\\*Completed\\*\\*.*?datetime=\"([^\"]+)\".*?\\|\\s*`([0-9a-f]{7,40})`\\s*\\|",
             "escalation_marker": "escalated without disposition",
             "trusted_requests": true,
             "post_green_requests": false,

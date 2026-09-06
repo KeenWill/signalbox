@@ -42,15 +42,52 @@ pagination bounds, and escalation wave caps. Check patterns use case-insensitive
 `--repo owner/name` selects the live repository instead of the policy's
 repository.
 
-The unmodified differential reference is
+Every policy field is listed below. “Required” means loading fails when the
+field is absent; there is no compiled default. Repository values live in the
+[example](examples/repository.toml).
+
+| Field                             | Meaning                                                                             | Default                   |
+| --------------------------------- | ----------------------------------------------------------------------------------- | ------------------------- |
+| `repository`                      | GitHub owner/name                                                                   | Required                  |
+| `fixed_in_commit_pattern`         | Disposition regex; capture 1 is the fixing revision                                 | Required                  |
+| `declined_prefix`                 | Case-insensitive prefix followed by a nonempty explanation; empty disables          | Required                  |
+| `informational_classes`           | Case-insensitive initial words that classify informational findings; empty disables | Required                  |
+| `acknowledgement_words`           | Case-insensitive complete replies that do not answer informational findings         | Required                  |
+| `scratchpad_marker_line`          | Exact marker in the first ten lines; empty disables planning exemption              | Required                  |
+| `description_word_limit`          | Maximum description word count                                                      | Absent (`None`); no limit |
+| `reject_drafts`                   | Reject a draft pull request when true                                               | Required                  |
+| `non_gating_check_patterns`       | Case-insensitive check-name globs                                                   | Required                  |
+| `exempt_smoke_workflow_names`     | Case-insensitive check names excluded from gating                                   | Required                  |
+| `thread_limit`                    | Maximum complete review-thread inventory                                            | Required                  |
+| `page_limit`                      | Maximum pages per connection                                                        | Required                  |
+| `wave_cap`                        | Initial escalation boundary                                                         | Required                  |
+| `extended_wave_cap`               | Escalation boundary after continued review                                          | Required                  |
+| `reviewers`                       | Nonempty reviewer-policy list                                                       | Required                  |
+| `reviewers[].login`               | Reviewer login                                                                      | Required                  |
+| `reviewers[].bot`                 | Match the optional GitHub bot suffix                                                | Required                  |
+| `reviewers[].request_pattern`     | Review-request regex at the start of a line containing the revision                 | Required                  |
+| `reviewers[].verdict_marker`      | Required completion-summary substring                                               | Required                  |
+| `reviewers[].verdict_pattern`     | Summary regex; captures 1 and 2 are completion time and revision                    | Required                  |
+| `reviewers[].escalation_marker`   | Case-insensitive complete escalation reply                                          | Required                  |
+| `reviewers[].trusted_requests`    | Require trusted request authors                                                     | Required                  |
+| `reviewers[].post_green_requests` | Require requests after gating checks complete successfully                          | Required                  |
+| `reviewers[].completion_reaction` | GitHub reaction that authenticates a completion summary                             | Required                  |
+
+Evidence timestamps are compared as RFC 3339 instants with `chrono`, including
+UTC offsets and fractional seconds.
+
+The frozen differential reference is
 [reference.py](../../tooling/convergence-reconciler/reference.py) from
 [39bfc826d](https://github.com/KeenWill/signalbox/commit/39bfc826d). The
 configuration shape follows
-[#1588](https://github.com/KeenWill/signalbox/pull/1588). The reference supplies
-the evidence rules; it is not a consumer of this crate. The harness additionally
-applies the [repository-watch contract](../../docs/spec/repo-watch.md) requiring
-at least one gating check. An empty or entirely exempt inventory cannot
-converge. The harness also applies the
+[#1588](https://github.com/KeenWill/signalbox/pull/1588). The reference includes
+the removal of the source-comment-only exemption and supplies the evidence
+rules; it is not a consumer of this crate. The harness additionally applies the
+[repository-watch contract](../../docs/spec/repo-watch.md) requiring at least
+one gating check and every review thread to be resolved, including escalated
+threads. An empty or entirely exempt inventory cannot converge. Draft status and
+description must be present with boolean and string types. The harness also
+applies the
 [review-workflow identity contract](../../docs/spec/review-workflows.md): a
 change of open or closed state between observations invalidates the snapshot.
 Policy-bound state and the removal of the comment-only exemption apply to both

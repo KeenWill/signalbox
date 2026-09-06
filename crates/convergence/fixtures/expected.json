@@ -76,10 +76,28 @@
     "converged": true,
     "reasons": []
   },
+  "mutations/description-malformed.json": {
+    "error": "pull request body must be a string"
+  },
+  "mutations/description-null.json": {
+    "error": "pull request body must be a string"
+  },
+  "mutations/draft-malformed.json": {
+    "error": "pull request isDraft must be a boolean"
+  },
+  "mutations/draft-null.json": {
+    "error": "pull request isDraft must be a boolean"
+  },
   "mutations/draft.json": {
     "converged": false,
     "reasons": [
       "pull-request-is-draft"
+    ]
+  },
+  "mutations/escalated-open-after-review.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1"
     ]
   },
   "mutations/escalation-followed-by-reply.json": {
@@ -101,7 +119,8 @@
   "mutations/escalation-wave-5.json": {
     "converged": false,
     "reasons": [
-      "quiet-review-not-completed-for-current-head"
+      "quiet-review-not-completed-for-current-head",
+      "unresolved-review-threads:1"
     ]
   },
   "mutations/escalation-wave-6.json": {
@@ -115,7 +134,8 @@
   "mutations/escalation-wave-8.json": {
     "converged": false,
     "reasons": [
-      "quiet-review-not-completed-for-current-head"
+      "quiet-review-not-completed-for-current-head",
+      "unresolved-review-threads:1"
     ]
   },
   "mutations/final-identity-baseRefOid.json": {
@@ -545,7 +565,8 @@
   "mutations/wave-census-after-rerun.json": {
     "converged": false,
     "reasons": [
-      "quiet-review-not-completed-for-current-head"
+      "quiet-review-not-completed-for-current-head",
+      "unresolved-review-threads:1"
     ]
   },
   "pr-1566.json.gz": {

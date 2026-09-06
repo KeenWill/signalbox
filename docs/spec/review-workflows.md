@@ -243,20 +243,21 @@ The orchestration loaders derive the current stage only from durable records;
 missing ancestry, an unknown closed value, a noncanonical count, or
 contradictory evidence is corruption and never an inferred result.
 
-The reviewer-verdict and usage-limit evidence rules belong to
-[tool loop](tool-loop.md).
-
 `signalbox-convergence` evaluates complete GitHub snapshots with an explicit
 reviewer and check policy. Its verdict combines thread dispositions,
 authenticated quiet reviews and exempt head changes, retained review waves,
 settled check inventories, current-head checks, mergeability, base ancestry,
-draft status, and description length. Incomplete pagination or a changed
-pull-request identity during decision revalidation is an error; the predicate
-performs no I/O. Persisted authentication and review waves are bound to the
-complete policy value and requalified when it changes. Exempt head changes are
-rename-only changes and clean base forwards; comment-only changes require a
-fresh quiet review. The Python reconciler delegates evidence evaluation to the
-crate's CLI and retains its loop, dispatch fence, and cool-off state.
+draft status, and description length according to explicit policy. Disposition
+grammars, informational classes and acknowledgements, the planning marker, and
+draft handling are policy fields; the description word limit is optional and
+absent by default. Repository values live in the crate policy example.
+Incomplete pagination or a changed pull-request identity during decision
+revalidation is an error; the predicate performs no I/O. Persisted
+authentication and review waves are bound to the complete policy value and
+requalified when it changes. Exempt head changes are rename-only changes and
+clean base forwards; comment-only changes require a fresh quiet review. The Python
+reconciler delegates evidence evaluation to the crate's CLI and retains its loop,
+dispatch fence, and cool-off state.
 
 ## Planned
 

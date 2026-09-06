@@ -7,7 +7,6 @@ import argparse
 import dataclasses
 import datetime as dt
 import fnmatch
-import io
 import json
 import math
 import os
@@ -18,7 +17,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tokenize
 from typing import Any, Iterable, Sequence
 
 
@@ -159,9 +157,6 @@ NON_GATING_TOOL_SMOKE_CHECK_NAMES = frozenset(
         "tool live smokes (report only)",
         "web search live smoke (report only)",
     }
-)
-EXECUTABLE_COMMENT_DIRECTIVE = re.compile(
-    r"^#!|^#.*coding[:=]\s*[-_.a-zA-Z0-9]+"
 )
 INFORMATIONAL_REVIEW_COMMENT = re.compile(
     r"^(?:question|informational|note)\b", re.IGNORECASE
@@ -922,7 +917,7 @@ query($id: ID!, $after: String!) {
             comparison, reviewed_oid, head_oid, base_oid
         ):
             return True
-        return bool(files) and all(comment_only_patch(file) for file in files)
+        return False
 
     def _is_clean_merge_forward(
         self,
@@ -1717,64 +1712,6 @@ def checks_green_before_request(
         ):
             return False
     return True
-
-
-def comment_only_patch(file: dict[str, Any]) -> bool:
-    filename = file.get("filename")
-    patch = file.get("patch")
-    if not isinstance(filename, str) or not isinstance(patch, str):
-        return False
-    if Path(filename).suffix.casefold() != ".py":
-        return False
-
-    def side_is_comment_only(prefix: str) -> tuple[bool, bool]:
-        source: list[str] = []
-        changed_rows: set[int] = set()
-        saw_change = False
-        inside_hunk = False
-        for line in patch.splitlines():
-            if line.startswith("@@"):
-                inside_hunk = True
-                source.append("\n")
-                continue
-            if not inside_hunk or not line:
-                continue
-            marker = line[0]
-            if marker == " ":
-                source.append(line[1:] + "\n")
-            elif marker == prefix:
-                source.append(line[1:] + "\n")
-                changed_rows.add(len(source))
-                saw_change = True
-        if not saw_change:
-            return True, False
-        try:
-            tokens = tokenize.generate_tokens(io.StringIO("".join(source)).readline)
-            comment_rows = {
-                token.start[0]
-                for token in tokens
-                if token.type == tokenize.COMMENT
-                and not token.line[: token.start[1]].strip()
-            }
-        except (IndentationError, SyntaxError, tokenize.TokenError):
-            return False, True
-        meaningful_rows = {
-            row for row in changed_rows if source[row - 1].strip()
-        }
-        # Shebangs and PEP 263 encoding cookies tokenize as comments but change
-        # runtime behaviour, so they never qualify for the comment-only
-        # exemption. Patch hunks carry no absolute line numbers, so any changed
-        # row that looks like such a directive is rejected conservatively.
-        if any(
-            EXECUTABLE_COMMENT_DIRECTIVE.match(source[row - 1].strip())
-            for row in meaningful_rows
-        ):
-            return False, True
-        return meaningful_rows <= comment_rows, True
-
-    added_ok, added = side_is_comment_only("+")
-    removed_ok, removed = side_is_comment_only("-")
-    return (added or removed) and added_ok and removed_ok
 
 
 def comparison_file_delta(files: Any) -> tuple[tuple[Any, ...], ...] | None:

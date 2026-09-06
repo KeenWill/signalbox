@@ -28,8 +28,17 @@ pub enum Error {
 
 /// Repository and reviewer configuration shared by every consumer.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConvergencePolicy {
     pub repository: String,
+    pub fixed_in_commit_pattern: String,
+    pub declined_prefix: String,
+    pub informational_classes: Vec<String>,
+    pub acknowledgement_words: Vec<String>,
+    pub scratchpad_marker_line: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_word_limit: Option<usize>,
+    pub reject_drafts: bool,
     pub reviewers: Vec<ReviewerPolicy>,
     pub non_gating_check_patterns: Vec<String>,
     pub exempt_smoke_workflow_names: Vec<String>,
@@ -40,6 +49,7 @@ pub struct ConvergencePolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReviewerPolicy {
     pub login: String,
     pub bot: bool,
@@ -76,8 +86,20 @@ impl ConvergencePolicy {
                 "invalid convergence limits or reviewer list".into(),
             ));
         }
+        if regex::Regex::new(&self.fixed_in_commit_pattern)?.captures_len() < 2 {
+            return Err(Error::Evidence(
+                "fixed_in_commit_pattern must capture the fixing revision".into(),
+            ));
+        }
         for reviewer in &self.reviewers {
-            if reviewer.login.trim().is_empty() {
+            if reviewer.login.trim().is_empty()
+                || (reviewer.bot
+                    && reviewer
+                        .login
+                        .to_lowercase()
+                        .trim_end_matches("[bot]")
+                        .is_empty())
+            {
                 return Err(Error::Evidence("reviewer login must not be blank".into()));
             }
             regex::Regex::new(&reviewer.request_pattern)?;
@@ -207,11 +229,18 @@ pub(crate) fn login(value: &Value) -> &str {
         .unwrap_or_default()
 }
 pub(crate) fn effective_at(value: &Value) -> &str {
-    std::cmp::max(text(&value["createdAt"]), text(&value["lastEditedAt"]))
+    [text(&value["createdAt"]), text(&value["lastEditedAt"])]
+        .into_iter()
+        .max_by_key(|at| timestamp(at))
+        .unwrap_or_default()
 }
 pub(crate) fn trusted(value: &Value) -> bool {
     matches!(
         text(&value["authorAssociation"]),
         "OWNER" | "MEMBER" | "COLLABORATOR"
     )
+}
+
+pub(crate) fn timestamp(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value).ok()
 }

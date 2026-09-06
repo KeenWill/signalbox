@@ -185,12 +185,37 @@ query ThreadOwnership($thread: ID!) {
 }
 "#;
 
+type ConvergenceHistoryEntry = std::sync::Arc<tokio::sync::Mutex<serde_json::Value>>;
+type ConvergenceHistory =
+    std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, ConvergenceHistoryEntry>>>;
+
+struct CensusHistory {
+    histories: ConvergenceHistory,
+    key: String,
+}
+
+impl Drop for CensusHistory {
+    fn drop(&mut self) {
+        let mut histories = self
+            .histories
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Waiting censuses share this entry. Only its last user may remove an
+        // empty history, including when cancellation drops the pending future.
+        if histories.get(&self.key).is_some_and(|entry| {
+            std::sync::Arc::strong_count(entry) == 1
+                && entry.try_lock().is_ok_and(|state| state.is_null())
+        }) {
+            histories.remove(&self.key);
+        }
+    }
+}
+
 /// Production GitHub transport with fixed endpoints and deployment-supplied policy.
 #[derive(Clone, Debug)]
 pub struct GitHubCodeHostTransport {
     convergence_policy: Option<signalbox_convergence::ConvergencePolicy>,
-    convergence_history:
-        std::sync::Arc<tokio::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
+    convergence_history: ConvergenceHistory,
     client: Client,
     rest_base: Url,
     graphql_url: Url,
@@ -808,20 +833,34 @@ impl GitHubCodeHostTransport {
             .convergence_policy
             .as_ref()
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        if !repository.as_str().eq_ignore_ascii_case(&policy.repository) {
+            return Err(CodeHostTransportFailure::InvalidResponse);
+        }
         let key = format!(
-            "{}/{}#{}",
-            repository.owner(),
-            repository.name(),
+            "{}#{}",
+            repository.as_str().to_ascii_lowercase(),
             number.get()
         );
-        let previous = self
+        // Declare the cleanup guard before the entry so the caller's strong
+        // reference drops before cleanup checks for the last census.
+        let census_history = CensusHistory {
+            histories: self.convergence_history.clone(),
+            key,
+        };
+        let entry = self
             .convergence_history
             .lock()
-            .await
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(census_history.key.clone())
+            .or_insert_with(|| {
+                std::sync::Arc::new(tokio::sync::Mutex::new(serde_json::Value::Null))
+            })
+            .clone();
+        let mut history = entry.lock().await;
+        let previous = history.clone();
         let repository_name = format!("{}/{}", repository.owner(), repository.name());
+        let transport_failure = std::sync::Mutex::new(None);
+        let failure = &transport_failure;
         let mut send = |request| -> signalbox_convergence::fetch::RequestFuture<'_> {
             Box::pin(async move {
                 let result = match request {
@@ -844,7 +883,10 @@ impl GitHubCodeHostTransport {
                         }
                     }
                 };
-                result.map_err(|_| {
+                result.map_err(|error| {
+                    *failure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
                     signalbox_convergence::Error::Evidence(
                         "GitHub convergence request failed".into(),
                     )
@@ -859,18 +901,22 @@ impl GitHubCodeHostTransport {
             policy,
         )
         .await
-        .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        .map_err(|_| {
+            transport_failure
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or(CodeHostTransportFailure::InvalidResponse)
+        })?;
         let snapshot = recording
             .snapshot(policy)
             .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
         let evaluation = signalbox_convergence::evaluate(&snapshot, policy)
             .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
-        self.convergence_history
-            .lock()
-            .await
-            .insert(key, evaluation.state.clone());
-        ConvergenceReadResult::try_new(self.bounds, evaluation)
-            .ok_or(CodeHostTransportFailure::InvalidResponse)
+        let next_state = evaluation.state.clone();
+        let result = ConvergenceReadResult::try_new(self.bounds, evaluation)
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        *history = next_state;
+        Ok(result)
     }
 
     async fn thread_inventory(
@@ -1149,18 +1195,6 @@ impl GitHubCodeHostTransport {
     }
 
     async fn review_gate_check(
-        &self,
-        arguments: ReviewGateCheckArguments,
-        credential: &CredentialValue,
-    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
-        with_read_operation_timeout(
-            self.bounds.request_timeout(),
-            self.review_gate_transaction(arguments, credential),
-        )
-        .await
-    }
-
-    async fn review_gate_transaction(
         &self,
         arguments: ReviewGateCheckArguments,
         credential: &CredentialValue,
@@ -2951,6 +2985,256 @@ mod tests {
     fn repository() -> CodeHostRepository {
         CodeHostRepository::try_new(String::from("owner/repository"))
             .expect("fixture repository is admitted")
+    }
+
+    #[tokio::test]
+    async fn convergence_fetch_preserves_credential_and_dispatch_failures() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../convergence");
+        let policy = signalbox_convergence::ConvergencePolicy::read(
+            &fixture_root.join("examples/repository.toml"),
+        )
+        .expect("the shared policy example loads");
+        let recording =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1566.json.gz"))
+                .expect("the recorded request identity loads");
+        let repository = CodeHostRepository::try_new(recording.repository)
+            .expect("the recorded repository is admitted");
+        let number = CodeHostChangeRequestNumber::try_new(recording.number)
+            .expect("the recorded number is admitted");
+        let (transport, listener) = repository_test_transport().await;
+        let mut transport = transport.with_convergence_policy(Some(policy));
+        transport.graphql_url = transport
+            .rest_base
+            .join("graphql")
+            .expect("local URL joins");
+        // Closing the listener exercises a real connection failure without provider responses.
+        drop(listener);
+        for (credential, expected) in [
+            (
+                CredentialValue::new(b"invalid\nheader".to_vec()),
+                CodeHostTransportFailure::InvalidCredential,
+            ),
+            (test_credential(), CodeHostTransportFailure::DispatchUnknown),
+        ] {
+            assert_eq!(
+                transport
+                    .convergence_state_for(&repository, number, &credential)
+                    .await
+                    .err(),
+                Some(expected)
+            );
+            assert!(
+                transport
+                    .convergence_history
+                    .lock()
+                    .expect("history map locks")
+                    .is_empty(),
+                "failed censuses must not retain empty entries"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn both_convergence_tools_wait_for_history_outside_the_request_timeout() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../convergence");
+        let policy = signalbox_convergence::ConvergencePolicy::read(
+            &fixture_root.join("examples/repository.toml"),
+        )
+        .expect("the shared policy example loads");
+        let recording =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1566.json.gz"))
+                .expect("the recorded request identity loads");
+        let arguments = serde_json::json!({
+            "repository": recording.repository,
+            "number": recording.number,
+        });
+        let bounds = CodeHostNumericBounds::new(
+            Some(Duration::from_millis(5)),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let transport = GitHubCodeHostTransport::try_new(bounds)
+            .expect("transport constructs")
+            .with_convergence_policy(Some(policy));
+        let credential = CredentialValue::new(b"invalid\nheader".to_vec());
+        let key = format!(
+            "{}#{}",
+            recording.repository.to_ascii_lowercase(),
+            recording.number
+        );
+        let entry = std::sync::Arc::new(tokio::sync::Mutex::new(serde_json::Value::Null));
+        transport
+            .convergence_history
+            .lock()
+            .expect("history map locks")
+            .insert(key, entry.clone());
+        for review_gate in [false, true] {
+            let history = entry.lock().await;
+            let release = async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                drop(history);
+            };
+            let census = async {
+                if review_gate {
+                    transport
+                        .review_gate_check(
+                            serde_json::from_value(arguments.clone())
+                                .expect("recorded arguments decode"),
+                            &credential,
+                        )
+                        .await
+                } else {
+                    transport
+                        .convergence_state(
+                            serde_json::from_value(arguments.clone())
+                                .expect("recorded arguments decode"),
+                            &credential,
+                        )
+                        .await
+                }
+            };
+            let (_, result) = tokio::join!(release, census);
+            assert_eq!(
+                result.err(),
+                Some(CodeHostTransportFailure::InvalidCredential)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn convergence_tools_reject_other_repositories_before_credentials() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../convergence");
+        let policy = signalbox_convergence::ConvergencePolicy::read(
+            &fixture_root.join("examples/repository.toml"),
+        )
+        .expect("the shared policy example loads");
+        let recording =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1566.json.gz"))
+                .expect("the recorded request identity loads");
+        let transport = GitHubCodeHostTransport::try_new(crate::code_host::test_numeric_bounds())
+            .expect("transport constructs")
+            .with_convergence_policy(Some(policy));
+        let credential = CredentialValue::new(b"invalid\nheader".to_vec());
+        for (repository, expected) in [
+            (
+                recording.repository.to_ascii_uppercase(),
+                CodeHostTransportFailure::InvalidCredential,
+            ),
+            (
+                repository().as_str().to_owned(),
+                CodeHostTransportFailure::InvalidResponse,
+            ),
+        ] {
+            let arguments =
+                serde_json::json!({"repository": repository, "number": recording.number});
+            assert_eq!(
+                transport
+                    .convergence_state(
+                        serde_json::from_value(arguments.clone()).expect("arguments decode"),
+                        &credential,
+                    )
+                    .await
+                    .err(),
+                Some(expected)
+            );
+            assert_eq!(
+                transport
+                    .review_gate_check(
+                        serde_json::from_value(arguments).expect("arguments decode"),
+                        &credential,
+                    )
+                    .await
+                    .err(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cloned_transports_serialize_one_census_without_blocking_other_pull_requests() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../convergence");
+        let policy = signalbox_convergence::ConvergencePolicy::read(
+            &fixture_root.join("examples/repository.toml"),
+        )
+        .expect("the shared policy example loads");
+        let recording =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1566.json.gz"))
+                .expect("the recorded request identity loads");
+        let other =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1567.json.gz"))
+                .expect("the second recorded identity loads");
+        let (transport, listener) = graphql_test_transport().await;
+        let transport = transport.with_convergence_policy(Some(policy));
+        let spawn_census = |transport: GitHubCodeHostTransport, repository: String| {
+            let number = recording.number;
+            tokio::spawn(async move {
+                let repository = CodeHostRepository::try_new(repository)
+                    .expect("recorded repository is admitted");
+                let number = CodeHostChangeRequestNumber::try_new(number)
+                    .expect("recorded number is admitted");
+                transport
+                    .convergence_state_for(&repository, number, &test_credential())
+                    .await
+            })
+        };
+        let first = spawn_census(transport.clone(), recording.repository.clone());
+        let (_first_connection, _) =
+            tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .expect("the first census reaches the provider")
+                .expect("the first connection is accepted");
+        let second = spawn_census(transport.clone(), recording.repository.to_ascii_uppercase());
+        let other_repository =
+            CodeHostRepository::try_new(other.repository).expect("recorded repository is admitted");
+        let other_number = CodeHostChangeRequestNumber::try_new(other.number)
+            .expect("recorded number is admitted");
+        let credential = CredentialValue::new(b"invalid\nheader".to_vec());
+        let other_result = tokio::time::timeout(
+            Duration::from_secs(2),
+            transport.convergence_state_for(&other_repository, other_number, &credential),
+        )
+        .await
+        .expect("another pull request is not held behind the first census");
+        assert_eq!(
+            other_result.err(),
+            Some(CodeHostTransportFailure::InvalidCredential)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "the same pull request cannot start a second provider census"
+        );
+        first.abort();
+        assert!(
+            first
+                .await
+                .expect_err("the pending census is cancelled")
+                .is_cancelled()
+        );
+        let (_second_connection, _) =
+            tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .expect("cancelling the first census releases its per-request history")
+                .expect("the second connection is accepted");
+        second.abort();
+        assert!(
+            second
+                .await
+                .expect_err("the pending census is cancelled")
+                .is_cancelled()
+        );
+        assert!(
+            transport
+                .convergence_history
+                .lock()
+                .expect("history map locks")
+                .is_empty(),
+            "cancellation of the last waiter removes its empty history"
+        );
     }
 
     /// REST paths and pagination are derived only from checked typed segments.

@@ -444,59 +444,6 @@ automatic resumption of an execution-failure block are specified in
 
 ## Tool safety
 
-### Review-slog toolkit adoption
-
-This is a blocking condition rather than an open design question. The
-review-slog toolkit ships with a known race in its merge gate, accepted on the
-grounds that the toolkit is not yet load-bearing. That ground disappears the
-moment it is adopted, so the condition is recorded here rather than only in the
-review thread that raised it.
-
-**The window.** `review_gate_transaction` reads stack state, thread inventory,
-convergence state, stack state again, and convergence state again, then requires
-the two stack reads to be equal and the two convergence reads to be equal before
-composing the gate. The stack pair brackets the interval between the first and
-second stack reads; the convergence pair brackets the interval between the first
-and second convergence reads. Neither pair brackets the interval between the
-final stack read and the final convergence read. A stack-only change inside that
-interval — the immediate base advancing, or a child change request being opened
-or force-pushed — leaves both stack reads equal, because both were taken before
-it, and leaves both convergence reads equal, because convergence evidence
-carries no ancestry facts. The equality check passes and the gate composes its
-verdict from a stack snapshot that is already stale.
-
-**What becomes silently missable.** Every stack-derived blocker:
-`parent_needs_merge_forward`, `base_chain_missing_main`,
-`child_needs_merge_forward`, and `evidence_truncated` where it derives from a
-truncated child page. The gate reports `ready: true` with no blocker recorded
-and nothing in the result marking the stack evidence as stale, so a reader of
-the output cannot detect the condition. Convergence-derived blockers —
-unresolved, undispositioned and buried threads, continuous-integration state,
-mergeability, and reviewer verdict status — are not affected, because the gate
-is composed from the final convergence read, which is the freshest read in the
-transaction.
-
-**This is a sequencing argument, not a severity one.** A base advancing
-concurrently with a gate check is normal in a merge train, not exotic; the race
-is not rare. What makes it acceptable to ship is that merges are gated by the
-standalone convergence checker, not by this tool, so a stale verdict cannot
-currently affect a real merge decision.
-
-**The condition.** The review gate must not be used to gate any merge decision
-until the stale-stack-read window is closed. Adoption is blocked on the fix; the
-fix does not follow adoption.
-
-**Shape of the fix.** Minimally, a third stack read after the final convergence
-read, folded into the equality check: this closes the window and leaves only the
-post-transaction interval, which no read ordering can close, since the base may
-always advance after the last read. Preferably, a stable read loop that repeats
-the stack and convergence reads until two consecutive complete snapshots agree.
-Both are small changes and either is cheap relative to trusting the tool with a
-merge decision.
-
-Raised as a review finding and dispositioned with this condition attached:
-https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
-
 - **Future tool-attempt retry.** General automatic retry, accepted-risk retry
   after ambiguity, idempotency-key policy, duplicate-risk controls, and retry
   resource limits beyond the sealed
