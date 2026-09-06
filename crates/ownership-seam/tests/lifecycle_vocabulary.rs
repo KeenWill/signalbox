@@ -2,8 +2,8 @@ use signalbox_ownership_seam::{
     CoreAgency, DispatchingModule, GoalBlockedReasonKind, SessionFailureCause,
     SessionLifecycleState, SessionParkCause, SessionParkResponder, SessionRecoveryOperation,
     SessionRetirementCause, SessionRetryableCause, SessionStructuralCause,
-    SessionTemplateContentDigest, SessionTemplateProvenance, SessionTerminalOutcome, SessionWait,
-    ToolRequestId,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+    SessionTerminalOutcome, SessionWait, ToolRequestId,
 };
 
 fn assert_nameable<T>() {}
@@ -22,8 +22,21 @@ fn lifecycle_event_vocabulary_is_nameable_from_the_seam() {
     assert_nameable::<SessionRetryableCause>();
     assert_nameable::<SessionStructuralCause>();
     assert_nameable::<SessionTemplateContentDigest>();
+    assert_nameable::<SessionTemplateName>();
     assert_nameable::<SessionTemplateProvenance>();
     assert_nameable::<SessionTerminalOutcome>();
     assert_nameable::<SessionWait>();
     assert_nameable::<ToolRequestId>();
+}
+
+#[test]
+fn template_provenance_is_constructible_from_seam_exports() {
+    let name = SessionTemplateName::try_new(String::from("repository-watch"))
+        .expect("fixture template name is valid");
+    let digest = SessionTemplateContentDigest::from_bytes([7; 32]);
+
+    let provenance = SessionTemplateProvenance::new(name, digest);
+
+    assert_eq!(provenance.name().as_str(), "repository-watch");
+    assert_eq!(provenance.content_digest(), digest);
 }
