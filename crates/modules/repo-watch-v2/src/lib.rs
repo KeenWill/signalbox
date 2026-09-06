@@ -1315,6 +1315,7 @@ impl RepoWatchStore {
         let Some(first) = planned.first() else {
             return Err(StoreError::InvalidDispatchBatch);
         };
+        let initial_batch = first.trigger_sequence().is_none();
         if planned.iter().enumerate().any(|(index, command)| {
             command.dispatch() != first.dispatch()
                 || command.repository() != first.repository()
@@ -1322,8 +1323,9 @@ impl RepoWatchStore {
                 || command.rule_revision() != first.rule_revision()
                 || command.event_id() != first.event_id()
                 || command.trigger_sequence() != first.trigger_sequence()
-                || command.action_ordinal()
-                    != u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1)
+                || (initial_batch
+                    && command.action_ordinal()
+                        != u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1))
         }) {
             return Err(StoreError::InvalidDispatchBatch);
         }
@@ -1419,21 +1421,22 @@ impl RepoWatchStore {
             return Ok(DispatchAdmission::ConflictingReuse);
         }
         if first.trigger_sequence().is_some() {
-            let committed_origin: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                    SELECT 1 FROM dispatch_ledger
-                     WHERE dispatch_ref = $1 AND repository = $2 AND rule_id = $3
-                       AND rule_revision = $4 AND event_id = $5
-                       AND trigger_sequence IS NULL)",
+            let committed_origin_ordinals: Vec<Decimal> = sqlx::query_scalar(
+                "SELECT action_ordinal FROM dispatch_ledger
+                  WHERE dispatch_ref = $1 AND repository = $2 AND rule_id = $3
+                    AND rule_revision = $4 AND event_id = $5
+                    AND trigger_sequence IS NULL",
             )
             .bind(first.dispatch().into_uuid())
             .bind(first.repository().as_str())
             .bind(first.rule_id().as_str())
             .bind(Decimal::from(first.rule_revision().get()))
             .bind(first.event_id().into_uuid())
-            .fetch_one(&mut *transaction)
+            .fetch_all(&mut *transaction)
             .await?;
-            if !committed_origin {
+            if planned.iter().any(|command| {
+                !committed_origin_ordinals.contains(&Decimal::from(command.action_ordinal()))
+            }) {
                 transaction.rollback().await?;
                 return Ok(DispatchAdmission::ConflictingReuse);
             }

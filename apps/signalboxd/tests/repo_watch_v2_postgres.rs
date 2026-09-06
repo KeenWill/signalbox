@@ -743,38 +743,42 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             == ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(18)))
     }));
     let created_session = Uuid::from_u128(82);
-    let lifecycle_command_id = Uuid::from_u128(81);
+    let lifecycle_command_id = Uuid::from_u128(83);
     let trigger_sequence = NonZeroU64::new(42).expect("forty-two is positive");
     let reaction_session = SessionId::from_uuid(created_session);
-    let reaction_commands = [
-        plan_lifecycle_reaction_for_test(
-            trigger_sequence,
-            retained_dispatch,
-            &rule,
-            &event,
-            NonZeroU64::MIN,
-            SessionLifecycleCommand::new(
-                DurableCommandId::from_uuid(lifecycle_command_id),
-                reaction_session,
-                SessionLifecycleOperation::ReleaseStart,
-            ),
-        )?,
-        plan_lifecycle_reaction_for_test(
-            trigger_sequence,
-            retained_dispatch,
-            &rule,
-            &event,
-            NonZeroU64::new(2).expect("two is positive"),
-            SessionLifecycleCommand::new(
-                DurableCommandId::from_uuid(Uuid::from_u128(83)),
-                reaction_session,
-                SessionLifecycleOperation::Stop {
-                    sticky: StopStickiness::Sticky,
-                    descendant_scope: DescendantTerminationScope::ParentAlone,
-                },
-            ),
-        )?,
-    ];
+    let unowned_reaction = [plan_lifecycle_reaction_for_test(
+        NonZeroU64::new(41).expect("forty-one is positive"),
+        retained_dispatch,
+        &rule,
+        &event,
+        NonZeroU64::new(3).expect("three is positive"),
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(84)),
+            reaction_session,
+            SessionLifecycleOperation::ReleaseStart,
+        ),
+    )?];
+    assert!(matches!(
+        store
+            .record_commands(&unowned_reaction, observed_at, &mut command_codec)
+            .await?,
+        DispatchAdmission::ConflictingReuse
+    ));
+    let reaction_commands = [plan_lifecycle_reaction_for_test(
+        trigger_sequence,
+        retained_dispatch,
+        &rule,
+        &event,
+        NonZeroU64::new(2).expect("two is positive"),
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(lifecycle_command_id),
+            reaction_session,
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Sticky,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        ),
+    )?];
     assert!(matches!(
         store
             .record_commands(&reaction_commands, observed_at, &mut command_codec)
@@ -789,10 +793,14 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .bind(retained_dispatch.into_uuid())
     .fetch_all(&module_pool)
     .await?;
-    assert_eq!(
-        retained_reaction_ordinals,
-        [Decimal::from(1_u64), Decimal::from(2_u64)]
-    );
+    assert_eq!(retained_reaction_ordinals, [Decimal::from(2_u64)]);
+    let recovered_reaction = store
+        .recover_pending_commands(&mut command_codec)
+        .await?
+        .into_iter()
+        .find(|planned| planned.command().command_id().into_uuid() == lifecycle_command_id)
+        .expect("the reaction owed by action two remains queued for submission");
+    assert_eq!(recovered_reaction.action_ordinal(), 2);
     let created_event = LifecycleEvent::session_created_for_test(
         43,
         observed_at + Duration::from_secs(1),
