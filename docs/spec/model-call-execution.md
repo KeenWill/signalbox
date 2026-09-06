@@ -239,9 +239,10 @@ acknowledgement cannot prove the provider did not act, and an invented
 exactly-once claim could duplicate both an effect and its spend. Refusal never
 admits a successor: it is provider judgment about the request, so another
 account would refuse the same content and substituting one would only seek a
-different answer. Credential resolution failure and credential rejection never
-admit a successor: both are deployment misconfiguration, and moving to another
-account hides the account that is broken.
+different answer. Credential resolution failure never admits a successor: it is
+deployment misconfiguration. Credential rejection admits only the configured
+`switch_now` rotation; the rejection remains recorded durably on the failed
+attempt.
 
 A successful call ends its availability chain, and a later tool round starts a
 fresh one, so a round that exhausts the pool before calling carries no earlier
