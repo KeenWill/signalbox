@@ -34,35 +34,22 @@ const RECURSIVE_REASON: &str = "recursive_container";
 const SPECIAL_ENTRY_REASON: &str = "special_entry";
 const SOURCE_SIZE_REASON: &str = "source_size_limit";
 const UNSUPPORTED_COMPRESSION_REASON: &str = "unsupported_compression_method";
-// numeric-bound: hard safety ceiling - bounds probe I/O and retained signature evidence
 const PROBE_BYTES: u64 = 1_024;
-// numeric-bound: hard safety ceiling - bounds whole-archive memory and decode latency
 const SOURCE_BYTES: u64 = 256 * 1024;
-// numeric-bound: hard safety ceiling - bounds archive inventory memory and enumeration work
 const MAX_ENTRIES: usize = 1_000;
-// numeric-bound: hard safety ceiling - bounds one decoded entry's memory and CPU work
 const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
-// numeric-bound: hard safety ceiling - prevents Zstandard frames from reserving more than 8 MiB
+// A Zstandard window-log ceiling of 23 permits 2^23 bytes (8 MiB).
 const ZSTD_WINDOW_LOG_MAX: u32 = 23;
-// numeric-bound: hard safety ceiling - bounds aggregate decompression memory and CPU work
 const MAX_EXPANDED_BYTES: u64 = 16 * 1024 * 1024;
-// numeric-bound: hard safety ceiling - bounds retained untrusted entry-name memory
 const MAX_NAME_BYTES: usize = 512;
-// numeric-bound: hard safety ceiling - bounds one structured tool result
 const OUTPUT_BYTES: usize = 500_000;
-// numeric-bound: hard safety ceiling - bounds retained recursive-format prefix evidence
 const PREFIX_BYTES: usize = 1_024;
-// numeric-bound: hard safety ceiling - the entries view reads the complete source once
 const READ_RANGES: u32 = 1;
-// numeric-bound: hard safety ceiling - bounds structured result nesting
 const OUTPUT_DEPTH: u32 = 5;
-// numeric-bound: hard safety ceiling - bounds structured result traversal work
 const OUTPUT_NODES: u64 = 5_000;
-// numeric-bound: hard safety ceiling - bounds aggregate structured string memory
 const OUTPUT_STRING_BYTES: usize = 480_000;
-// numeric-bound: not-a-bound - fixed ZIP central-directory record header size
+// PKWARE APPNOTE section 4.3.12 defines a 46-byte central-directory header.
 const ZIP_CENTRAL_HEADER_BYTES: usize = 46;
-// numeric-bound: not-a-bound - fixed streaming read-buffer size for decoded bytes
 const DECODE_BUFFER_BYTES: usize = 8_192;
 
 /// ZIP, TAR, GZIP, and Zstandard provider for the isolated worker.
