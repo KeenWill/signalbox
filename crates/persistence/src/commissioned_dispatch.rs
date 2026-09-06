@@ -480,7 +480,7 @@ pub(crate) async fn lock_pull_request_target(
     pull_request: &Decimal,
 ) -> Result<(), sqlx::Error> {
     let key = format!("commissioned-dispatch:{repository}:{pull_request}");
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+    sqlx::query(crate::lock_inventory::HASHED_TRANSACTION_ADVISORY_LOCK)
         .bind(key)
         .execute(&mut **transaction)
         .await?;

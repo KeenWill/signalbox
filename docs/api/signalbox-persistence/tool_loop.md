@@ -250,33 +250,36 @@ impl tool_loop::PostgresToolLoopRepository {
         &self,
         command_id: signalbox_domain::DurableCommandId,
     ) -> result::Result<
-        option::Option<tool::PreparedDecideToolRequest>,
+        option::Option<decide::PreparedDecideToolRequest>,
         tool_loop::ToolLoopRepositoryError,
     >;
     pub async fn decide<NextAttempt>(
         &self,
-        command: tool::DecideToolRequest,
+        command: decide::DecideToolRequest,
         next_attempt: NextAttempt,
-    ) -> result::Result<tool::PreparedDecideToolRequest, tool_loop::ToolLoopRepositoryError>
+    ) -> result::Result<decide::PreparedDecideToolRequest, tool_loop::ToolLoopRepositoryError>
     where
         NextAttempt: function::FnMut() -> signalbox_domain::TurnAttemptId;
     pub async fn load_recorded_override(
         &self,
         command_id: signalbox_domain::DurableCommandId,
     ) -> result::Result<
-        option::Option<tool::PreparedOverrideDeniedToolRequest>,
+        option::Option<override_denial::PreparedOverrideDeniedToolRequest>,
         tool_loop::ToolLoopRepositoryError,
     >;
     pub async fn override_denied(
         &self,
-        command: tool::OverrideDeniedToolRequest,
-    ) -> result::Result<tool::PreparedOverrideDeniedToolRequest, tool_loop::ToolLoopRepositoryError>;
+        command: override_denial::OverrideDeniedToolRequest,
+    ) -> result::Result<
+        override_denial::PreparedOverrideDeniedToolRequest,
+        tool_loop::ToolLoopRepositoryError,
+    >;
     pub async fn prepare_next_attempt(
         &self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
         attempt: signalbox_domain::ToolAttemptId,
-        effect_class: tool::ToolEffectClass,
+        effect_class: policy::ToolEffectClass,
     ) -> result::Result<
         option::Option<tool_attempt::CurrentToolAttempt>,
         tool_loop::ToolLoopRepositoryError,
@@ -372,10 +375,10 @@ impl tool_loop_ports::DecideToolRequestTransaction for tool_loop::PostgresToolLo
     type Error = tool_loop::ToolLoopRepositoryError;
     async fn decide<NextAttempt>(
         &mut self,
-        command: tool::DecideToolRequest,
+        command: decide::DecideToolRequest,
         next_attempt: NextAttempt,
     ) -> result::Result<
-        tool::PreparedDecideToolRequest,
+        decide::PreparedDecideToolRequest,
         <Self as tool_loop_ports::DecideToolRequestTransaction>::Error,
     >
     where
@@ -387,9 +390,9 @@ impl tool_loop_ports::OverrideDeniedToolRequestTransaction
     type Error = tool_loop::ToolLoopRepositoryError;
     async fn override_denied(
         &mut self,
-        command: tool::OverrideDeniedToolRequest,
+        command: override_denial::OverrideDeniedToolRequest,
     ) -> result::Result<
-        tool::PreparedOverrideDeniedToolRequest,
+        override_denial::PreparedOverrideDeniedToolRequest,
         <Self as tool_loop_ports::OverrideDeniedToolRequestTransaction>::Error,
     >;
 }
@@ -414,7 +417,7 @@ impl tool_loop_ports::ToolExecutionTransaction for tool_loop::PostgresToolLoopRe
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
         attempt: signalbox_domain::ToolAttemptId,
-        effect_class: tool::ToolEffectClass,
+        effect_class: policy::ToolEffectClass,
     ) -> result::Result<
         option::Option<tool_attempt::CurrentToolAttempt>,
         <Self as tool_loop_ports::ToolExecutionTransaction>::Error,

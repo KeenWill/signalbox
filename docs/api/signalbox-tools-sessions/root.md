@@ -45,12 +45,12 @@ where
 }
 impl SpawnSessionReceipt {
     pub fn from_relation(
-        request: &session_delegation::DelegatedSpawnRequest,
-        relation: &session_delegation::SessionDelegation,
+        request: &request::DelegatedSpawnRequest,
+        relation: &relation::SessionDelegation,
     ) -> option::Option<Self>;
     pub const fn tool_request(&self) -> signalbox_domain::ToolRequestId;
     pub const fn child(&self) -> signalbox_domain::SessionId;
-    pub const fn policy(&self) -> session_delegation::ChildRelationshipPolicy;
+    pub const fn policy(&self) -> vocabulary::ChildRelationshipPolicy;
 }
 ```
 
@@ -67,12 +67,12 @@ where
 }
 impl AwaitSessionReceipt {
     pub fn from_wait(
-        request: &session_delegation::DelegationAwaitRequest,
-        wait: session_delegation::DelegationWait,
+        request: &request::DelegationAwaitRequest,
+        wait: wait::DelegationWait,
     ) -> option::Option<Self>;
     pub const fn tool_request(self) -> signalbox_domain::ToolRequestId;
     pub const fn child(self) -> signalbox_domain::SessionId;
-    pub const fn mode(self) -> session_delegation::DelegationWaitMode;
+    pub const fn mode(self) -> vocabulary::DelegationWaitMode;
 }
 ```
 
@@ -89,13 +89,13 @@ where
 }
 impl SessionMessageReceipt {
     pub fn from_delivery(
-        request: &session_delegation::DelegationMessageRequest,
+        request: &request::DelegationMessageRequest,
         delivery: &impl session_delegation::DelegationMessageDeliveryProjection,
     ) -> option::Option<Self>;
     pub const fn tool_request(self) -> signalbox_domain::ToolRequestId;
     pub const fn message(self) -> signalbox_domain::DelegationMessageId;
-    pub const fn direction(self) -> session_delegation::DelegationMessageDirection;
-    pub const fn ordinal(self) -> session_delegation::DelegationEventOrdinal;
+    pub const fn direction(self) -> message::DelegationMessageDirection;
+    pub const fn ordinal(self) -> event::DelegationEventOrdinal;
     pub const fn delivery_sequence(self) -> nonzero::NonZeroU64;
 }
 ```
@@ -113,20 +113,20 @@ where
 }
 impl DeliveredChildResult {
     pub fn from_stored_outcome(
-        wait: session_delegation::DelegationWait,
-        outcome: session_delegation::DelegationOutcome,
+        wait: wait::DelegationWait,
+        outcome: outcome::DelegationOutcome,
     ) -> option::Option<Self>;
     pub fn try_new(
-        wait: session_delegation::DelegationWait,
-        relation: &session_delegation::SessionDelegation,
-        event: &session_delegation::DelegationEvent,
+        wait: wait::DelegationWait,
+        relation: &relation::SessionDelegation,
+        event: &event::DelegationEvent,
     ) -> result::Result<Self, DeliveredChildResultError>;
-    pub const fn wait(&self) -> session_delegation::DelegationWait;
+    pub const fn wait(&self) -> wait::DelegationWait;
     pub const fn child(&self) -> signalbox_domain::SessionId;
-    pub const fn kind(&self) -> session_delegation::DelegationOutcomeKind;
-    pub const fn content(&self) -> option::Option<&session_delegation::DelegationContent>;
-    pub const fn reason(&self) -> session_delegation::DelegationOutcomeReason;
-    pub const fn provenance(&self) -> session_delegation::DelegationProvenance;
+    pub const fn kind(&self) -> outcome::DelegationOutcomeKind;
+    pub const fn content(&self) -> option::Option<&content::DelegationContent>;
+    pub const fn reason(&self) -> outcome::DelegationOutcomeReason;
+    pub const fn provenance(&self) -> provenance::DelegationProvenance;
 }
 ```
 
@@ -148,12 +148,7 @@ impl error::Error for DeliveredChildResultError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl DeliveredChildResultError {
-    pub fn into_parts(
-        self,
-    ) -> (
-        session_delegation::DelegationWait,
-        session_delegation::DelegationEvent,
-    );
+    pub fn into_parts(self) -> (wait::DelegationWait, event::DelegationEvent);
 }
 ```
 
@@ -180,7 +175,7 @@ where
 pub enum AwaitSessionPortOutcome {
     BackgroundRegistered(AwaitSessionReceipt),
     Delivered(DeliveredChildResult),
-    ForegroundPending(session_delegation::DelegationWait),
+    ForegroundPending(wait::DelegationWait),
     Rejected,
     DurablyRejected,
 }
@@ -201,7 +196,7 @@ pub trait SessionDelegationPort: marker::Send {
     type MessageDelivery: session_delegation::DelegationMessageDeliveryProjection;
     fn spawn_session(
         &mut self,
-        request: session_delegation::DelegatedSpawnRequest,
+        request: request::DelegatedSpawnRequest,
         dispatch: tool_attempt::ToolDispatchAuthority,
     ) -> impl future::Future<
         Output = result::Result<
@@ -211,14 +206,14 @@ pub trait SessionDelegationPort: marker::Send {
     > + marker::Send;
     fn await_session(
         &mut self,
-        request: session_delegation::DelegationAwaitRequest,
+        request: request::DelegationAwaitRequest,
         dispatch: tool_attempt::ToolDispatchAuthority,
     ) -> impl future::Future<
         Output = result::Result<AwaitSessionPortOutcome, <Self as SessionDelegationPort>::Error>,
     > + marker::Send;
     fn send_session_message(
         &mut self,
-        request: session_delegation::DelegationMessageRequest,
+        request: request::DelegationMessageRequest,
         dispatch: tool_attempt::ToolDispatchAuthority,
     ) -> impl future::Future<
         Output = result::Result<
@@ -304,7 +299,7 @@ where
 }
 impl SessionDelegationRequestDecodeError {
     pub const fn failure(&self) -> SessionDelegationRequestDecodeFailure;
-    pub fn into_request(self) -> tool::ToolRequest;
+    pub fn into_request(self) -> request::ToolRequest;
 }
 impl fmt::Display for SessionDelegationRequestDecodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -318,8 +313,8 @@ impl error::Error for SessionDelegationRequestDecodeError {
 
 ```rust
 pub fn foreground_await_request(
-    request: &tool::ToolRequest,
-) -> option::Option<session_delegation::DelegationAwaitRequest>;
+    request: &request::ToolRequest,
+) -> option::Option<request::DelegationAwaitRequest>;
 ```
 
 ## ForegroundAwaitPending
@@ -335,7 +330,7 @@ where
 }
 impl ForegroundAwaitPending {
     pub const fn correlation(self) -> tool_attempt::ToolAttemptDispatchCorrelation;
-    pub const fn wait(self) -> session_delegation::DelegationWait;
+    pub const fn wait(self) -> wait::DelegationWait;
 }
 ```
 

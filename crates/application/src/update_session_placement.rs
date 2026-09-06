@@ -51,10 +51,10 @@ mod tests {
     use super::UpdateSessionPlacementRequest;
     use crate::InvalidDurableCommandId;
 
-    /// S36: reserved command identities fail before a
+    /// reserved command identities fail before a
     /// placement-update transaction can observe a canonical request.
     #[test]
-    fn s36_request_rejects_reserved_command_identifiers() {
+    fn request_rejects_reserved_command_identifiers() {
         let session = SessionId::from_uuid(Uuid::from_u128(1));
 
         assert_eq!(

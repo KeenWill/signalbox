@@ -5549,11 +5549,11 @@ async fn schema_requires_new_pass_to_be_queued() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// S29: change-request targets require a frozen comparison
+/// change-request targets require a frozen comparison
 /// revision.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s29_schema_requires_change_request_base() -> Result<(), Box<dyn Error>> {
+async fn schema_requires_change_request_base() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let missing_change_request = sqlx::query(
         "INSERT INTO review_target

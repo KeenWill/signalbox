@@ -3196,10 +3196,10 @@ mod tests {
         );
     }
 
-    /// S17: a scheduling-aware executor's durable
+    /// a scheduling-aware executor's durable
     /// foreground wait is reread before the service accepts the parked turn.
     #[tokio::test]
-    async fn s17_durable_child_wait_is_authenticated_without_second_observation() {
+    async fn durable_child_wait_is_authenticated_without_second_observation() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3250,10 +3250,10 @@ mod tests {
         );
     }
 
-    /// S17: terminal evidence committed atomically with a
+    /// terminal evidence committed atomically with a
     /// tool effect is authenticated and never sent through a second commit.
     #[tokio::test]
-    async fn s17_durable_completion_is_authenticated_without_second_commit() {
+    async fn durable_completion_is_authenticated_without_second_commit() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3416,10 +3416,10 @@ mod tests {
         );
     }
 
-    /// S17: a transient durable-wait reread failure keeps
+    /// a transient durable-wait reread failure keeps
     /// the exact evidence and dispatch permit for same-incarnation retry.
     #[tokio::test]
-    async fn s17_durable_child_wait_retries_only_its_authentication() {
+    async fn durable_child_wait_retries_only_its_authentication() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -4087,12 +4087,12 @@ mod tests {
         )
     }
 
-    /// S15: a result past the admission bound is replaced by the
+    /// a result past the admission bound is replaced by the
     /// typed `ResultTooLarge` error. The observation compared here is the whole
     /// value handed to the commit boundary, so equality with a detail-less
     /// typed failure is also the proof that no oversized byte survives into it.
     #[test]
-    fn s15_oversized_result_is_replaced_by_result_too_large() {
+    fn oversized_result_is_replaced_by_result_too_large() {
         let observation = completed_text_admission("r".repeat(OVERSIZED_RESULT_BYTES));
 
         assert_eq!(
@@ -4103,12 +4103,12 @@ mod tests {
         );
     }
 
-    /// S15: a result carrying U+0000 is admitted as a detail-less
+    /// a result carrying U+0000 is admitted as a detail-less
     /// `ExecutionFailed`. The tool-loop specification names a replacement kind
     /// for the size bound only, so this test pins the implemented mapping for
     /// the null-bearing arm rather than a specified one.
     #[test]
-    fn s15_result_containing_null_is_replaced_by_execution_failed() {
+    fn result_containing_null_is_replaced_by_execution_failed() {
         let observation = completed_text_admission(String::from("head\0tail"));
 
         assert_eq!(
@@ -4159,11 +4159,11 @@ mod tests {
         );
     }
 
-    /// S15: the substitution is what the hub durably commits — the
+    /// the substitution is what the hub durably commits — the
     /// ended attempt carries the typed `ResultTooLarge` failure, so oversized
     /// executor bytes never become durable result evidence.
     #[tokio::test]
-    async fn s15_committed_oversized_result_ends_the_attempt_known_failed() {
+    async fn committed_oversized_result_ends_the_attempt_known_failed() {
         let effect_class = ToolEffectClass::EffectFree;
         let (batch, _) = prepared_batch("{}", effect_class);
         let events = Arc::new(Mutex::new(Vec::new()));

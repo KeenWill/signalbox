@@ -3466,13 +3466,13 @@ async fn acquire_peer_message_suffix(
     Ok(())
 }
 
-/// S19: descendant-scoped goal stop takes its canonical
+/// descendant-scoped goal stop takes its canonical
 /// cascade prefix before the ordinary root lock, so an overlapping peer-message
 /// prefix cannot form the child/root inversion that PostgreSQL reports as
 /// `40P01`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_goal_stop_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
+async fn goal_stop_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfb00;
     let fixture = descendant_lock_order_fixture(&pool, seed).await?;
@@ -3516,12 +3516,12 @@ async fn s19_goal_stop_orders_cascade_before_peer_message() -> Result<(), Box<dy
     Ok(())
 }
 
-/// S19: descendant-scoped input interrupt takes the same
+/// descendant-scoped input interrupt takes the same
 /// canonical cascade prefix before its root and scheduler locks, preventing the
 /// peer-message child/root inversion.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_input_interrupt_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
+async fn input_interrupt_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfc00;
     let fixture = descendant_lock_order_fixture(&pool, seed).await?;
@@ -3583,12 +3583,12 @@ async fn s19_input_interrupt_orders_cascade_before_peer_message() -> Result<(), 
     Ok(())
 }
 
-/// S19: when the descendant-scope root is itself a
+/// when the descendant-scope root is itself a
 /// delegated child, the canonical session frontier includes its parent
 /// endpoint in the same ascending lock set.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_descendant_frontier_includes_root_parent_endpoint() -> Result<(), Box<dyn Error>> {
+async fn descendant_frontier_includes_root_parent_endpoint() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfca0;
     let grandparent = seed + 1;
@@ -3696,13 +3696,13 @@ async fn s19_descendant_frontier_includes_root_parent_endpoint() -> Result<(), B
     Ok(())
 }
 
-/// S18: an applied descendant-scoped goal stop
+/// an applied descendant-scoped goal stop
 /// atomically records every edge, logically terminalizes active and queued
 /// bound children with exact provenance, and leaves the background child
 /// runnable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_goal_stop_materializes_complete_delegation_cascade() -> Result<(), Box<dyn Error>> {
+async fn goal_stop_materializes_complete_delegation_cascade() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf100;
     let bound_child = 0xf101;
@@ -4140,12 +4140,12 @@ async fn s18_goal_stop_materializes_complete_delegation_cascade() -> Result<(), 
     Ok(())
 }
 
-/// S18: a descendant-scoped lifecycle stop whose live
+/// a descendant-scoped lifecycle stop whose live
 /// turn is closed by its core interrupt carries `stopped` into the cascade, so
 /// a bound child follows `on_parent_stopped` rather than `on_parent_cancelled`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_lifecycle_stop_interrupt_uses_stopped_child_policy() -> Result<(), Box<dyn Error>> {
+async fn lifecycle_stop_interrupt_uses_stopped_child_policy() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf500;
     let child = 0xf501;
@@ -4317,7 +4317,7 @@ struct PrunedEdgeRecordCounts {
     logical_terminals: i64,
 }
 
-/// S19: a descendant-scoped stop descends into a nested
+/// a descendant-scoped stop descends into a nested
 /// relationship under its immediate parent's disposition, not under the root
 /// command's kind.
 ///
@@ -4330,8 +4330,8 @@ struct PrunedEdgeRecordCounts {
 /// `parent_stopped_parent_and_descendants`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_nested_cascade_descends_under_immediate_parent_disposition()
--> Result<(), Box<dyn Error>> {
+async fn nested_cascade_descends_under_immediate_parent_disposition() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf600;
     let bound_child = 0xf601;
@@ -4485,7 +4485,7 @@ async fn s19_nested_cascade_descends_under_immediate_parent_disposition()
     Ok(())
 }
 
-/// S19: a descendant-scoped stop stops descending below a
+/// a descendant-scoped stop stops descending below a
 /// relationship that survives it, leaving that whole subtree runnable.
 ///
 /// `background_child` keeps running under any parent termination, so the
@@ -4496,7 +4496,7 @@ async fn s19_nested_cascade_descends_under_immediate_parent_disposition()
 /// queued delegated turn stays eligible.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dyn Error>> {
+async fn nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf700;
     let background_child = 0xf701;
@@ -4651,7 +4651,7 @@ async fn s19_nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dy
     Ok(())
 }
 
-/// S18: a delegated turn that completes while holding
+/// a delegated turn that completes while holding
 /// next-safe-point steering reclassifies that steering into a successor turn.
 ///
 /// A delegated turn has no accepted-input queue origin, so reclassification
@@ -4659,7 +4659,7 @@ async fn s19_nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dy
 /// queue chain that an accepted-input turn walks.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_delegated_turn_reclassifies_its_pending_steering() -> Result<(), Box<dyn Error>> {
+async fn delegated_turn_reclassifies_its_pending_steering() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xfb00;
     let child = 0xfb01;
@@ -4814,13 +4814,13 @@ async fn s18_delegated_turn_reclassifies_its_pending_steering() -> Result<(), Bo
     Ok(())
 }
 
-/// S18: a cascade-terminalized child releases its
+/// a cascade-terminalized child releases its
 /// compaction boundary. The retained delegated turn stays physically active, so
 /// preparation must read runtime relevance rather than the physical state and
 /// must source the logical terminal's frontier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_logically_terminal_child_admits_compaction() -> Result<(), Box<dyn Error>> {
+async fn logically_terminal_child_admits_compaction() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xfa00;
     let bound_child = 0xfa01;

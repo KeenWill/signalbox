@@ -90,11 +90,12 @@ formatted error.
 Every command handler inspects the registry for the command identifier before it
 validates anything against current state. Replaying the same command with the
 same payload returns the recorded result once the command has settled; while it
-is pending the handler reports busy. Replaying it with a different payload or
-kind is a conflict and changes nothing. A single-transaction command commits its
-registry row, payload record, result, and every effect together, and a failed
-transaction leaves no claim behind. A recorded rejection claims the identifier
-the same way an applied command does.
+is pending the handler reports busy, except that review orchestration resumes
+its own pending command. Replaying it with a different payload or kind is a
+conflict and changes nothing. A single-transaction command commits its registry
+row, payload record, result, and every effect together, and a failed transaction
+leaves no claim behind. A recorded rejection claims the identifier the same way
+an applied command does.
 
 Recording who or what caused an action is provenance only. It grants no
 lifecycle, authorization, or approval authority. No automated path can attribute

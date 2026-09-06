@@ -459,7 +459,9 @@ pub fn input_position_from_numeric(
 ## dangerous_tool_auto_approval_to_str
 
 ```rust
-pub fn dangerous_tool_auto_approval_to_str(value: tool::DangerousToolAutoApproval) -> &'static str;
+pub fn dangerous_tool_auto_approval_to_str(
+    value: policy::DangerousToolAutoApproval,
+) -> &'static str;
 ```
 
 ## dangerous_tool_auto_approval_from_str
@@ -467,7 +469,7 @@ pub fn dangerous_tool_auto_approval_to_str(value: tool::DangerousToolAutoApprova
 ```rust
 pub fn dangerous_tool_auto_approval_from_str(
     value: &str,
-) -> option::Option<tool::DangerousToolAutoApproval>;
+) -> option::Option<policy::DangerousToolAutoApproval>;
 ```
 
 ## session_id_to_uuid

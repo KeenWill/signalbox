@@ -2,7 +2,7 @@
 
 use crate::*;
 
-/// S08: pending-steering acceptance and source terminalization
+/// pending-steering acceptance and source terminalization
 /// serialize on the source lifecycle row, so racing commits cannot both
 /// succeed from snapshots in which the reciprocal effect is not yet visible.
 #[tokio::test(flavor = "multi_thread")]
@@ -152,13 +152,13 @@ async fn pending_steering_and_source_terminalization_serialize() -> Result<(), B
     Ok(())
 }
 
-/// S03 / S04: after a real pool restart, startup atomically
+/// after a real pool restart, startup atomically
 /// ends the prior-process attempt as Lost, retains it as attempt-only terminal
 /// provenance, appends `TurnFailed`, terminalizes Failed, remains idempotent on
 /// replay, and exposes the queued successor to the ordinary scheduler path.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_s04_restart_scan_recovers_lost_attempt_once_and_unblocks_successor()
+async fn restart_scan_recovers_lost_attempt_once_and_unblocks_successor()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let session_uuid = Uuid::from_u128(0x7b1);
@@ -384,12 +384,11 @@ async fn s03_s04_restart_scan_recovers_lost_attempt_once_and_unblocks_successor(
     Ok(())
 }
 
-/// S03: failure after the typed outbox append rolls the
+/// failure after the typed outbox append rolls the
 /// complete Lost recovery back; retry then commits the state and event once.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_startup_recovery_and_outbox_commit_or_roll_back_together() -> Result<(), Box<dyn Error>>
-{
+async fn startup_recovery_and_outbox_commit_or_roll_back_together() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session_uuid = Uuid::from_u128(0x7d1);
     let turn_uuid = Uuid::from_u128(0xad1);
@@ -520,12 +519,12 @@ async fn s03_startup_recovery_and_outbox_commit_or_roll_back_together() -> Resul
     Ok(())
 }
 
-/// S08 / S09: evidence-free restart recovery
+/// evidence-free restart recovery
 /// ends the abandoned source attempt and atomically reclassifies pending
 /// steering, leaving no startup blocker on replay.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s08_s09_restart_reclassifies_pending_steering() -> Result<(), Box<dyn Error>> {
+async fn restart_reclassifies_pending_steering() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let session_uuid = Uuid::from_u128(0x7c1);
     let turn_uuid = Uuid::from_u128(0xac1);
@@ -689,14 +688,13 @@ async fn s08_s09_restart_reclassifies_pending_steering() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// S01 / S03 / S07 / S08 / S09 /
 /// occupied-slot rejection evidence is recorded exactly, generated
 /// identities cannot reuse the active origin, and a matching interrupt
 /// atomically cancels prepared work while recording and prioritizing its exact
 /// immediate successor ahead of previously queued ordinary work.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_s07_prepared_interrupt_is_exact() -> Result<(), Box<dyn Error>> {
+async fn prepared_interrupt_is_exact() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let prepared_session = prepared(0x441, 0x841, direct(0xc41));
     let session = prepared_session.session().id();
@@ -2058,13 +2056,13 @@ async fn concurrent_attempt_and_frontier_inserts_fail_closed() -> Result<(), Box
     Ok(())
 }
 
-/// S01: all baseline authoritative rejections are typed
+/// all baseline authoritative rejections are typed
 /// terminal records. Active-work delivery modes reject `NoActiveTurn`, stale
 /// defaults and unresolved aliases retain their exact evidence, and missing
 /// sessions create no aggregate or queued-work effects.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_submit_records_authoritative_rejections() -> Result<(), Box<dyn Error>> {
+async fn submit_records_authoritative_rejections() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let direct_session_fixture = prepared(0x311, 0x711, direct(0x811));
