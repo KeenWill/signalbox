@@ -14,6 +14,7 @@ use signalbox_domain::{
     SessionOwnership, SessionPlacement, SessionTemplateProvenance, StartGate, TranscriptAncestry,
 };
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a caller-supplied command identity cannot enter canonical construction.
 ///
 /// docs/spec/identity-and-commands.md reserves nil and max UUIDs as invalid
@@ -22,22 +23,13 @@ use signalbox_domain::{
 /// identity generation, or durable-command lookup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvalidDurableCommandId {
+    #[error("nil durable command identity is reserved")]
     /// The supplied UUID contains all zero bits.
     Nil,
+    #[error("max durable command identity is reserved")]
     /// The supplied UUID contains all one bits.
     Max,
 }
-
-impl fmt::Display for InvalidDurableCommandId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Nil => formatter.write_str("nil durable command identity is reserved"),
-            Self::Max => formatter.write_str("max durable command identity is reserved"),
-        }
-    }
-}
-
-impl Error for InvalidDurableCommandId {}
 
 /// The complete admitted application request for user-initiated creation.
 ///

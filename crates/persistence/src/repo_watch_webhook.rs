@@ -4,8 +4,6 @@
 //! storage adapter. This module admits only already-authenticated exact bytes.
 
 use std::{
-    error::Error,
-    fmt,
     num::{NonZeroU16, NonZeroU64},
     time::{Duration, SystemTime},
 };
@@ -37,10 +35,13 @@ pub const MAX_PENDING_PAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_WEBHOOK_NAME_BYTES: usize = 64;
 const MAX_OUTCOME_CODE_BYTES: usize = 64;
 
+#[derive(signalbox_derive::Accessors)]
 /// Permanent replay identity supplied by GitHub for one repository webhook.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RepoWatchWebhookDeliveryKey {
+    #[get(copy)]
     hook_id: NonZeroU64,
+    #[get(copy)]
     delivery_id: Uuid,
 }
 
@@ -51,24 +52,21 @@ impl RepoWatchWebhookDeliveryKey {
             delivery_id,
         }
     }
-
-    pub const fn hook_id(self) -> NonZeroU64 {
-        self.hook_id
-    }
-
-    pub const fn delivery_id(self) -> Uuid {
-        self.delivery_id
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One already-authenticated exact delivery prepared for durable admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchWebhookAdmission {
     key: RepoWatchWebhookDeliveryKey,
+    #[get]
     repository: RepositorySlug,
+    #[get(str)]
     event_name: String,
     action_name: Option<String>,
+    #[get]
     body_digest: [u8; 32],
+    #[get(unbox)]
     body: Box<[u8]>,
 }
 
@@ -107,70 +105,37 @@ impl RepoWatchWebhookAdmission {
         self.key
     }
 
-    pub const fn repository(&self) -> &RepositorySlug {
-        &self.repository
-    }
-
-    pub fn event_name(&self) -> &str {
-        &self.event_name
-    }
-
     pub fn action_name(&self) -> Option<&str> {
         self.action_name.as_deref()
     }
-
-    pub const fn body_digest(&self) -> &[u8; 32] {
-        &self.body_digest
-    }
-
-    pub fn body(&self) -> &[u8] {
-        &self.body
-    }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Validation failure before a webhook persistence request reaches PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookRequestError {
+    #[error("invalid GitHub webhook event name")]
     InvalidEventName,
+    #[error("invalid GitHub webhook action name")]
     InvalidActionName,
+    #[error("invalid webhook terminal outcome code")]
     InvalidOutcomeCode,
+    #[error("GitHub webhook body is empty")]
     EmptyBody,
+    #[error("webhook event occurrence key is empty")]
     EmptyOccurrenceKey,
+    #[error("webhook projection batch exceeds the durable ordinal range")]
     TooManyProjections,
 }
 
-impl fmt::Display for RepoWatchWebhookRequestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidEventName => "invalid GitHub webhook event name",
-            Self::InvalidActionName => "invalid GitHub webhook action name",
-            Self::InvalidOutcomeCode => "invalid webhook terminal outcome code",
-            Self::EmptyBody => "GitHub webhook body is empty",
-            Self::EmptyOccurrenceKey => "webhook event occurrence key is empty",
-            Self::TooManyProjections => {
-                "webhook projection batch exceeds the durable ordinal range"
-            }
-        })
-    }
-}
-
-impl Error for RepoWatchWebhookRequestError {}
-
+#[derive(signalbox_derive::Accessors)]
 /// Positive durable intake position returned only after the local commit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchWebhookReceipt {
+    #[get(copy)]
     sequence: NonZeroU64,
+    #[get(copy)]
     received_at: SystemTime,
-}
-
-impl RepoWatchWebhookReceipt {
-    pub const fn sequence(self) -> NonZeroU64 {
-        self.sequence
-    }
-
-    pub const fn received_at(self) -> SystemTime {
-        self.received_at
-    }
 }
 
 /// Replay-sensitive outcome of durable delivery admission.
@@ -226,9 +191,10 @@ impl RepoWatchWebhookProjectionFault {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded pending-delivery page size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RepoWatchWebhookPendingPageSize(NonZeroU16);
+pub struct RepoWatchWebhookPendingPageSize(#[get(inner, as = "get")] NonZeroU16);
 
 impl RepoWatchWebhookPendingPageSize {
     pub fn try_new(value: NonZeroU16) -> Result<Self, RepoWatchWebhookPageSizeError> {
@@ -238,33 +204,28 @@ impl RepoWatchWebhookPendingPageSize {
             Ok(Self(value))
         }
     }
-
-    pub const fn get(self) -> u16 {
-        self.0.get()
-    }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("repository-watch pending webhook page size exceeds 100")]
 /// A requested pending webhook page exceeded the fixed storage bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchWebhookPageSizeError;
 
-impl fmt::Display for RepoWatchWebhookPageSizeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("repository-watch pending webhook page size exceeds 100")
-    }
-}
-
-impl Error for RepoWatchWebhookPageSizeError {}
-
+#[derive(signalbox_derive::Accessors)]
 /// One accepted delivery that still lacks a terminal disposition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingRepoWatchWebhookDelivery {
     key: RepoWatchWebhookDeliveryKey,
+    #[get]
     repository: RepositorySlug,
+    #[get(str)]
     event_name: String,
     action_name: Option<String>,
+    #[get]
     body_digest: [u8; 32],
     receipt: RepoWatchWebhookReceipt,
+    #[get(unbox)]
     body: Box<[u8]>,
 }
 
@@ -302,28 +263,12 @@ impl PendingRepoWatchWebhookDelivery {
         self.key
     }
 
-    pub const fn repository(&self) -> &RepositorySlug {
-        &self.repository
-    }
-
-    pub fn event_name(&self) -> &str {
-        &self.event_name
-    }
-
     pub fn action_name(&self) -> Option<&str> {
         self.action_name.as_deref()
     }
 
-    pub const fn body_digest(&self) -> &[u8; 32] {
-        &self.body_digest
-    }
-
     pub const fn receipt(&self) -> RepoWatchWebhookReceipt {
         self.receipt
-    }
-
-    pub fn body(&self) -> &[u8] {
-        &self.body
     }
 }
 
@@ -417,9 +362,11 @@ pub enum RepoWatchWebhookDisposition {
     Quarantined,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One atomic shadow-projection and terminal-disposition request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchWebhookTerminalRequest {
+    #[get(unbox)]
     projections: Box<[RepoWatchWebhookProjection]>,
     disposition: RepoWatchWebhookDisposition,
     outcome_code: Option<String>,
@@ -447,10 +394,6 @@ impl RepoWatchWebhookTerminalRequest {
         })
     }
 
-    pub fn projections(&self) -> &[RepoWatchWebhookProjection] {
-        &self.projections
-    }
-
     pub const fn disposition(&self) -> RepoWatchWebhookDisposition {
         self.disposition
     }
@@ -467,65 +410,34 @@ pub enum RepoWatchWebhookTerminalOutcome {
     AlreadyTerminal,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Closed fail-closed classification for malformed webhook storage rows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookStorageCorruption {
+    #[error("invalid stored webhook hook ID")]
     InvalidHookId,
+    #[error("invalid stored webhook receipt sequence")]
     InvalidReceiptSequence,
+    #[error("invalid stored webhook repository")]
     InvalidRepository,
+    #[error("invalid stored webhook body digest")]
     InvalidBodyDigest,
+    #[error("invalid stored webhook terminal disposition")]
     InvalidDisposition,
 }
 
-impl fmt::Display for RepoWatchWebhookStorageCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidHookId => "invalid stored webhook hook ID",
-            Self::InvalidReceiptSequence => "invalid stored webhook receipt sequence",
-            Self::InvalidRepository => "invalid stored webhook repository",
-            Self::InvalidBodyDigest => "invalid stored webhook body digest",
-            Self::InvalidDisposition => "invalid stored webhook terminal disposition",
-        })
-    }
-}
-
-impl Error for RepoWatchWebhookStorageCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database, transaction, or fail-closed durable webhook intake failure.
 #[derive(Debug)]
 pub enum RepoWatchWebhookStoreError {
-    Database(sqlx::Error),
-    CommitAmbiguous(sqlx::Error),
-    Corruption(RepoWatchWebhookStorageCorruption),
+    #[error("webhook intake database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error("webhook intake commit outcome is ambiguous: {field_0}")]
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("webhook intake storage is corrupt: {field_0}")]
+    Corruption(#[source] RepoWatchWebhookStorageCorruption),
+    #[error("webhook delivery does not exist")]
     MissingDelivery,
-}
-
-impl fmt::Display for RepoWatchWebhookStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "webhook intake database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "webhook intake commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::Corruption(error) => {
-                write!(formatter, "webhook intake storage is corrupt: {error}")
-            }
-            Self::MissingDelivery => formatter.write_str("webhook delivery does not exist"),
-        }
-    }
-}
-
-impl Error for RepoWatchWebhookStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-            Self::MissingDelivery => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for RepoWatchWebhookStoreError {

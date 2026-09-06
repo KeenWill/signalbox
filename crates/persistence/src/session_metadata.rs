@@ -4,8 +4,6 @@
 //! aggregate, retains complete durable replacement receipts, and implements
 //! bounded keyset pages from one repeatable-read snapshot.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use signalbox_application::{
     ReplaceSessionMetadataOutcome, ReplaceSessionMetadataTransaction, SessionMetadataListItem,
@@ -53,11 +51,14 @@ pub enum ReplaceSessionMetadataHandlingOutcome {
     },
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable metadata shape that cannot construct the public domain values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionMetadataCorruption {
+    #[error("missing session metadata {field_0}")]
     /// One required row or field is absent.
     Missing(&'static str),
+    #[error("unsupported session metadata {field}: {value}")]
     /// A closed discriminator or representation version is unsupported.
     Unsupported {
         /// The record field that could not be decoded.
@@ -65,97 +66,42 @@ pub enum SessionMetadataCorruption {
         /// The durable spelling that was observed.
         value: String,
     },
+    #[error("inconsistent session metadata {field_0}")]
     /// Typed record relationships or variant fields disagree.
     Inconsistent(&'static str),
+    #[error("invalid metadata-list defaults version: {field_0}")]
     /// A stored defaults version is not a positive domain ordinal.
     InvalidDefaultsVersion(PositiveOrdinalMappingError),
+    #[error("invalid stored metadata content: {field_0:?}")]
     /// A stored metadata string collection violates the domain boundary.
     InvalidContent(SessionMetadataContentError),
+    #[error("invalid stored metadata update timestamp")]
     /// A stored database timestamp is not a nonnegative integral u64 value.
     InvalidUpdatedAt,
+    #[error("metadata receipt reconstitution failed: {field_0:?}")]
     /// Complete receipt values fail domain-owned correlation.
     Domain(ReplaceSessionMetadataReconstitutionFailure),
 }
 
-impl fmt::Display for SessionMetadataCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing session metadata {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported session metadata {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent session metadata {relationship}")
-            }
-            Self::InvalidDefaultsVersion(reason) => {
-                write!(
-                    formatter,
-                    "invalid metadata-list defaults version: {reason}"
-                )
-            }
-            Self::InvalidContent(reason) => {
-                write!(formatter, "invalid stored metadata content: {reason:?}")
-            }
-            Self::InvalidUpdatedAt => {
-                formatter.write_str("invalid stored metadata update timestamp")
-            }
-            Self::Domain(reason) => {
-                write!(
-                    formatter,
-                    "metadata receipt reconstitution failed: {reason:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for SessionMetadataCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database failure, ambiguous commit, wrong load purpose, or corruption.
 #[derive(Debug)]
 pub enum SessionMetadataRepositoryError {
+    #[error("session metadata database failure: {field_0}")]
     /// PostgreSQL could not complete the operation.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("session metadata commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL did not reveal whether the final commit took effect.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("durable command {command_id:?} does not name ReplaceSessionMetadata")]
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
         /// The user-global identifier that names another kind.
         command_id: DurableCommandId,
     },
+    #[error(transparent)]
     /// Durable rows cannot reconstruct the requested domain value.
-    Corruption(SessionMetadataCorruption),
-}
-
-impl fmt::Display for SessionMetadataRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => {
-                write!(formatter, "session metadata database failure: {error}")
-            }
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "session metadata commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::DifferentCommandKind { command_id } => write!(
-                formatter,
-                "durable command {command_id:?} does not name ReplaceSessionMetadata"
-            ),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for SessionMetadataRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::DifferentCommandKind { .. } => None,
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] SessionMetadataCorruption),
 }
 
 impl From<sqlx::Error> for SessionMetadataRepositoryError {

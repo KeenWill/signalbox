@@ -7,7 +7,7 @@
 
 use std::{
     error::Error,
-    fmt, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -111,55 +111,31 @@ pub fn decode_corpus(bytes: &[u8]) -> Result<ApprovalJudgeCorpus, CorpusLoadErro
     serde_json::from_slice(bytes).map_err(CorpusLoadError::Json)
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A corpus file could not be read or admitted.
 #[derive(Debug)]
 pub enum CorpusLoadError {
+    #[error("could not read corpus {}: {source}", path.display())]
     /// Filesystem access failed.
     Read {
         /// Requested corpus path.
         path: PathBuf,
+        #[source]
         /// Underlying filesystem failure.
         source: std::io::Error,
     },
+    #[error("corpus JSON is invalid: {field_0}")]
     /// JSON decoding or strict shape validation failed.
-    Json(serde_json::Error),
+    Json(#[source] serde_json::Error),
+    #[error("corpus {} is not valid corpus JSON: {source}", path.display())]
     /// JSON decoding or strict shape validation failed for a named file.
     JsonInFile {
         /// Corpus file that failed to decode.
         path: PathBuf,
+        #[source]
         /// Underlying decode failure.
         source: serde_json::Error,
     },
-}
-
-impl fmt::Display for CorpusLoadError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Read { path, source } => {
-                write!(
-                    formatter,
-                    "could not read corpus {}: {source}",
-                    path.display()
-                )
-            }
-            Self::Json(source) => write!(formatter, "corpus JSON is invalid: {source}"),
-            Self::JsonInFile { path, source } => write!(
-                formatter,
-                "corpus {} is not valid corpus JSON: {source}",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl Error for CorpusLoadError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Read { source, .. } => Some(source),
-            Self::Json(source) => Some(source),
-            Self::JsonInFile { source, .. } => Some(source),
-        }
-    }
 }
 
 /// Replays and scores every corpus case through the current binary judge path.
@@ -320,10 +296,13 @@ impl DispositionMetrics {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A case could not be scored through the judge adapter.
 #[derive(Debug)]
+#[error("approval-judge replay failed for case {case_id}: {source}")]
 pub struct ScoreError {
     case_id: String,
+    #[source]
     source: Box<dyn Error + Send + Sync>,
 }
 
@@ -332,22 +311,6 @@ impl ScoreError {
     #[must_use]
     pub fn case_id(&self) -> &str {
         &self.case_id
-    }
-}
-
-impl fmt::Display for ScoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "approval-judge replay failed for case {}: {}",
-            self.case_id, self.source
-        )
-    }
-}
-
-impl Error for ScoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.source.as_ref())
     }
 }
 

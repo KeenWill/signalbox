@@ -1,23 +1,31 @@
-use std::{error::Error, fmt};
+use std::fmt;
 
 use signalbox_model_runtime::CredentialValue;
 
 use super::{diagnostic::*, redaction::*, result::*};
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized classification of one physical provider exchange.
 pub enum WebSearchTransportFailure {
+    #[error("invalid web search credential")]
     /// Client-side credential bytes could not form the provider header.
     InvalidCredential,
+    #[error("{}", & field_0.rendered)]
     /// A request-scoped credential collided with otherwise-safe diagnostics.
     CredentialDiagnosticCollision(WebSearchCredentialDiagnostic),
+    #[error("web search request failed before dispatch")]
     /// Client setup or connection failed before dispatch.
     RequestFailed,
+    #[error("web search provider rejected the request")]
     /// A complete status and complete bounded provider error body were received.
-    ProviderRejected(WebSearchProviderError),
+    ProviderRejected(#[source] WebSearchProviderError),
+    #[error("web search provider returned an invalid response")]
     /// A complete success body did not match the provider contract.
     InvalidResponse,
+    #[error("web search provider response exceeded the byte cap")]
     /// The provider body exceeded the fixed exchange cap.
     ResponseTooLarge,
+    #[error("web search request outcome is unknown")]
     /// Dispatch began without a complete bounded outcome.
     DispatchUnknown,
 }
@@ -34,42 +42,6 @@ impl fmt::Debug for WebSearchTransportFailure {
             Self::InvalidResponse => formatter.write_str("InvalidResponse"),
             Self::ResponseTooLarge => formatter.write_str("ResponseTooLarge"),
             Self::DispatchUnknown => formatter.write_str("DispatchUnknown"),
-        }
-    }
-}
-
-impl fmt::Display for WebSearchTransportFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidCredential => formatter.write_str("invalid web search credential"),
-            Self::CredentialDiagnosticCollision(diagnostic) => {
-                formatter.write_str(&diagnostic.rendered)
-            }
-            Self::RequestFailed => formatter.write_str("web search request failed before dispatch"),
-            Self::ProviderRejected(_) => {
-                formatter.write_str("web search provider rejected the request")
-            }
-            Self::InvalidResponse => {
-                formatter.write_str("web search provider returned an invalid response")
-            }
-            Self::ResponseTooLarge => {
-                formatter.write_str("web search provider response exceeded the byte cap")
-            }
-            Self::DispatchUnknown => formatter.write_str("web search request outcome is unknown"),
-        }
-    }
-}
-
-impl Error for WebSearchTransportFailure {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::ProviderRejected(error) => Some(error),
-            Self::InvalidCredential
-            | Self::CredentialDiagnosticCollision(_)
-            | Self::RequestFailed
-            | Self::InvalidResponse
-            | Self::ResponseTooLarge
-            | Self::DispatchUnknown => None,
         }
     }
 }

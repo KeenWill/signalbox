@@ -403,17 +403,15 @@ the whole workspace passes it at `deny`.
 explicit matching until the workspace's remaining wildcard arms are gone and the
 lint can be enabled at `deny`.
 
-### The style-rule checker
+### Review conventions
 
-`scripts/check_style_rules.py` checks the three conventions below, which a text
-scan can decide without type resolution. It runs in CI as a blocking step. A
-rule is added to it only once the tree has no violations of that rule.
+Review enforces these conventions:
 
-| Rule  | Convention it decides                                             |
-| ----- | ----------------------------------------------------------------- |
-| SR-8  | no production code under `apps/` names a table in SQL             |
-| SR-12 | every clap argument and `ValueEnum` variant carries a doc comment |
-| SR-13 | no proc-macro diagnostic is spanned on the macro call site        |
+| Rule  | Convention                                                    |
+| ----- | ------------------------------------------------------------- |
+| SR-8  | production code under `apps/` does not name a table in SQL    |
+| SR-12 | every clap argument and `ValueEnum` variant has a doc comment |
+| SR-13 | proc-macro diagnostics are not spanned on the macro call site |
 
 The other conventions in this guide are applied by the author when writing the
 change, because the fact they depend on (who owns a bound, whether two helpers

@@ -7,8 +7,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    error::Error,
-    fmt,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
@@ -160,27 +158,16 @@ impl From<ContextFrontierId> for ProspectiveModelInput<'_> {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Latest terminal-call usage usable as a conservative next-call lower bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReportedModelCallUsage {
-    usage: ProviderReportedTokenUsage,
-    input_includes_cache_tokens: bool,
-    input_is_retained: bool,
-    output_is_retained: bool,
-    projected_unreported_content_bytes: u64,
-}
-
-impl ReportedModelCallUsage {
     /// Returns the exact provider-reported fields retained for the call.
-    pub const fn usage(self) -> ProviderReportedTokenUsage {
-        self.usage
-    }
-
+    #[get(copy)]
+    usage: ProviderReportedTokenUsage,
     /// Whether the stored input field already includes the cache axes.
-    pub const fn input_includes_cache_tokens(self) -> bool {
-        self.input_includes_cache_tokens
-    }
-
+    #[get(copy)]
+    input_includes_cache_tokens: bool,
     /// Whether the reported input is still model-visible for the next call.
     ///
     /// An ordinary call's input is the transcript prefix its successor resends.
@@ -188,20 +175,15 @@ impl ReportedModelCallUsage {
     /// replaced, so none of it survives into the next request; that call's
     /// retained material is its summary output plus the content the compaction
     /// did not summarize, which the projected-content allowance counts.
-    pub const fn input_is_retained(self) -> bool {
-        self.input_is_retained
-    }
-
+    #[get(copy)]
+    input_is_retained: bool,
     /// Whether reported output became assistant transcript for the next call.
-    pub const fn output_is_retained(self) -> bool {
-        self.output_is_retained
-    }
-
+    #[get(copy)]
+    output_is_retained: bool,
     /// Returns a conservative byte allowance for model-visible transcript
     /// material appended after the reported call's input.
-    pub const fn projected_unreported_content_bytes(self) -> u64 {
-        self.projected_unreported_content_bytes
-    }
+    #[get(copy)]
+    projected_unreported_content_bytes: u64,
 }
 
 impl ProspectiveModelCall {
@@ -240,39 +222,33 @@ impl ProspectiveModelCall {
 }
 
 /// Which fresh execution identity collided with an existing durable record.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum ModelCallIdentityCollision {
     /// The proposed model-call identity already exists.
+    #[error("model-call identity already exists")]
     ModelCall,
     /// A proposed semantic-entry identity already exists.
+    #[error("semantic-entry identity already exists")]
     SemanticEntry,
     /// The proposed terminal-frontier identity already exists.
+    #[error("context-frontier identity already exists")]
     TerminalFrontier,
     /// A proposed reclassified successor-turn identity already exists.
+    #[error("reclassified successor-turn identity already exists")]
     ReclassifiedTurn,
 }
 
-impl fmt::Display for ModelCallIdentityCollision {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let identity = match self {
-            Self::ModelCall => "model-call",
-            Self::SemanticEntry => "semantic-entry",
-            Self::TerminalFrontier => "context-frontier",
-            Self::ReclassifiedTurn => "reclassified successor-turn",
-        };
-        write!(formatter, "{identity} identity already exists")
-    }
-}
-
-impl Error for ModelCallIdentityCollision {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct the execution aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelCallCorruption {
+    #[error("missing model-call execution {field_0}")]
     /// One required durable record or field is absent.
     Missing(&'static str),
+    #[error("inconsistent model-call execution {field_0}")]
     /// Stored records disagree about an exact relationship.
     Inconsistent(&'static str),
+    #[error("unsupported model-call execution {field}: {value}")]
     /// A closed durable discriminator is unsupported.
     Unsupported {
         /// The field whose spelling is unsupported.
@@ -280,96 +256,42 @@ pub enum ModelCallCorruption {
         /// The exact durable spelling.
         value: String,
     },
+    #[error("model-call current Session is invalid: {field_0}")]
     /// The current session projection is invalid.
     CurrentSession(SessionCorruption),
+    #[error("model-call scheduling projection is invalid: {field_0}")]
     /// Complete scheduling records are invalid.
     Scheduling(SubmitInputCorruption),
+    #[error("model-call execution reconstitution failed: {field_0:?}")]
     /// Complete live facts fail domain reconstitution.
     Execution(ModelCallExecutionReconstitutionFailure),
 }
 
-impl fmt::Display for ModelCallCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(record) => write!(formatter, "missing model-call execution {record}"),
-            Self::Inconsistent(relationship) => {
-                write!(
-                    formatter,
-                    "inconsistent model-call execution {relationship}"
-                )
-            }
-            Self::Unsupported { field, value } => {
-                write!(
-                    formatter,
-                    "unsupported model-call execution {field}: {value}"
-                )
-            }
-            Self::CurrentSession(error) => {
-                write!(formatter, "model-call current Session is invalid: {error}")
-            }
-            Self::Scheduling(error) => {
-                write!(
-                    formatter,
-                    "model-call scheduling projection is invalid: {error}"
-                )
-            }
-            Self::Execution(failure) => {
-                write!(
-                    formatter,
-                    "model-call execution reconstitution failed: {failure:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ModelCallCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database, integrity, identity, or caller failure at the execution boundary.
 #[derive(Debug)]
 pub enum ModelCallRepositoryError {
+    #[error("model-call database failure: {source}")]
     /// PostgreSQL could not complete the operation.
     Database {
+        #[source]
         /// The underlying SQLx failure.
         source: sqlx::Error,
         /// Whether failure occurred while awaiting commit.
         commit_ambiguous: bool,
     },
+    #[error(transparent)]
     /// Committed rows cannot form the accepted aggregate.
-    Corruption(ModelCallCorruption),
+    Corruption(#[source] ModelCallCorruption),
+    #[error(transparent)]
     /// A fresh identity collided durably.
-    IdentityCollision(ModelCallIdentityCollision),
+    IdentityCollision(#[source] ModelCallIdentityCollision),
+    #[error("no live model-call execution exists")]
     /// The application invoked an execution transition without a live turn.
     NoLiveExecution,
+    #[error("model-call transition rejected: {field_0}")]
     /// A checked transition rejected an application-supplied operation.
     InvalidTransition(&'static str),
-}
-
-impl fmt::Display for ModelCallRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "model-call database failure: {source}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::IdentityCollision(error) => error.fmt(formatter),
-            Self::NoLiveExecution => formatter.write_str("no live model-call execution exists"),
-            Self::InvalidTransition(operation) => {
-                write!(formatter, "model-call transition rejected: {operation}")
-            }
-        }
-    }
-}
-
-impl Error for ModelCallRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
-            Self::IdentityCollision(error) => Some(error),
-            Self::NoLiveExecution | Self::InvalidTransition(_) => None,
-        }
-    }
 }
 
 impl ClassifyOperatorFailure for ModelCallRepositoryError {
@@ -489,9 +411,12 @@ impl CredentialPoolRuntimeAction {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Runtime pool member in immutable policy order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialPoolRuntimeMember {
+    /// Borrows the deployment-owned profile reference.
+    #[get(str)]
     credential_reference: Arc<str>,
     priority: NonZeroU32,
 }
@@ -509,20 +434,18 @@ impl CredentialPoolRuntimeMember {
         }
     }
 
-    /// Borrows the deployment-owned profile reference.
-    pub fn credential_reference(&self) -> &str {
-        &self.credential_reference
-    }
-
     /// Returns the membership priority.
     pub const fn priority(&self) -> NonZeroU32 {
         self.priority
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Immutable credential-pool policy supplied by admitted daemon configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialPoolRuntimePolicy {
+    /// Borrows the exact pool name.
+    #[get(str)]
     name: Arc<str>,
     members: Arc<[CredentialPoolRuntimeMember]>,
     on_pool_exhausted: CredentialPoolRuntimeExhaustion,
@@ -554,11 +477,6 @@ impl CredentialPoolRuntimePolicy {
         }
     }
 
-    /// Borrows the exact pool name.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     /// Borrows members in deterministic selection order.
     pub fn members(&self) -> &[CredentialPoolRuntimeMember] {
         &self.members
@@ -584,9 +502,12 @@ impl CredentialPoolRuntimePolicy {
 pub type CredentialPoolRuntimeCatalog =
     HashMap<ResolvedProviderTarget, CredentialPoolRuntimePolicy>;
 
+#[derive(signalbox_derive::Accessors)]
 /// PostgreSQL adapter for the initial model-call execution transactions.
 #[derive(Clone, Debug)]
 pub struct PostgresModelCallRepository {
+    /// Borrows the shared pool for composition-owned adjacent transactions.
+    #[get]
     pool: PgPool,
     targets: ModelTargetCatalog,
     credential_reference: ModelCallCredentialReference,
@@ -669,11 +590,6 @@ impl PostgresModelCallRepository {
             .map(|limit| ((limit.target, limit.fast_mode), limit))
             .collect();
         self
-    }
-
-    /// Borrows the shared pool for composition-owned adjacent transactions.
-    pub const fn pool(&self) -> &PgPool {
-        &self.pool
     }
 
     /// Reads the newest ordinary or dedicated-compaction call with reported input

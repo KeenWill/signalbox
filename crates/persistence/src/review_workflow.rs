@@ -4,11 +4,7 @@
 //! the domain API defined by `docs/spec/review-workflows.md`.
 
 use signalbox_application::ReviewWorkflowReader;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    error::Error,
-    fmt,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -5104,129 +5100,82 @@ pub enum ReserveExternalLinkOutcome {
     Existing(ReviewExternalLink),
 }
 
+#[derive(signalbox_derive::Accessors, signalbox_derive::OperatorError)]
+#[error("review external-link identity was reused for a different canonical reservation")]
 /// Conflicting reuse of a review external-link reservation identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewExternalLinkReservationConflict {
+    /// Borrows the retained canonical aggregate.
+    #[get(unbox)]
     existing: Box<ReviewExternalLink>,
+    /// Borrows the rejected reservation request.
+    #[get(unbox)]
     requested: Box<ReviewExternalLink>,
 }
 
 impl ReviewExternalLinkReservationConflict {
-    /// Borrows the retained canonical aggregate.
-    pub fn existing(&self) -> &ReviewExternalLink {
-        &self.existing
-    }
-
-    /// Borrows the rejected reservation request.
-    pub fn requested(&self) -> &ReviewExternalLink {
-        &self.requested
-    }
-
     /// Returns both complete aggregates.
     pub fn into_parts(self) -> (ReviewExternalLink, ReviewExternalLink) {
         (*self.existing, *self.requested)
     }
 }
 
-impl fmt::Display for ReviewExternalLinkReservationConflict {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(
-            "review external-link identity was reused for a different canonical reservation",
-        )
-    }
-}
-
-impl Error for ReviewExternalLinkReservationConflict {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Caller-supplied aggregate shape that cannot begin a new store record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewWorkflowInsertionError {
+    #[error("new review run is not queued: {state:?}")]
     /// A run insertion carried state that can only result from transition.
     RunNotQueued {
         /// Rejected current state.
         state: Box<ReviewRunState>,
     },
+    #[error("new review pass is not queued: {state:?}")]
     /// A pass insertion carried state that can only result from transition.
     PassNotQueued {
         /// Rejected current state.
         state: Box<ReviewPassState>,
     },
+    #[error("new review run and pass are not one coherent admission")]
     /// A paired run and pass do not describe one domain-coherent admission.
     RunPassMismatch,
+    #[error("new review finding is not open: {status:?}")]
     /// A finding insertion already carried lifecycle history.
     FindingNotOpen {
         /// Rejected current status.
         status: ReviewFindingStatus,
     },
+    #[error("new review external-link reservation is not pending")]
     /// A reservation insertion already carried post-effect evidence.
     ExternalLinkNotPending,
 }
 
-impl fmt::Display for ReviewWorkflowInsertionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RunNotQueued { state } => {
-                write!(formatter, "new review run is not queued: {state:?}")
-            }
-            Self::PassNotQueued { state } => {
-                write!(formatter, "new review pass is not queued: {state:?}")
-            }
-            Self::RunPassMismatch => {
-                formatter.write_str("new review run and pass are not one coherent admission")
-            }
-            Self::FindingNotOpen { status } => {
-                write!(formatter, "new review finding is not open: {status:?}")
-            }
-            Self::ExternalLinkNotPending => {
-                formatter.write_str("new review external-link reservation is not pending")
-            }
-        }
-    }
-}
-
-impl Error for ReviewWorkflowInsertionError {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Domain transition rejected before persistence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewWorkflowTransitionError {
+    #[error("review-run transition rejected: {field_0:?}")]
     /// Run transition failed.
     Run(signalbox_domain::ReviewRunTransitionError),
+    #[error("review-pass transition rejected: {field_0:?}")]
     /// Pass transition failed.
     Pass(signalbox_domain::ReviewPassTransitionError),
+    #[error("review-finding transition rejected: {:?}", field_0.failure())]
     /// Finding event application failed.
     Finding(signalbox_domain::ReviewFindingTransitionError),
+    #[error("review external-link transition rejected: {field_0:?}")]
     /// External-link attachment or observation failed.
     ExternalLink(signalbox_domain::ReviewExternalLinkTransitionError),
 }
 
-impl fmt::Display for ReviewWorkflowTransitionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Run(error) => write!(formatter, "review-run transition rejected: {error:?}"),
-            Self::Pass(error) => write!(formatter, "review-pass transition rejected: {error:?}"),
-            Self::Finding(error) => {
-                write!(
-                    formatter,
-                    "review-finding transition rejected: {:?}",
-                    error.failure()
-                )
-            }
-            Self::ExternalLink(error) => {
-                write!(
-                    formatter,
-                    "review external-link transition rejected: {error:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ReviewWorkflowTransitionError {}
-
+#[derive(signalbox_derive::Accessors, signalbox_derive::OperatorError)]
+#[error("{} durable facts are corrupt: {}", aggregate, detail)]
 /// Stored workflow facts could not form one domain aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewWorkflowCorruption {
     aggregate: &'static str,
+    /// Borrows the content-safe diagnostic detail.
+    #[get(str)]
     detail: String,
 }
 
@@ -5235,87 +5184,39 @@ impl ReviewWorkflowCorruption {
     pub const fn aggregate(&self) -> &'static str {
         self.aggregate
     }
-
-    /// Borrows the content-safe diagnostic detail.
-    pub fn detail(&self) -> &str {
-        &self.detail
-    }
 }
 
-impl fmt::Display for ReviewWorkflowCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} durable facts are corrupt: {}",
-            self.aggregate, self.detail
-        )
-    }
-}
-
-impl Error for ReviewWorkflowCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Review-workflow persistence failure.
 #[derive(Debug)]
 pub enum ReviewWorkflowStoreError {
+    #[error("review-workflow database failure: {field_0}")]
     /// PostgreSQL or transport failure.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("review-workflow commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL may have committed a mutation before the response was lost.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Stored facts failed closed reconstitution.
-    Corruption(ReviewWorkflowCorruption),
+    Corruption(#[source] ReviewWorkflowCorruption),
+    #[error(transparent)]
     /// A caller attempted to insert a post-transition aggregate as new.
-    InvalidInsertion(ReviewWorkflowInsertionError),
+    InvalidInsertion(#[source] ReviewWorkflowInsertionError),
+    #[error(transparent)]
     /// A caller requested an invalid domain transition.
-    InvalidTransition(ReviewWorkflowTransitionError),
+    InvalidTransition(#[source] ReviewWorkflowTransitionError),
+    #[error("review pass results must bind in the same transaction as their exact effect")]
     /// A lifecycle-only transition attempted to persist an effect result.
     NonAtomicPassResult,
+    #[error("produced findings must be admitted as one complete exact inventory")]
     /// A produced-finding write omitted or contradicted the exact inventory.
     IncompleteFindingInventory,
+    #[error("blocked publication reservations require one atomic reconciliation effect")]
     /// A blocked publication reservation was not reconciled atomically.
     IncompletePublicationReconciliation,
+    #[error(transparent)]
     /// An external-link identity was reused for another canonical payload.
-    ReservationConflict(ReviewExternalLinkReservationConflict),
-}
-
-impl fmt::Display for ReviewWorkflowStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "review-workflow database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "review-workflow commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::InvalidInsertion(error) => error.fmt(formatter),
-            Self::InvalidTransition(error) => error.fmt(formatter),
-            Self::NonAtomicPassResult => formatter.write_str(
-                "review pass results must bind in the same transaction as their exact effect",
-            ),
-            Self::IncompleteFindingInventory => formatter
-                .write_str("produced findings must be admitted as one complete exact inventory"),
-            Self::IncompletePublicationReconciliation => formatter.write_str(
-                "blocked publication reservations require one atomic reconciliation effect",
-            ),
-            Self::ReservationConflict(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ReviewWorkflowStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-            Self::InvalidInsertion(error) => Some(error),
-            Self::InvalidTransition(error) => Some(error),
-            Self::NonAtomicPassResult
-            | Self::IncompleteFindingInventory
-            | Self::IncompletePublicationReconciliation => None,
-            Self::ReservationConflict(error) => Some(error),
-        }
-    }
+    ReservationConflict(#[source] ReviewExternalLinkReservationConflict),
 }
 
 impl From<sqlx::Error> for ReviewWorkflowStoreError {

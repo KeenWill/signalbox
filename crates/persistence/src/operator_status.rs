@@ -1,7 +1,5 @@
 //! Read-only repository-watch projections for the operator status command.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use signalbox_application::{RepoWatchConvergenceVerdict, RepoWatchReviewDecision};
 use signalbox_domain::MergeableState;
@@ -110,17 +108,24 @@ pub enum ProcessOperatorStatusHeldSlotOrigin {
     Branch { branch: String },
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One active repository-watch dispatch slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessOperatorStatusHeldSlot {
     dispatch_id: Uuid,
+    #[get(str)]
     repository: String,
+    #[get]
     origin: ProcessOperatorStatusHeldSlotOrigin,
+    #[get(str)]
     rule_id: String,
     rule_version: u64,
+    #[get]
     singleton: ProcessOperatorStatusSingleton,
     held_for_seconds: u64,
+    #[get(slice)]
     session_ids: Vec<Uuid>,
+    #[get(slice)]
     blockers: Vec<ProcessOperatorStatusHeldSlotBlocker>,
 }
 
@@ -129,52 +134,33 @@ impl ProcessOperatorStatusHeldSlot {
         self.dispatch_id
     }
 
-    pub fn repository(&self) -> &str {
-        &self.repository
-    }
-
-    pub const fn origin(&self) -> &ProcessOperatorStatusHeldSlotOrigin {
-        &self.origin
-    }
-
-    pub fn rule_id(&self) -> &str {
-        &self.rule_id
-    }
-
     pub const fn rule_version(&self) -> u64 {
         self.rule_version
-    }
-
-    pub const fn singleton(&self) -> &ProcessOperatorStatusSingleton {
-        &self.singleton
     }
 
     pub const fn held_for_seconds(&self) -> u64 {
         self.held_for_seconds
     }
-
-    pub fn session_ids(&self) -> &[Uuid] {
-        &self.session_ids
-    }
-
-    pub fn blockers(&self) -> &[ProcessOperatorStatusHeldSlotBlocker] {
-        &self.blockers
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One owed repository-watch dispatch waiting for admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessOperatorStatusQueuedObligation {
     obligation_id: Uuid,
+    #[get(str)]
     repository: String,
+    #[get(str)]
     rule_id: String,
     rule_version: u64,
+    #[get]
     singleton: ProcessOperatorStatusSingleton,
     first_event_id: Uuid,
     latest_event_id: Uuid,
     matched_event_count: u64,
     waiting_for_seconds: u64,
     occupying_dispatch_id: Option<Uuid>,
+    #[get(slice)]
     occupying_session_ids: Vec<Uuid>,
     cooldown_remaining_seconds: Option<u64>,
     cooldown_never_eligible: bool,
@@ -186,20 +172,8 @@ impl ProcessOperatorStatusQueuedObligation {
         self.obligation_id
     }
 
-    pub fn repository(&self) -> &str {
-        &self.repository
-    }
-
-    pub fn rule_id(&self) -> &str {
-        &self.rule_id
-    }
-
     pub const fn rule_version(&self) -> u64 {
         self.rule_version
-    }
-
-    pub const fn singleton(&self) -> &ProcessOperatorStatusSingleton {
-        &self.singleton
     }
 
     pub const fn first_event_id(&self) -> Uuid {
@@ -222,10 +196,6 @@ impl ProcessOperatorStatusQueuedObligation {
         self.occupying_dispatch_id
     }
 
-    pub fn occupying_session_ids(&self) -> &[Uuid] {
-        &self.occupying_session_ids
-    }
-
     pub const fn cooldown_remaining_seconds(&self) -> Option<u64> {
         self.cooldown_remaining_seconds
     }
@@ -239,18 +209,24 @@ impl ProcessOperatorStatusQueuedObligation {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One latest pull-request convergence assessment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessOperatorStatusPullRequestConvergence {
+    #[get(str)]
     repository: String,
     pull_request_number: u64,
+    #[get(str)]
     head_sha: String,
+    #[get(str)]
     base_branch: String,
+    #[get(str)]
     base_revision: String,
     mergeable_state: ProcessOperatorStatusMergeableState,
     review_decision: ProcessOperatorStatusReviewDecision,
     unresolved_thread_count: u64,
     gating_check_count: u64,
+    #[get(slice)]
     non_green_gating_checks: Vec<String>,
     verdict: ProcessOperatorStatusConvergenceVerdict,
     seal: Option<ProcessOperatorStatusConvergenceSeal>,
@@ -258,24 +234,8 @@ pub struct ProcessOperatorStatusPullRequestConvergence {
 }
 
 impl ProcessOperatorStatusPullRequestConvergence {
-    pub fn repository(&self) -> &str {
-        &self.repository
-    }
-
     pub const fn pull_request_number(&self) -> u64 {
         self.pull_request_number
-    }
-
-    pub fn head_sha(&self) -> &str {
-        &self.head_sha
-    }
-
-    pub fn base_branch(&self) -> &str {
-        &self.base_branch
-    }
-
-    pub fn base_revision(&self) -> &str {
-        &self.base_revision
     }
 
     pub const fn mergeable_state(&self) -> ProcessOperatorStatusMergeableState {
@@ -294,10 +254,6 @@ impl ProcessOperatorStatusPullRequestConvergence {
         self.gating_check_count
     }
 
-    pub fn non_green_gating_checks(&self) -> &[String] {
-        &self.non_green_gating_checks
-    }
-
     pub const fn verdict(&self) -> ProcessOperatorStatusConvergenceVerdict {
         self.verdict
     }
@@ -311,41 +267,27 @@ impl ProcessOperatorStatusPullRequestConvergence {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One stale blocking review whose planned clearance is not yet settled.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessOperatorStatusPendingStaleReviewClearance {
+    #[get(str)]
     repository: String,
     pull_request_number: u64,
+    #[get(str)]
     current_head_sha: String,
+    #[get(str)]
     review_node_id: String,
+    #[get(str)]
     reviewer: String,
+    #[get(str)]
     reviewed_head_sha: String,
     pending_for_seconds: u64,
 }
 
 impl ProcessOperatorStatusPendingStaleReviewClearance {
-    pub fn repository(&self) -> &str {
-        &self.repository
-    }
-
     pub const fn pull_request_number(&self) -> u64 {
         self.pull_request_number
-    }
-
-    pub fn current_head_sha(&self) -> &str {
-        &self.current_head_sha
-    }
-
-    pub fn review_node_id(&self) -> &str {
-        &self.review_node_id
-    }
-
-    pub fn reviewer(&self) -> &str {
-        &self.reviewer
-    }
-
-    pub fn reviewed_head_sha(&self) -> &str {
-        &self.reviewed_head_sha
     }
 
     pub const fn pending_for_seconds(&self) -> u64 {
@@ -366,42 +308,23 @@ pub enum ProcessOperatorStatusItem {
     LifecycleDeadlineViolation(LifecycleDeadlineViolation),
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Counts committed after every status cursor has been exhausted.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProcessOperatorStatusCounts {
+    #[get(copy)]
     held_slots: u64,
+    #[get(copy)]
     queued_obligations: u64,
+    #[get(copy)]
     pull_request_convergences: u64,
+    #[get(copy)]
     pending_stale_review_clearances: u64,
+    #[get(copy)]
     lifecycle_weeks: u64,
-    lifecycle_deadline_violations: u64,
-}
-
-impl ProcessOperatorStatusCounts {
-    pub const fn held_slots(self) -> u64 {
-        self.held_slots
-    }
-
-    pub const fn queued_obligations(self) -> u64 {
-        self.queued_obligations
-    }
-
-    pub const fn pull_request_convergences(self) -> u64 {
-        self.pull_request_convergences
-    }
-
-    pub const fn pending_stale_review_clearances(self) -> u64 {
-        self.pending_stale_review_clearances
-    }
-
-    pub const fn lifecycle_weeks(self) -> u64 {
-        self.lifecycle_weeks
-    }
-
     /// Returns the `nonterminal_past_deadline` alarm value, target zero.
-    pub const fn lifecycle_deadline_violations(self) -> u64 {
-        self.lifecycle_deadline_violations
-    }
+    #[get(copy)]
+    lifecycle_deadline_violations: u64,
 }
 
 /// PostgreSQL-backed operator-status read boundary.
@@ -962,60 +885,28 @@ fn positive_i64(value: i64, field: &'static str) -> Result<u64, ProcessOperatorS
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Stored operator-status data contradicted its view contract.
 #[derive(Debug)]
 pub enum ProcessOperatorStatusCorruption {
+    #[error("operator status is missing {field_0}")]
     Missing(&'static str),
+    #[error("operator status has inconsistent {field_0}")]
     Inconsistent(&'static str),
+    #[error("operator status has invalid {field_0}")]
     InvalidNumber(&'static str),
+    #[error("operator status has unsupported {field} {value:?}")]
     Unsupported { field: &'static str, value: String },
 }
 
-impl fmt::Display for ProcessOperatorStatusCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "operator status is missing {field}"),
-            Self::Inconsistent(field) => {
-                write!(formatter, "operator status has inconsistent {field}")
-            }
-            Self::InvalidNumber(field) => write!(formatter, "operator status has invalid {field}"),
-            Self::Unsupported { field, value } => {
-                write!(
-                    formatter,
-                    "operator status has unsupported {field} {value:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ProcessOperatorStatusCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Failure to read or decode one operator-status snapshot.
 #[derive(Debug)]
 pub enum ProcessOperatorStatusError {
-    Database(sqlx::Error),
-    Corruption(ProcessOperatorStatusCorruption),
-}
-
-impl fmt::Display for ProcessOperatorStatusError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => {
-                write!(formatter, "operator-status database read failed: {error}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ProcessOperatorStatusError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    #[error("operator-status database read failed: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
+    Corruption(#[source] ProcessOperatorStatusCorruption),
 }
 
 impl From<sqlx::Error> for ProcessOperatorStatusError {

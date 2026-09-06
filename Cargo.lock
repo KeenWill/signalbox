@@ -4239,6 +4239,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
@@ -4578,6 +4579,7 @@ dependencies = [
  "expect-test",
  "serde_json",
  "signalbox-application",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-expect-table",
  "signalbox-model-runtime",
@@ -4689,6 +4691,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-newtype"
+version = "0.0.0"
+
+[[package]]
 name = "signalbox-ownership-seam"
 version = "0.0.0"
 dependencies = [
@@ -4711,8 +4717,10 @@ dependencies = [
  "signalbox-blob-store",
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-expect-table",
+ "signalbox-newtype",
  "signalbox-tools-plan",
  "sqlx",
  "tempfile",
@@ -4731,6 +4739,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "signalbox-derive",
  "signalbox-domain",
  "uuid",
 ]
@@ -4818,6 +4827,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-persistence",
  "signalbox-tool-contract",
@@ -4840,6 +4850,7 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-convergence",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-egress-transport",
  "signalbox-model-runtime",
@@ -4855,6 +4866,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-tool-contract",
  "uuid",
@@ -4869,11 +4881,11 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-test-bin",
  "signalbox-tool-contract",
  "tokio",
- "toml",
 ]
 
 [[package]]
@@ -4885,6 +4897,7 @@ dependencies = [
  "serde_json",
  "serde_stacker",
  "signalbox-application",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-file-media-runtime",
  "signalbox-tool-contract",
@@ -4907,6 +4920,7 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "signalbox-application",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-tool-contract",
  "signalbox-tools-workspace",
@@ -4926,6 +4940,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-egress-transport",
  "signalbox-model-runtime",
@@ -4944,7 +4959,9 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-derive",
  "signalbox-domain",
+ "signalbox-newtype",
  "signalbox-tool-contract",
  "uuid",
 ]
@@ -4957,6 +4974,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
  "signalbox-tool-contract",
@@ -4979,6 +4997,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-egress-transport",
  "signalbox-model-runtime",
@@ -5003,6 +5022,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-tool-contract",
  "tempfile",

@@ -2,8 +2,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    error::Error,
-    fmt,
     num::NonZeroU64,
     time::Duration,
 };
@@ -84,105 +82,43 @@ impl ConfiguredRuleIdentity {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Database or durable-shape failure while evaluating one repository-watch rule.
 #[derive(Debug)]
 pub enum RepoWatchDispatchRepositoryError {
-    Database(sqlx::Error),
-    CommitAmbiguous(sqlx::Error),
-    EventStore(crate::repo_watch::RepoWatchStoreError),
-    SessionCreation(crate::create_session::CreateSessionRepositoryError),
-    InitialInput(crate::submit_input::SubmitInputRepositoryError),
-    GoalCommission(crate::goal::GoalRepositoryError),
-    GoalCutoff(crate::goal::GoalRepositoryError),
+    #[error("repository-watch dispatch database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error("repository-watch dispatch commit outcome is ambiguous: {field_0}")]
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error(transparent)]
+    EventStore(#[source] crate::repo_watch::RepoWatchStoreError),
+    #[error(transparent)]
+    SessionCreation(#[source] crate::create_session::CreateSessionRepositoryError),
+    #[error(transparent)]
+    InitialInput(#[source] crate::submit_input::SubmitInputRepositoryError),
+    #[error(transparent)]
+    GoalCommission(#[source] crate::goal::GoalRepositoryError),
+    #[error(transparent)]
+    GoalCutoff(#[source] crate::goal::GoalRepositoryError),
+    #[error("repository-watch rule {} version {} was retired and cannot be reused", rule_id.as_str(), rule_version.get())]
     ReusedRuleIdentity {
         rule_id: RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
     },
+    #[error("repository-watch rule {} version {} field `{}` changed without a version bump", rule_id.as_str(), rule_version.get(), field.configuration_path())]
     ChangedRuleIdentity {
         rule_id: RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
         field: RepoWatchRuleIdentityField,
     },
+    #[error("repository-watch rule {} version {} is below its highest recorded version {}", rule_id.as_str(), rule_version.get(), latest_version.get())]
     RegressedRuleVersion {
         rule_id: RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
         latest_version: RepoWatchRuleVersion,
     },
+    #[error("repository-watch dispatch storage is inconsistent: {field_0}")]
     Corruption(&'static str),
-}
-
-impl fmt::Display for RepoWatchDispatchRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(
-                formatter,
-                "repository-watch dispatch database failure: {error}"
-            ),
-            Self::CommitAmbiguous(error) => write!(
-                formatter,
-                "repository-watch dispatch commit outcome is ambiguous: {error}"
-            ),
-            Self::SessionCreation(error) => error.fmt(formatter),
-            Self::InitialInput(error) => error.fmt(formatter),
-            Self::GoalCommission(error) => error.fmt(formatter),
-            Self::GoalCutoff(error) => error.fmt(formatter),
-            Self::EventStore(error) => error.fmt(formatter),
-            Self::ReusedRuleIdentity {
-                rule_id,
-                rule_version,
-            } => write!(
-                formatter,
-                "repository-watch rule {} version {} was retired and cannot be reused",
-                rule_id.as_str(),
-                rule_version.get()
-            ),
-            Self::ChangedRuleIdentity {
-                rule_id,
-                rule_version,
-                field,
-            } => write!(
-                formatter,
-                "repository-watch rule {} version {} field `{}` changed without a version bump",
-                rule_id.as_str(),
-                rule_version.get(),
-                field.configuration_path()
-            ),
-            Self::RegressedRuleVersion {
-                rule_id,
-                rule_version,
-                latest_version,
-            } => write!(
-                formatter,
-                "repository-watch rule {} version {} is below its highest recorded version {}",
-                rule_id.as_str(),
-                rule_version.get(),
-                latest_version.get()
-            ),
-            Self::Corruption(reason) => {
-                write!(
-                    formatter,
-                    "repository-watch dispatch storage is inconsistent: {reason}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for RepoWatchDispatchRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::EventStore(error) => Some(error),
-            Self::SessionCreation(error) => Some(error),
-            Self::InitialInput(error) => Some(error),
-            Self::GoalCommission(error) => Some(error),
-            Self::GoalCutoff(error) => Some(error),
-            Self::ReusedRuleIdentity { .. }
-            | Self::ChangedRuleIdentity { .. }
-            | Self::RegressedRuleVersion { .. }
-            | Self::Corruption(_) => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for RepoWatchDispatchRepositoryError {

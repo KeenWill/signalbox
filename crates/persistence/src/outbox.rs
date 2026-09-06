@@ -5,8 +5,6 @@
 //! connection and never own its transaction. [`OutboxDispatcher`] separately
 //! owns the delivery-prefix transaction around one synchronous consumer offer.
 
-use std::{error::Error, fmt};
-
 #[cfg(feature = "postgres-integration")]
 use std::num::NonZeroU64;
 
@@ -126,6 +124,7 @@ struct TurnCancelledOutboxRow {
     terminal_frontier_id: Uuid,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One committed outbox event offered to a typed outbox consumer.
 ///
 /// This is a persistence projection, not a domain event or process-protocol
@@ -135,6 +134,8 @@ pub struct DispatchedOutboxEvent {
     sequence: u64,
     recorded_at: OffsetDateTime,
     session: Option<SessionId>,
+    /// Borrows the decoded typed event record.
+    #[get]
     kind: DispatchedOutboxEventKind,
 }
 
@@ -153,11 +154,6 @@ impl DispatchedOutboxEvent {
     /// receipt for a rejected creation or an unknown session names none.
     pub const fn session(&self) -> Option<SessionId> {
         self.session
-    }
-
-    /// Borrows the decoded typed event record.
-    pub const fn kind(&self) -> &DispatchedOutboxEventKind {
-        &self.kind
     }
 }
 
@@ -732,114 +728,83 @@ pub enum OutboxConsumer {
     RepoWatch,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Fail-closed reason a committed outbox projection could not be decoded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutboxCorruption {
+    #[error("outbox delivery state is missing")]
     /// The selected consumer cursor was absent.
     MissingDeliveryState,
+    #[error("outbox delivery state changed unexpectedly")]
     /// The locked consumer cursor could not advance from the observed value.
     DeliveryStateChanged,
+    #[error("outbox sequence state is missing")]
     /// The singleton allocation row was absent.
     MissingSequenceState,
+    #[error("outbox delivery state exceeds the allocated sequence")]
     /// The delivered cursor exceeded the allocator cursor.
     DeliveryBeyondAllocatedSequence,
+    #[error("outbox event header exceeds the allocated sequence")]
     /// A committed header existed beyond the allocator cursor.
     EventBeyondAllocatedSequence,
+    #[error("outbox committed event header is missing")]
     /// The allocator named a committed sequence whose header was absent.
     MissingCommittedEventHeader,
+    #[error("outbox sequence is invalid")]
     /// A stored cursor or sequence was not an unsigned 64-bit integer.
     InvalidSequence,
+    #[error("outbox input acceptance position is invalid")]
     /// An input-accepted record carried an invalid positive position.
     InvalidAcceptancePosition,
+    #[error("outbox accepted input content is invalid")]
     /// An input-accepted record carried invalid ordered content satellites.
     InvalidAcceptedInputContent,
+    #[error("outbox storage version is unsupported")]
     /// An event header used an unsupported storage version.
     UnsupportedStorageVersion,
+    #[error("outbox event kind is unsupported")]
     /// An event header named no admitted typed record family.
     UnsupportedEventKind,
+    #[error("outbox typed event record is missing")]
     /// The header's required typed record was absent.
     MissingTypedRecord,
+    #[error("outbox lifecycle event correlations are invalid")]
     /// A lifecycle transition disagreed with authoritative durable state.
     InvalidLifecycleEventCorrelation,
+    #[error("outbox terminal event correlations are invalid")]
     /// A terminal typed record disagreed with authoritative durable state.
     InvalidTerminalEventCorrelation,
+    #[error("outbox model-call state is invalid")]
     /// A model-call transition had an inconsistent or unknown state shape.
     InvalidModelCallState,
+    #[error("outbox delegation event is invalid")]
     /// A delegation update or wake had an inconsistent or unknown typed shape.
     InvalidDelegationEvent,
+    #[error("outbox model-settings event is invalid")]
     /// A settings event disagreed with its immutable referenced records.
     InvalidModelSettingsEvent,
+    #[error("outbox runner event is invalid")]
     /// A runner event had an inconsistent or unknown typed shape.
     InvalidRunnerEvent,
+    #[error("outbox lifecycle event is invalid")]
     /// A session lifecycle, goal, or ownership record had an inconsistent or
     /// unknown typed shape.
     InvalidLifecycleEvent,
+    #[error("outbox settlement event is invalid")]
     /// A settlement receipt had an inconsistent or unknown typed shape.
     InvalidSettlementEvent,
 }
 
-impl fmt::Display for OutboxCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::MissingDeliveryState => "outbox delivery state is missing",
-            Self::DeliveryStateChanged => "outbox delivery state changed unexpectedly",
-            Self::MissingSequenceState => "outbox sequence state is missing",
-            Self::DeliveryBeyondAllocatedSequence => {
-                "outbox delivery state exceeds the allocated sequence"
-            }
-            Self::EventBeyondAllocatedSequence => {
-                "outbox event header exceeds the allocated sequence"
-            }
-            Self::MissingCommittedEventHeader => "outbox committed event header is missing",
-            Self::InvalidSequence => "outbox sequence is invalid",
-            Self::InvalidAcceptancePosition => "outbox input acceptance position is invalid",
-            Self::InvalidAcceptedInputContent => "outbox accepted input content is invalid",
-            Self::UnsupportedStorageVersion => "outbox storage version is unsupported",
-            Self::UnsupportedEventKind => "outbox event kind is unsupported",
-            Self::MissingTypedRecord => "outbox typed event record is missing",
-            Self::InvalidLifecycleEventCorrelation => {
-                "outbox lifecycle event correlations are invalid"
-            }
-            Self::InvalidTerminalEventCorrelation => {
-                "outbox terminal event correlations are invalid"
-            }
-            Self::InvalidModelCallState => "outbox model-call state is invalid",
-            Self::InvalidDelegationEvent => "outbox delegation event is invalid",
-            Self::InvalidModelSettingsEvent => "outbox model-settings event is invalid",
-            Self::InvalidRunnerEvent => "outbox runner event is invalid",
-            Self::InvalidLifecycleEvent => "outbox lifecycle event is invalid",
-            Self::InvalidSettlementEvent => "outbox settlement event is invalid",
-        })
-    }
-}
-
-impl Error for OutboxCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Infrastructure or integrity failure from one dispatcher attempt.
 #[derive(Debug)]
 pub enum OutboxDispatchError {
+    #[error("outbox dispatch database operation failed")]
     /// PostgreSQL acquisition, query, rollback, or commit failed.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("outbox dispatch corruption: {field_0}")]
     /// Committed storage could not be decoded into the closed projection.
-    Corruption(OutboxCorruption),
-}
-
-impl fmt::Display for OutboxDispatchError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(_) => formatter.write_str("outbox dispatch database operation failed"),
-            Self::Corruption(error) => write!(formatter, "outbox dispatch corruption: {error}"),
-        }
-    }
-}
-
-impl Error for OutboxDispatchError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] OutboxCorruption),
 }
 
 impl From<sqlx::Error> for OutboxDispatchError {

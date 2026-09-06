@@ -6,10 +6,15 @@ use signalbox_application::ModelCallCredentialReference;
 use signalbox_domain::{FastMode, ResolvedProviderTarget, SessionId};
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
+#[derive(signalbox_derive::Accessors)]
 /// One model-family credential entry in a complete session snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionModelCredential {
+    /// Configuration-owned model family key.
+    #[get(str)]
     model_family: Arc<str>,
+    /// Non-secret reference pinned for this family.
+    #[get(str)]
     credential_reference: Arc<str>,
 }
 
@@ -23,16 +28,6 @@ impl SessionModelCredential {
             model_family: model_family.into(),
             credential_reference: credential_reference.into(),
         }
-    }
-
-    /// Configuration-owned model family key.
-    pub fn model_family(&self) -> &str {
-        &self.model_family
-    }
-
-    /// Non-secret reference pinned for this family.
-    pub fn credential_reference(&self) -> &str {
-        &self.credential_reference
     }
 }
 

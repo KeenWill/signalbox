@@ -24,7 +24,7 @@ mod result;
 mod review_gate_check;
 mod review_slog;
 
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{future::Future, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -704,26 +704,23 @@ impl<Credentials, Transport> CodeHostTools<Credentials, Transport> {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why the static code-host suite could not be compiled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodeHostToolsConstructionError {
+    #[error("code-host tool suite construction failed")]
     /// One static name was invalid.
     Name,
+    #[error("code-host tool suite construction failed")]
     /// One static schema was invalid.
     Schema,
+    #[error("code-host tool suite construction failed")]
     /// One static sanitized error detail was invalid.
     ErrorDetail,
+    #[error("code-host tool suite construction failed")]
     /// Two static declarations unexpectedly shared one name.
     Duplicate,
 }
-
-impl fmt::Display for CodeHostToolsConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("code-host tool suite construction failed")
-    }
-}
-
-impl Error for CodeHostToolsConstructionError {}
 
 /// Credential-resolving executor for all sixteen code-host declarations.
 #[derive(Clone, Debug)]
@@ -737,19 +734,13 @@ pub struct CodeHostExecutor<Credentials, Transport> {
     thread_not_in_change_request_detail: ToolExecutionErrorDetail,
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("code-host tool executor failed")]
 /// Sanitized code-host executor failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CodeHostExecutorError {
     class: OperatorFailureClass,
 }
-
-impl fmt::Display for CodeHostExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("code-host tool executor failed")
-    }
-}
-
-impl Error for CodeHostExecutorError {}
 
 impl ClassifyOperatorFailure for CodeHostExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {

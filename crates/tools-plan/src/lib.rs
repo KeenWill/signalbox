@@ -5,7 +5,6 @@ use std::{
     error::Error,
     fmt,
     future::Future,
-    num::NonZeroU64,
 };
 
 use signalbox_application::{
@@ -43,37 +42,10 @@ const ENTRY_NOT_FOUND_DETAIL: &str = "plan entry not found";
 const DEPENDENCY_CYCLE_DETAIL: &str = "plan dependency would create a cycle";
 const DEPENDENCY_LIMIT_DETAIL: &str = "plan entry dependency limit reached";
 
-/// One positive ordinal in a session's append-only plan history.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PlanEventOrdinal(NonZeroU64);
-
-impl PlanEventOrdinal {
-    /// Reconstitutes a positive durable ordinal.
-    pub const fn try_from_u64(value: u64) -> Option<Self> {
-        match NonZeroU64::new(value) {
-            Some(value) => Some(Self(value)),
-            None => None,
-        }
-    }
-
-    /// Returns the first event ordinal.
-    pub const fn first() -> Self {
-        Self(NonZeroU64::MIN)
-    }
-
-    /// Returns the next ordinal when representable.
-    pub const fn checked_next(self) -> Option<Self> {
-        match self.0.get().checked_add(1) {
-            Some(value) => Self::try_from_u64(value),
-            None => None,
-        }
-    }
-
-    /// Returns the durable integer.
-    pub const fn as_u64(self) -> u64 {
-        self.0.get()
-    }
-}
+signalbox_newtype::positive_ordinal!(
+    /// One positive ordinal in a session's append-only plan history.
+    PlanEventOrdinal
+);
 
 /// Stable entry identity: the ordinal of its creation event.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -100,7 +72,7 @@ impl PlanEntryId {
 
     /// Returns the model-facing integer.
     pub const fn as_u64(self) -> u64 {
-        self.0.as_u64()
+        self.0.get()
     }
 }
 
@@ -159,34 +131,23 @@ impl PlanText {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why plan text was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlanTextError {
+    #[error("plan text is empty")]
     /// Empty entries are not meaningful steps.
     Empty,
+    #[error("plan text contains U+0000")]
     /// PostgreSQL text cannot retain U+0000.
     ContainsNull,
+    #[error("plan text has {characters} characters, above {MAX_PLAN_TEXT_CHARS}")]
     /// Text exceeded the declared scalar bound.
     TooLong {
         /// Observed Unicode scalar count.
         characters: usize,
     },
 }
-
-impl fmt::Display for PlanTextError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("plan text is empty"),
-            Self::ContainsNull => formatter.write_str("plan text contains U+0000"),
-            Self::TooLong { characters } => write!(
-                formatter,
-                "plan text has {characters} characters, above {MAX_PLAN_TEXT_CHARS}"
-            ),
-        }
-    }
-}
-
-impl Error for PlanTextError {}
 
 /// One checked append request.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -454,23 +415,29 @@ impl FoldedPlan {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why an event sequence cannot represent one session plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlanFoldError {
+    #[error("plan required event ordinal {}", expected.get())]
     /// Ordinals were not contiguous from one.
     NoncontiguousOrdinal {
         /// Next required ordinal.
         expected: PlanEventOrdinal,
     },
+    #[error("plan history mixes sessions")]
     /// Event provenance crossed session boundaries.
     MixedSessions,
+    #[error("plan history names unknown entry {}", entry.as_u64())]
     /// A mutation named no previously created entry.
     UnknownEntry {
         /// Missing target.
         entry: PlanEntryId,
     },
+    #[error("plan dependency {} -> {} closes a cycle", field_0.entry().as_u64(), field_0.dependency().as_u64())]
     /// A dependency event closes a directed cycle.
     DependencyCycle(PlanDependencyCycle),
+    #[error("plan entry {} exceeds the dependency limit", entry.as_u64())]
     /// An entry accumulated more distinct dependencies than the read contract admits.
     DependencyLimitExceeded {
         /// Entry whose current dependency set exceeded the bound.
@@ -478,44 +445,9 @@ pub enum PlanFoldError {
     },
 }
 
-impl fmt::Display for PlanFoldError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoncontiguousOrdinal { expected } => {
-                write!(
-                    formatter,
-                    "plan required event ordinal {}",
-                    expected.as_u64()
-                )
-            }
-            Self::MixedSessions => formatter.write_str("plan history mixes sessions"),
-            Self::UnknownEntry { entry } => {
-                write!(
-                    formatter,
-                    "plan history names unknown entry {}",
-                    entry.as_u64()
-                )
-            }
-            Self::DependencyCycle(cycle) => write!(
-                formatter,
-                "plan dependency {} -> {} closes a cycle",
-                cycle.entry().as_u64(),
-                cycle.dependency().as_u64()
-            ),
-            Self::DependencyLimitExceeded { entry } => write!(
-                formatter,
-                "plan entry {} exceeds the dependency limit",
-                entry.as_u64()
-            ),
-        }
-    }
-}
-
-impl Error for PlanFoldError {}
-
 /// Folds one complete session history into current entries.
 pub fn fold_plan_events(events: &[PlanEvent]) -> Result<FoldedPlan, PlanFoldError> {
-    let mut expected = PlanEventOrdinal::first();
+    let mut expected = PlanEventOrdinal::MIN;
     let mut session = None;
     let mut entries = Vec::<PlanEntry>::new();
     for (index, event) in events.iter().enumerate() {
@@ -955,31 +887,23 @@ impl ToolContract for PlanReadContract {
         "Reads the invoking session's folded current plan and optional bounded event history.";
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A static plan declaration could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlanToolConstructionError {
+    #[error("plan-tool static name is invalid")]
     /// A static name was invalid.
     Name,
+    #[error("plan-tool static schema is invalid")]
     /// A static schema was invalid.
     Schema,
+    #[error("plan-tool static error detail is invalid")]
     /// A static error detail was invalid.
     ErrorDetail,
+    #[error("plan-tool catalog is duplicated")]
     /// The catalog contained a duplicate.
     Duplicate,
 }
-
-impl fmt::Display for PlanToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Name => "plan-tool static name is invalid",
-            Self::Schema => "plan-tool static schema is invalid",
-            Self::ErrorDetail => "plan-tool static error detail is invalid",
-            Self::Duplicate => "plan-tool catalog is duplicated",
-        })
-    }
-}
-
-impl Error for PlanToolConstructionError {}
 
 /// Compiled plan catalog and executor around one injected port.
 #[derive(Clone, Debug)]
@@ -1155,39 +1079,26 @@ impl<Port> PlanExecutor<Port> {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[operator(
+    display_bound = "PortError : fmt :: Display",
+    error_bound = "PortError : Error + 'static"
+)]
 /// Failure inside the plan executor.
 #[derive(Debug)]
 pub enum PlanExecutorError<PortError> {
+    #[error("plan-tool argument validation drifted")]
     /// Executor decoding disagreed with catalog validation.
     ArgumentValidationDrift,
+    #[error(transparent)]
     /// The injected port failed.
-    Port(PortError),
+    Port(#[source] PortError),
+    #[error("session plan port contract was violated")]
     /// The injected port violated provenance, ordering, or bounds.
     PortContract,
+    #[error("plan-tool result encoding failed")]
     /// Compact result encoding failed.
     ResultEncoding,
-}
-
-impl<PortError: fmt::Display> fmt::Display for PlanExecutorError<PortError> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ArgumentValidationDrift => {
-                formatter.write_str("plan-tool argument validation drifted")
-            }
-            Self::Port(error) => error.fmt(formatter),
-            Self::PortContract => formatter.write_str("session plan port contract was violated"),
-            Self::ResultEncoding => formatter.write_str("plan-tool result encoding failed"),
-        }
-    }
-}
-
-impl<PortError: Error + 'static> Error for PlanExecutorError<PortError> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Port(error) => Some(error),
-            Self::ArgumentValidationDrift | Self::PortContract | Self::ResultEncoding => None,
-        }
-    }
 }
 
 impl<PortError: ClassifyOperatorFailure> ClassifyOperatorFailure for PlanExecutorError<PortError> {
@@ -1548,7 +1459,7 @@ struct EventOutput {
 
 impl From<PlanEvent> for EventOutput {
     fn from(value: PlanEvent) -> Self {
-        let ordinal = value.ordinal.as_u64();
+        let ordinal = value.ordinal.get();
         let provenance = value.provenance.into();
         let kind = match value.kind {
             PlanEventKind::Created { text } => EventKindOutput::Created {

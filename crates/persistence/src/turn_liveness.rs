@@ -9,7 +9,7 @@
 //! for a terminal turn — repository-watch dispatch release included — fires
 //! without this module naming any of them.
 
-use std::{error::Error, fmt, future::Future, num::NonZeroU64, time::Duration};
+use std::{future::Future, num::NonZeroU64, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, DurableTurnLivenessObservation, OperatorFailureClass,
@@ -65,6 +65,7 @@ impl TurnLivenessPersistenceBounds {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Infrastructure or integrity failure while supervising turn liveness.
 ///
 /// The database arms are separate because they mean different things to an
@@ -75,28 +76,36 @@ impl TurnLivenessPersistenceBounds {
 /// another's cause code.
 #[derive(Debug)]
 pub enum TurnLivenessRepositoryError {
+    #[error("quiescent active-turn inventory failed: {field_0}")]
     /// Reading the quiescent active-turn inventory failed.
-    Inventory(sqlx::Error),
+    Inventory(#[source] sqlx::Error),
+    #[error("durable turn-liveness observation failed: {source}")]
     /// Recording a complete durable observation population failed.
     Observation {
         /// Whether the failure leaves the commit's outcome unknown.
         commit_ambiguous: bool,
+        #[source]
         /// The originating driver failure.
         source: sqlx::Error,
     },
+    #[error("durable turn-liveness observation is corrupt: {field_0}")]
     /// A stored durable observation could not be decoded into its domain shape.
-    ObservationCorruption(sqlx::Error),
+    ObservationCorruption(#[source] sqlx::Error),
+    #[error("stale-turn terminalization could not acquire a required row lock: {field_0}")]
     /// A required terminalization row stayed locked past the attempt's wait.
-    TerminalizationLockUnavailable(sqlx::Error),
+    TerminalizationLockUnavailable(#[source] sqlx::Error),
+    #[error("stale-turn terminalization failed: {source}")]
     /// A database operation on the terminalization path failed.
     TerminalizationDatabase {
         /// Whether the failure leaves the commit's outcome unknown.
         commit_ambiguous: bool,
+        #[source]
         /// The originating driver failure.
         source: sqlx::Error,
     },
+    #[error(transparent)]
     /// The shared failed-turn transition could not be committed.
-    Terminalization(StartupScanRepositoryError),
+    Terminalization(#[source] StartupScanRepositoryError),
 }
 
 impl TurnLivenessRepositoryError {
@@ -139,54 +148,6 @@ impl TurnLivenessRepositoryError {
             return Self::TerminalizationLockUnavailable(error);
         }
         Self::terminalization(error)
-    }
-}
-
-impl fmt::Display for TurnLivenessRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Inventory(source) => {
-                write!(
-                    formatter,
-                    "quiescent active-turn inventory failed: {source}"
-                )
-            }
-            Self::Observation { source, .. } => {
-                write!(
-                    formatter,
-                    "durable turn-liveness observation failed: {source}"
-                )
-            }
-            Self::ObservationCorruption(source) => {
-                write!(
-                    formatter,
-                    "durable turn-liveness observation is corrupt: {source}"
-                )
-            }
-            Self::TerminalizationLockUnavailable(source) => {
-                write!(
-                    formatter,
-                    "stale-turn terminalization could not acquire a required row lock: {source}"
-                )
-            }
-            Self::TerminalizationDatabase { source, .. } => {
-                write!(formatter, "stale-turn terminalization failed: {source}")
-            }
-            Self::Terminalization(source) => source.fmt(formatter),
-        }
-    }
-}
-
-impl Error for TurnLivenessRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Inventory(source)
-            | Self::Observation { source, .. }
-            | Self::ObservationCorruption(source)
-            | Self::TerminalizationLockUnavailable(source)
-            | Self::TerminalizationDatabase { source, .. } => Some(source),
-            Self::Terminalization(source) => Some(source),
-        }
     }
 }
 
@@ -660,9 +621,12 @@ fn decode_durable_observation(
     ))
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One page of the quiescent inventory, and where the rotation continues.
 #[derive(Clone, Debug)]
 pub struct QuiescentActiveTurnPage {
+    /// Returns the quiescent turns this page observed.
+    #[get(unbox)]
     candidates: Box<[StaleTurnCandidate]>,
     rows: usize,
     resume_after: Option<SessionId>,
@@ -692,11 +656,6 @@ impl QuiescentActiveTurnPage {
             rows: fetched.rows,
             resume_after,
         }
-    }
-
-    /// Returns the quiescent turns this page observed.
-    pub fn candidates(&self) -> &[StaleTurnCandidate] {
-        &self.candidates
     }
 
     /// Returns how many rows the statement returned, dropped ones included.

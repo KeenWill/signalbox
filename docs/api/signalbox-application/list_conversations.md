@@ -87,7 +87,7 @@ pub enum ConversationListItem {
         conversation: signalbox_domain::ImportedConversationId,
         title: option::Option<string::String>,
         entry_count: u64,
-        format: imported_conversation::ImportedConversationFormat,
+        format: format::ImportedConversationFormat,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
