@@ -1116,7 +1116,8 @@ async fn stored_projections_match(
         .is_none_or(|(default_branch, default_head, observed_at)| {
             default_branch != repository_state.default_branch.as_str()
                 || default_head != repository_state.default_head.as_str()
-                || *observed_at != repository_state.observed_at
+                || postgres_timestamp_micros(*observed_at)
+                    != postgres_timestamp_micros(repository_state.observed_at)
         })
     {
         return Ok(false);
@@ -1145,8 +1146,14 @@ async fn stored_projections_match(
                 && stored.body == candidate.body.as_str()
                 && stored.draft == candidate.draft
                 && stored.author.as_deref() == candidate.author.map(RepoWatchAuthorLogin::as_str)
-                && stored.observed_at == candidate.observed_at
+                && postgres_timestamp_micros(stored.observed_at)
+                    == postgres_timestamp_micros(candidate.observed_at)
         }))
+}
+
+fn postgres_timestamp_micros(timestamp: OffsetDateTime) -> i128 {
+    const POSTGRES_EPOCH_UNIX_NANOS: i128 = 946_684_800_000_000_000;
+    (timestamp.unix_timestamp_nanos() - POSTGRES_EPOCH_UNIX_NANOS) / 1_000
 }
 
 async fn upsert_repository(
@@ -1248,12 +1255,8 @@ fn frontier_candidate_identity(
         &mut identity,
         repository_state.default_head.as_str().as_bytes(),
     );
-    identity.extend_from_slice(
-        &repository_state
-            .observed_at
-            .unix_timestamp_nanos()
-            .to_be_bytes(),
-    );
+    identity
+        .extend_from_slice(&postgres_timestamp_micros(repository_state.observed_at).to_be_bytes());
     let mut pull_request_states = pull_request_states.iter().collect::<Vec<_>>();
     pull_request_states.sort_by_key(|state| state.number);
     for state in pull_request_states {
@@ -1274,7 +1277,7 @@ fn frontier_candidate_identity(
             }
             None => identity.push(0),
         }
-        identity.extend_from_slice(&state.observed_at.unix_timestamp_nanos().to_be_bytes());
+        identity.extend_from_slice(&postgres_timestamp_micros(state.observed_at).to_be_bytes());
     }
     for entry in frontier {
         identity.push(b'F');

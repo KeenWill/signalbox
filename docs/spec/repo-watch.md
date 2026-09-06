@@ -43,7 +43,8 @@ ordered event occurrences in one transaction. A generation mismatch is stale
 unless that complete input exactly replays the immediately succeeding commit. An
 empty event batch with an unchanged cursor is unchanged only when both stored
 projections also match; a projection-only change advances the generation and
-records the complete commit digest.
+records the complete commit digest. Projection timestamps use PostgreSQL
+microsecond precision in both the stored comparison and commit identity.
 
 ## Ownership boundary
 
