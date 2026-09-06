@@ -212,14 +212,13 @@ fn request_signature(comment: &Value) -> Option<Value> {
         json!({"id":comment["id"],"author":login(comment),"author_association":comment["authorAssociation"],"body":comment["body"],"created_at":comment["createdAt"],"last_edited_at":comment["lastEditedAt"]}),
     )
 }
-fn requests(comment: &Value, oid: &str, reviewer: &ReviewerPolicy) -> Result<bool, Error> {
-    let grammar = Regex::new(&reviewer.request_pattern)?;
+fn requests(comment: &Value, oid: &str, reviewer: &ReviewerPolicy, grammar: &Regex) -> bool {
     let body = text(&comment["body"]).to_lowercase();
-    Ok((!reviewer.trusted_requests || trusted(comment))
+    (!reviewer.trusted_requests || trusted(comment))
         && body.contains(&oid.to_lowercase())
         && body
             .lines()
-            .any(|line| grammar.find(line.trim()).is_some_and(|m| m.start() == 0)))
+            .any(|line| grammar.find(line.trim()).is_some_and(|m| m.start() == 0))
 }
 fn prior_threads_dispositioned(threads: &[Thread], requested: &str) -> bool {
     threads.iter().all(|thread| {
@@ -248,9 +247,10 @@ fn qualifying_request(
     policy: &ConvergencePolicy,
 ) -> Result<Option<Value>, Error> {
     let mut best: Option<(&str, Value)> = None;
+    let grammar = Regex::new(&reviewer.request_pattern)?;
     for comment in comments {
         let at = effective_at(comment);
-        if at.is_empty() || !requests(comment, oid, reviewer)? {
+        if at.is_empty() || !requests(comment, oid, reviewer, &grammar) {
             continue;
         }
         let Some(signature) = request_signature(comment) else {
@@ -327,10 +327,25 @@ fn file_delta(value: &Value) -> Option<Vec<String>> {
     result.sort();
     Some(result)
 }
-fn exempt_change(snapshot: &Snapshot, reviewed: &str, head: &str, base: &str) -> bool {
-    let delta = comparison(snapshot, reviewed, head);
+fn exempt_change(
+    snapshot: &Snapshot,
+    reviewed: &str,
+    head: &str,
+    base: &str,
+) -> Result<bool, Error> {
+    let available = |from: &str, to: &str| {
+        let value = comparison(snapshot, from, to);
+        if value.is_null() {
+            Err(Error::Evidence(
+                "review ancestry comparison unavailable".into(),
+            ))
+        } else {
+            Ok(value)
+        }
+    };
+    let delta = available(reviewed, head)?;
     if !complete_comparison(delta) || array(&delta["commits"]).is_empty() {
-        return false;
+        return Ok(false);
     }
     let files = array(&delta["files"]);
     if !files.is_empty()
@@ -341,7 +356,7 @@ fn exempt_change(snapshot: &Snapshot, reviewed: &str, head: &str, base: &str) ->
                 && f["deletions"] == 0
         })
     {
-        return true;
+        return Ok(true);
     }
     let commits = array(&delta["commits"]);
     if commits.iter().any(|commit| {
@@ -351,17 +366,18 @@ fn exempt_change(snapshot: &Snapshot, reviewed: &str, head: &str, base: &str) ->
                 .map(|parent| text(&parent["sha"]))
                 .eq([reviewed, base])
     }) {
-        let merge_base = text(&comparison(snapshot, reviewed, base)["merge_base_commit"]["sha"]);
-        let base_delta = comparison(snapshot, merge_base, base);
-        if !merge_base.is_empty()
-            && complete_comparison(base_delta)
-            && file_delta(&delta["files"])
-                .is_some_and(|files| Some(files) == file_delta(&base_delta["files"]))
-        {
-            return true;
+        let merge_base = text(&available(reviewed, base)?["merge_base_commit"]["sha"]);
+        if !merge_base.is_empty() {
+            let base_delta = available(merge_base, base)?;
+            if complete_comparison(base_delta)
+                && file_delta(&delta["files"])
+                    .is_some_and(|files| Some(files) == file_delta(&base_delta["files"]))
+            {
+                return Ok(true);
+            }
         }
     }
-    false
+    Ok(false)
 }
 
 pub(crate) fn planning_blob(blob: &Value, policy: &ConvergencePolicy) -> bool {
@@ -586,7 +602,12 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
         && !persisted_head.is_empty()
     {
         for reviewer in &policy.reviewers {
-            request_valid |= requests(comment, persisted_head, reviewer)?;
+            request_valid |= requests(
+                comment,
+                persisted_head,
+                reviewer,
+                &Regex::new(&reviewer.request_pattern)?,
+            );
         }
     }
     let currently_green = facts.check_rollup_state.is_some()
@@ -625,7 +646,7 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
         facts.review_exempt_since_quiet_review = quiet_oids
             .iter()
             .rev()
-            .any(|oid| exempt_change(snapshot, oid, head, base));
+            .any(|oid| exempt_change(snapshot, oid, head, base).unwrap_or(false));
     }
     let mut known_ids: Vec<String> = array(&previous["known_codex_review_ids"])
         .iter()
@@ -650,12 +671,11 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
     } else {
         base
     };
-    if !prior_base.is_empty()
+    let base_and_head_advanced = !prior_base.is_empty()
         && prior_base != base
         && !prior_head.is_empty()
-        && prior_head != head
-        && !exempt_change(snapshot, prior_head, head, base)
-    {
+        && prior_head != head;
+    if base_and_head_advanced && !exempt_change(snapshot, prior_head, head, base)? {
         wave_ids = new_ids.clone();
     } else {
         for id in &new_ids {
