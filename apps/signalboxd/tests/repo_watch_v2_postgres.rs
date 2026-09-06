@@ -10,9 +10,9 @@ use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use signalbox_module_repo_watch_v2::{
     EventAdmission, EventProducer, FrontierEventAdmission, FrontierReleaseAdmission,
-    PullRequestLifecycle, PullRequestState, RepoWatchStore, RepositoryProjection, RepositoryState,
-    RuleAdmission, RuleReconciliationAdmission, WebhookAdmission, WebhookDelivery,
-    WebhookDisposition, matching_rules,
+    PullRequestLifecycle, PullRequestState, RepoWatchStore, RepositoryProjection,
+    RepositoryRuleSet, RepositoryState, RuleAdmission, RuleReconciliationAdmission,
+    WebhookAdmission, WebhookDelivery, WebhookDisposition, matching_rules,
 };
 use signalbox_ownership_seam::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
@@ -259,9 +259,17 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         RepoWatchSingletonScope::Repository,
         Duration::ZERO,
     )?;
+    let first_configuration = [RepositoryRuleSet::new(
+        &repository,
+        std::slice::from_ref(&rule),
+    )];
+    let concurrent_configuration = [RepositoryRuleSet::new(
+        &repository,
+        std::slice::from_ref(&rule),
+    )];
     let (first, concurrent) = tokio::join!(
-        store.reconcile_rules(&repository, std::slice::from_ref(&rule), observed_at),
-        store.reconcile_rules(&repository, std::slice::from_ref(&rule), observed_at)
+        store.reconcile_rules(&first_configuration, observed_at),
+        store.reconcile_rules(&concurrent_configuration, observed_at)
     );
     assert!(matches!(
         (first?, concurrent?),
@@ -275,7 +283,13 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     ));
     assert_eq!(
         store
-            .reconcile_rules(&repository, std::slice::from_ref(&rule), observed_at)
+            .reconcile_rules(
+                &[RepositoryRuleSet::new(
+                    &repository,
+                    std::slice::from_ref(&rule),
+                )],
+                observed_at,
+            )
             .await?,
         RuleReconciliationAdmission::Applied {
             rules: Box::new([RuleAdmission::Replayed]),
@@ -297,19 +311,31 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let other_repository = RepositorySlug::try_new(String::from("other/repository"))?;
     assert_eq!(
         store
-            .reconcile_rules(&other_repository, std::slice::from_ref(&rule), observed_at,)
+            .reconcile_rules(
+                &[
+                    RepositoryRuleSet::new(&repository, std::slice::from_ref(&rule)),
+                    RepositoryRuleSet::new(&other_repository, std::slice::from_ref(&rule),),
+                ],
+                observed_at,
+            )
             .await?,
         RuleReconciliationAdmission::Applied {
-            rules: Box::new([RuleAdmission::Inserted]),
+            rules: Box::new([RuleAdmission::Replayed, RuleAdmission::Inserted]),
             deactivated: 0,
         }
     );
     assert_eq!(
         store
-            .reconcile_rules(&other_repository, &[], observed_at)
+            .reconcile_rules(
+                &[
+                    RepositoryRuleSet::new(&repository, std::slice::from_ref(&rule)),
+                    RepositoryRuleSet::new(&other_repository, &[]),
+                ],
+                observed_at,
+            )
             .await?,
         RuleReconciliationAdmission::Applied {
-            rules: Box::new([]),
+            rules: Box::new([RuleAdmission::Replayed]),
             deactivated: 1,
         }
     );
@@ -325,8 +351,16 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         store
             .reconcile_rules(
-                &other_repository,
-                &[second_rule.clone(), rule.clone()],
+                &[
+                    RepositoryRuleSet::new(
+                        &repository,
+                        &[rule.clone(), second_rule.clone()],
+                    ),
+                    RepositoryRuleSet::new(
+                        &other_repository,
+                        &[second_rule.clone(), rule.clone()],
+                    ),
+                ],
                 observed_at,
             )
             .await?,
@@ -341,6 +375,15 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_one(&module_pool)
     .await?;
     assert_eq!(partially_inserted_rules, 0);
+    let partially_inserted_main_rules: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rule_revision
+          WHERE repository = $1 AND rule_id = $2",
+    )
+    .bind(repository.as_str())
+    .bind(second_rule.id().as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(partially_inserted_main_rules, 0);
 
     let event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(14)),
@@ -410,8 +453,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         store
             .reconcile_rules(
-                &repository,
-                &[rule.clone(), second_rule.clone()],
+                &[RepositoryRuleSet::new(
+                    &repository,
+                    &[rule.clone(), second_rule.clone()],
+                )],
                 observed_at + Duration::from_secs(1),
             )
             .await?,
