@@ -6,5 +6,4 @@
 | --- | ---: | ---: | ---: | --- |
 | config | 1 | 0 | 0 | [config](config.md) |
 | runtime | 3 | 0 | 0 | [runtime](runtime.md) |
-| stream | 0 | 0 | 0 | [stream](stream.md) |
 | translate | 0 | 0 | 1 | [translate](translate.md) |

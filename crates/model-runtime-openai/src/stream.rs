@@ -114,10 +114,19 @@ impl StreamDecoder {
                 if let Err(detail) = self.observe_response(&response, correlation, sink) {
                     return self.violation(detail);
                 }
-                if response.usage.is_none() && response.status.as_deref() != Some("failed") {
+                if response.usage.is_none()
+                    && self.usage == TokenUsage::unreported()
+                    && response.status.as_deref() != Some("failed")
+                {
                     return self.violation("terminal response lacks usage");
                 }
-                let evidence = decode_response(response, self.exchange.clone(), correlation, sink);
+                let evidence = decode_response(
+                    response,
+                    self.usage,
+                    self.exchange.clone(),
+                    correlation,
+                    sink,
+                );
                 match evidence {
                     TerminalEvidence::BoundaryLoss(mut loss) => {
                         loss.cause = LossCause::StreamProtocolViolation {
@@ -403,6 +412,67 @@ mod tests {
         event["response"].as_object_mut().unwrap().remove("usage");
         assert!(matches!(decode(event), TerminalEvidence::BoundaryLoss(_)));
     }
+    #[test]
+    fn terminal_usage_preserves_earlier_fields_and_supersedes_reported_fields() {
+        // Distinct counts expose replacement and accidental summation on all axes.
+        for status in ["completed", "incomplete", "failed"] {
+            for terminal_usage in [
+                json!({"output_tokens":11,"input_tokens_details":{"cached_tokens":3}}),
+                json!({"output_tokens":11}),
+                Value::Null,
+            ] {
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                apply(
+                    &mut decoder,
+                    json!({"type":"response.in_progress","response":{
+                        "id":"resp_fixture","model":"model-fixture","usage":{
+                            "input_tokens":17,"output_tokens":7,
+                            "input_tokens_details":{"cached_tokens":5,"cache_write_tokens":2}
+                        }
+                    }}),
+                    &mut sink,
+                );
+                let expected = TokenUsage {
+                    input_tokens: Some(17),
+                    output_tokens: Some(if terminal_usage.is_null() { 7 } else { 11 }),
+                    cache_read_input_tokens: Some(
+                        if terminal_usage.get("input_tokens_details").is_some() {
+                            3
+                        } else {
+                            5
+                        },
+                    ),
+                    cache_creation_input_tokens: Some(2),
+                };
+                let mut event = terminal();
+                event["type"] = json!(format!("response.{status}"));
+                event["response"]["status"] = json!(status);
+                event["response"]["usage"] = terminal_usage;
+                event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                event["response"]["error"] = json!({"code":"server_error"});
+                let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                    panic!("terminal event must terminate");
+                };
+                let usage = match *evidence {
+                    TerminalEvidence::Completed(result) => result.usage,
+                    TerminalEvidence::ProviderError(error) => error.usage,
+                    other => panic!("unexpected terminal evidence: {other:?}"),
+                };
+                assert_eq!(usage, expected);
+                assert_eq!(
+                    sink.iter()
+                        .rev()
+                        .find_map(|observation| match observation.fact {
+                            ObservationFact::UsageReported(usage) => Some(usage),
+                            _ => None,
+                        }),
+                    Some(expected)
+                );
+            }
+        }
+    }
+
     #[test]
     fn terminal_event_must_agree_with_response_status() {
         let mut event = terminal();

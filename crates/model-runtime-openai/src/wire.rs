@@ -10,7 +10,6 @@ pub(crate) struct CreateResponse {
     pub input: Vec<WireInputItem>,
     pub max_output_tokens: u32,
     pub store: bool,
-    pub include: [&'static str; 1],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<WireReasoning>,
     #[serde(skip_serializing_if = "Option::is_none")]

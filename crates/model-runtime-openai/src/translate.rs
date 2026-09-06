@@ -43,11 +43,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
         });
     }
     validate_function_names(operation)?;
-    if operation.settings.max_output_tokens < 16 {
-        return Err(PreparationFailure::UnsupportedOperation {
-            detail: "max_output_tokens must be at least 16".to_string(),
-        });
-    }
+    validate_output_ceiling(&operation.settings)?;
     if let Some(value) = operation.settings.temperature
         && !(0.0..=2.0).contains(&value)
     {
@@ -97,7 +93,6 @@ pub(crate) fn build_request_with_fast_mode<C>(
         max_output_tokens: operation.settings.max_output_tokens,
         reasoning: reasoning_effort.map(|effort| WireReasoning { effort }),
         store: false,
-        include: ["reasoning.encrypted_content"],
         service_tier,
         temperature: operation.settings.temperature,
         top_p: operation.settings.top_p,
@@ -113,11 +108,21 @@ pub(crate) fn build_request_with_fast_mode<C>(
 /// Capability-set validation remains the caller's responsibility. This check
 /// owns cross-knob constraints that independent capability sets cannot state.
 pub fn validate_model_settings(settings: &ModelSettings) -> Result<(), PreparationFailure> {
+    validate_output_ceiling(settings)?;
     settings
         .reasoning_level
         .map(openai_reasoning_effort)
         .transpose()?;
     openai_service_tier(settings, settings.fast_mode)?;
+    Ok(())
+}
+
+fn validate_output_ceiling(settings: &ModelSettings) -> Result<(), PreparationFailure> {
+    if settings.max_output_tokens < 16 {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "max_output_tokens must be at least 16".to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -452,7 +457,7 @@ mod tests {
         ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
     };
 
-    use super::{build_request, build_request_with_fast_mode};
+    use super::{build_request, build_request_with_fast_mode, validate_model_settings};
 
     /// An operation whose correlation seed is the one knob; targets, one
     /// user-role message, and a 64-token ceiling are canonical.
@@ -622,9 +627,6 @@ mod tests {
 
         expect![[r#"
             {
-              "include": [
-                "reasoning.encrypted_content"
-              ],
               "input": [
                 {
                   "content": "Answer briefly.",
@@ -708,9 +710,6 @@ mod tests {
     fn minimal_operation_omits_every_unset_optional_field() {
         expect![[r#"
             {
-              "include": [
-                "reasoning.encrypted_content"
-              ],
               "input": [
                 {
                   "content": "hello",
@@ -1102,13 +1101,22 @@ mod tests {
     }
 
     #[test]
-    fn output_token_limit_below_sixteen_is_rejected_before_send() {
-        let mut candidate = operation("call-zero-tokens");
-        candidate.settings.max_output_tokens = 15;
-        assert!(matches!(
-            build_request(&candidate),
-            Err(PreparationFailure::UnsupportedOperation { .. })
-        ));
+    fn output_token_limits_below_sixteen_fail_configuration_and_preparation() {
+        let mut candidate = operation("call-output-ceiling");
+        for limit in 1..16 {
+            candidate.settings.max_output_tokens = limit;
+            assert!(matches!(
+                validate_model_settings(&candidate.settings),
+                Err(PreparationFailure::UnsupportedOperation { .. })
+            ));
+            assert!(matches!(
+                build_request(&candidate),
+                Err(PreparationFailure::UnsupportedOperation { .. })
+            ));
+        }
+        candidate.settings.max_output_tokens = 16;
+        assert!(validate_model_settings(&candidate.settings).is_ok());
+        assert_eq!(build_request(&candidate).unwrap().max_output_tokens, 16);
     }
 
     #[test]

@@ -145,7 +145,13 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         .map_err(|e| e.to_string())
         .and_then(|()| serde_json::from_slice::<Response>(body).map_err(|e| e.to_string()));
     match response {
-        Ok(response) => decode_response(response, exchange, correlation, sink),
+        Ok(response) => decode_response(
+            response,
+            TokenUsage::unreported(),
+            exchange,
+            correlation,
+            sink,
+        ),
         Err(detail) => TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::ResponseUnintelligible { detail },
             exchange,
@@ -159,16 +165,15 @@ pub(crate) fn decode_buffered_response<C: Clone>(
 
 pub(crate) fn decode_response<C: Clone>(
     response: Response,
+    mut usage: TokenUsage,
     exchange: ExchangeFacts,
     correlation: &C,
     sink: &mut (dyn ObservationSink<C> + Send),
 ) -> TerminalEvidence {
     let reported_model = response.model.clone().map(ProviderReportedModel::new);
-    let usage = response
-        .usage
-        .as_ref()
-        .map(convert_usage)
-        .unwrap_or_default();
+    if let Some(reported) = &response.usage {
+        usage.absorb(convert_usage(reported));
+    }
     let items: Result<Vec<WireOutputItem>, _> = response
         .output
         .as_deref()
@@ -200,7 +205,7 @@ pub(crate) fn decode_response<C: Clone>(
             ObservationFact::ProviderModelReported(model.clone()),
         );
     }
-    if response.usage.is_some() {
+    if response.usage.is_some() || usage != TokenUsage::unreported() {
         emit(correlation, sink, ObservationFact::UsageReported(usage));
     }
     if response.status.as_deref() == Some("failed") {
