@@ -42,6 +42,9 @@ repository and pull-request projections, an expected generation, one complete
 cursor candidate, and its ordered batch of event occurrences. A generation
 mismatch is stale unless the complete projections, candidate, and ordered batch
 exactly replay the immediately succeeding commit.
+An empty event batch with an unchanged cursor is unchanged only when both stored
+projections also match; a projection-only change advances the generation and
+records the complete commit digest.
 
 A pure differ (`derive_repo_watch_events`) compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities,
