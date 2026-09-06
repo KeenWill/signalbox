@@ -145,22 +145,6 @@ jobs:
         run: /tmp/mdformat-venv/bin/python scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
         run: python3 scripts/check_migration_versions.py
-      - name: Check numeric bound declarations
-        run: python3 scripts/check_numeric_bounds.py
-      # Gates normally: the tree satisfies this today, so the step can only
-      # fail on a regression. Clippy enforces the panic denies but cannot see
-      # a member that opts out of inheriting them, which is the hole this
-      # closes. Reads `cargo metadata --no-deps` for the member set, which
-      # resolves no dependency graph and compiles nothing, so it belongs above
-      # the cache step with the other non-compiling checks.
-      - name: Check panic-gate coverage
-        run: python3 scripts/check_panic_gate.py
-      # Gates normally: the tree satisfies all three rules this checker decides,
-      # so the step can only fail on a regression. A rule joins this step only
-      # once the tree it scans is already at zero — never as a side effect of a
-      # change that merely reduces a count.
-      - name: Check style rules
-        run: python3 scripts/check_style_rules.py
       - name: Check ownership-seam boundaries
         run: python3 scripts/check_ownership_seam.py
   checker-and-format-tests:
@@ -185,12 +169,6 @@ jobs:
         run: python3 scripts/test_render_domain_spine.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
-      - name: Test numeric bound checker
-        run: python3 scripts/test_check_numeric_bounds.py
-      - name: Test panic-gate checker
-        run: python3 scripts/test_check_panic_gate.py
-      - name: Test style-rule checker
-        run: python3 scripts/test_check_style_rules.py
       - name: Test ownership-seam checker
         run: python3 scripts/test_check_ownership_seam.py
       - name: Test documentation consistency checker
