@@ -34,6 +34,8 @@ mod github;
 use baseline::observation_payload;
 pub use github::{GitHubClient, GitHubClientError};
 
+const CONFIGURATION_LOCK: &str = "repo-watch\u{1f}configuration";
+
 /// Current provider state for one watched repository.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryState<'a> {
@@ -1133,6 +1135,10 @@ impl RepoWatchStore {
             }
         }
         let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(CONFIGURATION_LOCK)
+            .execute(&mut *transaction)
+            .await?;
         let active_repositories: Vec<String> =
             sqlx::query_scalar("SELECT DISTINCT repository FROM rule ORDER BY repository")
                 .fetch_all(&mut *transaction)
