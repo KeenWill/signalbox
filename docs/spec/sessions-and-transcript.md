@@ -94,7 +94,10 @@ parent-chosen policy, messages in both directions, and the child's one result.
 The browser read plane serves a session catalog with attention states, a live
 projection and follow stream for one session, a timeline of durable events with
 typed detail, and lexical search. Its request and response shapes live in
-`crates/web-contract`.
+`crates/web-contract`. The browser submits text with a user-global command ID
+through the operator submit-input path, starting only when no turn is active.
+A 204 response acknowledges durable acceptance; typed errors report rejection,
+and an unconfirmed outcome is retried with the same command ID and text.
 
 ## Design decisions
 

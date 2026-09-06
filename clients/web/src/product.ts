@@ -6,6 +6,10 @@ import {
   decodeWebContractBootstrap,
   decodeWebSearchPage,
   decodeWebSessionCatalogSnapshot,
+  decodeWebSessionLiveSnapshot,
+  decodeWebSessionLiveStreamEvent,
+  decodeWebSessionTimelineDetailPage,
+  decodeWebSubmitInputRequest,
   type WebApiErrorResponse,
   type WebAttentionSnapshot,
   type WebAttentionStreamEvent,
@@ -13,6 +17,9 @@ import {
   type WebContractBootstrap,
   type WebSearchPage,
   type WebSessionCatalogSnapshot,
+  type WebSessionLiveStreamEvent,
+  type WebSubmitInputRequest,
+  type WebTimelineDetailContinuation,
 } from './generated/web-contract.mjs'
 
 export const productRoutes = [
@@ -985,3 +992,148 @@ export class SameOriginProductTransport implements ProductTransport {
 }
 
 export const productTransport = new SameOriginProductTransport()
+
+export async function submitSessionInput(sessionId: string, input: WebSubmitInputRequest) {
+  const body = JSON.stringify(decodeWebSubmitInputRequest(input))
+  if (new TextEncoder().encode(body).byteLength > MAX_PRODUCT_JSON_BYTES) {
+    throw new ProductInputError('Message exceeds the browser request byte limit.')
+  }
+  const response = await request(`/api/sessions/${sessionId}/input`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    credentials: 'same-origin',
+    body,
+  })
+  if (response.status === 204) return
+  if (!response.ok)
+    throw new ProductRequestError(
+      response.status,
+      decodeWebApiErrorResponse(await readBoundedJson(response)),
+    )
+  throw new TypeError('Input response did not acknowledge durable acceptance.')
+}
+
+export async function readSessionLive(sessionId: string, signal?: AbortSignal) {
+  const response = await request(`/api/sessions/${sessionId}/live`, {
+    credentials: 'same-origin',
+    signal,
+  })
+  const payload = await readBoundedJson(response)
+  if (!response.ok)
+    throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
+  const snapshot = decodeWebSessionLiveSnapshot(payload)
+  if (snapshot.session_id !== sessionId) throw new TypeError('Live snapshot session mismatch')
+  return snapshot
+}
+
+export async function* followSession(
+  sessionId: string,
+  signal: AbortSignal,
+): AsyncGenerator<WebSessionLiveStreamEvent> {
+  while (!signal.aborted) {
+    const initial = await readSessionLive(sessionId, signal)
+    let cursor = BigInt(initial.observed_through)
+    yield { kind: 'snapshot', snapshot: initial }
+    const response = await request(`/api/sessions/${sessionId}/follow`, {
+      credentials: 'same-origin',
+      headers: { accept: 'application/x-ndjson' },
+      signal,
+    })
+    if (!response.ok)
+      throw new ProductRequestError(
+        response.status,
+        decodeWebApiErrorResponse(await readBoundedJson(response)),
+      )
+    if (
+      !response.body ||
+      response.headers.get('content-type')?.split(';')[0] !== 'application/x-ndjson'
+    )
+      throw new TypeError('Session follow requires NDJSON')
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    let line: number[] = []
+    let resync = false
+    let first = true
+    try {
+      stream: while (!signal.aborted) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        for (const byte of chunk.value) {
+          if (byte !== 10) {
+            if (line.length === MAX_NDJSON_ITEM_BYTES)
+              throw new TypeError('Session follow item exceeds its byte limit')
+            line.push(byte)
+            continue
+          }
+          const event = decodeWebSessionLiveStreamEvent(
+            JSON.parse(decoder.decode(Uint8Array.from(line))),
+          )
+          line = []
+          if (first && event.kind !== 'snapshot')
+            throw new TypeError('Session follow must begin with a snapshot')
+          first = false
+          if (event.kind === 'snapshot') {
+            if (
+              event.snapshot.session_id !== sessionId ||
+              BigInt(event.snapshot.observed_through) < cursor
+            )
+              throw new TypeError('Session snapshot identity or cursor mismatch')
+            cursor = BigInt(event.snapshot.observed_through)
+            yield event
+          } else if (event.kind === 'durable') {
+            if (BigInt(event.cursor) <= cursor) continue
+            if (BigInt(event.address.event_sequence) > BigInt(event.cursor))
+              throw new TypeError('Session event exceeds its cursor')
+            cursor = BigInt(event.cursor)
+            yield event
+          } else if (event.kind === 'resync_required') {
+            resync = true
+            break stream
+          }
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined)
+      reader.releaseLock()
+    }
+    if (!resync && !signal.aborted)
+      throw new ProductTransportError('Live connection ended; reconnect to continue following.')
+  }
+}
+
+export async function readSessionTranscript(
+  sessionId: string,
+  first: string,
+  through: string,
+  continuation: WebTimelineDetailContinuation | null,
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams({ first, through, max_items: '80', max_bytes: '65536' })
+  if (continuation?.type === 'more_at')
+    query.set('cursor_address', continuation.address.event_sequence)
+  if (continuation?.type === 'more_body') {
+    query.set('cursor_address', continuation.body.address.event_sequence)
+    query.set('cursor_field', continuation.body.field)
+    query.set('cursor_member', String(continuation.body.member_index))
+    query.set('cursor_offset', continuation.body.offset_bytes)
+  }
+  const response = await request(`/api/sessions/${sessionId}/timeline-detail?${query}`, {
+    credentials: 'same-origin',
+    signal,
+  })
+  // JSON escaping can use six bytes per text byte; the existing timeline response budget covers metadata.
+  const payload = await readBoundedJson(response, MAX_PRODUCT_JSON_BYTES * 7)
+  if (!response.ok)
+    throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
+  const page = decodeWebSessionTimelineDetailPage(payload)
+  if (
+    page.session_id !== sessionId ||
+    page.items.some(
+      (item) =>
+        BigInt(item.address.event_sequence) < BigInt(first) ||
+        BigInt(item.address.event_sequence) > BigInt(through),
+    )
+  )
+    throw new TypeError('Transcript detail belongs to another window')
+  return page
+}

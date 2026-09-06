@@ -13,6 +13,8 @@ import {
 import { invokeCommand } from './commands'
 import { MissingAttachmentState } from './features/artifacts/ArtifactAttachments'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
+import { SessionComposer, useSessionFollow } from './SessionComposer'
+import { SessionTranscriptText } from './SessionTranscriptText'
 import {
   BoundedSessionHistory,
   HttpSessionTimelineSource,
@@ -206,6 +208,10 @@ export function SessionWorkspaceSurface({
     enabled: sessionId !== null && timelineCapability === 'available',
   })
   const refetchSession = session.refetch
+  const follow = useSessionFollow(
+    timelineCapability === 'available' ? sessionId : null,
+    refetchSession,
+  )
   const displayedSession =
     session.isSuccess && awaitingSessionId !== sessionId ? session.data : undefined
   const items = useMemo(
@@ -511,11 +517,66 @@ export function SessionWorkspaceSurface({
             <button type="button" onClick={() => invokeBoundaryCommand('selection.last')}>
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
+            <button
+              type="button"
+              disabled={!displayedSession.window.continuation_before}
+              onClick={() => {
+                const address = displayedSession.window.continuation_before?.event_sequence
+                if (address) {
+                  manualAnchorRef.current = { kind: 'before', eventSequence: address }
+                  void refetchSession()
+                }
+              }}
+            >
+              Previous window
+            </button>
+            <button
+              type="button"
+              disabled={!displayedSession.window.continuation_after}
+              onClick={() => {
+                const address = displayedSession.window.continuation_after?.event_sequence
+                if (address) {
+                  manualAnchorRef.current = { kind: 'after', eventSequence: address }
+                  void refetchSession()
+                }
+              }}
+            >
+              Next window
+            </button>
             <span>
               {displayedSession.window.items.length} bounded items ·{' '}
               {displayedSession.window.projected_structured_bytes} B
             </span>
           </div>
+          <p className="session-live-status" role="status">
+            {follow.error ? (
+              <>
+                Live updates unavailable.{' '}
+                <button type="button" onClick={follow.reconnect}>
+                  Reconnect live updates
+                </button>
+              </>
+            ) : follow.live ? (
+              'Following live session'
+            ) : (
+              'Connecting live session…'
+            )}
+          </p>
+          {displayedSession.descriptor.sizes.projected_text_bytes !== '0' && (
+            <SessionTranscriptText
+              key={`${sessionId}:${displayedSession.window.items[0]?.address.event_sequence}:${displayedSession.window.items.at(-1)?.address.event_sequence}`}
+              sessionId={sessionId ?? ''}
+              first={
+                displayedSession.window.items[0]?.address.event_sequence ??
+                displayedSession.descriptor.first_address.event_sequence
+              }
+              through={
+                displayedSession.window.items.at(-1)?.address.event_sequence ??
+                displayedSession.descriptor.latest_address.event_sequence
+              }
+              observed={displayedSession.descriptor.observed_through}
+            />
+          )}
           <div
             className={`session-timeline presentation-${app.detail}`}
             aria-label="Session timeline"
@@ -584,7 +645,9 @@ export function SessionWorkspaceSurface({
                         </div>
                         <div>
                           <dt>Projection</dt>
-                          <dd>Header only; rich event detail is not exposed</dd>
+                          <dd>
+                            Durable event metadata; message text appears in the transcript above
+                          </dd>
                         </div>
                       </dl>
                       {item.kind === 'input_accepted' && (
@@ -596,16 +659,12 @@ export function SessionWorkspaceSurface({
               )
             })}
           </div>
-          <section className="session-composer" aria-labelledby="session-composer-heading">
-            <header>
-              <div>
-                <span className="eyebrow">Input surface</span>
-                <h3 id="session-composer-heading">Composer</h3>
-              </div>
-              <span className="availability-tag">Committed · unavailable</span>
-            </header>
-            <MissingAttachmentState placement="composer" />
-          </section>
+          <SessionComposer
+            key={sessionId}
+            sessionId={sessionId ?? ''}
+            activeState={follow.live ? (follow.live.active?.state.kind ?? null) : undefined}
+            onAccepted={refetchSession}
+          />
         </section>
       )}
     </div>

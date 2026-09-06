@@ -4300,6 +4300,27 @@ const schemas = {
     "title": "WebSessionTimelineWindow",
     "type": "object"
   },
+  "WebSubmitInputRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "An idempotent text submission using the session's current defaults.",
+    "properties": {
+      "command_id": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "message": {
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "message"
+    ],
+    "title": "WebSubmitInputRequest",
+    "type": "object"
+  },
   "WebUsageCallPage": {
     "$defs": {
       "WebDollarAmount": {
@@ -6096,6 +6117,11 @@ export function decodeWebContractBootstrap(value) {
       value.limits.max_session_live_queued_turns !== 32) {
     throw new TypeError("bootstrap carries an incompatible web contract");
   }
+  return value;
+}
+
+export function decodeWebSubmitInputRequest(value) {
+  assertSchema(schemas.WebSubmitInputRequest, schemas.WebSubmitInputRequest, value, "websubmitinputrequest");
   return value;
 }
 

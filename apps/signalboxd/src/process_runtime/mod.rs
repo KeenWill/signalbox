@@ -377,8 +377,8 @@ pub(crate) use compaction::{AutomaticContextCompactionError, compact_automatical
 mod sessions;
 use sessions::*;
 mod turns;
-pub(crate) use turns::wire_user_content;
 use turns::*;
+pub(crate) use turns::{ConfiguredSubmitInputTransaction, wire_user_content};
 mod transcript;
 use transcript::*;
 mod protocol;

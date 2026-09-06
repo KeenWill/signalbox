@@ -11,6 +11,7 @@ export interface CommandContext {
   artifactOriginalIds: readonly string[]
   artifactSelectionTarget?: string
   paneSize?: number
+  submitSessionInput?: () => void
   sessionId?: string
   timelineWindowAvailable?: boolean
   focusTimeline: () => void
@@ -604,6 +605,15 @@ export const commandRegistry = [
     bindings: [],
     available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('results')),
+  },
+  {
+    id: 'session.send',
+    title: 'Send message',
+    description: 'Submit text to the idle session.',
+    category: 'Surface',
+    bindings: [],
+    available: (context) => context.submitSessionInput !== undefined,
+    run: (context) => context.submitSessionInput?.(),
   },
   {
     id: 'session.open',

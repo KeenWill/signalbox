@@ -457,7 +457,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
-  await expect(page.getByRole('region', { name: 'composer attachments unavailable' })).toBeVisible()
+  await expect(page.getByRole('form', { name: 'Message composer' })).toBeVisible()
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
   await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
     'aria-selected',

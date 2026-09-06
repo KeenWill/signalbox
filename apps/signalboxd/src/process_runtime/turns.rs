@@ -1,11 +1,11 @@
 use super::*;
 
 #[derive(Debug)]
-pub(super) struct ConfiguredSubmitInputTransaction<'configuration> {
-    pub(super) repository: SubmitInputRepository,
-    pub(super) model_configuration: &'configuration HubModelConfiguration,
-    pub(super) principal: CommandPrincipal,
-    pub(super) cascade_root_kind: ParentTerminationKind,
+pub(crate) struct ConfiguredSubmitInputTransaction<'configuration> {
+    pub(crate) repository: SubmitInputRepository,
+    pub(crate) model_configuration: &'configuration HubModelConfiguration,
+    pub(crate) principal: CommandPrincipal,
+    pub(crate) cascade_root_kind: ParentTerminationKind,
 }
 
 impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
