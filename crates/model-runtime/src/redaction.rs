@@ -705,24 +705,34 @@ impl<'a> CredentialBoundaryMatcher<'a> {
     }
 }
 
-fn inspect_raw_json_strings(
+fn inspect_json_value_strings(
+    value: &serde_json::Value,
+    inspect: &mut impl FnMut(&str) -> bool,
+) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            entries
+                .into_iter()
+                .any(|(key, value)| inspect(key) || inspect_json_value_strings(value, inspect))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| inspect_json_value_strings(value, inspect)),
+        serde_json::Value::String(value) => inspect(value),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
+}
+
+fn inspect_canonical_json_strings(
     raw: &str,
     inspect: &mut impl FnMut(&str) -> bool,
 ) -> Result<bool, serde_json::Error> {
-    let raw = raw.trim();
-    match raw.as_bytes().first() {
-        Some(b'{' | b'[') => {
-            let RawJsonChildren(children) = serde_json::from_str(raw)?;
-            for child in children {
-                if inspect_raw_json_strings(child.get(), inspect)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        Some(b'"') => serde_json::from_str::<String>(raw).map(|value| inspect(&value)),
-        _ => serde_json::from_str::<serde_json::Value>(raw).map(|_| false),
-    }
+    serde_json::from_str::<serde_json::Value>(raw)
+        .map(|value| inspect_json_value_strings(&value, inspect))
 }
 
 fn inspect_durable_assistant_part_fields(
@@ -744,7 +754,7 @@ fn inspect_durable_assistant_part_fields(
         AssistantPart::ToolCall(proposal) => {
             inspect(proposal.id.as_str(), false)
                 || inspect(proposal.name.as_str(), false)
-                || match inspect_raw_json_strings(&proposal.arguments_json, &mut |value| {
+                || match inspect_canonical_json_strings(&proposal.arguments_json, &mut |value| {
                     inspect(value, false)
                 }) {
                     Ok(found) => found,
@@ -2011,7 +2021,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_spanning_source_order_tool_fields_and_compaction_is_rejected() {
+    fn credential_spanning_canonical_tool_fields_and_compaction_is_rejected() {
         let key = credential("key_loop");
         let evidence = TerminalEvidence::CompletedWithProviderCompaction {
             completion: CompletionEvidence {
@@ -2023,7 +2033,7 @@ mod tests {
                     AssistantPart::ToolCall(ToolCallProposal {
                         id: ToolCallId::new("call-1"),
                         name: ToolName::new("lookup"),
-                        arguments_json: r#"{"z":"key","a":"_"}"#.to_string(),
+                        arguments_json: r#"{"z":"_","a":"key"}"#.to_string(),
                     }),
                     AssistantPart::ProviderCompaction {
                         block_json: r#"{"type":"compaction","content":"loop summary","encrypted_content":"opaque"}"#.to_string(),
@@ -2036,7 +2046,7 @@ mod tests {
         };
 
         let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
-            panic!("credential following source-order tool fields is rejected");
+            panic!("credential following canonical tool fields is rejected");
         };
         assert_eq!(
             error.native.error_token.as_deref(),
