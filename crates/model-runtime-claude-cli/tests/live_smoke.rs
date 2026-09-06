@@ -517,7 +517,8 @@ async fn assert_pinned_version(executable: &std::path::Path) {
 
     assert_eq!(
         version,
-        SUPPORTED_CLAUDE_CLI_VERSION,
+        semver::Version::parse(SUPPORTED_CLAUDE_CLI_VERSION)
+            .expect("the build-validated pin is SemVer"),
         "the executable at `{}` reports {version}, but this smoke can \
          only produce compatibility evidence for the pinned \
          {SUPPORTED_CLAUDE_CLI_VERSION}; install the version pinned in \
@@ -531,25 +532,35 @@ async fn assert_pinned_version(executable: &std::path::Path) {
 /// Reading the leading token rather than the trailing one keeps the parenthesized
 /// product name out of the comparison; a banner reduced to the version alone
 /// still parses.
-fn reported_version(banner: &str) -> Option<&str> {
-    banner.lines().next()?.split_whitespace().next()
+fn reported_version(banner: &str) -> Option<semver::Version> {
+    banner
+        .lines()
+        .next()?
+        .split_whitespace()
+        .find_map(|token| semver::Version::parse(token).ok())
 }
 
 #[test]
 fn reported_version_reads_the_leading_token_of_the_banner() {
-    assert_eq!(reported_version("2.1.220 (Claude Code)\n"), Some("2.1.220"));
+    assert_eq!(
+        reported_version("2.1.220 (Claude Code)\n"),
+        semver::Version::parse("2.1.220").ok()
+    );
 }
 
 #[test]
 fn reported_version_accepts_a_bare_version_banner() {
-    assert_eq!(reported_version("2.1.220\n"), Some("2.1.220"));
+    assert_eq!(
+        reported_version("2.1.220\n"),
+        semver::Version::parse("2.1.220").ok()
+    );
 }
 
 #[test]
 fn reported_version_reads_only_the_first_line() {
     assert_eq!(
         reported_version("2.1.220 (Claude Code)\ntrailing notice\n"),
-        Some("2.1.220")
+        semver::Version::parse("2.1.220").ok()
     );
 }
 
