@@ -19,12 +19,11 @@ use signalbox_ownership_seam::{
     CreateSession, CreateSessionOutcome, FinishCondition, LifecycleEvent, LifecycleEventKind,
     MergeableState, ModuleDispatch, OffsetDateTime, PullRequestBody, PullRequestNumber,
     PullRequestTitle, ReactionChange, ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId,
-    RepoWatchEvent, RepoWatchEventContentIdentityV1,
-    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
-    RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
-    RepoWatchRuleVersion, RepositorySlug, ReviewState, SessionCommand, SessionCreationCause,
-    SessionId, SessionLifecycleCommand, SessionLifecycleOperation, SessionOwnership, StartGate,
-    StopStickiness,
+    RepoWatchEvent, RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, ReviewState,
+    SessionCommand, SessionCreationCause, SessionId, SessionLifecycleCommand,
+    SessionLifecycleOperation, SessionOwnership, StartGate, StopStickiness,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
