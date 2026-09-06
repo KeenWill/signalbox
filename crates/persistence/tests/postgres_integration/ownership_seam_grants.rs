@@ -30,6 +30,16 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
     .await?;
     assert_eq!(privileges, (true, true, false, false));
 
+    let function_privileges: (bool, bool) = sqlx::query_as(
+        "SELECT has_function_privilege('mod_repo_watch',
+                    'public.require_session_ownership_journal(uuid)', 'EXECUTE'),
+                has_function_privilege(current_user,
+                    'public.require_session_ownership_journal(uuid)', 'EXECUTE')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(function_privileges, (false, true));
+
     let core_membership: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1
@@ -105,6 +115,14 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
             .fetch_one(&mut *connection)
             .await?;
     assert_eq!(cursor, Decimal::ZERO);
+
+    let effective_function_privilege: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege(
+            current_user, 'public.require_session_ownership_journal(uuid)', 'EXECUTE')",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    assert!(!effective_function_privilege);
 
     let core_read = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM public.session")
         .fetch_one(&mut *connection)

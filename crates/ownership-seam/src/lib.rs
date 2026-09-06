@@ -15,10 +15,9 @@ pub use signalbox_domain::{
     SessionCreationCause, SessionCreationProvenance, SessionFailureCause, SessionId,
     SessionLifecycleCommand, SessionLifecycleOperation, SessionLifecycleState, SessionOwnership,
     SessionOwnershipTransition, SessionParkCause, SessionParkResponder, SessionRecoveryOperation,
-    SessionRetirementCause, SessionRetryableCause, SessionStructuralCause,
-    SessionTemplateContentDigest, SessionTemplateProvenance, SessionTerminalOutcome, SessionWait,
-    StartGate, StopStickiness, SubmitInput, ToolAttemptId, ToolRequestId, TurnId, UserContent,
-    UserContentPart,
+    SessionRetirementCause, SessionRetryableCause, SessionStructuralCause, SessionTemplateName,
+    SessionTemplateProvenance, SessionTerminalOutcome, SessionWait, StartGate, StopStickiness,
+    SubmitInput, ToolAttemptId, ToolRequestId, TurnId, UserContent, UserContentPart,
 };
 pub use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::outbox::{
@@ -449,7 +448,12 @@ impl SessionCommand {
 
     /// Admits the ordinary typed input-submission command.
     pub fn submit_input(command: SubmitInput) -> Result<Self, CommandOutsideSeam> {
-        if command.actor() != signalbox_domain::Actor::User {
+        if command.actor() != signalbox_domain::Actor::User
+            || !matches!(
+                command.delivery(),
+                DeliveryRequest::StartWhenNoActiveTurn { .. }
+            )
+        {
             return Err(CommandOutsideSeam);
         }
         Ok(Self {
@@ -537,17 +541,19 @@ mod tests {
         ))
     }
 
-    fn ordinary_input() -> SubmitInput {
+    fn input(delivery: DeliveryRequest) -> SubmitInput {
         SubmitInput::new(
             DurableCommandId::from_uuid(Uuid::from_u128(5)),
             SessionId::from_uuid(Uuid::from_u128(6)),
             UserContent::try_text(String::from("module input")).expect("fixture text is admitted"),
-            DeliveryRequest::StartWhenNoActiveTurn {
-                configuration: PerInputConfigurationChoices::new(
-                    SessionConfigurationDefaultsVersion::first(),
-                    ModelSelectionOverride::UseSessionDefault,
-                ),
-            },
+            delivery,
+        )
+    }
+
+    fn choices() -> PerInputConfigurationChoices {
+        PerInputConfigurationChoices::new(
+            SessionConfigurationDefaultsVersion::first(),
+            ModelSelectionOverride::UseSessionDefault,
         )
     }
 
@@ -606,20 +612,45 @@ mod tests {
     }
 
     #[test]
-    fn submit_input_admits_user_shape_and_rejects_core_interrupt() {
-        assert!(SessionCommand::submit_input(ordinary_input()).is_ok());
+    fn submit_input_admits_only_initial_delivery_without_a_turn_identity() {
+        assert!(
+            SessionCommand::submit_input(input(DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: choices(),
+            }))
+            .is_ok()
+        );
+
+        let turn = TurnId::from_uuid(Uuid::from_u128(12));
+        assert!(
+            SessionCommand::submit_input(input(DeliveryRequest::Interrupt {
+                expected_active_turn: turn,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                configuration: choices(),
+            }))
+            .is_err()
+        );
+        assert!(
+            SessionCommand::submit_input(input(DeliveryRequest::NextSafePoint {
+                expected_active_turn: turn,
+            }))
+            .is_err()
+        );
+        assert!(
+            SessionCommand::submit_input(input(DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn: turn,
+                configuration: choices(),
+            }))
+            .is_err()
+        );
 
         let core_interrupt = SubmitInput::new_core_interrupt(
             DurableCommandId::from_uuid(Uuid::from_u128(10)),
             SessionId::from_uuid(Uuid::from_u128(11)),
             UserContent::try_text(String::from("core interrupt"))
                 .expect("fixture text is admitted"),
-            TurnId::from_uuid(Uuid::from_u128(12)),
+            turn,
             DescendantTerminationScope::ParentAlone,
-            PerInputConfigurationChoices::new(
-                SessionConfigurationDefaultsVersion::first(),
-                ModelSelectionOverride::UseSessionDefault,
-            ),
+            choices(),
         );
         assert!(SessionCommand::submit_input(core_interrupt).is_err());
     }
