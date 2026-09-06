@@ -181,6 +181,18 @@ async fn web_input_requires_same_origin_json_and_valid_text() -> Result<(), Box<
         router.clone().oneshot(non_json).await?.status(),
         StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
+    let mut noncanonical = submission(session, command, "Message");
+    *noncanonical.body_mut() = Body::from(
+        serde_json::json!({
+            "command_id": "00000000-0000-0000-0000-0000000000AF",
+            "message": "Message"
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        router.clone().oneshot(noncanonical).await?.status(),
+        StatusCode::BAD_REQUEST
+    );
     assert_eq!(
         router
             .clone()

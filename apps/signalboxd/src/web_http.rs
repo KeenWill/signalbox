@@ -1107,11 +1107,14 @@ async fn session_submit_input(
             "session identity is not canonical",
         );
     };
-    let Ok(command_id) = Uuid::parse_str(&request.command_id) else {
+    let Some(command_id) = Uuid::parse_str(&request.command_id)
+        .ok()
+        .filter(|identity| identity.to_string() == request.command_id)
+    else {
         return application_error(
             StatusCode::BAD_REQUEST,
             "invalid_command_id",
-            "command identity is not a UUID",
+            "command identity is not a canonical UUID",
         );
     };
     let command_id = DurableCommandId::from_uuid(command_id);
@@ -1199,7 +1202,9 @@ async fn session_submit_input(
     );
     match service.execute(request).await {
         Ok(SubmitInputOutcome::Recorded(result)) => web_input_result(&result),
-        Ok(SubmitInputOutcome::ConflictingReuse { .. }) => web_input_conflict(),
+        // A concurrent request may have resolved different session defaults.
+        // Retry reads its recorded command before resolving defaults again.
+        Ok(SubmitInputOutcome::ConflictingReuse { .. }) => web_input_unconfirmed(),
         Err(SubmitInputRepositoryError::UnsupportedModelSetting(_)) => application_error(
             StatusCode::CONFLICT,
             "unsupported_model_setting",
