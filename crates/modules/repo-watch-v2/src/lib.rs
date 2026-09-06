@@ -149,6 +149,8 @@ pub enum FrontierEventAdmission {
         /// Admission of each ordered fact.
         events: Box<[EventAdmission]>,
     },
+    /// The complete candidate already matches the stored frontier and carried no facts.
+    Unchanged,
     /// A durable event identity was already bound to a different fact.
     ConflictingReuse,
     /// A newer frontier entry already committed for this repository.
@@ -709,6 +711,34 @@ impl RepoWatchStore {
                 })
             } else {
                 Ok(FrontierEventAdmission::Stale)
+            };
+        }
+        let stored_frontier: Vec<(Vec<u8>, Decimal, Option<Decimal>)> = sqlx::query_as(
+            "SELECT stream_identity, sequence, pull_request_number
+               FROM frontier
+              WHERE repository = $1
+              ORDER BY stream_identity",
+        )
+        .bind(repository.as_str())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let unchanged = stored_frontier.len() == frontier.len()
+            && stored_frontier.iter().zip(&frontier).all(
+                |((stream_identity, sequence, pull_request_number), entry)| {
+                    stream_identity.as_slice() == entry.stream_identity().as_slice()
+                        && *sequence == Decimal::from(entry.sequence().get())
+                        && *pull_request_number
+                            == entry
+                                .pull_request_number()
+                                .map(|number| Decimal::from(number.get()))
+                },
+            );
+        if unchanged {
+            transaction.rollback().await?;
+            return if events.is_empty() {
+                Ok(FrontierEventAdmission::Unchanged)
+            } else {
+                Ok(FrontierEventAdmission::ConflictingReuse)
             };
         }
         let next_generation = expected_generation
