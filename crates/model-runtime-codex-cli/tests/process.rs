@@ -3169,7 +3169,7 @@ async fn inv_035_drifted_thread_id_is_redacted_against_held_state() {
     assert!(diagnostic.contains("[redacted]"));
 }
 
-/// A nonzero exit retains bounded raw stderr as opaque native evidence, while
+/// A nonzero exit retains bounded stderr as opaque native evidence, while
 /// credential redaction still sanitizes the emitted message.
 #[cfg(unix)]
 #[tokio::test]
@@ -3317,7 +3317,7 @@ async fn completed_stderr_is_preserved_during_stdout_cleanup() {
 /// deadline) still keeps that opaque native message. The group kill
 /// closes the descendant's write end, and the bounded drain awaits the reader
 /// rather than aborting it, so the buffered `authentication failed` is not
-/// discarded and degraded to `Unrecognized`.
+/// discarded; the failure kind remains `Unrecognized`.
 #[cfg(unix)]
 #[tokio::test]
 async fn held_stderr_is_drained_during_stdout_cleanup() {
@@ -4252,8 +4252,8 @@ printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cache
 
 /// Scripts a CLI whose stderr places an explicit error phrase after a
 /// line-scoped credential marker, then exits nonzero with a stdout-holding
-/// descendant. The sanitized message consumes the marker's line, so the
-/// failure can only classify correctly from the bounded raw stderr.
+/// descendant. Sanitization removes the marker's line; any retained stderr is
+/// opaque native evidence and does not determine the failure kind.
 #[cfg(unix)]
 fn stdout_holding_masked_credential_failure_cli(directory: &Path) -> std::path::PathBuf {
     let script = r#"#!/bin/sh
@@ -4290,7 +4290,7 @@ exit 7
     script_cli(directory, "completed-nonzero-codex", &script)
 }
 
-/// Scripts a CLI that exits nonzero after a classifiable stderr while a
+/// Scripts a CLI that exits nonzero after writing stderr evidence while a
 /// descendant both holds stdout open and signals readiness, so a cancellation
 /// can be timed to arrive after the leader has already exited.
 #[cfg(unix)]
@@ -4312,7 +4312,7 @@ exit 7
     script_cli(directory, "cancel-after-exit-codex", script)
 }
 
-/// Scripts a CLI that writes a classifiable credential-rejection to stderr,
+/// Scripts a CLI that writes opaque credential-rejection prose to stderr,
 /// closes stderr, hands a stdout-holding descendant the pipe, and exits
 /// nonzero. The stdout-decode loop then reaches its deadline with the leader
 /// already exited and stderr already complete, exercising the branch that
@@ -4332,8 +4332,8 @@ exit 7
     script_cli(directory, "stderr-credential-codex", script)
 }
 
-/// Scripts a CLI that emits its nonterminal preamble, writes a classifiable
-/// stderr failure, hands stdout to a descendant that floods benign unknown
+/// Scripts a CLI that emits its nonterminal preamble, writes opaque failure
+/// evidence to stderr, hands stdout to a descendant that floods benign unknown
 /// keepalive events continuously, and exits nonzero. The flood keeps the
 /// biased select's read arm always ready, so the deadline is only ever
 /// noticed by the post-line check — on a freshly read line while the
@@ -4409,7 +4409,7 @@ while :; do cat fake-codex-flood-block; done
     script_cli(directory, "starving-flood-codex", &script)
 }
 
-/// Scripts a CLI that writes a classifiable stderr failure, then hands its
+/// Scripts a CLI that writes opaque failure evidence to stderr, then hands its
 /// stdout and stderr handles to a surviving descendant (so neither pipe reaches
 /// EOF on its own) and exits nonzero. Unlike `stdout_holding_credential_failure_cli`,
 /// the leader never closes stderr, so at the cleanup deadline the reader is not

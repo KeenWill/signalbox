@@ -709,14 +709,10 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                         if exited_before_cleanup || !was_killed_by_group_cleanup(&status) =>
                     {
                         child.disarm();
-                        // A leader that wrote and closed stderr before exiting,
-                        // or a descendant whose stderr write end the group kill
-                        // just closed, leaves classifiable failure text buffered
-                        // in the reader. Await it under the bounded drain so a
-                        // credential rejection or quota failure keeps its typed
-                        // kind instead of degrading to the synthetic cleanup
-                        // message; `is_finished()` is not yet true right after
-                        // the kill, so aborting here would discard that text.
+                        // Drain buffered stderr under the bound to retain it as
+                        // opaque native evidence. The reader may not yet report
+                        // `is_finished()` after the group kill closes its write
+                        // ends; aborting it here would discard that evidence.
                         let stderr_detail = drain_stderr_after_cleanup(
                             &mut stderr_task,
                             &format!(
@@ -806,10 +802,9 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 {
                     child.disarm();
                     reaped_status = Some(Ok(status));
-                    // Same bounded drain as the exit-wait deadline: a descendant
-                    // whose stderr the group kill just closed may still hold
-                    // buffered classifiable text, so await the reader instead of
-                    // aborting it and losing a typed provider failure.
+                    // Drain buffered stderr after the group kill closes the
+                    // descendant's write end, preserving opaque native evidence
+                    // that aborting the reader would discard.
                     drain_stderr_after_cleanup(
                         &mut stderr_task,
                         &format!(
@@ -1224,13 +1219,10 @@ async fn reap_exited_leader(
 /// Await a stderr reader after the process group has been killed, under a short
 /// bound.
 ///
-/// Killing the group closes the descendants' stderr write ends, so the reader
-/// reaches EOF and finishes with its already-buffered classifiable failure
-/// text. Await it — rather than aborting an `is_finished()`-not-yet reader,
-/// which drops that buffered text and degrades a recognizable provider failure
-/// (a credential rejection, a quota exhaustion) to `Unrecognized`. Only a reader
-/// still held open past the bound — a descendant that ignored the kill — is
-/// aborted and reported with `unavailable_message`.
+/// Killing the group closes the descendants' stderr write ends, allowing the
+/// reader to finish with buffered text retained only as opaque native evidence.
+/// Await the reader to preserve that evidence; if it remains pending past the
+/// bound, abort it and report `unavailable_message`.
 async fn drain_stderr_after_cleanup(
     stderr_task: &mut tokio::task::JoinHandle<std::io::Result<BoundedOutput>>,
     unavailable_message: &str,
