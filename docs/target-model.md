@@ -8,7 +8,8 @@ selection aims at a destination instead of drifting.
 
 This document is **directional destination only, never authority**. Implemented
 behavior is owned by the [living specification](spec/README.md) under
-`docs/spec/` and the [domain spine](domain-spine.md); where this document and
+`docs/spec/` and the [domain API](api/signalbox-domain/README.md) and
+[application API](api/signalbox-application/README.md); where this document and
 those pages disagree about what the system does, they win and this document
 describes only where the system is headed. The [glossary](glossary.md) is a
 terminology index, not part of that normative surface. Concepts described here

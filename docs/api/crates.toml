@@ -1,0 +1,2 @@
+crates = ["signalbox-domain", "signalbox-application"]
+rustdoc_toolchain = "nightly-2026-09-01"
