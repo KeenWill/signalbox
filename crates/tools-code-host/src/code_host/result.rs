@@ -11,9 +11,7 @@ use super::{
     arguments::{CodeHostFilePath, valid_opaque_id, valid_revision},
 };
 
-// numeric-bound: guard - the tool contract advertises accepting result URLs only to this length
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
-// numeric-bound: guard - one encoded tool result exhausting transport memory
 pub(super) const MAX_ENCODED_RESULT_BYTES: usize = 512 * 1024;
 
 /// Whether a bounded code-host result exhausted its source.

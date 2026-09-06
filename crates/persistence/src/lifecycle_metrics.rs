@@ -17,11 +17,9 @@ use crate::mapping::{
 ///
 /// Weeks accrue forever and the report is written to a wire frame, so it names
 /// its own horizon.
-// numeric-bound: guard - bounds one metric report to a fixed number of weeks
 pub(crate) const MAX_REPORTED_WEEKS: i64 = 104;
 
 /// Parts per million, the unit every rate is reported in.
-// numeric-bound: not-a-bound - fixed-point scale for exact rate arithmetic
 const PARTS_PER_MILLION: u128 = 1_000_000;
 
 #[derive(signalbox_derive::OperatorError)]
