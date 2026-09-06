@@ -39,7 +39,6 @@ boundaries.
 - [Target model](docs/target-model.md)
 - [Architecture](docs/architecture.md)
 - [Glossary](docs/glossary.md)
-- [Scenarios](docs/scenarios.md)
 - [Domain API](docs/api/signalbox-domain/README.md)
 - [Application API](docs/api/signalbox-application/README.md)
 - [Testing style](docs/agents/testing-style.md)

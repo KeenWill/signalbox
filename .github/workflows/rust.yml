@@ -78,7 +78,7 @@ jobs:
                 # run the complete bar even though they are Markdown.
                 AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
                   | docs/api/* \
-                  | docs/scenarios.md | docs/style.md)
+                  | docs/style.md)
                   rust=$((rust + 1))
                   ;;
                 docs/* | *.md)
