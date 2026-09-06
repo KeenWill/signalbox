@@ -10,7 +10,6 @@
 
 use std::{
     collections::BinaryHeap,
-    error::Error,
     ffi::OsStr,
     fmt,
     fs::File,
@@ -28,67 +27,41 @@ pub const MAX_WORKSPACE_PATH_CHARACTERS: usize = 4096;
 /// Maximum accepted UTF-8 byte length implied by the character bound.
 pub const MAX_WORKSPACE_PATH_BYTES: usize = MAX_WORKSPACE_PATH_CHARACTERS * 4;
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a model-supplied path was rejected before filesystem access.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspacePathRejection {
+    #[error("absolute workspace path rejected")]
     /// The supplied path was absolute.
     Absolute,
+    #[error("parent traversal in workspace path rejected")]
     /// The supplied path contained a parent-directory component.
     ParentTraversal,
+    #[error("invalid workspace path rejected")]
     /// The supplied path contained a NUL, exceeded its bounded shape, or had a
     /// component not representable by the relative-path contract.
     Invalid,
+    #[error("symbolic link in workspace path rejected")]
     /// A symbolic link occurred in the supplied path.
     Symlink,
 }
 
-impl fmt::Display for WorkspacePathRejection {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Absolute => "absolute workspace path rejected",
-            Self::ParentTraversal => "parent traversal in workspace path rejected",
-            Self::Invalid => "invalid workspace path rejected",
-            Self::Symlink => "symbolic link in workspace path rejected",
-        })
-    }
-}
-
-impl Error for WorkspacePathRejection {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Construction failure for an injected workspace root.
 #[derive(Debug)]
 pub enum WorkspaceRootError {
+    #[error("injected workspace root `{}` could not be opened", path.display())]
     /// The injected root could not be opened without following a symlink.
     Io {
         /// Injected root path associated with the failure.
         path: PathBuf,
+        #[source]
         /// Underlying operating-system failure.
         source: io::Error,
     },
+    #[error("injected workspace root is not a directory")]
     /// The opened injected root is not a directory.
     NotDirectory,
-}
-
-impl fmt::Display for WorkspaceRootError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io { path, .. } => write!(
-                formatter,
-                "injected workspace root `{}` could not be opened",
-                path.display()
-            ),
-            Self::NotDirectory => formatter.write_str("injected workspace root is not a directory"),
-        }
-    }
-}
-
-impl Error for WorkspaceRootError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::NotDirectory => None,
-        }
-    }
 }
 
 /// Stable filesystem identity of one pinned workspace-root descriptor.
@@ -229,15 +202,19 @@ fn validate_resolved_path(path: &Path) -> Result<(), WorkspacePathRejection> {
     Ok(())
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Failure while resolving or accessing one model-supplied path.
 #[derive(Debug)]
 pub enum WorkspaceResolveError {
+    #[error(transparent)]
     /// Typed evidence that the authority boundary rejected the path.
-    Rejected(WorkspacePathRejection),
+    Rejected(#[source] WorkspacePathRejection),
+    #[error("workspace path `{}` could not be resolved", path.display())]
     /// The admitted path could not be resolved.
     Io {
         /// Root-relative path associated with the failure.
         path: PathBuf,
+        #[source]
         /// Underlying operating-system failure.
         source: io::Error,
     },
@@ -250,28 +227,6 @@ impl WorkspaceResolveError {
         match self {
             Self::Rejected(reason) => Some(*reason),
             Self::Io { .. } => None,
-        }
-    }
-}
-
-impl fmt::Display for WorkspaceResolveError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Rejected(reason) => reason.fmt(formatter),
-            Self::Io { path, .. } => write!(
-                formatter,
-                "workspace path `{}` could not be resolved",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl Error for WorkspaceResolveError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Rejected(reason) => Some(reason),
-            Self::Io { source, .. } => Some(source),
         }
     }
 }

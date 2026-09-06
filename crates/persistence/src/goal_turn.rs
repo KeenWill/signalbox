@@ -38,9 +38,13 @@ impl GoalTurnInsertion {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(signalbox_derive::Accessors, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GoalTurnCandidates {
+    /// Returns the accepted-input candidate.
+    #[get(copy)]
     accepted_input: AcceptedInputId,
+    /// Returns the turn candidate.
+    #[get(copy)]
     turn: TurnId,
 }
 
@@ -114,16 +118,6 @@ impl GoalTurnCandidates {
             accepted_input,
             turn,
         }
-    }
-
-    /// Returns the accepted-input candidate.
-    pub const fn accepted_input(self) -> AcceptedInputId {
-        self.accepted_input
-    }
-
-    /// Returns the turn candidate.
-    pub const fn turn(self) -> TurnId {
-        self.turn
     }
 }
 

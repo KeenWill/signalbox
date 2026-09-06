@@ -6,7 +6,7 @@
 //! collection is labeled workspace-influenced evidence because Cargo and
 //! test-body output share output channels.
 
-use std::{error::Error, fmt, path::Path};
+use std::path::Path;
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -80,42 +80,25 @@ impl ToolContract for CargoDiagnosticsContract {
     const DESCRIPTION: &'static str = "Runs a bounded sandboxed Cargo check, clippy, or test pass and returns structured compiler diagnostics.";
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why Cargo diagnostics tool construction failed.
 #[derive(Debug)]
 pub enum CargoDiagnosticsToolConstructionError {
+    #[error(transparent)]
     /// The sandboxed execution core failed construction.
-    Exec(ExecToolConstructionError),
+    Exec(#[source] ExecToolConstructionError),
+    #[error("cargo diagnostics static name is invalid")]
     /// The static tool name was rejected.
     Name,
+    #[error("cargo diagnostics static schema is invalid")]
     /// The static argument schema was rejected.
     Schema,
+    #[error("cargo diagnostics static error detail is invalid")]
     /// The static validation detail was rejected.
     ErrorDetail,
+    #[error("cargo diagnostics catalog is duplicated")]
     /// The one-entry catalog unexpectedly reported a duplicate.
     Duplicate,
-}
-
-impl fmt::Display for CargoDiagnosticsToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Exec(source) => source.fmt(formatter),
-            Self::Name => formatter.write_str("cargo diagnostics static name is invalid"),
-            Self::Schema => formatter.write_str("cargo diagnostics static schema is invalid"),
-            Self::ErrorDetail => {
-                formatter.write_str("cargo diagnostics static error detail is invalid")
-            }
-            Self::Duplicate => formatter.write_str("cargo diagnostics catalog is duplicated"),
-        }
-    }
-}
-
-impl Error for CargoDiagnosticsToolConstructionError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Exec(source) => Some(source),
-            Self::Name | Self::Schema | Self::ErrorDetail | Self::Duplicate => None,
-        }
-    }
 }
 
 impl From<ExecToolConstructionError> for CargoDiagnosticsToolConstructionError {
@@ -226,17 +209,11 @@ impl ToolArgumentValidator for CargoDiagnosticsValidator {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("{}", INVALID_ARGUMENTS_DETAIL)]
 /// Cargo diagnostics arguments violated a finite bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidCargoDiagnosticsArguments;
-
-impl fmt::Display for InvalidCargoDiagnosticsArguments {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(INVALID_ARGUMENTS_DETAIL)
-    }
-}
-
-impl Error for InvalidCargoDiagnosticsArguments {}
 
 fn decode_arguments(
     arguments: &NormalizedToolArguments,
@@ -262,25 +239,17 @@ pub struct CargoDiagnosticsExecutor<Runner> {
     runner: CargoDiagnosticsRunner<Runner>,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A checked catalog/executor assumption failed inside diagnostics execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CargoDiagnosticsExecutorError {
+    #[error("cargo diagnostics argument validation drifted")]
     /// Executor argument decoding disagreed with catalog validation.
     ArgumentValidationDrift,
+    #[error("cargo diagnostics result encoding failed")]
     /// Compact structured result encoding unexpectedly failed.
     ResultEncoding,
 }
-
-impl fmt::Display for CargoDiagnosticsExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ArgumentValidationDrift => "cargo diagnostics argument validation drifted",
-            Self::ResultEncoding => "cargo diagnostics result encoding failed",
-        })
-    }
-}
-
-impl Error for CargoDiagnosticsExecutorError {}
 
 impl ClassifyOperatorFailure for CargoDiagnosticsExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {

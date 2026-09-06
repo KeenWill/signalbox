@@ -108,23 +108,16 @@ pub enum GoalTransitionOutcome {
     NotCurrentGoalTurn,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One latest execution-failure block selected for daemon reconciliation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PendingGoalExecutionFailure {
-    session: SessionId,
-    blocked: GoalEventOrdinal,
-}
-
-impl PendingGoalExecutionFailure {
     /// Returns the session whose goal remains blocked.
-    pub const fn session(self) -> SessionId {
-        self.session
-    }
-
+    #[get(copy)]
+    session: SessionId,
     /// Returns the exact blocked event the reconciliation must answer.
-    pub const fn blocked(self) -> GoalEventOrdinal {
-        self.blocked
-    }
+    #[get(copy)]
+    blocked: GoalEventOrdinal,
 }
 
 #[derive(signalbox_derive::OperatorError)]

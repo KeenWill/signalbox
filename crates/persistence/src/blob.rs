@@ -20,9 +20,12 @@ const LOAD_ENTRY: &str = r#"SELECT blob.digest, blob.byte_length,
       ORDER BY blob_replica.store_name COLLATE "C",
                blob_replica.object_key COLLATE "C""#;
 
+#[derive(signalbox_derive::Accessors)]
 /// One durable deployment store name and backend namespace identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobStoreBindingRecord {
+    /// Returns the durable deployment store name.
+    #[get]
     store: BlobStoreName,
     namespace_id: Uuid,
 }
@@ -36,21 +39,21 @@ impl BlobStoreBindingRecord {
         }
     }
 
-    /// Returns the durable deployment store name.
-    pub const fn store(&self) -> &BlobStoreName {
-        &self.store
-    }
-
     /// Returns the deployment-supplied backend namespace identity.
     pub const fn namespace_id(&self) -> Uuid {
         self.namespace_id
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One verified placement in a durable blob catalog entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobReplicaRecord {
+    /// Returns the durable deployment store identity.
+    #[get]
     store: BlobStoreName,
+    /// Returns the exact recorded object key.
+    #[get]
     object_key: BlobObjectKey,
 }
 
@@ -59,22 +62,15 @@ impl BlobReplicaRecord {
     pub const fn new(store: BlobStoreName, object_key: BlobObjectKey) -> Self {
         Self { store, object_key }
     }
-
-    /// Returns the durable deployment store identity.
-    pub const fn store(&self) -> &BlobStoreName {
-        &self.store
-    }
-
-    /// Returns the exact recorded object key.
-    pub const fn object_key(&self) -> &BlobObjectKey {
-        &self.object_key
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One immutable blob identity and all currently recorded verified replicas.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobCatalogEntry {
     expected: ExpectedBlob,
+    /// Returns verified replicas in durable store-name and object-key order.
+    #[get(unbox)]
     replicas: Box<[BlobReplicaRecord]>,
 }
 
@@ -82,11 +78,6 @@ impl BlobCatalogEntry {
     /// Returns the immutable digest and positive byte length.
     pub const fn expected(&self) -> ExpectedBlob {
         self.expected
-    }
-
-    /// Returns verified replicas in durable store-name and object-key order.
-    pub fn replicas(&self) -> &[BlobReplicaRecord] {
-        &self.replicas
     }
 
     /// Finds the verified replica in one routed store, if present.

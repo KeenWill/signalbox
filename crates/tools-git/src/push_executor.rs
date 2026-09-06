@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, path::PathBuf};
+use std::path::PathBuf;
 
 use git2::Odb;
 use serde::Serialize;
@@ -62,19 +62,13 @@ impl<Transport> GitPushExecutor<Transport> {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("Git push executor failed")]
 /// Sanitized push executor failure with explicit commit certainty.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitPushExecutorError {
     class: OperatorFailureClass,
 }
-
-impl fmt::Display for GitPushExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Git push executor failed")
-    }
-}
-
-impl Error for GitPushExecutorError {}
 
 impl ClassifyOperatorFailure for GitPushExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {

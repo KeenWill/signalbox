@@ -1,6 +1,6 @@
 //! Dedicated model execution for append-only context summaries.
 
-use std::{error::Error, fmt, future::Future, pin::Pin};
+use std::{fmt, future::Future, pin::Pin};
 
 use signalbox_domain::{DirectModelSelection, ModelCallId, ResolvedProviderTarget, SessionId};
 use signalbox_model_runtime::{
@@ -246,46 +246,53 @@ fn require_same_target(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized failure of one dedicated summary call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextCompactionModelError {
+    #[error("context compaction model execution failed")]
     /// The durable target has no runtime mapping.
     UnconfiguredTarget,
+    #[error("context compaction model execution failed")]
     /// Runtime preparation observed cancellation before send.
     CancelledBeforeSend,
+    #[error("context compaction model execution failed")]
     /// Credential or request preparation failed safely.
     PreparationFailed,
+    #[error("context compaction model execution failed")]
     /// Adapter request construction was defective.
     PreparationDefect,
+    #[error("context compaction model execution failed")]
     /// Runtime correlation differed from the durable call.
     CorrelationMismatch,
+    #[error("context compaction model execution failed")]
     /// The provider returned an explicit refusal.
     Refused,
+    #[error("context compaction model execution failed")]
     /// A complete, correlated provider error response was observed.
     ProviderError,
+    #[error("context compaction model execution failed")]
     /// The provider definitively confirmed cancellation.
     CancellationConfirmed,
+    #[error("context compaction model execution failed")]
     /// The request provably never reached an acceptance-capable boundary.
     ProvenUnsent,
+    #[error("context compaction model execution failed")]
     /// Provider acceptance or completion remained uncertain.
     BoundaryLoss,
+    #[error("context compaction model execution failed")]
     /// The provider reported a different model lineage.
     ProviderTargetSubstituted,
+    #[error("context compaction model execution failed")]
     /// The completion stopped before a complete summary.
     IncompleteSummary,
+    #[error("context compaction model execution failed")]
     /// Completion material was not plain text.
     NonTextSummary,
+    #[error("context compaction model execution failed")]
     /// Summary text was empty or contained U+0000.
     InvalidSummary,
 }
-
-impl fmt::Display for ContextCompactionModelError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("context compaction model execution failed")
-    }
-}
-
-impl Error for ContextCompactionModelError {}
 
 #[cfg(test)]
 mod tests {

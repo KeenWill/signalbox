@@ -2,8 +2,7 @@
 
 use std::{
     collections::BTreeSet,
-    error::Error,
-    fmt, fs,
+    fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -601,164 +600,83 @@ fn validate_manifest_content(
     })
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A manifest or its referenced content failed closed.
 #[derive(Debug)]
 pub enum ManifestError {
+    #[error("could not read {}: {source}", path.display())]
     /// A file could not be read.
     Read {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
     },
+    #[error("JSON is invalid: {field_0}")]
     /// Strict JSON decoding or encoding failed.
-    Json(serde_json::Error),
+    Json(#[source] serde_json::Error),
+    #[error("manifest version {observed} is unsupported; expected {CORPUS_MANIFEST_VERSION}")]
     /// The manifest representation is unknown.
     UnsupportedManifestVersion { observed: u32 },
+    #[error("corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}")]
     /// The case representation is unknown.
     UnsupportedCorpusVersion { observed: u32 },
+    #[error("manifest {field_0} is empty, too long, or contains control characters")]
     /// A logical identity component is empty, too long, or contains controls.
     InvalidIdentity(&'static str),
+    #[error("repository case path {field_0:?} is not a portable relative path")]
     /// A repository source escaped the manifest directory or used a platform-specific root.
     NonPortablePath(String),
+    #[error("could not determine repository root for manifest {}", field_0.display())]
     /// The repository checkout root could not be retained in durable provenance.
     RepositoryRootUnavailable(PathBuf),
+    #[error("repository case source {} resolves outside the checkout", field_0.display())]
     /// A repository source resolved outside its checkout root.
     RepositorySourceOutsideCheckout(PathBuf),
+    #[error("repository case source requires source_sha256")]
     /// A repository source omitted its exact-byte digest.
     MissingSourceDigest,
+    #[error("non-repository case source must not carry source_sha256")]
     /// A non-file source supplied an inapplicable exact-byte digest.
     UnexpectedSourceDigest,
+    #[error("blob source byte length must be positive")]
     /// A blob reference declared an empty source.
     InvalidBlobByteLength,
+    #[error("blob store binding name is invalid")]
     /// A blob store binding name was not canonical.
     InvalidBlobStore,
+    #[error("case source digest mismatch: expected {expected}, observed {observed}")]
     /// Exact source bytes did not match the manifest.
     SourceDigestMismatch {
         expected: Sha256Digest,
         observed: Sha256Digest,
     },
+    #[error("case source is not an admitted corpus: {field_0}")]
     /// The corpus file itself failed admission.
-    Corpus(crate::CorpusLoadError),
+    Corpus(#[source] crate::CorpusLoadError),
+    #[error("manifest corpus format version {manifest} does not match source version {corpus}")]
     /// Manifest and corpus format versions disagree.
     CorpusVersionMismatch { manifest: u32, corpus: u32 },
+    #[error("case identity {field_0:?} occurs more than once")]
     /// Stable case identities were not unique.
     DuplicateCaseId(String),
+    #[error("per-case integrity does not match the manifest")]
     /// Per-case integrity did not match exactly.
     CaseIntegrityMismatch,
+    #[error("manifest requires at least one case-integrity entry")]
     /// A manifest omitted integrity for every case.
     MissingCaseIntegrity,
+    #[error("logical corpus digest mismatch: expected {expected}, observed {observed}")]
     /// Aggregate logical integrity did not match.
     CorpusDigestMismatch {
         expected: Sha256Digest,
         observed: Sha256Digest,
     },
+    #[error("blob reference is valid but no blob corpus backend is configured")]
     /// Blob reference shape is admitted, but no loader is implemented in this slice.
     BlobBackendUnavailable,
+    #[error("corpus content exceeds version-one u64 framing")]
     /// A collection or serialized value exceeded the version-one u64 framing.
     LengthOverflow,
-}
-
-impl fmt::Display for ManifestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Read { path, source } => {
-                write!(formatter, "could not read {}: {source}", path.display())
-            }
-            Self::Json(source) => write!(formatter, "JSON is invalid: {source}"),
-            Self::UnsupportedManifestVersion { observed } => write!(
-                formatter,
-                "manifest version {observed} is unsupported; expected {CORPUS_MANIFEST_VERSION}"
-            ),
-            Self::UnsupportedCorpusVersion { observed } => write!(
-                formatter,
-                "corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}"
-            ),
-            Self::InvalidIdentity(field) => write!(
-                formatter,
-                "manifest {field} is empty, too long, or contains control characters"
-            ),
-            Self::NonPortablePath(path) => write!(
-                formatter,
-                "repository case path {path:?} is not a portable relative path"
-            ),
-            Self::RepositoryRootUnavailable(path) => write!(
-                formatter,
-                "could not determine repository root for manifest {}",
-                path.display()
-            ),
-            Self::RepositorySourceOutsideCheckout(path) => write!(
-                formatter,
-                "repository case source {} resolves outside the checkout",
-                path.display()
-            ),
-            Self::MissingSourceDigest => {
-                formatter.write_str("repository case source requires source_sha256")
-            }
-            Self::UnexpectedSourceDigest => {
-                formatter.write_str("non-repository case source must not carry source_sha256")
-            }
-            Self::InvalidBlobByteLength => {
-                formatter.write_str("blob source byte length must be positive")
-            }
-            Self::InvalidBlobStore => formatter.write_str("blob store binding name is invalid"),
-            Self::SourceDigestMismatch { expected, observed } => write!(
-                formatter,
-                "case source digest mismatch: expected {expected}, observed {observed}"
-            ),
-            Self::Corpus(source) => {
-                write!(formatter, "case source is not an admitted corpus: {source}")
-            }
-            Self::CorpusVersionMismatch { manifest, corpus } => write!(
-                formatter,
-                "manifest corpus format version {manifest} does not match source version {corpus}"
-            ),
-            Self::DuplicateCaseId(id) => {
-                write!(formatter, "case identity {id:?} occurs more than once")
-            }
-            Self::CaseIntegrityMismatch => {
-                formatter.write_str("per-case integrity does not match the manifest")
-            }
-            Self::MissingCaseIntegrity => {
-                formatter.write_str("manifest requires at least one case-integrity entry")
-            }
-            Self::CorpusDigestMismatch { expected, observed } => write!(
-                formatter,
-                "logical corpus digest mismatch: expected {expected}, observed {observed}"
-            ),
-            Self::BlobBackendUnavailable => formatter
-                .write_str("blob reference is valid but no blob corpus backend is configured"),
-            Self::LengthOverflow => {
-                formatter.write_str("corpus content exceeds version-one u64 framing")
-            }
-        }
-    }
-}
-
-impl Error for ManifestError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Read { source, .. } => Some(source),
-            Self::Json(source) => Some(source),
-            Self::Corpus(source) => Some(source),
-            Self::UnsupportedManifestVersion { .. }
-            | Self::UnsupportedCorpusVersion { .. }
-            | Self::InvalidIdentity(_)
-            | Self::NonPortablePath(_)
-            | Self::RepositoryRootUnavailable(_)
-            | Self::RepositorySourceOutsideCheckout(_)
-            | Self::MissingSourceDigest
-            | Self::UnexpectedSourceDigest
-            | Self::InvalidBlobByteLength
-            | Self::InvalidBlobStore
-            | Self::SourceDigestMismatch { .. }
-            | Self::CorpusVersionMismatch { .. }
-            | Self::DuplicateCaseId(_)
-            | Self::CaseIntegrityMismatch
-            | Self::MissingCaseIntegrity
-            | Self::CorpusDigestMismatch { .. }
-            | Self::BlobBackendUnavailable
-            | Self::LengthOverflow => None,
-        }
-    }
 }
 
 #[cfg(test)]

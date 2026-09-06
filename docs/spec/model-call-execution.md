@@ -245,16 +245,7 @@ attempt.
 
 A successful call ends its availability chain, and a later tool round starts a
 fresh one, so a round that exhausts the pool before calling carries no earlier
-round's failure. A successor prepared when a parked wait releases carries the
-predecessor call and its non-acceptance proof in its origin, so it is that
-failure's authorized successor rather than the start of a fresh chain. Releasing
-a wait never readmits the member whose failure parked the turn, because
-otherwise a one-member `switch_now` pool configured to park would wake at its
-deadline, drop the sole exclusion, and call the same profile again without
-bound. Goal disposition keys on whether the observation selected a wait, not on
-the pool's configured action, so a park pool whose members are all excluded
-blocks like any other failure rather than staying current forever;
-[goal-mode](goal-mode.md) owns the disposition.
+round's failure.
 
 The identity relation is derived from the configured target's own family, never
 from a table of known provider identifiers, so a newly published model needs no

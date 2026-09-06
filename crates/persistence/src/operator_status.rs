@@ -19,22 +19,15 @@ pub enum ProcessOperatorStatusItem {
     LifecycleDeadlineViolation(LifecycleDeadlineViolation),
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Counts committed after every status cursor has been exhausted.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProcessOperatorStatusCounts {
+    #[get(copy)]
     lifecycle_weeks: u64,
-    lifecycle_deadline_violations: u64,
-}
-
-impl ProcessOperatorStatusCounts {
-    pub const fn lifecycle_weeks(self) -> u64 {
-        self.lifecycle_weeks
-    }
-
     /// Returns the `nonterminal_past_deadline` alarm value, target zero.
-    pub const fn lifecycle_deadline_violations(self) -> u64 {
-        self.lifecycle_deadline_violations
-    }
+    #[get(copy)]
+    lifecycle_deadline_violations: u64,
 }
 
 /// PostgreSQL-backed operator-status read boundary.

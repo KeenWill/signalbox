@@ -8,41 +8,25 @@
 use signalbox_domain::{ModelCallId, SessionId};
 use sqlx::{FromRow, PgPool, types::Uuid};
 
+#[derive(signalbox_derive::Accessors)]
 /// Durable fleet state observed by the process-runtime soak harness.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FleetSoakCensus {
-    active_turns: i64,
-    terminal_turns: i64,
-    awaiting_model_call_recovery_turns: i64,
-    terminal_model_calls: i64,
-    ambiguous_model_calls: i64,
-}
-
-impl FleetSoakCensus {
     /// Number of active turns in the isolated test database.
-    pub const fn active_turns(self) -> i64 {
-        self.active_turns
-    }
-
+    #[get(copy)]
+    active_turns: i64,
     /// Number of terminal turns in the isolated test database.
-    pub const fn terminal_turns(self) -> i64 {
-        self.terminal_turns
-    }
-
+    #[get(copy)]
+    terminal_turns: i64,
     /// Active turns parked for a user model-call recovery decision.
-    pub const fn awaiting_model_call_recovery_turns(self) -> i64 {
-        self.awaiting_model_call_recovery_turns
-    }
-
+    #[get(copy)]
+    awaiting_model_call_recovery_turns: i64,
     /// Scoped model calls carrying any terminal disposition.
-    pub const fn terminal_model_calls(self) -> i64 {
-        self.terminal_model_calls
-    }
-
+    #[get(copy)]
+    terminal_model_calls: i64,
     /// Scoped model calls carrying the ambiguity disposition.
-    pub const fn ambiguous_model_calls(self) -> i64 {
-        self.ambiguous_model_calls
-    }
+    #[get(copy)]
+    ambiguous_model_calls: i64,
 }
 
 #[derive(FromRow)]

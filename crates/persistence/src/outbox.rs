@@ -124,6 +124,7 @@ struct TurnCancelledOutboxRow {
     terminal_frontier_id: Uuid,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One committed outbox event offered to a typed outbox consumer.
 ///
 /// This is a persistence projection, not a domain event or process-protocol
@@ -133,6 +134,8 @@ pub struct DispatchedOutboxEvent {
     sequence: u64,
     recorded_at: OffsetDateTime,
     session: Option<SessionId>,
+    /// Borrows the decoded typed event record.
+    #[get]
     kind: DispatchedOutboxEventKind,
 }
 
@@ -151,11 +154,6 @@ impl DispatchedOutboxEvent {
     /// receipt for a rejected creation or an unknown session names none.
     pub const fn session(&self) -> Option<SessionId> {
         self.session
-    }
-
-    /// Borrows the decoded typed event record.
-    pub const fn kind(&self) -> &DispatchedOutboxEventKind {
-        &self.kind
     }
 }
 

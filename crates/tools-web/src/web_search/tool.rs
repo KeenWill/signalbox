@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::fmt;
 
 use signalbox_application::{CompiledTool, CompiledToolCatalog};
 use signalbox_domain::{ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault};
@@ -20,34 +20,26 @@ pub(super) const PROVIDER_REJECTED_DETAIL: &str = "web search provider rejected 
 pub(super) const INVALID_RESPONSE_DETAIL: &str =
     "web search provider returned an invalid bounded response";
 
+#[derive(signalbox_derive::OperatorError)]
 /// A static declaration or production search transport could not be built.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebSearchToolConstructionError {
+    #[error("web_search static name is invalid")]
     /// The static name was rejected.
     Name,
+    #[error("web_search static schema is invalid")]
     /// The static schema was rejected.
     Schema,
+    #[error("web_search static error detail is invalid")]
     /// A static sanitized error detail was rejected.
     ErrorDetail,
+    #[error("web_search catalog is duplicated")]
     /// The one-entry catalog unexpectedly reported a duplicate.
     Duplicate,
+    #[error("web_search transport could not be constructed")]
     /// The production transport could not be constructed.
     Transport,
 }
-
-impl fmt::Display for WebSearchToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Name => "web_search static name is invalid",
-            Self::Schema => "web_search static schema is invalid",
-            Self::ErrorDetail => "web_search static error detail is invalid",
-            Self::Duplicate => "web_search catalog is duplicated",
-            Self::Transport => "web_search transport could not be constructed",
-        })
-    }
-}
-
-impl Error for WebSearchToolConstructionError {}
 
 /// Compiled catalog entry and matching credential-resolving executor.
 #[derive(Clone)]

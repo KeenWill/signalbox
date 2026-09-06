@@ -420,6 +420,8 @@ const fn outcome_is_deliverable(outcome: &DelegationOutcome) -> bool {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("delegation event is not deliverable for the selected relationship")]
 /// A nonterminal or cross-wired relationship event was offered for delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveredChildResultError {
@@ -433,14 +435,6 @@ impl DeliveredChildResultError {
         (self.wait, *self.event)
     }
 }
-
-impl fmt::Display for DeliveredChildResultError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("delegation event is not deliverable for the selected relationship")
-    }
-}
-
-impl Error for DeliveredChildResultError {}
 
 /// Applied effect or a definitive checked refusal from the durable boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -516,31 +510,23 @@ pub trait SessionDelegationPort: Send {
     > + Send;
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A static session-delegation tool family could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionDelegationToolsConstructionError {
+    #[error("session-delegation static tool name is invalid")]
     /// One static name was invalid.
     Name,
+    #[error("session-delegation static tool schema is invalid")]
     /// One static schema was invalid.
     Schema,
+    #[error("session-delegation static error detail is invalid")]
     /// One static sanitized error detail was invalid.
     ErrorDetail,
+    #[error("session-delegation tool catalog contains a duplicate")]
     /// The compiled catalog unexpectedly contained a duplicate.
     Duplicate,
 }
-
-impl fmt::Display for SessionDelegationToolsConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Name => "session-delegation static tool name is invalid",
-            Self::Schema => "session-delegation static tool schema is invalid",
-            Self::ErrorDetail => "session-delegation static error detail is invalid",
-            Self::Duplicate => "session-delegation tool catalog contains a duplicate",
-        })
-    }
-}
-
-impl Error for SessionDelegationToolsConstructionError {}
 
 /// Compiled session-delegation catalog and matching nonblocking executor.
 #[derive(Clone, Debug)]
@@ -875,46 +861,26 @@ impl<Port> SessionDelegationExecutor<Port> {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[operator(
+    display_bound = "PortError : fmt :: Display",
+    error_bound = "PortError : Error + 'static"
+)]
 /// Failure inside the session-delegation executor.
 #[derive(Debug)]
 pub enum SessionDelegationExecutorError<PortError> {
+    #[error(transparent)]
     /// Executor decoding disagreed with catalog validation.
-    ArgumentValidationDrift(SessionDelegationRequestDecodeError),
+    ArgumentValidationDrift(#[source] SessionDelegationRequestDecodeError),
+    #[error(transparent)]
     /// The injected port failed without trustworthy result evidence.
-    Port(PortError),
+    Port(#[source] PortError),
+    #[error("session-delegation port contract failed")]
     /// The port returned evidence unrelated to the exact request or wait mode.
     PortContract,
+    #[error("session-delegation result encoding failed")]
     /// Compact model-facing result encoding unexpectedly failed.
     ResultEncoding,
-}
-
-impl<PortError> fmt::Display for SessionDelegationExecutorError<PortError>
-where
-    PortError: fmt::Display,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ArgumentValidationDrift(error) => error.fmt(formatter),
-            Self::Port(error) => error.fmt(formatter),
-            Self::PortContract => formatter.write_str("session-delegation port contract failed"),
-            Self::ResultEncoding => {
-                formatter.write_str("session-delegation result encoding failed")
-            }
-        }
-    }
-}
-
-impl<PortError> Error for SessionDelegationExecutorError<PortError>
-where
-    PortError: Error + 'static,
-{
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::ArgumentValidationDrift(error) => Some(error),
-            Self::Port(error) => Some(error),
-            Self::PortContract | Self::ResultEncoding => None,
-        }
-    }
 }
 
 impl<PortError> ClassifyOperatorFailure for SessionDelegationExecutorError<PortError>
@@ -1227,17 +1193,11 @@ pub fn render_delivered_child_result(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("delivered child result is not renderable")]
 /// A typed delivered result could not fit the model-facing result contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeliveredChildResultRenderError;
-
-impl fmt::Display for DeliveredChildResultRenderError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("delivered child result is not renderable")
-    }
-}
-
-impl Error for DeliveredChildResultRenderError {}
 
 fn encode_json<PortError>(
     value: &impl serde::Serialize,
