@@ -258,6 +258,17 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             events: Box::new([EventAdmission::Replayed]),
         }
     );
+    let projection_row_versions_before: (String, String) = sqlx::query_as(
+        "SELECT repository.xmin::text, pull_request.xmin::text
+           FROM repository_state AS repository
+           JOIN pr_state AS pull_request USING (repository)
+          WHERE repository.repository = $1
+            AND pull_request.pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(Decimal::from(7_u64))
+    .fetch_one(&module_pool)
+    .await?;
     assert_eq!(
         store
             .commit_frontier_candidate(
@@ -270,6 +281,21 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             )
             .await?,
         FrontierEventAdmission::Unchanged
+    );
+    let projection_row_versions_after: (String, String) = sqlx::query_as(
+        "SELECT repository.xmin::text, pull_request.xmin::text
+           FROM repository_state AS repository
+           JOIN pr_state AS pull_request USING (repository)
+          WHERE repository.repository = $1
+            AND pull_request.pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(Decimal::from(7_u64))
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(
+        projection_row_versions_after,
+        projection_row_versions_before
     );
     let updated_title = PullRequestTitle::try_new(String::from("Updated projection"))?;
     projection.pull_requests[0].title = &updated_title;
