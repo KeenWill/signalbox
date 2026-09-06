@@ -311,11 +311,8 @@ credential remains admitted and below the required finite-positive
 contract fixes no numeric value; the initial call and every same-credential
 successor call count toward the configured bound. The successor carries the
 durable retry deadline, and its call preparation and dispatch wait until that
-deadline. For provider-internal failure, the local delay uses a call-ID-derived
-jitter from one-half through just under one-and-a-half times a window that
-doubles with the same-credential attempt count from one second to a nominal
-sixty-second cap; the deadline uses the greater of that delay and a reported
-`Retry-After`, with the result capped at five minutes.
+deadline. [Credential availability](credential-availability.md) owns the delay
+rule for rate-limit, overload, and provider-internal successors.
 
 The same-credential retry is evaluated before the pinned pool action, and that
 action is not applied while the retry is admitted. Once the configured bound is
