@@ -210,7 +210,7 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
   [session lifecycle design](../design/session-lifecycle.md).
 - Sticky-stop suppression: re-dispatch of stopped work stays suppressed until
   the dispatch source is updated; see the
-  [repository-watch reaction contract](repo-watch.md#reducer-and-dispatch-ledger).
+  [repository-watch reaction contract](repo-watch.md#design-decisions).
 - Worktree and container cleanup on closure: a closed session's worktree and
   container are removed; see
   [session lifecycle design](../design/session-lifecycle.md).
