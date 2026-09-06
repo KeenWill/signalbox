@@ -32,9 +32,9 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
 
     let function_privileges: (bool, bool) = sqlx::query_as(
         "SELECT has_function_privilege('mod_repo_watch',
-                    'public.require_session_ownership_journal(uuid)', 'EXECUTE'),
+                    'public.configured_git_remote_url_is_valid(text)', 'EXECUTE'),
                 has_function_privilege(current_user,
-                    'public.require_session_ownership_journal(uuid)', 'EXECUTE')",
+                    'public.configured_git_remote_url_is_valid(text)', 'EXECUTE')",
     )
     .fetch_one(&pool)
     .await?;
@@ -123,7 +123,7 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
 
     let effective_function_privilege: bool = sqlx::query_scalar(
         "SELECT has_function_privilege(
-            current_user, 'public.require_session_ownership_journal(uuid)', 'EXECUTE')",
+            current_user, 'public.configured_git_remote_url_is_valid(text)', 'EXECUTE')",
     )
     .fetch_one(&mut *connection)
     .await?;
