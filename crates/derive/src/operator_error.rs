@@ -4,7 +4,8 @@ use proc_macro2::{TokenStream, TokenTree};
 use quote::{format_ident, quote};
 use syn::{
     Attribute, Data, DeriveInput, Expr, Fields, Generics, Ident, Lit, LitStr, Member, Token,
-    TypeParamBound, WhereClause, parse_quote, punctuated::Punctuated, spanned::Spanned,
+    TypeParamBound, WhereClause, ext::IdentExt, parse_quote, punctuated::Punctuated,
+    spanned::Spanned, visit::Visit,
 };
 
 #[derive(Default)]
@@ -183,16 +184,68 @@ fn pattern(
     }
 }
 
+#[derive(Default)]
+struct References(BTreeSet<String>);
+
+impl References {
+    fn callee(&mut self, expression: &Expr) {
+        match expression {
+            Expr::Path(_) => {}
+            Expr::Paren(expression) => self.callee(&expression.expr),
+            Expr::Group(expression) => self.callee(&expression.expr),
+            expression => self.visit_expr(expression),
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for References {
+    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+        if let Some(ident) = expression.path.get_ident() {
+            self.0.insert(ident.to_string());
+        }
+    }
+
+    fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
+        self.callee(&expression.func);
+        for argument in &expression.args {
+            self.visit_expr(argument);
+        }
+    }
+
+    fn visit_expr_assign(&mut self, expression: &'ast syn::ExprAssign) {
+        self.visit_expr(&expression.right);
+    }
+
+    fn visit_macro(&mut self, expression: &'ast syn::Macro) {
+        use syn::parse::Parser;
+
+        if let Ok(arguments) =
+            Punctuated::<Expr, Token![,]>::parse_terminated.parse2(expression.tokens.clone())
+        {
+            for argument in &arguments {
+                self.visit_expr(argument);
+            }
+        } else {
+            let tokens = &expression.tokens;
+            if let Ok(repeat) = syn::parse2::<syn::ExprRepeat>(quote!([#tokens])) {
+                self.visit_expr_repeat(&repeat);
+            } else {
+                identifiers(tokens.clone(), &mut self.0);
+            }
+        }
+    }
+}
+
 fn arm(
     prefix: &TokenStream,
     shape: &Fields,
     fields: &[Field<'_>],
     body: TokenStream,
-) -> TokenStream {
-    let mut used = BTreeSet::new();
-    identifiers(body.clone(), &mut used);
-    let pattern = pattern(prefix, shape, fields, &used);
-    quote!(#pattern => #body)
+) -> syn::Result<TokenStream> {
+    let mut references = References::default();
+    references.visit_expr(&syn::parse2(body.clone())?);
+    let pattern = pattern(prefix, shape, fields, &references.0);
+    Ok(quote!(#pattern => #body))
 }
 
 fn format_literal(
@@ -263,18 +316,18 @@ fn format_literal(
 
 fn capture(key: &str, fields: &[Field<'_>], positional: bool, captures: &mut Vec<Ident>) -> String {
     let field = fields.iter().find(|field| {
-        field.binding == key
+        field.binding.unraw() == key
             || (!positional
                 && match &field.member {
                     Member::Unnamed(index) => key == index.index.to_string(),
-                    Member::Named(name) => name == key,
+                    Member::Named(name) => name.unraw() == key,
                 })
     });
     if let Some(field) = field {
         if !captures.contains(&field.binding) {
             captures.push(field.binding.clone());
         }
-        field.binding.to_string()
+        field.binding.unraw().to_string()
     } else {
         key.to_owned()
     }
@@ -313,9 +366,27 @@ fn display(
             "expected error format string",
         ));
     };
-    let mut arguments = args.map(|arg| quote!(#arg)).collect::<Vec<_>>();
+    let args = args.collect::<Vec<_>>();
+    let supplied = args
+        .iter()
+        .filter_map(|argument| {
+            let Expr::Assign(assignment) = argument else {
+                return None;
+            };
+            let Expr::Path(path) = assignment.left.as_ref() else {
+                return None;
+            };
+            path.path.get_ident().map(|ident| ident.unraw().to_string())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut arguments = args.iter().map(|arg| quote!(#arg)).collect::<Vec<_>>();
     let (literal, captures) = format_literal(&literal, fields, !arguments.is_empty());
-    arguments.extend(captures.iter().map(|binding| quote!(#binding = #binding)));
+    arguments.extend(
+        captures
+            .iter()
+            .filter(|binding| !supplied.contains(&binding.unraw().to_string()))
+            .map(|binding| quote!(#binding = #binding)),
+    );
     Ok(quote!(::std::write!(#formatter, #literal #(, #arguments)*)))
 }
 
@@ -420,13 +491,13 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             shape,
             &fields,
             display(attrs, &fields, &owner, &formatter)?,
-        ));
+        )?);
         let source_fields = fields
             .iter()
             .filter(|field| field.source)
             .collect::<Vec<_>>();
         let source = match source_fields.as_slice() {
-            [] => quote!(None),
+            [] => quote!(::std::option::Option::None),
             [field] => {
                 let binding = &field.binding;
                 if boxed_trait_object(&field.field.ty) {
@@ -442,7 +513,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 ));
             }
         };
-        sources.push(arm(&prefix, shape, &fields, source));
+        sources.push(arm(&prefix, shape, &fields, source)?);
         if classify {
             let classification = classification(attrs)?;
             let target = target(&classification, &fields, &owner)?;
@@ -466,8 +537,8 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             } else {
                 quote!(#code)
             };
-            classes.push(arm(&prefix, shape, &fields, class));
-            codes.push(arm(&prefix, shape, &fields, code));
+            classes.push(arm(&prefix, shape, &fields, class)?);
+            codes.push(arm(&prefix, shape, &fields, code)?);
         }
     }
     let name = &input.ident;
