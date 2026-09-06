@@ -1826,14 +1826,6 @@ impl RepoWatchStore {
         {
             return Err(StoreError::InvalidDispatchBatch);
         }
-        let encoded_commands = planned
-            .iter()
-            .map(|command| {
-                codec
-                    .encode(command.command())
-                    .ok_or(StoreError::InvalidRetainedCommand)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "SELECT pg_advisory_xact_lock(
@@ -1962,6 +1954,14 @@ impl RepoWatchStore {
                 return Ok(DispatchAdmission::InactiveRule);
             }
         }
+        let encoded_commands = planned
+            .iter()
+            .map(|command| {
+                codec
+                    .encode(command.command())
+                    .ok_or(StoreError::InvalidRetainedCommand)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut inserted_count = 0_usize;
         for (command, payload) in planned.iter().zip(encoded_commands) {
             inserted_count += usize::from(
