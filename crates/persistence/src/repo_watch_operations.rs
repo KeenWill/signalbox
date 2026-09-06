@@ -1,6 +1,6 @@
 //! Coherent bounded operator projections over durable repository-watch facts.
 
-use std::{collections::BTreeMap, error::Error, fmt, num::NonZeroU64, time::SystemTime};
+use std::{collections::BTreeMap, num::NonZeroU64, time::SystemTime};
 
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -40,61 +40,24 @@ use crate::{
 const FIVE_MINUTES_SECONDS: u32 = 5 * 60;
 const ONE_HOUR_SECONDS: u32 = 60 * 60;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(signalbox_derive::OperatorError, Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchOperationsCorruption {
+    #[error("invalid repository-watch operations {field_0}")]
     Invalid(&'static str),
+    #[error("unsupported repository-watch operations {field}: {value}")]
     Unsupported { field: &'static str, value: String },
 }
 
-impl fmt::Display for RepoWatchOperationsCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Invalid(field) => {
-                write!(formatter, "invalid repository-watch operations {field}")
-            }
-            Self::Unsupported { field, value } => {
-                write!(
-                    formatter,
-                    "unsupported repository-watch operations {field}: {value}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for RepoWatchOperationsCorruption {}
-
-#[derive(Debug)]
+#[derive(signalbox_derive::OperatorError, Debug)]
 pub enum RepoWatchOperationsError {
-    Database(sqlx::Error),
-    Attention(AttentionRepositoryError),
-    RepoWatch(RepoWatchStoreError),
-    Corruption(RepoWatchOperationsCorruption),
-}
-
-impl fmt::Display for RepoWatchOperationsError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(
-                formatter,
-                "repository-watch operations database failure: {error}"
-            ),
-            Self::Attention(error) => error.fmt(formatter),
-            Self::RepoWatch(error) => error.fmt(formatter),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for RepoWatchOperationsError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Attention(error) => Some(error),
-            Self::RepoWatch(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    #[error("repository-watch operations database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
+    Attention(#[source] AttentionRepositoryError),
+    #[error(transparent)]
+    RepoWatch(#[source] RepoWatchStoreError),
+    #[error(transparent)]
+    Corruption(#[source] RepoWatchOperationsCorruption),
 }
 
 impl From<sqlx::Error> for RepoWatchOperationsError {

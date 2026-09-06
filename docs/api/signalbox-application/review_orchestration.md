@@ -90,9 +90,11 @@ pub enum ReviewOrchestrationAttemptError {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewOrchestrationAttemptError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ReviewOrchestrationAttemptError {}
+impl error::Error for ReviewOrchestrationAttemptError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## ReviewDurableSealOutcome
@@ -162,9 +164,11 @@ pub enum ReviewImportEvidenceFailure {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewImportEvidenceFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ReviewImportEvidenceFailure {}
+impl error::Error for ReviewImportEvidenceFailure {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## ReviewConcernSuccess
@@ -275,9 +279,11 @@ pub enum ReviewFanoutBarrierFailure {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewFanoutBarrierFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ReviewFanoutBarrierFailure {}
+impl error::Error for ReviewFanoutBarrierFailure {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## ReviewPlannedDisposition
@@ -358,9 +364,11 @@ pub enum ReviewJudgmentPlanFailure {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewJudgmentPlanFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ReviewJudgmentPlanFailure {}
+impl error::Error for ReviewJudgmentPlanFailure {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## ReviewJudgmentEffectId
@@ -430,9 +438,11 @@ pub enum ReviewJudgmentEffectEvidenceFailure {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewJudgmentEffectEvidenceFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ReviewJudgmentEffectEvidenceFailure {}
+impl error::Error for ReviewJudgmentEffectEvidenceFailure {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## ReviewRepairSuccess
@@ -535,9 +545,11 @@ pub enum ReviewTerminalBarrierFailure {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewTerminalBarrierFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ReviewTerminalBarrierFailure {}
+impl error::Error for ReviewTerminalBarrierFailure {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## ReviewOrchestrationAttemptStore
@@ -803,7 +815,7 @@ pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
 impl<StoreError, RunnerError> fmt::Display
     for ReviewOrchestrationServiceError<StoreError, RunnerError>
 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<StoreError, RunnerError> error::Error
     for ReviewOrchestrationServiceError<StoreError, RunnerError>

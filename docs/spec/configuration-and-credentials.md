@@ -151,15 +151,8 @@ ordinary single-account deployment and needs no trigger keys. Selection happens
 at model-call preparation, never at session creation: it prefers the sticky
 member while that member remains admissible and otherwise walks members in
 priority order, skipping excluded ones and breaking ties by the snapshot's rule.
-Trigger actions and the exclusions they create are durable. How an attempt ends
-when a pool admits no member is owned by
-[credential availability](credential-availability.md).
-
-For rate-limit and overload failures, the credential-availability machine
-creates an authorized same-member retry before applying the pinned trigger
-action while that member remains below the configured attempt bound.
-Provider-internal failures use the same retry rule but have no trigger key; they
-terminalize at the bound.
+Trigger actions and the exclusions they create are durable. Every availability
+ending is owned by [credential availability](credential-availability.md).
 
 The session-template catalog is read after the model catalog. Each template
 binds a name and version to a model or alias, a system prompt, and a
@@ -319,11 +312,12 @@ successor attempt that fails as its predecessor did.
 Settings whose effect the daemon cannot supply are typed startup failures rather
 than retained and inert: `round_robin`, `least_used`, any headroom reserve, a
 non-`stay` `on_headroom_low`, and a `switch_now` whose adapter cannot prove
-non-acceptance for that trigger's cause. A Codex pool rejects non-`stay` actions
-on availability and credential-rejection triggers because its opaque failures
-cannot fire them. A Claude pool rejects non-`stay` quota actions because HTTP
-status classification supplies no quota-exhaustion cause. Why: a configured
-protection that silently never fires reads as one the deployment has.
+non-acceptance for that trigger's cause unless it is `on_credential_rejected`. A
+Codex pool rejects non-`stay` actions on availability and credential-rejection
+triggers because its opaque failures cannot fire them. A Claude pool rejects
+non-`stay` quota actions because HTTP status classification supplies no
+quota-exhaustion cause. Why: a configured protection that silently never fires
+reads as one the deployment has.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under
@@ -336,9 +330,11 @@ account holds different ranks in different pools.
 commits alone, so the default configuration can still commit a terminal
 observation.
 
-`switch_now` is refused on `on_credential_rejected` and `on_headroom_low`,
-because a rejected credential is deployment misconfiguration that substitution
-would hide and low headroom is not a failure.
+`switch_now` on `on_credential_rejected` rotates to the next admitted member
+when no stop was requested; `CredentialRejected` admits that successor without
+non-acceptance proof. The rejected profile and `CredentialRejected` cause remain
+recorded durably on the failed attempt. `switch_now` remains refused on
+`on_headroom_low`, because low headroom is not a failure.
 
 Codex rendered authentication prose is opaque and produces no
 credential-rejection trigger or delivery-layer refresh-race bypass.

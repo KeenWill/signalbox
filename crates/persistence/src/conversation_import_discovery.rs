@@ -3,7 +3,7 @@
 //! These reads deliberately avoid [`crate::conversation_import::ImportedConversationRepository`]:
 //! catalog and entry-window callers never reconstruct a complete imported aggregate.
 
-use std::{error::Error, fmt, num::NonZeroU32};
+use std::num::NonZeroU32;
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -180,101 +180,61 @@ pub struct ImportedEntryWindow {
     pub items: Vec<ImportedEntryProjection>,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable import projection failed checked decoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImportedConversationDiscoveryCorruption {
+    #[error("missing imported discovery {field_0}")]
     /// A required stored value is missing.
     Missing(&'static str),
+    #[error("unsupported imported discovery {field_0}")]
     /// A closed discriminator is unsupported.
     Unsupported(&'static str),
+    #[error("invalid imported discovery {field_0}")]
     /// A stored positive ordinal is invalid.
     InvalidOrdinal(&'static str),
+    #[error("invalid imported discovery {field_0} UTF-8")]
     /// UTF-8 source evidence is malformed.
     InvalidUtf8(&'static str),
+    #[error("invalid imported discovery source digest")]
     /// A fixed-size digest has the wrong width.
     InvalidDigest,
+    #[error("invalid imported discovery display title")]
     /// A resolved display title violates its shape contract.
     InvalidDisplayTitle,
+    #[error("inconsistent imported discovery {field_0}")]
     /// A supposedly complete immutable range has a gap or mismatch.
     Inconsistent(&'static str),
+    #[error("invalid imported discovery entry encoding")]
     /// A normalized entry encoding is malformed.
     InvalidEntryEncoding,
 }
 
-impl fmt::Display for ImportedConversationDiscoveryCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing imported discovery {field}"),
-            Self::Unsupported(field) => write!(formatter, "unsupported imported discovery {field}"),
-            Self::InvalidOrdinal(field) => write!(formatter, "invalid imported discovery {field}"),
-            Self::InvalidUtf8(field) => {
-                write!(formatter, "invalid imported discovery {field} UTF-8")
-            }
-            Self::InvalidDigest => formatter.write_str("invalid imported discovery source digest"),
-            Self::InvalidDisplayTitle => {
-                formatter.write_str("invalid imported discovery display title")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent imported discovery {relationship}")
-            }
-            Self::InvalidEntryEncoding => {
-                formatter.write_str("invalid imported discovery entry encoding")
-            }
-        }
-    }
-}
-
-impl Error for ImportedConversationDiscoveryCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A caller requested a region outside the selective-read contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImportedConversationDiscoveryRequestError {
+    #[error("imported position is out of range")]
     /// The exact one-based anchor is outside the immutable timeline.
     PositionOutOfRange,
+    #[error("imported entry window exceeds its bound")]
     /// The requested region exceeds the caller-supplied hard bound.
     WindowTooLarge,
 }
 
-impl fmt::Display for ImportedConversationDiscoveryRequestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PositionOutOfRange => formatter.write_str("imported position is out of range"),
-            Self::WindowTooLarge => formatter.write_str("imported entry window exceeds its bound"),
-        }
-    }
-}
-
-impl Error for ImportedConversationDiscoveryRequestError {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL imported-discovery failure.
 #[derive(Debug)]
 pub enum ImportedConversationDiscoveryError {
+    #[error("imported discovery read failed: {field_0}")]
     /// PostgreSQL could not complete the bounded read.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
     /// The caller's requested selective region is invalid.
-    Request(ImportedConversationDiscoveryRequestError),
+    Request(#[source] ImportedConversationDiscoveryRequestError),
+    #[error(transparent)]
     /// Durable data cannot satisfy the projection contract.
-    Corruption(ImportedConversationDiscoveryCorruption),
-}
-
-impl fmt::Display for ImportedConversationDiscoveryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "imported discovery read failed: {error}"),
-            Self::Request(error) => error.fmt(formatter),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ImportedConversationDiscoveryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Request(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] ImportedConversationDiscoveryCorruption),
 }
 
 impl From<sqlx::Error> for ImportedConversationDiscoveryError {

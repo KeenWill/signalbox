@@ -45,11 +45,14 @@ use crate::{
     outbox::{self, OutboxEvent},
 };
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable lifecycle shape that cannot construct the public domain values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionLifecycleCorruption {
+    #[error("session lifecycle is missing {field_0}")]
     /// One required row or field is absent.
     Missing(&'static str),
+    #[error("session lifecycle {field} is unsupported: {value}")]
     /// A closed discriminator is unsupported.
     Unsupported {
         /// The field whose spelling is unsupported.
@@ -57,28 +60,10 @@ pub enum SessionLifecycleCorruption {
         /// The stored spelling.
         value: String,
     },
+    #[error("session lifecycle is inconsistent: {field_0}")]
     /// Typed record relationships or variant fields disagree.
     Inconsistent(&'static str),
 }
-
-impl fmt::Display for SessionLifecycleCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "session lifecycle is missing {field}"),
-            Self::Unsupported { field, value } => {
-                write!(
-                    formatter,
-                    "session lifecycle {field} is unsupported: {value}"
-                )
-            }
-            Self::Inconsistent(detail) => {
-                write!(formatter, "session lifecycle is inconsistent: {detail}")
-            }
-        }
-    }
-}
-
-impl Error for SessionLifecycleCorruption {}
 
 /// Why one lifecycle transition was refused before any row changed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

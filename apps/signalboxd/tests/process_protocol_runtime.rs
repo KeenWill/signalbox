@@ -41,7 +41,10 @@ use signalbox_application::{
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
     scheduler_ordinary_pass_limit,
 };
-use signalbox_blob_store::BlobObjectKey;
+use signalbox_blob_store::{
+    BlobObjectKey, BlobPutOutcome, BlobReader, BlobStore, BlobStoreError, BlobStoreFuture,
+    ExpectedBlob, OpenedBlob,
+};
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
     ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, BlobDigest, BranchName,
@@ -269,6 +272,25 @@ selection_id = "00000000-0000-0000-0000-000000000001"
 alias_id = "540ce009-c2ec-4a04-b823-c411ea189778"
 selection_id = "00000000-0000-0000-0000-000000000001"
 "#;
+
+fn reported_usage_preflight_configuration_text() -> String {
+    MODEL_CONFIGURATION
+        // These fixtures exercise reported-usage preflight through an adapter
+        // without prospective token counting.
+        .replace("adapter = \"anthropic\"", "adapter = \"openai\"")
+        .replace("model_family = \"anthropic\"", "model_family = \"openai\"")
+        .replace("max_output_tokens = 256", "max_output_tokens = 1")
+        .replace(
+            "context_window_tokens = 200000",
+            "context_window_tokens = 4096",
+        )
+}
+
+fn reported_usage_preflight_configuration() -> Result<HubModelConfiguration, Box<dyn Error>> {
+    Ok(support::parse_model_configuration(
+        &reported_usage_preflight_configuration_text(),
+    )?)
+}
 
 fn session_template_configuration(
     models: &HubModelConfiguration,
@@ -845,16 +867,21 @@ impl RunningRuntime {
     async fn start_with_optional_compaction(
         compaction_model: Option<ScriptedModel<ModelCallId>>,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_with_options(compaction_model, BlobStorageFixtureMode::Disabled).await
+        Self::start_with_options(compaction_model, BlobStorageFixtureMode::Disabled, None).await
     }
 
     async fn start_with_blob_storage() -> Result<Self, Box<dyn Error>> {
-        Self::start_with_options(None, BlobStorageFixtureMode::Enabled).await
+        Self::start_with_options(None, BlobStorageFixtureMode::Enabled, None).await
+    }
+
+    async fn start_with_model_configuration(configuration: &str) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_options(None, BlobStorageFixtureMode::Disabled, Some(configuration)).await
     }
 
     async fn start_with_options(
         compaction_model: Option<ScriptedModel<ModelCallId>>,
         blob_storage: BlobStorageFixtureMode,
+        configuration_override: Option<&str>,
     ) -> Result<Self, Box<dyn Error>> {
         let (container, pool) = postgres().await?;
         let socket_directory = SocketDirectory::create()?;
@@ -869,9 +896,14 @@ impl RunningRuntime {
             BlobStorageFixtureMode::Disabled => None,
             BlobStorageFixtureMode::Enabled => Some(BlobStorageFixture::create()?),
         };
-        let configuration = blob_storage_root.as_ref().map_or_else(
-            || String::from(MODEL_CONFIGURATION),
-            BlobStorageFixture::model_configuration,
+        let configuration = configuration_override.map_or_else(
+            || {
+                blob_storage_root.as_ref().map_or_else(
+                    || String::from(MODEL_CONFIGURATION),
+                    BlobStorageFixture::model_configuration,
+                )
+            },
+            String::from,
         );
         let model_configuration = support::parse_model_configuration(&configuration)?;
         let blob_store_registry = match blob_storage {
@@ -2313,6 +2345,25 @@ async fn execute_streamed_turn_until(
     settle: TurnSettle,
 ) -> Result<ScriptedModel<ModelCallId>, Box<dyn Error>> {
     let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    execute_streamed_turn_until_with_configuration(
+        runtime,
+        scripted,
+        model_configuration,
+        session_id,
+        turn_id,
+        settle,
+    )
+    .await
+}
+
+async fn execute_streamed_turn_until_with_configuration(
+    runtime: &mut RunningRuntime,
+    scripted: ScriptedModel<ModelCallId>,
+    model_configuration: HubModelConfiguration,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    settle: TurnSettle,
+) -> Result<ScriptedModel<ModelCallId>, Box<dyn Error>> {
     let probe = scripted.clone();
     let provider =
         RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog(), None)
@@ -9159,7 +9210,8 @@ async fn s01_s03_automatic_guard_compacts_before_ordinary_send() -> Result<(), B
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s01_s03_reported_usage_rechecks_compaction_headroom() -> Result<(), Box<dyn Error>> {
-    let mut runtime = RunningRuntime::start().await?;
+    let configuration_text = reported_usage_preflight_configuration_text();
+    let mut runtime = RunningRuntime::start_with_model_configuration(&configuration_text).await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     let (_, first_turn) = submit_first_input(
@@ -9179,8 +9231,15 @@ async fn s01_s03_reported_usage_rechecks_compaction_headroom() -> Result<(), Box
         "reported usage historical reply",
         saturated_usage,
     ));
-    let first_probe =
-        execute_streamed_turn(&mut runtime, first_runtime, session_id, first_turn).await?;
+    let first_probe = execute_streamed_turn_until_with_configuration(
+        &mut runtime,
+        first_runtime,
+        reported_usage_preflight_configuration()?,
+        session_id,
+        first_turn,
+        TurnSettle::Terminal,
+    )
+    .await?;
     assert_eq!(first_probe.received_operations().len(), 1);
 
     connection
@@ -9198,14 +9257,7 @@ async fn s01_s03_reported_usage_rechecks_compaction_headroom() -> Result<(), Box
         )
         .await?;
     let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
-    let configuration = support::parse_model_configuration(
-        &MODEL_CONFIGURATION
-            .replace("max_output_tokens = 256", "max_output_tokens = 1")
-            .replace(
-                "context_window_tokens = 200000",
-                "context_window_tokens = 4096",
-            ),
-    )?;
+    let configuration = reported_usage_preflight_configuration()?;
     let runtime_models = configuration.runtime_model_catalog();
     let saturated_summary_usage = TokenUsage {
         input_tokens: Some(5000),
@@ -9278,7 +9330,8 @@ async fn s01_s03_reported_usage_rechecks_compaction_headroom() -> Result<(), Box
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s01_s03_reported_usage_preflight_counts_the_queued_input() -> Result<(), Box<dyn Error>> {
-    let mut runtime = RunningRuntime::start().await?;
+    let configuration_text = reported_usage_preflight_configuration_text();
+    let mut runtime = RunningRuntime::start_with_model_configuration(&configuration_text).await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     let (_, first_turn) = submit_first_input(
@@ -9287,8 +9340,9 @@ async fn s01_s03_reported_usage_preflight_counts_the_queued_input() -> Result<()
         String::from("queued input preflight historical request"),
     )
     .await?;
-    // The declared window below is 4096 with a one-token output reservation, so
-    // this reported input leaves 95 tokens of headroom on its own.
+    // `reported_usage_preflight_configuration_text` declares a 4096-token
+    // window with a one-token output reservation, so this reported input leaves
+    // 95 tokens of headroom on its own.
     let fitting_usage = TokenUsage {
         input_tokens: Some(4000),
         output_tokens: Some(0),
@@ -9300,8 +9354,15 @@ async fn s01_s03_reported_usage_preflight_counts_the_queued_input() -> Result<()
         "queued input preflight historical reply",
         fitting_usage,
     ));
-    let first_probe =
-        execute_streamed_turn(&mut runtime, first_runtime, session_id, first_turn).await?;
+    let first_probe = execute_streamed_turn_until_with_configuration(
+        &mut runtime,
+        first_runtime,
+        reported_usage_preflight_configuration()?,
+        session_id,
+        first_turn,
+        TurnSettle::Terminal,
+    )
+    .await?;
     assert_eq!(first_probe.received_operations().len(), 1);
 
     // 103 ASCII characters: under the byte-per-token allowance the queued input
@@ -9324,14 +9385,7 @@ async fn s01_s03_reported_usage_preflight_counts_the_queued_input() -> Result<()
         )
         .await?;
     let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
-    let configuration = support::parse_model_configuration(
-        &MODEL_CONFIGURATION
-            .replace("max_output_tokens = 256", "max_output_tokens = 1")
-            .replace(
-                "context_window_tokens = 200000",
-                "context_window_tokens = 4096",
-            ),
-    )?;
+    let configuration = reported_usage_preflight_configuration()?;
     let runtime_models = configuration.runtime_model_catalog();
     let summary_text = String::from("queued input preflight summary");
     let summary_runtime = ScriptedModel::single(completed_script(
@@ -9634,6 +9688,7 @@ impl ModelCallInputTokenCounter for CommitAmbiguousCounter {
 #[derive(Clone, Debug)]
 struct CountingProbe {
     interactions: Arc<AtomicUsize>,
+    outcome: ModelCallInputTokenCount,
 }
 
 impl ModelCallInputTokenCounter for CountingProbe {
@@ -9648,7 +9703,48 @@ impl ModelCallInputTokenCounter for CountingProbe {
         Cancellation: std::future::Future<Output = ()> + Send + 'static,
     {
         self.interactions.fetch_add(1, Ordering::SeqCst);
-        std::future::ready(Ok(ModelCallInputTokenCount::Counted(1)))
+        std::future::ready(Ok(self.outcome))
+    }
+}
+
+struct TransientUnavailableBlobStore {
+    inner: Arc<dyn BlobStore>,
+    reads: Arc<AtomicUsize>,
+}
+
+impl BlobStore for TransientUnavailableBlobStore {
+    fn put<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        source: BlobReader,
+    ) -> BlobStoreFuture<'a, BlobPutOutcome> {
+        self.inner.put(expected, source)
+    }
+
+    fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob> {
+        if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            Box::pin(async { Err(BlobStoreError::unavailable("transient test read")) })
+        } else {
+            self.inner.open(key)
+        }
+    }
+
+    fn open_verified<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        self.inner.open_verified(expected, key)
+    }
+
+    fn open_range<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+        offset: u64,
+        byte_length: std::num::NonZeroU64,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        self.inner.open_range(expected, key, offset, byte_length)
     }
 }
 
@@ -9700,6 +9796,7 @@ async fn attachment_verification_precedes_provider_counting() -> Result<(), Box<
     let counter = AttachmentPreparingModelCallProvider::for_counting(
         CountingProbe {
             interactions: Arc::clone(&interactions),
+            outcome: ModelCallInputTokenCount::Counted(1),
         },
         fixture.runtime.pool.clone(),
         Some(fixture.runtime.blob_store_registry()),
@@ -9769,6 +9866,148 @@ async fn attachment_verification_precedes_provider_counting() -> Result<(), Box<
             Some(String::from("missing")),
         )
     );
+
+    fixture.stop().await
+}
+
+/// INV-062: transient attachment unavailability leaves the prospective call
+/// uncommitted, so recovery re-verifies the attachment and performs the exact
+/// provider count before activation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv062_transient_attachment_unavailability_recounts_after_recovery()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = CommittedBlobReadFixture::start(b"transient count guard attachment").await?;
+    let session_id = create_alias_session(&mut fixture.connection).await?;
+    fixture
+        .connection
+        .request(
+            4,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::from_parts(vec![UserInputPart::Attachment {
+                    digest: fixture.wire_digest,
+                    kind: UserAttachmentKind::File,
+                    media_type: String::from("application/octet-stream"),
+                    display_filename: None,
+                }]),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_turn = accepted_successor_turn(&mut fixture.connection, session_id, 1).await?;
+
+    let model_configuration = support::parse_model_configuration(
+        &fixture
+            .runtime
+            .blob_storage_root
+            .as_ref()
+            .expect("the fixture owns blob configuration")
+            .model_configuration(),
+    )?;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut counting_registry = BlobStoreRegistry::initialize_for_conformance(
+        model_configuration.blob_storage(),
+        fixture.runtime.pool.clone(),
+    )
+    .await?
+    .expect("the fixture configures blob storage");
+    let (store_name, inner) = counting_registry.routed_store(BlobStorageClass::UserAttachment);
+    let store_name = store_name.clone();
+    assert!(counting_registry.replace_store_for_conformance(
+        &store_name,
+        Arc::new(TransientUnavailableBlobStore {
+            inner,
+            reads: Arc::clone(&reads),
+        }),
+    ));
+    let runtime_models = model_configuration.runtime_model_catalog();
+    let provider = RuntimeModelCallProvider::new(
+        ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
+        runtime_models.clone(),
+        None,
+    )
+    .with_text_delta_sink(fixture.runtime.provider_text_delta_sink());
+    let interactions = Arc::new(AtomicUsize::new(0));
+    let counter = AttachmentPreparingModelCallProvider::for_counting(
+        CountingProbe {
+            interactions: Arc::clone(&interactions),
+            outcome: ModelCallInputTokenCount::Cancelled,
+        },
+        fixture.runtime.pool.clone(),
+        Some(Arc::new(counting_registry)),
+        model_configuration.provider_input_count_targets(),
+    );
+    let repository = PostgresModelCallRepository::new(
+        fixture.runtime.pool.clone(),
+        model_configuration.target_catalog(),
+        ModelCallCredentialReference::new("attachment-count-recovery-fixture"),
+    )
+    .with_session_credentials(model_configuration.credential_family_catalog());
+    let guarded_repository = repository.clone();
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(
+                fixture.runtime.pool.clone(),
+                None,
+                Vec::new(),
+            ),
+        ));
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
+            runtime_models.clone(),
+        ));
+    let mut pass = ContextGuardedTurnPass::new(
+        StartEligibleTurnRepository::new(fixture.runtime.pool.clone()),
+        guarded_repository,
+        counter,
+        NoToolCatalog,
+        runtime_models,
+        model_configuration,
+        compaction_model,
+        execution,
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        fixture.runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
+    let session = SessionId::from_uuid(session_id.into_uuid());
+
+    pass.run(session).await?;
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert_eq!(interactions.load(Ordering::SeqCst), 0);
+    let call_count: i64 = sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+        .bind(queued_turn.into_uuid())
+        .fetch_one(&fixture.runtime.pool)
+        .await?;
+    assert_eq!(call_count, 0);
+
+    let recovered = pass.run(session).await;
+
+    assert!(matches!(
+        recovered,
+        Err(ContextGuardedTurnPassError::CountCancelled(turn))
+            if turn == TurnId::from_uuid(queued_turn.into_uuid())
+    ));
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+    assert_eq!(interactions.load(Ordering::SeqCst), 1);
+    assert!(!fatal_execution.is_triggered());
+    let call_count: i64 = sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+        .bind(queued_turn.into_uuid())
+        .fetch_one(&fixture.runtime.pool)
+        .await?;
+    assert_eq!(call_count, 0);
 
     fixture.stop().await
 }

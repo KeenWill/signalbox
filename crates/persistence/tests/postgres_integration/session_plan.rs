@@ -43,7 +43,7 @@ async fn session_plan_append_and_read_round_trip_through_postgres() -> Result<()
         .expect("the created entry is projected");
 
     assert_eq!(page.entries().len(), EXPECTED_ENTRY_COUNT);
-    assert_eq!(entry.id().as_u64(), event.ordinal().as_u64());
+    assert_eq!(entry.id().as_u64(), event.ordinal().get());
     assert_eq!(entry.text().as_str(), CREATED_TEXT);
     assert_eq!(entry.status(), PlanStatus::Pending);
     assert_eq!(history.events(), std::slice::from_ref(&event));

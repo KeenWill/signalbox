@@ -1,7 +1,5 @@
 //! PostgreSQL adapter for bounded aggregate and individual-call usage reads.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use signalbox_application::{
     UsageAggregateCompleteness, UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport,
@@ -261,11 +259,14 @@ SELECT model_call_id, call_kind, session_id, turn_id,
     )
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Integrity failure in the dedicated usage projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UsageProjectionCorruption {
+    #[error("invalid usage projection {field_0}")]
     /// A required projected field was absent or malformed.
     Invalid(&'static str),
+    #[error("unsupported usage projection {field}: {value}")]
     /// A closed stored discriminator was unsupported.
     Unsupported {
         /// Projection field carrying the unsupported spelling.
@@ -275,44 +276,16 @@ pub enum UsageProjectionCorruption {
     },
 }
 
-impl fmt::Display for UsageProjectionCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Invalid(field) => write!(formatter, "invalid usage projection {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported usage projection {field}: {value}")
-            }
-        }
-    }
-}
-
-impl Error for UsageProjectionCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database or fail-closed usage-projection failure.
 #[derive(Debug)]
 pub enum UsageRepositoryError {
+    #[error("usage database failure: {field_0}")]
     /// PostgreSQL query failure.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Projection row violated the application representation.
-    Corruption(UsageProjectionCorruption),
-}
-
-impl fmt::Display for UsageRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "usage database failure: {error}"),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for UsageRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] UsageProjectionCorruption),
 }
 
 impl From<sqlx::Error> for UsageRepositoryError {
