@@ -4,13 +4,33 @@
 //! only the checked command families admitted by [`SessionCommand`]. Database
 //! handles and the wider core outbox vocabulary do not cross this boundary.
 
+pub use signalbox_application::{
+    RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
+    RepoWatchCheckSuiteObservation, RepoWatchEventContentIdentityV1,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierError,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
+    RepoWatchMergedCheckRunBaselineV1, RepoWatchMergedCheckSuiteBaselineV1,
+    RepoWatchMergedPullRequestBaselineInputV1, RepoWatchMergedPullRequestBaselineV1,
+    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
+    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateError, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
+    derive_repo_watch_events,
+};
 pub use signalbox_domain::{
-    BranchName, CommitSha, ContextFrontierId, CoreAgency, CreateSession, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DispatchingModule, DurableCommandId,
-    FinishCondition, FinishConditionStatement, GoalBlockedReasonKind, GoalGuidance, GoalStatement,
-    GoalUserAction, GoalUserCommand, LifecycleActor, ModelCallId, ModelSelectionOverride,
-    ModelSelectionRequest, ModuleDispatch, PerInputConfigurationChoices, PullRequestBody,
-    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchDispatchId, RepositorySlug,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, ContextFrontierId,
+    CoreAgency, CreateSession, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DispatchingModule, DurableCommandId, FinishCondition, FinishConditionStatement, GitHubObjectId,
+    GoalBlockedReasonKind, GoalGuidance, GoalStatement, GoalUserAction, GoalUserCommand, LabelName,
+    LifecycleActor, MergeableState, ModelCallId, ModelSelectionOverride, ModelSelectionRequest,
+    ModuleDispatch, PerInputConfigurationChoices, PullRequestBody, PullRequestEventContext,
+    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionChange,
+    ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
+    RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId, RepoWatchRuleIdentityField,
+    RepoWatchRuleIdentityFieldDigest, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionFailureCause, SessionId,
     SessionLifecycleCommand, SessionLifecycleOperation, SessionLifecycleState, SessionOwnership,
@@ -18,7 +38,7 @@ pub use signalbox_domain::{
     SessionRetirementCause, SessionRetryableCause, SessionStructuralCause,
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
     SessionTerminalOutcome, SessionWait, StartGate, StopStickiness, SubmitInput, ToolAttemptId,
-    ToolRequestId, TurnId, UserContent, UserContentPart,
+    ToolRequestId, TurnId, UserContent, UserContentPart, WorkflowName,
 };
 pub use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::outbox::{

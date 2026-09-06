@@ -4,16 +4,30 @@
 //! unqualified and must run on a pool whose effective role and search path are
 //! confined to `mod_repo_watch`.
 
-use std::{error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use signalbox_ownership_seam::{
-    BranchName, CommitSha, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepositorySlug,
+    BranchName, CheckConclusion, ChecksOutcome, CommitSha, MergeableState, OffsetDateTime,
+    PullRequestBody, PullRequestNumber, PullRequestTitle, ReactionChange, ReactionSubject,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventContentIdentityV1,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
+    RepoWatchEventTarget, RepoWatchRule, RepositorySlug, ReviewState,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
+
+mod baseline;
+
+use baseline::observation_payload;
+
+const CONFIGURATION_LOCK: &str = "repo-watch\u{1f}configuration";
 
 /// Current provider state for one watched repository.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,6 +92,19 @@ pub struct PullRequestState<'a> {
     pub observed_at: OffsetDateTime,
 }
 
+/// Complete current provider projection committed with one frontier candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryProjection<'a> {
+    /// Repository-level provider state.
+    pub repository: RepositoryState<'a>,
+    /// Complete current pull-request projection for the repository.
+    pub pull_requests: Vec<PullRequestState<'a>>,
+    /// Complete normalized state used by the repository-event differ.
+    pub comparison_baseline: &'a signalbox_ownership_seam::RepoWatchObservation,
+    /// Compact baselines retained for merged pull requests.
+    pub merged_baselines: &'a [signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineV1],
+}
+
 /// Authenticated webhook intake retained until its caller-selected expiry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookDelivery<'a> {
@@ -121,6 +148,118 @@ pub enum WebhookDisposition {
     Rejected,
 }
 
+/// Result of idempotently recording one normalized GitHub fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventAdmission {
+    /// The fact was new.
+    Inserted,
+    /// The exact fact was already retained.
+    Replayed,
+}
+
+/// One normalized fact supplied with its content identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EventCandidate<'a> {
+    /// Complete normalized fact.
+    pub event: &'a RepoWatchEvent,
+    /// Source-independent identity assigned to the fact.
+    pub content_identity: RepoWatchEventContentIdentityV1,
+}
+
+/// Closed producer recorded with every durable repository-watch fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventProducer {
+    /// A complete or targeted provider poll produced the fact.
+    Poll,
+    /// An authenticated primary-mode webhook produced the fact.
+    Webhook,
+}
+
+impl EventProducer {
+    const fn storage(self) -> &'static str {
+        match self {
+            Self::Poll => "poll",
+            Self::Webhook => "webhook",
+        }
+    }
+}
+
+/// Result of atomically committing a complete frontier candidate and event batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FrontierEventAdmission {
+    /// The frontier and ordered facts committed together.
+    Committed {
+        /// Generation assigned to this complete candidate.
+        generation: u64,
+        /// Admission of each ordered fact.
+        events: Box<[EventAdmission]>,
+    },
+    /// The complete candidate already matches the stored frontier and carried no facts.
+    Unchanged,
+    /// A durable event identity was already bound to a different fact.
+    ConflictingReuse,
+    /// A newer frontier entry already committed for this repository.
+    Stale,
+}
+
+/// Result of idempotently releasing one frontier stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrontierReleaseAdmission {
+    /// The stream was removed at this generation.
+    Released { generation: u64 },
+    /// The same release already committed at this generation.
+    Replayed { generation: u64 },
+    /// The stream is absent and the latest frontier mutation was not its release.
+    Absent,
+    /// The repository frontier advanced after the caller observed it.
+    Stale,
+}
+
+/// Result of activating one configured rule revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuleAdmission {
+    /// The rule was first observed.
+    Inserted,
+    /// A newer revision became active.
+    Updated,
+    /// The exact active revision was already retained.
+    Replayed,
+    /// The revision was already bound to different rule semantics.
+    ConflictingReuse,
+    /// The supplied revision predates the active revision.
+    Stale,
+}
+
+/// Result of reconciling one repository's complete configured rule set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuleReconciliationAdmission {
+    /// The complete set was admitted atomically.
+    Applied {
+        /// Per-input outcomes in the supplied order.
+        rules: Box<[RuleAdmission]>,
+        /// Number of formerly active rules deactivated by this commit.
+        deactivated: u64,
+    },
+    /// A retained revision was already bound to different semantics.
+    ConflictingReuse,
+    /// At least one supplied revision was older than retained lineage.
+    Stale,
+}
+
+/// One repository in the complete configured rule set.
+#[derive(Clone, Copy, Debug)]
+pub struct RepositoryRuleSet<'a> {
+    repository: &'a RepositorySlug,
+    rules: &'a [RepoWatchRule],
+}
+
+impl<'a> RepositoryRuleSet<'a> {
+    /// Binds one repository to its complete ordered checked rule set.
+    pub const fn new(repository: &'a RepositorySlug, rules: &'a [RepoWatchRule]) -> Self {
+        Self { repository, rules }
+    }
+}
+
 impl WebhookDisposition {
     const fn storage(self) -> &'static str {
         match self {
@@ -140,6 +279,20 @@ pub enum StoreError {
     InvalidProviderIdentity,
     /// The webhook expiry does not follow its receipt time.
     InvalidWebhookExpiry,
+    /// The supplied frontier generation has no successor.
+    InvalidFrontierGeneration,
+    /// A retained event has an invalid durable evaluation position.
+    InvalidEventEvaluationPosition,
+    /// The repository-wide event ordinal has no successor.
+    InvalidEventOrdinal,
+    /// A fact in a frontier commit belongs to another repository.
+    EventRepositoryMismatch,
+    /// A pull-request projection belongs to another repository.
+    ProjectionRepositoryMismatch,
+    /// The checked rule exposed too many identity fields for the durable inventory.
+    InvalidRuleFieldInventory,
+    /// A complete configured set repeated one repository-scoped rule identity.
+    DuplicateRuleIdentity,
 }
 
 impl fmt::Display for StoreError {
@@ -148,6 +301,25 @@ impl fmt::Display for StoreError {
             Self::Database(_) => "repository-watch module database operation failed",
             Self::InvalidProviderIdentity => "repository-watch provider identity is not positive",
             Self::InvalidWebhookExpiry => "repository-watch webhook expiry is not after receipt",
+            Self::InvalidFrontierGeneration => {
+                "repository-watch frontier generation has no successor"
+            }
+            Self::InvalidEventEvaluationPosition => {
+                "repository-watch event has an invalid evaluation position"
+            }
+            Self::InvalidEventOrdinal => "repository-watch event ordinal has no successor",
+            Self::EventRepositoryMismatch => {
+                "repository-watch event does not belong to the frontier repository"
+            }
+            Self::ProjectionRepositoryMismatch => {
+                "repository-watch projection does not belong to the frontier repository"
+            }
+            Self::InvalidRuleFieldInventory => {
+                "repository-watch rule identity-field inventory is too large"
+            }
+            Self::DuplicateRuleIdentity => {
+                "repository-watch configured rule set repeats an identity"
+            }
         })
     }
 }
@@ -156,7 +328,15 @@ impl Error for StoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
-            Self::InvalidProviderIdentity | Self::InvalidWebhookExpiry => None,
+            Self::InvalidProviderIdentity
+            | Self::InvalidWebhookExpiry
+            | Self::InvalidFrontierGeneration
+            | Self::InvalidEventEvaluationPosition
+            | Self::InvalidEventOrdinal
+            | Self::EventRepositoryMismatch
+            | Self::ProjectionRepositoryMismatch
+            | Self::InvalidRuleFieldInventory
+            | Self::DuplicateRuleIdentity => None,
         }
     }
 }
@@ -177,66 +357,6 @@ impl RepoWatchStore {
     /// Uses a pool already confined to the repository-watch role and schema.
     pub const fn new(module_pool: PgPool) -> Self {
         Self { pool: module_pool }
-    }
-
-    /// Replaces one repository's current provider projection.
-    pub async fn upsert_repository(&self, state: RepositoryState<'_>) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO repository_state
-                (repository, default_branch, default_head_sha, observed_at, updated_at)
-             VALUES ($1, $2, $3, $4, statement_timestamp())
-             ON CONFLICT (repository) DO UPDATE
-             SET default_branch = EXCLUDED.default_branch,
-                 default_head_sha = EXCLUDED.default_head_sha,
-                 observed_at = EXCLUDED.observed_at,
-                 updated_at = statement_timestamp()",
-        )
-        .bind(state.repository.as_str())
-        .bind(state.default_branch.as_str())
-        .bind(state.default_head.as_str())
-        .bind(state.observed_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Replaces one pull request's normalized current provider projection.
-    pub async fn upsert_pull_request(&self, state: PullRequestState<'_>) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO pr_state
-                (repository, pull_request_number, lifecycle, head_sha,
-                 head_repository, head_branch, base_branch, title, body, draft,
-                 author, observed_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                     statement_timestamp())
-             ON CONFLICT (repository, pull_request_number) DO UPDATE
-             SET lifecycle = EXCLUDED.lifecycle,
-                 head_sha = EXCLUDED.head_sha,
-                 head_repository = EXCLUDED.head_repository,
-                 head_branch = EXCLUDED.head_branch,
-                 base_branch = EXCLUDED.base_branch,
-                 title = EXCLUDED.title,
-                 body = EXCLUDED.body,
-                 draft = EXCLUDED.draft,
-                 author = EXCLUDED.author,
-                 observed_at = EXCLUDED.observed_at,
-                 updated_at = statement_timestamp()",
-        )
-        .bind(state.repository.as_str())
-        .bind(Decimal::from(state.number.get()))
-        .bind(state.lifecycle.storage())
-        .bind(state.head.as_str())
-        .bind(state.head_repository.as_str())
-        .bind(state.head_branch.as_str())
-        .bind(state.base_branch.as_str())
-        .bind(state.title.as_str())
-        .bind(state.body.as_str())
-        .bind(state.draft)
-        .bind(state.author.map(RepoWatchAuthorLogin::as_str))
-        .bind(state.observed_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 
     /// Atomically admits the delivery metadata, body, and pending disposition.
@@ -361,6 +481,1116 @@ impl RepoWatchStore {
         .await?;
         Ok(updated.rows_affected() == 1)
     }
+
+    /// Atomically commits a complete frontier candidate and its ordered facts.
+    pub async fn commit_frontier_candidate(
+        &self,
+        projection: &RepositoryProjection<'_>,
+        expected_generation: u64,
+        frontier: &[RepoWatchEventIdentityFrontierEntryV1],
+        events: &[EventCandidate<'_>],
+        producer: EventProducer,
+        recorded_at: OffsetDateTime,
+    ) -> Result<FrontierEventAdmission, StoreError> {
+        let repository_state = &projection.repository;
+        let pull_request_states = projection.pull_requests.as_slice();
+        let comparison_baseline =
+            observation_payload(projection.comparison_baseline, projection.merged_baselines)
+                .to_string();
+        let repository = repository_state.repository;
+        if pull_request_states
+            .iter()
+            .any(|state| state.repository != repository)
+        {
+            return Err(StoreError::ProjectionRepositoryMismatch);
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
+            .bind(repository.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        let projection_existed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM repository_state WHERE repository = $1)",
+        )
+        .bind(repository.as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let projections_match = stored_projections_match(
+            &mut transaction,
+            repository_state,
+            pull_request_states,
+            &comparison_baseline,
+        )
+        .await?;
+        upsert_repository(&mut transaction, repository_state, &comparison_baseline).await?;
+        replace_pull_requests(&mut transaction, repository, pull_request_states).await?;
+        let candidate_identity = frontier_candidate_identity(
+            repository_state,
+            pull_request_states,
+            comparison_baseline.as_bytes(),
+            frontier,
+            events,
+        );
+        let current_generation: Decimal = sqlx::query_scalar(
+            "SELECT frontier_generation FROM repository_state
+              WHERE repository = $1 FOR UPDATE",
+        )
+        .bind(repository.as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let expected = Decimal::from(expected_generation);
+        if current_generation != expected {
+            let exact_replay: bool = sqlx::query_scalar(
+                "SELECT last_frontier_commit_predecessor = $2
+                        AND last_frontier_commit_digest = sha256($3)
+                   FROM repository_state WHERE repository = $1",
+            )
+            .bind(repository.as_str())
+            .bind(expected)
+            .bind(candidate_identity.as_slice())
+            .fetch_one(&mut *transaction)
+            .await?;
+            transaction.rollback().await?;
+            return if exact_replay {
+                Ok(FrontierEventAdmission::Committed {
+                    generation: current_generation
+                        .to_u64()
+                        .ok_or(StoreError::InvalidFrontierGeneration)?,
+                    events: vec![EventAdmission::Replayed; events.len()].into_boxed_slice(),
+                })
+            } else {
+                Ok(FrontierEventAdmission::Stale)
+            };
+        }
+        let stream_identities = frontier
+            .iter()
+            .map(|entry| entry.stream_identity().to_vec())
+            .collect::<Vec<_>>();
+        let sequences = frontier
+            .iter()
+            .map(|entry| Decimal::from(entry.sequence().get()))
+            .collect::<Vec<_>>();
+        let pull_request_numbers = frontier
+            .iter()
+            .map(|entry| {
+                entry
+                    .pull_request_number()
+                    .map(|number| Decimal::from(number.get()))
+            })
+            .collect::<Vec<_>>();
+        let (unchanged, omitted, stale): (bool, bool, bool) = sqlx::query_as(
+            "WITH candidate AS (
+                SELECT *
+                  FROM UNNEST($2::bytea[], $3::numeric[], $4::numeric[])
+                       AS entry(stream_identity, sequence, pull_request_number)
+             ),
+             stored AS (
+                SELECT stream_identity, sequence, pull_request_number
+                  FROM frontier
+                 WHERE repository = $1
+             )
+             SELECT
+                NOT EXISTS (
+                    (SELECT * FROM stored EXCEPT SELECT * FROM candidate)
+                    UNION ALL
+                    (SELECT * FROM candidate EXCEPT SELECT * FROM stored)
+                ),
+                EXISTS (
+                    SELECT 1
+                      FROM stored
+                      LEFT JOIN candidate USING (stream_identity)
+                     WHERE candidate.stream_identity IS NULL
+                ),
+                EXISTS (
+                    SELECT 1
+                      FROM stored
+                      JOIN candidate USING (stream_identity)
+                     WHERE stored.sequence > candidate.sequence
+                )",
+        )
+        .bind(repository.as_str())
+        .bind(&stream_identities)
+        .bind(&sequences)
+        .bind(&pull_request_numbers)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if unchanged && projections_match {
+            if events.is_empty() {
+                transaction.rollback().await?;
+                return Ok(FrontierEventAdmission::Unchanged);
+            }
+            if !events.is_empty() {
+                transaction.rollback().await?;
+                return Ok(FrontierEventAdmission::ConflictingReuse);
+            }
+        }
+        if omitted || stale {
+            transaction.rollback().await?;
+            return Ok(FrontierEventAdmission::Stale);
+        }
+        let generation_floor = if projection_existed {
+            expected_generation
+        } else {
+            sqlx::query_scalar::<_, Decimal>(
+                "SELECT COALESCE(max(frontier_generation), 0) FROM gh_event
+                  WHERE repository = $1",
+            )
+            .bind(repository.as_str())
+            .fetch_one(&mut *transaction)
+            .await?
+            .to_u64()
+            .ok_or(StoreError::InvalidFrontierGeneration)?
+        };
+        let next_generation = generation_floor
+            .checked_add(1)
+            .ok_or(StoreError::InvalidFrontierGeneration)?;
+        let mut repository_event_ordinal = sqlx::query_scalar::<_, Decimal>(
+            "SELECT COALESCE(max(repository_event_ordinal), 0) FROM gh_event
+              WHERE repository = $1",
+        )
+        .bind(repository.as_str())
+        .fetch_one(&mut *transaction)
+        .await?
+        .to_u64()
+        .ok_or(StoreError::InvalidEventEvaluationPosition)?;
+        let mut admissions = Vec::with_capacity(events.len());
+        for (event_ordinal, candidate) in (1_u64..).zip(events) {
+            if candidate.event.repository() != repository {
+                return Err(StoreError::EventRepositoryMismatch);
+            }
+            let candidate_repository_ordinal = repository_event_ordinal
+                .checked_add(1)
+                .ok_or(StoreError::InvalidEventOrdinal)?;
+            match append_event(
+                &mut transaction,
+                candidate,
+                producer,
+                candidate_repository_ordinal,
+                next_generation,
+                event_ordinal,
+                recorded_at,
+            )
+            .await?
+            {
+                Some(admission) => {
+                    if admission == EventAdmission::Inserted {
+                        repository_event_ordinal = candidate_repository_ordinal;
+                    }
+                    admissions.push(admission);
+                }
+                None => {
+                    transaction.rollback().await?;
+                    return Ok(FrontierEventAdmission::ConflictingReuse);
+                }
+            }
+        }
+        sqlx::query(
+            "WITH candidate AS (
+                SELECT *
+                  FROM UNNEST($2::bytea[], $3::numeric[], $4::numeric[])
+                       AS entry(stream_identity, sequence, pull_request_number)
+             )
+             INSERT INTO frontier
+                (repository, stream_identity, sequence, pull_request_number, updated_at)
+             SELECT $1, stream_identity, sequence, pull_request_number, statement_timestamp()
+               FROM candidate
+             ON CONFLICT (repository, stream_identity) DO UPDATE
+             SET sequence = EXCLUDED.sequence,
+                 pull_request_number = EXCLUDED.pull_request_number,
+                 updated_at = statement_timestamp()",
+        )
+        .bind(repository.as_str())
+        .bind(&stream_identities)
+        .bind(&sequences)
+        .bind(&pull_request_numbers)
+        .execute(&mut *transaction)
+        .await?;
+        let advanced = sqlx::query(
+            "UPDATE repository_state
+                SET frontier_generation = $2,
+                    last_frontier_commit_digest = sha256($3),
+                    last_frontier_commit_predecessor = $5,
+                    updated_at = statement_timestamp()
+              WHERE repository = $1 AND frontier_generation = $4",
+        )
+        .bind(repository.as_str())
+        .bind(Decimal::from(next_generation))
+        .bind(candidate_identity.as_slice())
+        .bind(expected)
+        .bind(expected)
+        .execute(&mut *transaction)
+        .await?;
+        if advanced.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(FrontierEventAdmission::Stale);
+        }
+        transaction.commit().await?;
+        Ok(FrontierEventAdmission::Committed {
+            generation: next_generation,
+            events: admissions.into_boxed_slice(),
+        })
+    }
+
+    /// Releases one recurring stream after its rebuild subject has retired.
+    pub async fn release_frontier(
+        &self,
+        repository: &RepositorySlug,
+        expected_generation: u64,
+        stream_identity: &[u8; 32],
+    ) -> Result<FrontierReleaseAdmission, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
+            .bind(repository.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        let current: Option<(Decimal, bool)> = sqlx::query_as(
+            "SELECT frontier_generation,
+                    COALESCE(last_frontier_commit_digest = sha256($2), false)
+               FROM repository_state
+              WHERE repository = $1
+              FOR UPDATE",
+        )
+        .bind(repository.as_str())
+        .bind(frontier_release_identity(stream_identity))
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((current_generation, same_release)) = current else {
+            transaction.rollback().await?;
+            return Ok(FrontierReleaseAdmission::Absent);
+        };
+        let current_generation = current_generation
+            .to_u64()
+            .ok_or(StoreError::InvalidFrontierGeneration)?;
+        if current_generation != expected_generation {
+            transaction.rollback().await?;
+            return if expected_generation.checked_add(1) == Some(current_generation) && same_release
+            {
+                Ok(FrontierReleaseAdmission::Replayed {
+                    generation: current_generation,
+                })
+            } else {
+                Ok(FrontierReleaseAdmission::Stale)
+            };
+        }
+        let deleted = sqlx::query(
+            "DELETE FROM frontier
+              WHERE repository = $1 AND stream_identity = $2",
+        )
+        .bind(repository.as_str())
+        .bind(stream_identity.as_slice())
+        .execute(&mut *transaction)
+        .await?;
+        if deleted.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(FrontierReleaseAdmission::Absent);
+        }
+        let next_generation = expected_generation
+            .checked_add(1)
+            .ok_or(StoreError::InvalidFrontierGeneration)?;
+        let advanced = sqlx::query(
+            "UPDATE repository_state
+                SET frontier_generation = $2,
+                    last_frontier_commit_digest = sha256($3),
+                    last_frontier_commit_predecessor = $4,
+                    updated_at = statement_timestamp()
+              WHERE repository = $1 AND frontier_generation = $4",
+        )
+        .bind(repository.as_str())
+        .bind(Decimal::from(next_generation))
+        .bind(frontier_release_identity(stream_identity))
+        .bind(Decimal::from(expected_generation))
+        .execute(&mut *transaction)
+        .await?;
+        if advanced.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(StoreError::InvalidFrontierGeneration);
+        }
+        transaction.commit().await?;
+        Ok(FrontierReleaseAdmission::Released {
+            generation: next_generation,
+        })
+    }
+
+    /// Reconciles the complete configured repository and rule set atomically.
+    pub async fn reconcile_rules(
+        &self,
+        repositories: &[RepositoryRuleSet<'_>],
+        activated_at: OffsetDateTime,
+    ) -> Result<RuleReconciliationAdmission, StoreError> {
+        let mut configured = BTreeMap::new();
+        for repository in repositories {
+            let mut rule_ids = BTreeSet::new();
+            for rule in repository.rules {
+                if !rule_ids.insert(rule.id().as_str()) {
+                    return Err(StoreError::DuplicateRuleIdentity);
+                }
+            }
+            if configured
+                .insert(repository.repository.as_str(), rule_ids)
+                .is_some()
+            {
+                return Err(StoreError::DuplicateRuleIdentity);
+            }
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(CONFIGURATION_LOCK)
+            .execute(&mut *transaction)
+            .await?;
+        let active_repositories: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT repository FROM rule ORDER BY repository")
+                .fetch_all(&mut *transaction)
+                .await?;
+        let mut locked_repositories = configured.keys().copied().collect::<BTreeSet<_>>();
+        locked_repositories.extend(active_repositories.iter().map(String::as_str));
+        for repository in locked_repositories {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
+                .bind(repository)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        let active_rules: Vec<(String, String, Decimal)> = sqlx::query_as(
+            "SELECT repository, rule_id, active_revision FROM rule
+              ORDER BY repository, rule_id FOR UPDATE",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut plans = Vec::new();
+        for repository in repositories {
+            let activation_tail: Decimal = sqlx::query_scalar(
+                "SELECT COALESCE(max(repository_event_ordinal), 0)
+                   FROM gh_event WHERE repository = $1",
+            )
+            .bind(repository.repository.as_str())
+            .fetch_one(&mut *transaction)
+            .await?;
+            for rule in repository.rules {
+                let revision = Decimal::from(rule.version().get());
+                let digest = rule.content_digest();
+                let active: Option<(Decimal, Vec<u8>)> = sqlx::query_as(
+                    "SELECT active_revision, content_digest
+                       FROM rule
+                      WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
+                )
+                .bind(repository.repository.as_str())
+                .bind(rule.id().as_str())
+                .fetch_optional(&mut *transaction)
+                .await?;
+                let latest_revision: Option<Decimal> = sqlx::query_scalar(
+                    "SELECT max(revision) FROM rule_revision
+                      WHERE repository = $1 AND rule_id = $2",
+                )
+                .bind(repository.repository.as_str())
+                .bind(rule.id().as_str())
+                .fetch_one(&mut *transaction)
+                .await?;
+                let historical_digest: Option<Vec<u8>> = sqlx::query_scalar(
+                    "SELECT content_digest FROM rule_revision
+                      WHERE repository = $1 AND rule_id = $2 AND revision = $3",
+                )
+                .bind(repository.repository.as_str())
+                .bind(rule.id().as_str())
+                .bind(revision)
+                .fetch_optional(&mut *transaction)
+                .await?;
+                if historical_digest
+                    .as_ref()
+                    .is_some_and(|historical| historical != digest.as_bytes())
+                    || active
+                        .as_ref()
+                        .is_some_and(|(active_revision, active_digest)| {
+                            *active_revision == revision && active_digest != digest.as_bytes()
+                        })
+                {
+                    transaction.rollback().await?;
+                    return Ok(RuleReconciliationAdmission::ConflictingReuse);
+                }
+                if historical_digest.is_some() {
+                    if active
+                        .as_ref()
+                        .is_some_and(|(active_revision, _)| *active_revision == revision)
+                    {
+                        plans.push((
+                            repository.repository,
+                            rule,
+                            active.map(|(revision, _)| revision),
+                            RuleAdmission::Replayed,
+                            activation_tail,
+                        ));
+                        continue;
+                    }
+                    transaction.rollback().await?;
+                    return Ok(RuleReconciliationAdmission::Stale);
+                }
+                if active
+                    .as_ref()
+                    .is_some_and(|(active_revision, _)| revision < *active_revision)
+                    || latest_revision.is_some_and(|latest| revision < latest)
+                {
+                    transaction.rollback().await?;
+                    return Ok(RuleReconciliationAdmission::Stale);
+                }
+                let admission = if active.is_some() || latest_revision.is_some() {
+                    RuleAdmission::Updated
+                } else {
+                    RuleAdmission::Inserted
+                };
+                plans.push((
+                    repository.repository,
+                    rule,
+                    active.map(|(revision, _)| revision),
+                    admission,
+                    activation_tail,
+                ));
+            }
+        }
+        for (repository, rule, active_revision, admission, activation_tail) in &plans {
+            if *admission == RuleAdmission::Replayed {
+                continue;
+            }
+            insert_rule_revision(
+                &mut transaction,
+                repository,
+                rule,
+                activated_at,
+                *activation_tail,
+            )
+            .await?;
+            if let Some(active_revision) = active_revision {
+                retire_rule_revision(
+                    &mut transaction,
+                    repository.as_str(),
+                    rule.id().as_str(),
+                    *active_revision,
+                    activated_at,
+                )
+                .await?;
+                sqlx::query(
+                    "UPDATE rule
+                        SET active_revision = $3, content_digest = $4,
+                            updated_at = statement_timestamp()
+                      WHERE repository = $1 AND rule_id = $2",
+                )
+                .bind(repository.as_str())
+                .bind(rule.id().as_str())
+                .bind(Decimal::from(rule.version().get()))
+                .bind(rule.content_digest().as_bytes().as_slice())
+                .execute(&mut *transaction)
+                .await?;
+            } else {
+                sqlx::query(
+                    "INSERT INTO rule
+                        (repository, rule_id, active_revision, content_digest, updated_at)
+                     VALUES ($1, $2, $3, $4, statement_timestamp())",
+                )
+                .bind(repository.as_str())
+                .bind(rule.id().as_str())
+                .bind(Decimal::from(rule.version().get()))
+                .bind(rule.content_digest().as_bytes().as_slice())
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+        let mut deactivated = 0_u64;
+        for (repository, rule_id, active_revision) in active_rules {
+            if configured
+                .get(repository.as_str())
+                .is_some_and(|rule_ids| rule_ids.contains(rule_id.as_str()))
+            {
+                continue;
+            }
+            retire_rule_revision(
+                &mut transaction,
+                &repository,
+                &rule_id,
+                active_revision,
+                activated_at,
+            )
+            .await?;
+            sqlx::query("DELETE FROM rule WHERE repository = $1 AND rule_id = $2")
+                .bind(&repository)
+                .bind(&rule_id)
+                .execute(&mut *transaction)
+                .await?;
+            deactivated = deactivated
+                .checked_add(1)
+                .ok_or(StoreError::InvalidRuleFieldInventory)?;
+        }
+        transaction.commit().await?;
+        Ok(RuleReconciliationAdmission::Applied {
+            rules: plans
+                .into_iter()
+                .map(|(_, _, _, admission, _)| admission)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            deactivated,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct StoredPullRequestProjection {
+    pull_request_number: Decimal,
+    lifecycle: String,
+    head_sha: String,
+    head_repository: String,
+    head_branch: String,
+    base_branch: String,
+    title: String,
+    body: String,
+    draft: bool,
+    author: Option<String>,
+    observed_at: OffsetDateTime,
+}
+
+async fn stored_projections_match(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_state: &RepositoryState<'_>,
+    pull_request_states: &[PullRequestState<'_>],
+    comparison_baseline: &str,
+) -> Result<bool, StoreError> {
+    let repository: Option<(String, String, OffsetDateTime, bool)> = sqlx::query_as(
+        "SELECT default_branch, default_head_sha, observed_at,
+                comparison_baseline = $2::jsonb
+           FROM repository_state
+          WHERE repository = $1",
+    )
+    .bind(repository_state.repository.as_str())
+    .bind(comparison_baseline)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if repository.as_ref().is_none_or(
+        |(default_branch, default_head, observed_at, baseline_matches)| {
+            default_branch != repository_state.default_branch.as_str()
+                || default_head != repository_state.default_head.as_str()
+                || !baseline_matches
+                || postgres_timestamp_micros(*observed_at)
+                    != postgres_timestamp_micros(repository_state.observed_at)
+        },
+    ) {
+        return Ok(false);
+    }
+    let stored: Vec<StoredPullRequestProjection> = sqlx::query_as(
+        "SELECT pull_request_number, lifecycle, head_sha, head_repository,
+                head_branch, base_branch, title, body, draft, author, observed_at
+           FROM pr_state
+          WHERE repository = $1
+          ORDER BY pull_request_number",
+    )
+    .bind(repository_state.repository.as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut candidate = pull_request_states.iter().collect::<Vec<_>>();
+    candidate.sort_by_key(|state| state.number);
+    Ok(stored.len() == candidate.len()
+        && stored.iter().zip(candidate).all(|(stored, candidate)| {
+            stored.pull_request_number == Decimal::from(candidate.number.get())
+                && stored.lifecycle == candidate.lifecycle.storage()
+                && stored.head_sha == candidate.head.as_str()
+                && stored.head_repository == candidate.head_repository.as_str()
+                && stored.head_branch == candidate.head_branch.as_str()
+                && stored.base_branch == candidate.base_branch.as_str()
+                && stored.title == candidate.title.as_str()
+                && stored.body == candidate.body.as_str()
+                && stored.draft == candidate.draft
+                && stored.author.as_deref() == candidate.author.map(RepoWatchAuthorLogin::as_str)
+                && postgres_timestamp_micros(stored.observed_at)
+                    == postgres_timestamp_micros(candidate.observed_at)
+        }))
+}
+
+fn postgres_timestamp_micros(timestamp: OffsetDateTime) -> i128 {
+    const POSTGRES_EPOCH_UNIX_NANOS: i128 = 946_684_800_000_000_000;
+    (timestamp.unix_timestamp_nanos() - POSTGRES_EPOCH_UNIX_NANOS) / 1_000
+}
+
+async fn upsert_repository(
+    transaction: &mut Transaction<'_, Postgres>,
+    state: &RepositoryState<'_>,
+    comparison_baseline: &str,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO repository_state
+            (repository, default_branch, default_head_sha, observed_at,
+             comparison_baseline, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, statement_timestamp())
+         ON CONFLICT (repository) DO UPDATE
+         SET default_branch = EXCLUDED.default_branch,
+             default_head_sha = EXCLUDED.default_head_sha,
+             observed_at = EXCLUDED.observed_at,
+             comparison_baseline = EXCLUDED.comparison_baseline,
+             updated_at = statement_timestamp()",
+    )
+    .bind(state.repository.as_str())
+    .bind(state.default_branch.as_str())
+    .bind(state.default_head.as_str())
+    .bind(state.observed_at)
+    .bind(comparison_baseline)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn replace_pull_requests(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    states: &[PullRequestState<'_>],
+) -> Result<(), StoreError> {
+    let retained_numbers = states
+        .iter()
+        .map(|state| Decimal::from(state.number.get()))
+        .collect::<Vec<_>>();
+    sqlx::query(
+        "DELETE FROM pr_state
+          WHERE repository = $1
+            AND NOT (pull_request_number = ANY($2::numeric[]))",
+    )
+    .bind(repository.as_str())
+    .bind(&retained_numbers)
+    .execute(&mut **transaction)
+    .await?;
+    for state in states {
+        sqlx::query(
+            "INSERT INTO pr_state
+                (repository, pull_request_number, lifecycle, head_sha,
+                 head_repository, head_branch, base_branch, title, body, draft,
+                 author, observed_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                     statement_timestamp())
+             ON CONFLICT (repository, pull_request_number) DO UPDATE
+             SET lifecycle = EXCLUDED.lifecycle,
+                 head_sha = EXCLUDED.head_sha,
+                 head_repository = EXCLUDED.head_repository,
+                 head_branch = EXCLUDED.head_branch,
+                 base_branch = EXCLUDED.base_branch,
+                 title = EXCLUDED.title,
+                 body = EXCLUDED.body,
+                 draft = EXCLUDED.draft,
+                 author = EXCLUDED.author,
+                 observed_at = EXCLUDED.observed_at,
+                 updated_at = statement_timestamp()",
+        )
+        .bind(state.repository.as_str())
+        .bind(Decimal::from(state.number.get()))
+        .bind(state.lifecycle.storage())
+        .bind(state.head.as_str())
+        .bind(state.head_repository.as_str())
+        .bind(state.head_branch.as_str())
+        .bind(state.base_branch.as_str())
+        .bind(state.title.as_str())
+        .bind(state.body.as_str())
+        .bind(state.draft)
+        .bind(state.author.map(RepoWatchAuthorLogin::as_str))
+        .bind(state.observed_at)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+fn frontier_candidate_identity(
+    repository_state: &RepositoryState<'_>,
+    pull_request_states: &[PullRequestState<'_>],
+    comparison_baseline: &[u8],
+    frontier: &[RepoWatchEventIdentityFrontierEntryV1],
+    events: &[EventCandidate<'_>],
+) -> Vec<u8> {
+    let mut identity = b"signalbox-repo-watch-frontier-commit-v1".to_vec();
+    push_identity_field(
+        &mut identity,
+        repository_state.repository.as_str().as_bytes(),
+    );
+    push_identity_field(
+        &mut identity,
+        repository_state.default_branch.as_str().as_bytes(),
+    );
+    push_identity_field(
+        &mut identity,
+        repository_state.default_head.as_str().as_bytes(),
+    );
+    identity
+        .extend_from_slice(&postgres_timestamp_micros(repository_state.observed_at).to_be_bytes());
+    push_identity_field(&mut identity, comparison_baseline);
+    let mut pull_request_states = pull_request_states.iter().collect::<Vec<_>>();
+    pull_request_states.sort_by_key(|state| state.number);
+    for state in pull_request_states {
+        identity.push(b'P');
+        identity.extend_from_slice(&state.number.get().to_be_bytes());
+        push_identity_field(&mut identity, state.lifecycle.storage().as_bytes());
+        push_identity_field(&mut identity, state.head.as_str().as_bytes());
+        push_identity_field(&mut identity, state.head_repository.as_str().as_bytes());
+        push_identity_field(&mut identity, state.head_branch.as_str().as_bytes());
+        push_identity_field(&mut identity, state.base_branch.as_str().as_bytes());
+        push_identity_field(&mut identity, state.title.as_str().as_bytes());
+        push_identity_field(&mut identity, state.body.as_str().as_bytes());
+        identity.push(u8::from(state.draft));
+        match state.author {
+            Some(author) => {
+                identity.push(1);
+                push_identity_field(&mut identity, author.as_str().as_bytes());
+            }
+            None => identity.push(0),
+        }
+        identity.extend_from_slice(&postgres_timestamp_micros(state.observed_at).to_be_bytes());
+    }
+    for entry in frontier {
+        identity.push(b'F');
+        identity.extend_from_slice(entry.stream_identity().as_slice());
+        identity.extend_from_slice(&entry.sequence().get().to_be_bytes());
+        match entry.pull_request_number() {
+            Some(number) => {
+                identity.push(1);
+                identity.extend_from_slice(&number.get().to_be_bytes());
+            }
+            None => identity.push(0),
+        }
+    }
+    identity.push(b'E');
+    for candidate in events {
+        identity.extend_from_slice(candidate.content_identity.as_bytes());
+    }
+    identity
+}
+
+fn push_identity_field(identity: &mut Vec<u8>, field: &[u8]) {
+    identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
+    identity.extend_from_slice(field);
+}
+
+fn frontier_release_identity(stream_identity: &[u8; 32]) -> Vec<u8> {
+    let mut identity = b"signalbox-repo-watch-frontier-release-v1".to_vec();
+    identity.extend_from_slice(stream_identity);
+    identity
+}
+
+async fn append_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    candidate: &EventCandidate<'_>,
+    producer: EventProducer,
+    repository_event_ordinal: u64,
+    frontier_generation: u64,
+    event_ordinal: u64,
+    recorded_at: OffsetDateTime,
+) -> Result<Option<EventAdmission>, StoreError> {
+    let event = candidate.event;
+    let (target_kind, pull_request_number) = match event.target() {
+        RepoWatchEventTarget::PullRequest(context) => {
+            ("pull_request", Some(Decimal::from(context.number().get())))
+        }
+        RepoWatchEventTarget::Branch => ("branch", None),
+    };
+    let payload = canonical_json(normalized_event_payload(event))
+        .to_string()
+        .into_bytes();
+    let inserted = sqlx::query(
+        "INSERT INTO gh_event
+            (event_id, content_identity, repository, event_kind, target_kind,
+             pull_request_number, normalized_payload, producer,
+             repository_event_ordinal, frontier_generation, event_ordinal, recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(event.id().into_uuid())
+    .bind(candidate.content_identity.as_bytes().as_slice())
+    .bind(event.repository().as_str())
+    .bind(event_kind_storage(event.kind().name()))
+    .bind(target_kind)
+    .bind(pull_request_number)
+    .bind(payload.as_slice())
+    .bind(producer.storage())
+    .bind(Decimal::from(repository_event_ordinal))
+    .bind(Decimal::from(frontier_generation))
+    .bind(Decimal::from(event_ordinal))
+    .bind(recorded_at)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected()
+        == 1;
+    if inserted {
+        return Ok(Some(EventAdmission::Inserted));
+    }
+    let exact: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM gh_event
+             WHERE content_identity = $2 AND normalized_payload = $3)
+            AND NOT EXISTS (
+                SELECT 1 FROM gh_event
+                 WHERE event_id = $1
+                   AND (content_identity <> $2 OR normalized_payload <> $3))",
+    )
+    .bind(event.id().into_uuid())
+    .bind(candidate.content_identity.as_bytes().as_slice())
+    .bind(payload.as_slice())
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(exact.then_some(EventAdmission::Replayed))
+}
+
+async fn insert_rule_revision(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    rule: &RepoWatchRule,
+    activated_at: OffsetDateTime,
+    activated_after_event_ordinal: Decimal,
+) -> Result<(), StoreError> {
+    let revision = Decimal::from(rule.version().get());
+    let digest = rule.content_digest();
+    sqlx::query(
+        "INSERT INTO rule_revision
+            (repository, rule_id, revision, content_digest, activated_at,
+             activated_after_event_ordinal)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(repository.as_str())
+    .bind(rule.id().as_str())
+    .bind(revision)
+    .bind(digest.as_bytes().as_slice())
+    .bind(activated_at)
+    .bind(activated_after_event_ordinal)
+    .execute(&mut **transaction)
+    .await?;
+    for (index, (field, field_digest)) in rule.identity_field_digests().into_iter().enumerate() {
+        let ordinal = i16::try_from(index).map_err(|_| StoreError::InvalidRuleFieldInventory)?;
+        sqlx::query(
+            "INSERT INTO rule_field_fingerprint
+                (repository, rule_id, revision, field_ordinal, field_name, field_digest)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(repository.as_str())
+        .bind(rule.id().as_str())
+        .bind(revision)
+        .bind(ordinal)
+        .bind(field.configuration_path())
+        .bind(field_digest.as_bytes().as_slice())
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn retire_rule_revision(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &str,
+    rule_id: &str,
+    revision: Decimal,
+    retired_at: OffsetDateTime,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "UPDATE rule_revision
+            SET retired_at = GREATEST(activated_at, $4)
+          WHERE repository = $1 AND rule_id = $2 AND revision = $3",
+    )
+    .bind(repository)
+    .bind(rule_id)
+    .bind(revision)
+    .bind(retired_at)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+        Value::Object(values) => {
+            let mut entries = values.into_iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        scalar => scalar,
+    }
+}
+
+fn normalized_event_payload(event: &RepoWatchEvent) -> Value {
+    let target = match event.target() {
+        RepoWatchEventTarget::PullRequest(context) => json!({
+            "kind": "pull_request",
+            "number": context.number().get(),
+            "head_sha": context.head_sha().as_str(),
+            "head_repository": context.head_repository().as_str(),
+            "base_branch": context.base_branch().as_str(),
+            "head_branch": context.head_branch().as_str(),
+            "title": context.title().as_str(),
+            "body": context.body().as_str(),
+            "labels": context.labels().iter().map(|label| label.as_str()).collect::<Vec<_>>(),
+            "draft": context.draft(),
+            "author": context.author().map(RepoWatchAuthorLogin::as_str),
+        }),
+        RepoWatchEventTarget::Branch => json!({ "kind": "branch" }),
+    };
+    let kind = match event.kind() {
+        RepoWatchEventKindV1::PullRequestOpened => json!({ "name": "pull_request_opened" }),
+        RepoWatchEventKindV1::PullRequestClosed => json!({ "name": "pull_request_closed" }),
+        RepoWatchEventKindV1::PullRequestMerged => json!({ "name": "pull_request_merged" }),
+        RepoWatchEventKindV1::HeadChanged { previous, current } => json!({
+            "name": "head_changed",
+            "previous": previous.as_str(),
+            "current": current.as_str(),
+        }),
+        RepoWatchEventKindV1::MergeableStateChanged { current } => json!({
+            "name": "mergeable_state_changed",
+            "current": mergeable_state_storage(*current),
+        }),
+        RepoWatchEventKindV1::ChecksCompleted { outcome } => json!({
+            "name": "checks_completed",
+            "outcome": checks_outcome_storage(*outcome),
+        }),
+        RepoWatchEventKindV1::CheckRunCompleted { name, conclusion } => json!({
+            "name": "check_run_completed",
+            "check_run": name.as_str(),
+            "conclusion": check_conclusion_storage(*conclusion),
+        }),
+        RepoWatchEventKindV1::BranchWorkflowRunCompleted {
+            branch,
+            workflow,
+            conclusion,
+        } => json!({
+            "name": "branch_workflow_run_completed",
+            "branch": branch.as_str(),
+            "workflow": workflow.as_str(),
+            "conclusion": check_conclusion_storage(*conclusion),
+        }),
+        RepoWatchEventKindV1::ReviewSubmitted {
+            reviewer,
+            state,
+            commit,
+        } => json!({
+            "name": "review_submitted",
+            "reviewer": reviewer.as_str(),
+            "state": review_state_storage(*state),
+            "commit": commit.as_str(),
+        }),
+        RepoWatchEventKindV1::ThreadOpened { thread } => json!({
+            "name": "thread_opened",
+            "thread": thread.as_str(),
+        }),
+        RepoWatchEventKindV1::ThreadResolved { thread } => json!({
+            "name": "thread_resolved",
+            "thread": thread.as_str(),
+        }),
+        RepoWatchEventKindV1::Labeled { label } => json!({
+            "name": "labeled",
+            "label": label.as_str(),
+        }),
+        RepoWatchEventKindV1::Unlabeled { label } => json!({
+            "name": "unlabeled",
+            "label": label.as_str(),
+        }),
+        RepoWatchEventKindV1::BaseAdvanced { branch } => json!({
+            "name": "base_advanced",
+            "branch": branch.as_str(),
+        }),
+        RepoWatchEventKindV1::ReactionChanged {
+            subject,
+            reactor,
+            content,
+            change,
+        } => json!({
+            "name": "reaction_changed",
+            "subject": reaction_subject_payload(*subject),
+            "reactor": reactor.as_str(),
+            "content": content.as_str(),
+            "change": reaction_change_storage(*change),
+        }),
+    };
+    json!({
+        "repository": event.repository().as_str(),
+        "target": target,
+        "kind": kind,
+    })
+}
+
+const fn mergeable_state_storage(value: MergeableState) -> &'static str {
+    match value {
+        MergeableState::Mergeable => "mergeable",
+        MergeableState::Conflicting => "conflicting",
+        MergeableState::Unknown => "unknown",
+    }
+}
+
+const fn checks_outcome_storage(value: ChecksOutcome) -> &'static str {
+    match value {
+        ChecksOutcome::Success => "success",
+        ChecksOutcome::Failure => "failure",
+    }
+}
+
+const fn check_conclusion_storage(value: CheckConclusion) -> &'static str {
+    match value {
+        CheckConclusion::Success => "success",
+        CheckConclusion::Failure => "failure",
+        CheckConclusion::Neutral => "neutral",
+        CheckConclusion::Cancelled => "cancelled",
+        CheckConclusion::Skipped => "skipped",
+        CheckConclusion::TimedOut => "timed_out",
+        CheckConclusion::ActionRequired => "action_required",
+        CheckConclusion::Stale => "stale",
+        CheckConclusion::StartupFailure => "startup_failure",
+    }
+}
+
+const fn review_state_storage(value: ReviewState) -> &'static str {
+    match value {
+        ReviewState::Approved => "approved",
+        ReviewState::ChangesRequested => "changes_requested",
+        ReviewState::Commented => "commented",
+    }
+}
+
+fn reaction_subject_payload(value: ReactionSubject) -> Value {
+    match value {
+        ReactionSubject::PullRequestBody => json!({ "kind": "pull_request_body" }),
+        ReactionSubject::IssueComment { id } => {
+            json!({ "kind": "issue_comment", "id": id.get() })
+        }
+        ReactionSubject::ReviewComment { id } => {
+            json!({ "kind": "review_comment", "id": id.get() })
+        }
+    }
+}
+
+const fn reaction_change_storage(value: ReactionChange) -> &'static str {
+    match value {
+        ReactionChange::Added => "added",
+        ReactionChange::Removed => "removed",
+    }
+}
+
+/// Returns configured rules whose checked matcher accepts one normalized fact.
+pub fn matching_rules<'a>(
+    rules: &'a [RepoWatchRule],
+    event: &RepoWatchEvent,
+) -> Vec<&'a RepoWatchRule> {
+    rules
+        .iter()
+        .filter(|rule| rule.matcher().matches(event))
+        .collect()
+}
+
+const fn event_kind_storage(kind: RepoWatchEventKindNameV1) -> &'static str {
+    match kind {
+        RepoWatchEventKindNameV1::PullRequestOpened => "pull_request_opened",
+        RepoWatchEventKindNameV1::PullRequestClosed => "pull_request_closed",
+        RepoWatchEventKindNameV1::PullRequestMerged => "pull_request_merged",
+        RepoWatchEventKindNameV1::HeadChanged => "head_changed",
+        RepoWatchEventKindNameV1::MergeableStateChanged => "mergeable_state_changed",
+        RepoWatchEventKindNameV1::ChecksCompleted => "checks_completed",
+        RepoWatchEventKindNameV1::CheckRunCompleted => "check_run_completed",
+        RepoWatchEventKindNameV1::BranchWorkflowRunCompleted => "branch_workflow_run_completed",
+        RepoWatchEventKindNameV1::ReviewSubmitted => "review_submitted",
+        RepoWatchEventKindNameV1::ThreadOpened => "thread_opened",
+        RepoWatchEventKindNameV1::ThreadResolved => "thread_resolved",
+        RepoWatchEventKindNameV1::Labeled => "labeled",
+        RepoWatchEventKindNameV1::Unlabeled => "unlabeled",
+        RepoWatchEventKindNameV1::BaseAdvanced => "base_advanced",
+        RepoWatchEventKindNameV1::ReactionChanged => "reaction_changed",
+    }
 }
 
 fn validate_webhook(delivery: &WebhookDelivery<'_>) -> Result<(), StoreError> {
@@ -375,7 +1605,8 @@ fn validate_webhook(delivery: &WebhookDelivery<'_>) -> Result<(), StoreError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StoreError, WebhookDelivery, validate_webhook};
+    use super::{StoreError, WebhookDelivery, canonical_json, validate_webhook};
+    use serde_json::{Map, Value};
     use signalbox_ownership_seam::{OffsetDateTime, RepositorySlug};
     use uuid::Uuid;
 
@@ -398,5 +1629,20 @@ mod tests {
             validate_webhook(&input),
             Err(StoreError::InvalidWebhookExpiry)
         ));
+    }
+
+    #[test]
+    fn normalized_payload_object_keys_are_canonical_at_every_depth() {
+        let mut nested = Map::new();
+        nested.insert(String::from("z"), Value::from(1));
+        nested.insert(String::from("a"), Value::from(2));
+        let mut payload = Map::new();
+        payload.insert(String::from("target"), Value::Object(nested));
+        payload.insert(String::from("repository"), Value::from("owner/repository"));
+
+        assert_eq!(
+            canonical_json(Value::Object(payload)).to_string(),
+            r#"{"repository":"owner/repository","target":{"a":2,"z":1}}"#
+        );
     }
 }
