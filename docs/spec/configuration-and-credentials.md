@@ -151,17 +151,9 @@ ordinary single-account deployment and needs no trigger keys. Selection happens
 at model-call preparation, never at session creation: it prefers the sticky
 member while that member remains admissible and otherwise walks members in
 priority order, skipping excluded ones and breaking ties by the snapshot's rule.
-Trigger actions and the exclusions they create are durable. How an attempt ends
-when a pool admits no member is owned by
+Trigger actions and the exclusions they create are durable. Retry-before-action
+ordering and every availability ending are owned by
 [credential availability](credential-availability.md).
-
-For rate-limit and overload failures, the credential-availability machine first
-admits a same-member retry while that member remains admitted and below the
-configured attempt bound; after that path is unavailable it applies the pinned
-trigger action once: `switch_now` alone creates a same-turn successor on another
-member, `stay` terminalizes, and the other actions record their durable effect
-and terminalize the current turn. Provider-internal failures use the same
-retry-first rule but have no trigger key and terminalize at the bound.
 
 The session-template catalog is read after the model catalog. Each template
 binds a name and version to a model or alias, a system prompt, and a
