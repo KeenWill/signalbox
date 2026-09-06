@@ -14,7 +14,6 @@ CREATE TABLE frontier (
     pull_request_number numeric(20,0),
     updated_at timestamptz NOT NULL,
     PRIMARY KEY (repository, stream_identity),
-    FOREIGN KEY (repository) REFERENCES repository_state(repository) ON DELETE CASCADE,
     CHECK (octet_length(stream_identity) = 32),
     CHECK (sequence BETWEEN 1 AND 18446744073709551615),
     CHECK (pull_request_number IS NULL OR pull_request_number BETWEEN 1 AND 18446744073709551615)
