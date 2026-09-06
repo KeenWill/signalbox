@@ -48,8 +48,7 @@ CREATE TABLE gh_event (
 );
 
 -- growth: one row per configured rule revision.
--- retention: the highest revision of each retired identity is permanent lineage; delete only a
--- lower inactive revision once no retained dispatch names it.
+-- retention: delete an inactive revision once no retained dispatch names it.
 CREATE TABLE rule_revision (
     repository text NOT NULL,
     rule_id text NOT NULL,
@@ -65,7 +64,7 @@ CREATE TABLE rule_revision (
 );
 
 -- growth: one row per identity-relevant field of a configured rule revision.
--- retention: delete with a releasable lower inactive revision once no retained dispatch names it.
+-- retention: delete with the inactive revision once no retained dispatch names it.
 CREATE TABLE rule_field_fingerprint (
     repository text NOT NULL,
     rule_id text NOT NULL,
