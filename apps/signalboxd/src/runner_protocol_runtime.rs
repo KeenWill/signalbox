@@ -2911,7 +2911,7 @@ mod tests {
                     RunnerId::from_uuid(enrolled.runner_id.into_uuid()),
                     RunnerAuthenticationId::from_uuid(enrolled.authentication_id.into_uuid()),
                 ),
-                RunnerRegistrationRevision::first(),
+                RunnerRegistrationRevision::MIN,
                 expected.clone(),
             )
             .await

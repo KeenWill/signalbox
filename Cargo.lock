@@ -4694,6 +4694,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-newtype"
+version = "0.0.0"
+
+[[package]]
 name = "signalbox-ownership-seam"
 version = "0.0.0"
 dependencies = [
@@ -4719,6 +4723,7 @@ dependencies = [
  "signalbox-derive",
  "signalbox-domain",
  "signalbox-expect-table",
+ "signalbox-newtype",
  "signalbox-tools-plan",
  "sqlx",
  "tempfile",
@@ -4951,6 +4956,7 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
+ "signalbox-newtype",
  "signalbox-tool-contract",
  "uuid",
 ]
