@@ -66,7 +66,10 @@ enum BlockBuilder {
         data: String,
     },
     Compaction {
-        delta: Option<(crate::wire::WireCompactionContent, Option<String>)>,
+        delta: Option<(
+            crate::wire::WireCompactionField,
+            crate::wire::WireCompactionField,
+        )>,
     },
     ToolUse {
         id: String,
@@ -733,20 +736,20 @@ impl StreamDecoder {
                     ));
                 };
                 let content = match content {
-                    crate::wire::WireCompactionContent::Missing => {
+                    crate::wire::WireCompactionField::Missing => {
                         return self.violation(format!(
                             "compaction block {} closed without delta content",
                             event.index
                         ));
                     }
-                    crate::wire::WireCompactionContent::Null => None,
-                    crate::wire::WireCompactionContent::Text(content) if content.is_empty() => {
+                    crate::wire::WireCompactionField::Null => None,
+                    crate::wire::WireCompactionField::Text(content) if content.is_empty() => {
                         return self.violation(format!(
                             "compaction block {} closed with empty content",
                             event.index
                         ));
                     }
-                    crate::wire::WireCompactionContent::Text(content) => Some(content),
+                    crate::wire::WireCompactionField::Text(content) => Some(content),
                 };
                 let Ok(content_json) = serde_json::to_string(&content) else {
                     return self.violation(format!(
@@ -754,14 +757,27 @@ impl StreamDecoder {
                         event.index
                     ));
                 };
-                let Ok(encrypted_content_json) = serde_json::to_string(&encrypted_content) else {
-                    return self.violation(format!(
-                        "compaction block {} encrypted content cannot be encoded",
-                        event.index
-                    ));
+                let encrypted_content_json = match encrypted_content {
+                    crate::wire::WireCompactionField::Missing => None,
+                    crate::wire::WireCompactionField::Null => Some("null".to_string()),
+                    crate::wire::WireCompactionField::Text(encrypted_content) => {
+                        let Ok(encrypted_content) = serde_json::to_string(&encrypted_content)
+                        else {
+                            return self.violation(format!(
+                                "compaction block {} encrypted content cannot be encoded",
+                                event.index
+                            ));
+                        };
+                        Some(encrypted_content)
+                    }
                 };
-                let block_json = format!(
-                    r#"{{"content":{content_json},"encrypted_content":{encrypted_content_json},"type":"compaction"}}"#
+                let block_json = encrypted_content_json.map_or_else(
+                    || format!(r#"{{"content":{content_json},"type":"compaction"}}"#),
+                    |encrypted_content_json| {
+                        format!(
+                            r#"{{"content":{content_json},"encrypted_content":{encrypted_content_json},"type":"compaction"}}"#
+                        )
+                    },
                 );
                 AssistantPart::ProviderCompaction { block_json }
             }
@@ -1344,6 +1360,52 @@ mod tests {
             !block_json.contains(r"\u0073"),
             "the streamed fields are structurally reconstructed before durable replay"
         );
+    }
+
+    #[test]
+    fn streamed_compaction_preserves_encrypted_content_presence() {
+        for (delta, expected) in [
+            (
+                b"event: content_block_delta\n\
+                  data: {\"type\":\"content_block_delta\",\"index\":0,\
+                  \"delta\":{\"type\":\"compaction_delta\",\"content\":\"summary\"}}\n\n"
+                    .as_slice(),
+                None,
+            ),
+            (
+                b"event: content_block_delta\n\
+                  data: {\"type\":\"content_block_delta\",\"index\":0,\
+                  \"delta\":{\"type\":\"compaction_delta\",\"content\":\"summary\",\"encrypted_content\":null}}\n\n"
+                    .as_slice(),
+                Some(serde_json::Value::Null),
+            ),
+        ] {
+            let (terminal, _) = drive(&[
+                message_start(),
+                b"event: content_block_start\n\
+                  data: {\"type\":\"content_block_start\",\"index\":0,\
+                  \"content_block\":{\"type\":\"compaction\",\"content\":null}}\n\n",
+                delta,
+                b"event: content_block_stop\n\
+                  data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                b"event: message_delta\n\
+                  data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+                  \"usage\":{\"output_tokens\":7,\"iterations\":[{\"input_tokens\":25,\"output_tokens\":7}]}}\n\n",
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ]);
+            let Some(TerminalEvidence::CompletedWithProviderCompaction { completion, .. }) =
+                terminal
+            else {
+                panic!("compaction stream gated on message_stop must complete");
+            };
+            let [AssistantPart::ProviderCompaction { block_json }] = completion.content.as_slice()
+            else {
+                panic!("compaction stream must retain exactly one opaque block");
+            };
+            let block = serde_json::from_str::<serde_json::Value>(block_json)
+                .expect("assembled compaction block is valid JSON");
+            assert_eq!(block.get("encrypted_content"), expected.as_ref());
+        }
     }
 
     #[test]

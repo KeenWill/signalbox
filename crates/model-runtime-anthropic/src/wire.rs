@@ -409,8 +409,9 @@ pub(crate) enum WireDelta {
     #[serde(rename = "compaction_delta")]
     Compaction {
         #[serde(default)]
-        content: WireCompactionContent,
-        encrypted_content: Option<String>,
+        content: WireCompactionField,
+        #[serde(default)]
+        encrypted_content: WireCompactionField,
     },
     /// A delta type this adapter does not recognize (the provider documents
     /// that new delta types may be added); tolerated and ignored.
@@ -418,17 +419,16 @@ pub(crate) enum WireDelta {
     Unrecognized,
 }
 
-/// The required compaction-delta content field, preserving the distinction
-/// between an explicit JSON null and a missing field.
+/// One compaction-delta field, preserving explicit JSON null versus absence.
 #[derive(Debug, Default)]
-pub(crate) enum WireCompactionContent {
+pub(crate) enum WireCompactionField {
     #[default]
     Missing,
     Null,
     Text(String),
 }
 
-impl<'de> Deserialize<'de> for WireCompactionContent {
+impl<'de> Deserialize<'de> for WireCompactionField {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -436,31 +436,31 @@ impl<'de> Deserialize<'de> for WireCompactionContent {
         struct Visitor;
 
         impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = WireCompactionContent;
+            type Value = WireCompactionField;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a string or null compaction content value")
+                formatter.write_str("a string or null compaction field value")
             }
 
             fn visit_none<E>(self) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
             {
-                Ok(WireCompactionContent::Null)
+                Ok(WireCompactionField::Null)
             }
 
             fn visit_unit<E>(self) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
             {
-                Ok(WireCompactionContent::Null)
+                Ok(WireCompactionField::Null)
             }
 
             fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
             where
                 D: Deserializer<'de>,
             {
-                String::deserialize(deserializer).map(WireCompactionContent::Text)
+                String::deserialize(deserializer).map(WireCompactionField::Text)
             }
         }
 
