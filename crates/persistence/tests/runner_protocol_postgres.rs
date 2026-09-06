@@ -5771,6 +5771,20 @@ async fn s30_current_registration_head_rejects_truncate() -> Result<(), Box<dyn 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn physical_attempt_lease_binding_rejects_truncate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let truncated = sqlx::query("TRUNCATE runner_physical_attempt_lease_binding")
+        .execute(&pool)
+        .await
+        .expect_err("attempt-to-lease lineage cannot be truncated");
+
+    assert_check_violation(truncated);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s30_enrollment_classes_reject_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, _) = stored_pin_fixture(&pool).await?;
