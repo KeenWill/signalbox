@@ -20,22 +20,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for search::SearchProjectionCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for search::SearchProjectionCorruption {}
 impl<T> parse_display::IntoResult<T> for search::SearchProjectionCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for search::SearchProjectionCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for search::SearchProjectionCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -47,26 +34,6 @@ impl<L> layered::LayerExt<L> for search::SearchProjectionCorruption {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for search::SearchProjectionCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for search::SearchProjectionCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for search::SearchProjectionCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for search::SearchProjectionCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -84,16 +51,9 @@ pub enum SearchRepositoryError {
     Corruption(search::SearchProjectionCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for search::SearchRepositoryError {}
 impl<T> parse_display::IntoResult<T> for search::SearchRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for search::SearchRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for search::SearchRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -105,26 +65,6 @@ impl<L> layered::LayerExt<L> for search::SearchRepositoryError {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for search::SearchRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for search::SearchRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for search::SearchRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for search::SearchRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -151,22 +91,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for search::SearchRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for search::SearchRepository {}
 impl<T> parse_display::IntoResult<T> for search::SearchRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for search::SearchRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for search::SearchRepository {
     fn into_request(self) -> request::Request<T>;
@@ -179,50 +106,33 @@ impl<L> layered::LayerExt<L> for search::SearchRepository {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for search::SearchRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for search::SearchRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for search::SearchRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl search::SearchRepository {
     #[must_use]
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn search(
         &self,
-        query: search::SearchQuery,
-    ) -> result::Result<search::SearchPage, search::SearchRepositoryError>;
+        query: signalbox_application::SearchQuery,
+    ) -> result::Result<signalbox_application::SearchPage, search::SearchRepositoryError>;
     pub async fn publish(
         &self,
-        projection: search::SearchArtifactProjection,
+        projection: signalbox_application::SearchArtifactProjection,
     ) -> result::Result<(), search::SearchRepositoryError>;
 }
-impl search::SearchReader for search::SearchRepository {
+impl signalbox_application::SearchReader for search::SearchRepository {
     type Error = search::SearchRepositoryError;
     async fn search(
         &self,
-        query: search::SearchQuery,
-    ) -> result::Result<search::SearchPage, <Self as search::SearchReader>::Error>;
+        query: signalbox_application::SearchQuery,
+    ) -> result::Result<
+        signalbox_application::SearchPage,
+        <Self as signalbox_application::SearchReader>::Error,
+    >;
 }
-impl search::SearchProjectionWriter for search::SearchRepository {
+impl signalbox_application::SearchProjectionWriter for search::SearchRepository {
     type Error = search::SearchRepositoryError;
     async fn publish(
         &self,
-        projection: search::SearchArtifactProjection,
-    ) -> result::Result<(), <Self as search::SearchProjectionWriter>::Error>;
+        projection: signalbox_application::SearchArtifactProjection,
+    ) -> result::Result<(), <Self as signalbox_application::SearchProjectionWriter>::Error>;
 }
 ```

@@ -27,12 +27,6 @@ pub enum CodexCliVersionProbeError {
     VersionMismatch,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for CodexCliVersionProbeError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for CodexCliVersionProbeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -58,19 +52,24 @@ impl fmt::Debug for CodexCliRuntime {
 impl CodexCliRuntime {
     pub fn new(config: CodexCliConfig) -> result::Result<Self, CodexCliConstructionError>;
 }
-impl<C: clone::Clone + marker::Send + marker::Sync> runtime::ModelRuntime<C> for CodexCliRuntime {
+impl<C: clone::Clone + marker::Send + marker::Sync> signalbox_model_runtime::ModelRuntime<C>
+    for CodexCliRuntime
+{
     type Prepared = CodexCliPreparedRequest<C>;
     async fn prepare(
         &self,
-        operation: operation::ModelOperation<C>,
-        _cancellation: runtime::CancellationSignal,
-    ) -> preparation::PreparationOutcome<C, <Self as runtime::ModelRuntime>::Prepared>;
+        operation: signalbox_model_runtime::ModelOperation<C>,
+        _cancellation: signalbox_model_runtime::CancellationSignal,
+    ) -> signalbox_model_runtime::PreparationOutcome<
+        C,
+        <Self as signalbox_model_runtime::ModelRuntime>::Prepared,
+    >;
     async fn execute(
         &self,
-        prepared: <Self as runtime::ModelRuntime>::Prepared,
-        sink: &mut (dyn observation::ObservationSink<C> + marker::Send),
-        cancellation: runtime::CancellationSignal,
-    ) -> evidence::TerminalReport<C>;
+        prepared: <Self as signalbox_model_runtime::ModelRuntime>::Prepared,
+        sink: &mut (dyn signalbox_model_runtime::ObservationSink<C> + marker::Send),
+        cancellation: signalbox_model_runtime::CancellationSignal,
+    ) -> signalbox_model_runtime::TerminalReport<C>;
 }
 ```
 
@@ -100,12 +99,6 @@ pub enum CodexCliConstructionError {
     InvalidModelContextWindowOverride,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for CodexCliConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for CodexCliConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -116,6 +109,6 @@ impl error::Error for CodexCliConstructionError {}
 
 ```rust
 pub fn validate_model_settings(
-    settings: &settings::ModelSettings,
-) -> result::Result<(), preparation::PreparationFailure>;
+    settings: &signalbox_model_runtime::ModelSettings,
+) -> result::Result<(), signalbox_model_runtime::PreparationFailure>;
 ```

@@ -16,22 +16,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for lifecycle_metrics::LifecycleMetricsCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for lifecycle_metrics::LifecycleMetricsCorruption {}
 impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleMetricsCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for lifecycle_metrics::LifecycleMetricsCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleMetricsCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -43,26 +30,6 @@ impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleMetricsCorruption {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for lifecycle_metrics::LifecycleMetricsCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for lifecycle_metrics::LifecycleMetricsCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for lifecycle_metrics::LifecycleMetricsCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for lifecycle_metrics::LifecycleMetricsCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -80,16 +47,9 @@ pub enum LifecycleMetricsError {
     Corruption(lifecycle_metrics::LifecycleMetricsCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for lifecycle_metrics::LifecycleMetricsError {}
 impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleMetricsError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for lifecycle_metrics::LifecycleMetricsError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleMetricsError {
     fn into_request(self) -> request::Request<T>;
@@ -101,26 +61,6 @@ impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleMetricsError {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for lifecycle_metrics::LifecycleMetricsError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for lifecycle_metrics::LifecycleMetricsError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for lifecycle_metrics::LifecycleMetricsError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for lifecycle_metrics::LifecycleMetricsError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -149,22 +89,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for lifecycle_metrics::LifecycleRate
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for lifecycle_metrics::LifecycleRate {}
 impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleRate {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for lifecycle_metrics::LifecycleRate
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleRate {
     fn into_request(self) -> request::Request<T>;
@@ -176,26 +103,6 @@ impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleRate {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for lifecycle_metrics::LifecycleRate
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for lifecycle_metrics::LifecycleRate
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for lifecycle_metrics::LifecycleRate
-where
-    T: ?marker::Sized,
-{
 }
 impl lifecycle_metrics::LifecycleRate {
     pub const fn numerator(self) -> u64;
@@ -217,22 +124,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for lifecycle_metrics::LifecycleWeeklyMetrics
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for lifecycle_metrics::LifecycleWeeklyMetrics {}
 impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleWeeklyMetrics {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for lifecycle_metrics::LifecycleWeeklyMetrics
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleWeeklyMetrics {
     fn into_request(self) -> request::Request<T>;
@@ -244,26 +138,6 @@ impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleWeeklyMetrics {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for lifecycle_metrics::LifecycleWeeklyMetrics
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for lifecycle_metrics::LifecycleWeeklyMetrics
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for lifecycle_metrics::LifecycleWeeklyMetrics
-where
-    T: ?marker::Sized,
-{
 }
 impl lifecycle_metrics::LifecycleWeeklyMetrics {
     pub const fn week_start(&self) -> primitive_date_time::PrimitiveDateTime;
@@ -298,22 +172,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for lifecycle_metrics::LifecycleNonTerminalState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for lifecycle_metrics::LifecycleNonTerminalState {}
 impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleNonTerminalState {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for lifecycle_metrics::LifecycleNonTerminalState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleNonTerminalState {
     fn into_request(self) -> request::Request<T>;
@@ -325,26 +186,6 @@ impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleNonTerminalState {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for lifecycle_metrics::LifecycleNonTerminalState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for lifecycle_metrics::LifecycleNonTerminalState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for lifecycle_metrics::LifecycleNonTerminalState
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -359,22 +200,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for lifecycle_metrics::LifecycleDeadlineViolation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for lifecycle_metrics::LifecycleDeadlineViolation {}
 impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleDeadlineViolation {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for lifecycle_metrics::LifecycleDeadlineViolation
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleDeadlineViolation {
     fn into_request(self) -> request::Request<T>;
@@ -386,26 +214,6 @@ impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleDeadlineViolation {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for lifecycle_metrics::LifecycleDeadlineViolation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for lifecycle_metrics::LifecycleDeadlineViolation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for lifecycle_metrics::LifecycleDeadlineViolation
-where
-    T: ?marker::Sized,
-{
 }
 impl lifecycle_metrics::LifecycleDeadlineViolation {
     pub const fn session(&self) -> signalbox_domain::SessionId;
@@ -426,22 +234,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for lifecycle_metrics::LifecycleMetricsReport
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for lifecycle_metrics::LifecycleMetricsReport {}
 impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleMetricsReport {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for lifecycle_metrics::LifecycleMetricsReport
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleMetricsReport {
     fn into_request(self) -> request::Request<T>;
@@ -453,26 +248,6 @@ impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleMetricsReport {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for lifecycle_metrics::LifecycleMetricsReport
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for lifecycle_metrics::LifecycleMetricsReport
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for lifecycle_metrics::LifecycleMetricsReport
-where
-    T: ?marker::Sized,
-{
 }
 impl lifecycle_metrics::LifecycleMetricsReport {
     pub fn weeks(&self) -> &[lifecycle_metrics::LifecycleWeeklyMetrics];
@@ -501,22 +276,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for lifecycle_metrics::LifecycleMetricsRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for lifecycle_metrics::LifecycleMetricsRepository {}
 impl<T> parse_display::IntoResult<T> for lifecycle_metrics::LifecycleMetricsRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for lifecycle_metrics::LifecycleMetricsRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for lifecycle_metrics::LifecycleMetricsRepository {
     fn into_request(self) -> request::Request<T>;
@@ -528,26 +290,6 @@ impl<L> layered::LayerExt<L> for lifecycle_metrics::LifecycleMetricsRepository {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for lifecycle_metrics::LifecycleMetricsRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for lifecycle_metrics::LifecycleMetricsRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for lifecycle_metrics::LifecycleMetricsRepository
-where
-    T: ?marker::Sized,
-{
 }
 impl lifecycle_metrics::LifecycleMetricsRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;

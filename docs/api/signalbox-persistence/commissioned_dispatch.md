@@ -29,22 +29,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for commissioned_dispatch::CommissionDispatchOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for commissioned_dispatch::CommissionDispatchOutcome {}
 impl<T> parse_display::IntoResult<T> for commissioned_dispatch::CommissionDispatchOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for commissioned_dispatch::CommissionDispatchOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for commissioned_dispatch::CommissionDispatchOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -56,26 +43,6 @@ impl<L> layered::LayerExt<L> for commissioned_dispatch::CommissionDispatchOutcom
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for commissioned_dispatch::CommissionDispatchOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for commissioned_dispatch::CommissionDispatchOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for commissioned_dispatch::CommissionDispatchOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -93,18 +60,11 @@ pub enum CommissionedDispatchRepositoryError {
     Corruption(&'static str),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for commissioned_dispatch::CommissionedDispatchRepositoryError {}
 impl<T> parse_display::IntoResult<T>
     for commissioned_dispatch::CommissionedDispatchRepositoryError
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for commissioned_dispatch::CommissionedDispatchRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for commissioned_dispatch::CommissionedDispatchRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -116,26 +76,6 @@ impl<L> layered::LayerExt<L> for commissioned_dispatch::CommissionedDispatchRepo
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for commissioned_dispatch::CommissionedDispatchRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for commissioned_dispatch::CommissionedDispatchRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for commissioned_dispatch::CommissionedDispatchRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for commissioned_dispatch::CommissionedDispatchRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -162,22 +102,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for commissioned_dispatch::PostgresCommissionedDispatchStore
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for commissioned_dispatch::PostgresCommissionedDispatchStore {}
 impl<T> parse_display::IntoResult<T> for commissioned_dispatch::PostgresCommissionedDispatchStore {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for commissioned_dispatch::PostgresCommissionedDispatchStore
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for commissioned_dispatch::PostgresCommissionedDispatchStore {
     fn into_request(self) -> request::Request<T>;
@@ -189,26 +116,6 @@ impl<L> layered::LayerExt<L> for commissioned_dispatch::PostgresCommissionedDisp
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for commissioned_dispatch::PostgresCommissionedDispatchStore
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for commissioned_dispatch::PostgresCommissionedDispatchStore
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for commissioned_dispatch::PostgresCommissionedDispatchStore
-where
-    T: ?marker::Sized,
-{
 }
 impl commissioned_dispatch::PostgresCommissionedDispatchStore {
     pub fn new(pool: sqlx_postgres::PgPool, credential_pin: SessionCredentialPin) -> Self;
@@ -225,8 +132,8 @@ impl commissioned_dispatch::PostgresCommissionedDispatchStore {
     ) -> result::Result<bool, commissioned_dispatch::CommissionedDispatchRepositoryError>;
     pub async fn commission<SelectDefinition>(
         &self,
-        prepared: commissioned_dispatch::PreparedCommissionedDispatch,
-        ids: &mut impl submit_input::SubmitInputIdGenerator,
+        prepared: signalbox_application::PreparedCommissionedDispatch,
+        ids: &mut impl signalbox_application::SubmitInputIdGenerator,
         select_definition: SelectDefinition,
     ) -> result::Result<
         commissioned_dispatch::CommissionDispatchOutcome,
@@ -234,14 +141,14 @@ impl commissioned_dispatch::PostgresCommissionedDispatchStore {
     >
     where
         SelectDefinition: function::Fn(
-                configuration::ModelAlias,
-            ) -> option::Option<configuration::FrozenAliasDefinition>
+                signalbox_domain::ModelAlias,
+            ) -> option::Option<signalbox_domain::FrozenAliasDefinition>
             + marker::Copy
             + marker::Send;
     pub async fn commission_after_cool_off<SelectDefinition>(
         &self,
-        prepared: commissioned_dispatch::PreparedCommissionedDispatch,
-        ids: &mut impl submit_input::SubmitInputIdGenerator,
+        prepared: signalbox_application::PreparedCommissionedDispatch,
+        ids: &mut impl signalbox_application::SubmitInputIdGenerator,
         cool_off: time::Duration,
         select_definition: SelectDefinition,
     ) -> result::Result<
@@ -250,8 +157,8 @@ impl commissioned_dispatch::PostgresCommissionedDispatchStore {
     >
     where
         SelectDefinition: function::Fn(
-                configuration::ModelAlias,
-            ) -> option::Option<configuration::FrozenAliasDefinition>
+                signalbox_domain::ModelAlias,
+            ) -> option::Option<signalbox_domain::FrozenAliasDefinition>
             + marker::Copy
             + marker::Send;
 }
@@ -262,16 +169,9 @@ impl commissioned_dispatch::PostgresCommissionedDispatchStore {
 ```rust
 pub struct RecordedCommissionedDispatch {/* private */}
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for commissioned_dispatch::RecordedCommissionedDispatch {}
 impl<T> parse_display::IntoResult<T> for commissioned_dispatch::RecordedCommissionedDispatch {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for commissioned_dispatch::RecordedCommissionedDispatch
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for commissioned_dispatch::RecordedCommissionedDispatch {
     fn into_request(self) -> request::Request<T>;
@@ -284,32 +184,12 @@ impl<L> layered::LayerExt<L> for commissioned_dispatch::RecordedCommissionedDisp
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for commissioned_dispatch::RecordedCommissionedDispatch
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for commissioned_dispatch::RecordedCommissionedDispatch
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for commissioned_dispatch::RecordedCommissionedDispatch
-where
-    T: ?marker::Sized,
-{
-}
 impl commissioned_dispatch::RecordedCommissionedDispatch {
     #[must_use]
     pub const fn dispatch(&self) -> signalbox_domain::CommissionedDispatchId;
     #[must_use]
     pub const fn session(&self) -> signalbox_domain::SessionId;
     #[must_use]
-    pub fn matches(&self, request: &commissioned_dispatch::CommissionDispatchRequest) -> bool;
+    pub fn matches(&self, request: &signalbox_application::CommissionDispatchRequest) -> bool;
 }
 ```

@@ -28,22 +28,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerProtocolCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerProtocolCorruption {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerProtocolCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerProtocolCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerProtocolCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -55,26 +42,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerProtocolCorruption {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerProtocolCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerProtocolCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerProtocolCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for runner_protocol::RunnerProtocolCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -91,20 +58,13 @@ pub enum RunnerProtocolStoreError {
     Database(error::Error),
     CommitAmbiguous(error::Error),
     Corruption(runner_protocol::RunnerProtocolCorruption),
-    Domain(runner::RunnerDomainError),
+    Domain(signalbox_domain::RunnerDomainError),
     EnrollmentRequest(runner_protocol::RunnerEnrollmentRequestFailure),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for runner_protocol::RunnerProtocolStoreError {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerProtocolStoreError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerProtocolStoreError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerProtocolStoreError {
     fn into_request(self) -> request::Request<T>;
@@ -116,26 +76,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerProtocolStoreError {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerProtocolStoreError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerProtocolStoreError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerProtocolStoreError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for runner_protocol::RunnerProtocolStoreError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;

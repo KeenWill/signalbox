@@ -13,22 +13,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerRegistrationRevision
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerRegistrationRevision {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerRegistrationRevision {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerRegistrationRevision
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerRegistrationRevision {
     fn into_request(self) -> request::Request<T>;
@@ -40,26 +27,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerRegistrationRevision {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerRegistrationRevision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerRegistrationRevision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerRegistrationRevision
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::RunnerRegistrationRevision {
     pub const MIN: Self;
@@ -81,22 +48,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerConnectionEpoch
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerConnectionEpoch {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionEpoch {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerConnectionEpoch
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionEpoch {
     fn into_request(self) -> request::Request<T>;
@@ -108,26 +62,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionEpoch {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerConnectionEpoch
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerConnectionEpoch
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerConnectionEpoch
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::RunnerConnectionEpoch {
     pub const MIN: Self;
@@ -149,22 +83,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerConnectionLossEpoch
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerConnectionLossEpoch {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionLossEpoch {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerConnectionLossEpoch
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionLossEpoch {
     fn into_request(self) -> request::Request<T>;
@@ -176,26 +97,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionLossEpoch {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerConnectionLossEpoch
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerConnectionLossEpoch
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerConnectionLossEpoch
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::RunnerConnectionLossEpoch {
     pub const MIN: Self;
@@ -222,22 +123,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerConnectionState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerConnectionState {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionState {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerConnectionState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionState {
     fn into_request(self) -> request::Request<T>;
@@ -249,26 +137,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionState {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerConnectionState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerConnectionState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerConnectionState
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -293,22 +161,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerConnectionCause
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerConnectionCause {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionCause {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerConnectionCause
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionCause {
     fn into_request(self) -> request::Request<T>;
@@ -320,26 +175,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionCause {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerConnectionCause
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerConnectionCause
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerConnectionCause
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -354,22 +189,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerConnectionSnapshot
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerConnectionSnapshot {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionSnapshot {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerConnectionSnapshot
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionSnapshot {
     fn into_request(self) -> request::Request<T>;
@@ -381,26 +203,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionSnapshot {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerConnectionSnapshot
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerConnectionSnapshot
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerConnectionSnapshot
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::RunnerConnectionSnapshot {
     pub const fn epoch(self) -> runner_protocol::RunnerConnectionEpoch;
@@ -421,22 +223,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerConnectionLossSnapshot
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerConnectionLossSnapshot {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionLossSnapshot {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerConnectionLossSnapshot
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionLossSnapshot {
     fn into_request(self) -> request::Request<T>;
@@ -448,26 +237,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionLossSnapshot {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerConnectionLossSnapshot
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerConnectionLossSnapshot
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerConnectionLossSnapshot
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::RunnerConnectionLossSnapshot {
     pub const fn enrollment(self) -> signalbox_domain::RunnerEnrollmentId;
@@ -488,22 +257,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerConnectionLossPropagationPage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerConnectionLossPropagationPage {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionLossPropagationPage {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerConnectionLossPropagationPage
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionLossPropagationPage {
     fn into_request(self) -> request::Request<T>;
@@ -515,26 +271,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionLossPropagatio
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerConnectionLossPropagationPage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerConnectionLossPropagationPage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerConnectionLossPropagationPage
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::RunnerConnectionLossPropagationPage {
     pub fn sessions(&self) -> &[signalbox_domain::SessionId];
@@ -564,22 +300,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerConnectionLossSessionDisposition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerConnectionLossSessionDisposition {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionLossSessionDisposition {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerConnectionLossSessionDisposition
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionLossSessionDisposition {
     fn into_request(self) -> request::Request<T>;
@@ -591,26 +314,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionLossSessionDis
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerConnectionLossSessionDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerConnectionLossSessionDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerConnectionLossSessionDisposition
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -634,22 +337,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerConnectionTransition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerConnectionTransition {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionTransition {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerConnectionTransition
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionTransition {
     fn into_request(self) -> request::Request<T>;
@@ -661,26 +351,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionTransition {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerConnectionTransition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerConnectionTransition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerConnectionTransition
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -701,22 +371,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerConnectionTransitionOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerConnectionTransitionOutcome {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionTransitionOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerConnectionTransitionOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionTransitionOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -728,26 +385,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionTransitionOutc
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerConnectionTransitionOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerConnectionTransitionOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerConnectionTransitionOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -762,22 +399,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::NonterminalRunnerConnection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::NonterminalRunnerConnection {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::NonterminalRunnerConnection {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::NonterminalRunnerConnection
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::NonterminalRunnerConnection {
     fn into_request(self) -> request::Request<T>;
@@ -789,26 +413,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::NonterminalRunnerConnection {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::NonterminalRunnerConnection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::NonterminalRunnerConnection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::NonterminalRunnerConnection
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::NonterminalRunnerConnection {
     pub const fn enrollment(self) -> signalbox_domain::RunnerEnrollmentId;
@@ -827,22 +431,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::AppliedRunnerConnectionTransition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::AppliedRunnerConnectionTransition {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::AppliedRunnerConnectionTransition {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::AppliedRunnerConnectionTransition
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::AppliedRunnerConnectionTransition {
     fn into_request(self) -> request::Request<T>;
@@ -854,26 +445,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::AppliedRunnerConnectionTransit
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::AppliedRunnerConnectionTransition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::AppliedRunnerConnectionTransition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::AppliedRunnerConnectionTransition
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::AppliedRunnerConnectionTransition {
     pub const fn enrollment(self) -> signalbox_domain::RunnerEnrollmentId;
@@ -895,22 +466,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerConnectionTransitionEffect
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerConnectionTransitionEffect {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerConnectionTransitionEffect {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerConnectionTransitionEffect
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerConnectionTransitionEffect {
     fn into_request(self) -> request::Request<T>;
@@ -922,26 +480,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerConnectionTransitionEffe
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerConnectionTransitionEffect
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerConnectionTransitionEffect
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerConnectionTransitionEffect
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::RunnerConnectionTransitionEffect {
     pub const fn outcome(self) -> runner_protocol::RunnerConnectionTransitionOutcome;
@@ -959,22 +497,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::StoredValidatedRunnerRegistration
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::StoredValidatedRunnerRegistration {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::StoredValidatedRunnerRegistration {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::StoredValidatedRunnerRegistration
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::StoredValidatedRunnerRegistration {
     fn into_request(self) -> request::Request<T>;
@@ -987,28 +512,8 @@ impl<L> layered::LayerExt<L> for runner_protocol::StoredValidatedRunnerRegistrat
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::StoredValidatedRunnerRegistration
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::StoredValidatedRunnerRegistration
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::StoredValidatedRunnerRegistration
-where
-    T: ?marker::Sized,
-{
-}
 impl runner_protocol::StoredValidatedRunnerRegistration {
-    pub const fn registration(&self) -> &runner::ValidatedRunnerRegistration;
+    pub const fn registration(&self) -> &signalbox_domain::ValidatedRunnerRegistration;
 }
 impl runner_protocol::StoredValidatedRunnerRegistration {
     pub const fn revision(&self) -> runner_protocol::RunnerRegistrationRevision;
@@ -1026,22 +531,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerEnrollmentRequestId
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerEnrollmentRequestId {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerEnrollmentRequestId {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerEnrollmentRequestId
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerEnrollmentRequestId {
     fn into_request(self) -> request::Request<T>;
@@ -1053,26 +545,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerEnrollmentRequestId {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerEnrollmentRequestId
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerEnrollmentRequestId
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerEnrollmentRequestId
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::RunnerEnrollmentRequestId {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
@@ -1092,22 +564,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::IssuedRunnerEnrollmentIdentities
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::IssuedRunnerEnrollmentIdentities {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::IssuedRunnerEnrollmentIdentities {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::IssuedRunnerEnrollmentIdentities
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::IssuedRunnerEnrollmentIdentities {
     fn into_request(self) -> request::Request<T>;
@@ -1119,26 +578,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::IssuedRunnerEnrollmentIdentiti
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::IssuedRunnerEnrollmentIdentities
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::IssuedRunnerEnrollmentIdentities
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::IssuedRunnerEnrollmentIdentities
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::IssuedRunnerEnrollmentIdentities {
     pub const fn enrollment(self) -> signalbox_domain::RunnerEnrollmentId;
@@ -1165,22 +604,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::PristineRunnerEnrollmentRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::PristineRunnerEnrollmentRequest {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::PristineRunnerEnrollmentRequest {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::PristineRunnerEnrollmentRequest
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::PristineRunnerEnrollmentRequest {
     fn into_request(self) -> request::Request<T>;
@@ -1193,40 +619,21 @@ impl<L> layered::LayerExt<L> for runner_protocol::PristineRunnerEnrollmentReques
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::PristineRunnerEnrollmentRequest
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::PristineRunnerEnrollmentRequest
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::PristineRunnerEnrollmentRequest
-where
-    T: ?marker::Sized,
-{
-}
 impl runner_protocol::PristineRunnerEnrollmentRequest {
-    pub const fn advertisement(&self) -> &runner::RunnerAdvertisement;
+    pub const fn advertisement(&self) -> &signalbox_domain::RunnerAdvertisement;
 }
 impl runner_protocol::PristineRunnerEnrollmentRequest {
     pub fn new(
         request: runner_protocol::RunnerEnrollmentRequestId,
         issued: runner_protocol::IssuedRunnerEnrollmentIdentities,
-        allowed_classes: impl collect::IntoIterator<Item = runner::RunnerCapabilityClass>,
-        advertisement: runner::RunnerAdvertisement,
+        allowed_classes: impl collect::IntoIterator<Item = signalbox_domain::RunnerCapabilityClass>,
+        advertisement: signalbox_domain::RunnerAdvertisement,
     ) -> Self;
     pub const fn request(&self) -> runner_protocol::RunnerEnrollmentRequestId;
     pub const fn issued(&self) -> runner_protocol::IssuedRunnerEnrollmentIdentities;
-    pub fn allowed_classes(&self)
-        -> impl iterator::Iterator<Item = &runner::RunnerCapabilityClass>;
+    pub fn allowed_classes(
+        &self,
+    ) -> impl iterator::Iterator<Item = &signalbox_domain::RunnerCapabilityClass>;
 }
 ```
 
@@ -1244,22 +651,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerEnrollmentDisposition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerEnrollmentDisposition {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerEnrollmentDisposition {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerEnrollmentDisposition
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerEnrollmentDisposition {
     fn into_request(self) -> request::Request<T>;
@@ -1272,26 +666,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerEnrollmentDisposition {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerEnrollmentDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerEnrollmentDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerEnrollmentDisposition
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## RunnerEnrollmentReceipt
@@ -1299,16 +673,9 @@ where
 ```rust
 pub struct RunnerEnrollmentReceipt {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> into_either::IntoEither for runner_protocol::RunnerEnrollmentReceipt {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerEnrollmentReceipt {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerEnrollmentReceipt
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerEnrollmentReceipt {
     fn into_request(self) -> request::Request<T>;
@@ -1321,39 +688,19 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerEnrollmentReceipt {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerEnrollmentReceipt
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerEnrollmentReceipt
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerEnrollmentReceipt
-where
-    T: ?marker::Sized,
-{
-}
 impl runner_protocol::RunnerEnrollmentReceipt {
-    pub const fn enrollment(&self) -> &runner::RunnerEnrollment;
+    pub const fn enrollment(&self) -> &signalbox_domain::RunnerEnrollment;
     pub const fn registration(&self) -> &runner_protocol::StoredValidatedRunnerRegistration;
 }
 impl runner_protocol::RunnerEnrollmentReceipt {
     pub const fn request(&self) -> runner_protocol::RunnerEnrollmentRequestId;
     pub const fn identities(&self) -> runner_protocol::IssuedRunnerEnrollmentIdentities;
-    pub fn advertisement(&self) -> runner::RunnerAdvertisement;
+    pub fn advertisement(&self) -> signalbox_domain::RunnerAdvertisement;
     pub fn into_parts(
         self,
     ) -> (
         runner_protocol::RunnerEnrollmentRequestId,
-        runner::RunnerEnrollment,
+        signalbox_domain::RunnerEnrollment,
         runner_protocol::StoredValidatedRunnerRegistration,
     );
 }
@@ -1364,16 +711,9 @@ impl runner_protocol::RunnerEnrollmentReceipt {
 ```rust
 pub struct RunnerEnrollmentOutcome {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> into_either::IntoEither for runner_protocol::RunnerEnrollmentOutcome {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerEnrollmentOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerEnrollmentOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerEnrollmentOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -1385,26 +725,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerEnrollmentOutcome {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerEnrollmentOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerEnrollmentOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerEnrollmentOutcome
-where
-    T: ?marker::Sized,
-{
 }
 impl runner_protocol::RunnerEnrollmentOutcome {
     pub const fn receipt(&self) -> &runner_protocol::RunnerEnrollmentReceipt;
@@ -1420,16 +740,9 @@ impl runner_protocol::RunnerEnrollmentOutcome {
 ```rust
 pub struct StoredSessionRunnerPlacement {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> into_either::IntoEither for runner_protocol::StoredSessionRunnerPlacement {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::StoredSessionRunnerPlacement {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::StoredSessionRunnerPlacement
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::StoredSessionRunnerPlacement {
     fn into_request(self) -> request::Request<T>;
@@ -1442,44 +755,24 @@ impl<L> layered::LayerExt<L> for runner_protocol::StoredSessionRunnerPlacement {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::StoredSessionRunnerPlacement
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::StoredSessionRunnerPlacement
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::StoredSessionRunnerPlacement
-where
-    T: ?marker::Sized,
-{
-}
 impl runner_protocol::StoredSessionRunnerPlacement {
-    pub const fn placement(&self) -> &runner::SessionRunnerPlacement;
+    pub const fn placement(&self) -> &signalbox_domain::SessionRunnerPlacement;
 }
 impl runner_protocol::StoredSessionRunnerPlacement {
     pub const fn event_ordinal(&self) -> u64;
     pub const fn registration(
         &self,
     ) -> option::Option<&runner_protocol::StoredValidatedRunnerRegistration>;
-    pub const fn grant(&self) -> option::Option<&runner::CredentialProfileGrant>;
+    pub const fn grant(&self) -> option::Option<&signalbox_domain::CredentialProfileGrant>;
     pub const fn interrupted_tool_attempt(&self)
         -> option::Option<signalbox_domain::ToolAttemptId>;
     pub fn into_parts(
         self,
     ) -> (
         u64,
-        runner::SessionRunnerPlacement,
+        signalbox_domain::SessionRunnerPlacement,
         option::Option<runner_protocol::StoredValidatedRunnerRegistration>,
-        option::Option<runner::CredentialProfileGrant>,
+        option::Option<signalbox_domain::CredentialProfileGrant>,
         option::Option<signalbox_domain::ToolAttemptId>,
     );
 }
@@ -1496,22 +789,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::StoredRunnerRecoveryWait
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::StoredRunnerRecoveryWait {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::StoredRunnerRecoveryWait {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::StoredRunnerRecoveryWait
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::StoredRunnerRecoveryWait {
     fn into_request(self) -> request::Request<T>;
@@ -1524,30 +804,10 @@ impl<L> layered::LayerExt<L> for runner_protocol::StoredRunnerRecoveryWait {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::StoredRunnerRecoveryWait
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::StoredRunnerRecoveryWait
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::StoredRunnerRecoveryWait
-where
-    T: ?marker::Sized,
-{
-}
 impl runner_protocol::StoredRunnerRecoveryWait {
     pub const fn turn(&self) -> signalbox_domain::TurnId;
     pub const fn runner(&self) -> signalbox_domain::RunnerId;
-    pub const fn placement_revision(&self) -> runner::RunnerGeneration;
+    pub const fn placement_revision(&self) -> signalbox_domain::RunnerGeneration;
     pub const fn interrupted_tool_attempt(&self)
         -> option::Option<signalbox_domain::ToolAttemptId>;
 }
@@ -1564,22 +824,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerProtocolStore
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerProtocolStore {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerProtocolStore {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerProtocolStore
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerProtocolStore {
     fn into_request(self) -> request::Request<T>;
@@ -1592,28 +839,8 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerProtocolStore {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerProtocolStore
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerProtocolStore
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerProtocolStore
-where
-    T: ?marker::Sized,
-{
-}
 impl runner_protocol::RunnerProtocolStore {
-    pub fn new(pool: sqlx_postgres::PgPool, catalog: runner::RunnerCatalog) -> Self;
+    pub fn new(pool: sqlx_postgres::PgPool, catalog: signalbox_domain::RunnerCatalog) -> Self;
     pub async fn open_connection(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
@@ -1696,46 +923,46 @@ impl runner_protocol::RunnerProtocolStore {
         request: runner_protocol::RunnerEnrollmentRequestId,
         observed: runner_protocol::IssuedRunnerEnrollmentIdentities,
         prior_revision: runner_protocol::RunnerRegistrationRevision,
-        advertisement: runner::RunnerAdvertisement,
+        advertisement: signalbox_domain::RunnerAdvertisement,
     ) -> result::Result<
         runner_protocol::RunnerEnrollmentReceipt,
         runner_protocol::RunnerProtocolStoreError,
     >;
     pub async fn insert_enrollment(
         &self,
-        enrollment: &runner::RunnerEnrollment,
+        enrollment: &signalbox_domain::RunnerEnrollment,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn load_enrollment(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
     ) -> result::Result<
-        option::Option<runner::RunnerEnrollment>,
+        option::Option<signalbox_domain::RunnerEnrollment>,
         runner_protocol::RunnerProtocolStoreError,
     >;
     pub async fn revoke_enrollment(
         &self,
-        enrollment: &mut runner::RunnerEnrollment,
+        enrollment: &mut signalbox_domain::RunnerEnrollment,
     ) -> result::Result<bool, runner_protocol::RunnerProtocolStoreError>;
     pub async fn register(
         &self,
-        enrollment: &runner::RunnerEnrollment,
-        advertisement: runner::RunnerAdvertisement,
+        enrollment: &signalbox_domain::RunnerEnrollment,
+        advertisement: signalbox_domain::RunnerAdvertisement,
     ) -> result::Result<
         runner_protocol::StoredValidatedRunnerRegistration,
         runner_protocol::RunnerProtocolStoreError,
     >;
     pub async fn register_at_revision(
         &self,
-        enrollment: &runner::RunnerEnrollment,
+        enrollment: &signalbox_domain::RunnerEnrollment,
         expected: runner_protocol::RunnerRegistrationRevision,
-        advertisement: runner::RunnerAdvertisement,
+        advertisement: signalbox_domain::RunnerAdvertisement,
     ) -> result::Result<
         runner_protocol::StoredValidatedRunnerRegistration,
         runner_protocol::RunnerProtocolStoreError,
     >;
     pub async fn load_registration(
         &self,
-        enrollment: &runner::RunnerEnrollment,
+        enrollment: &signalbox_domain::RunnerEnrollment,
         revision: runner_protocol::RunnerRegistrationRevision,
     ) -> result::Result<
         option::Option<runner_protocol::StoredValidatedRunnerRegistration>,
@@ -1743,20 +970,20 @@ impl runner_protocol::RunnerProtocolStore {
     >;
     pub async fn load_current_registration(
         &self,
-        enrollment: &runner::RunnerEnrollment,
+        enrollment: &signalbox_domain::RunnerEnrollment,
     ) -> result::Result<
         option::Option<runner_protocol::StoredValidatedRunnerRegistration>,
         runner_protocol::RunnerProtocolStoreError,
     >;
     pub async fn store_placement(
         &self,
-        placement: &runner::SessionRunnerPlacement,
+        placement: &signalbox_domain::SessionRunnerPlacement,
         registration: option::Option<&runner_protocol::StoredValidatedRunnerRegistration>,
-        grant: option::Option<&runner::CredentialProfileGrant>,
+        grant: option::Option<&signalbox_domain::CredentialProfileGrant>,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn store_pin(
         &self,
-        pin: &runner::SessionRunnerPin,
+        pin: &signalbox_domain::SessionRunnerPin,
         registration: &runner_protocol::StoredValidatedRunnerRegistration,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn load_placement(
@@ -1773,6 +1000,7 @@ impl runner_protocol::RunnerProtocolStore {
         option::Option<runner_protocol::StoredRunnerRecoveryWait>,
         runner_protocol::RunnerProtocolStoreError,
     >;
+    #[cfg(feature = "postgres-integration")]
     pub async fn load_current_grant_policy_event_for_test(
         &self,
         session: signalbox_domain::SessionId,
@@ -1781,51 +1009,51 @@ impl runner_protocol::RunnerProtocolStore {
         &self,
         session: signalbox_domain::SessionId,
         runner: signalbox_domain::RunnerId,
-        revision: runner::RunnerGeneration,
+        revision: signalbox_domain::RunnerGeneration,
     ) -> result::Result<
-        option::Option<runner::CredentialProfileGrant>,
+        option::Option<signalbox_domain::CredentialProfileGrant>,
         runner_protocol::RunnerProtocolStoreError,
     >;
     pub async fn store_lease(
         &self,
-        lease: &runner::RunnerLease,
+        lease: &signalbox_domain::RunnerLease,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn store_lease_loss(
         &self,
-        loss: &runner::RunnerLeaseLoss,
+        loss: &signalbox_domain::RunnerLeaseLoss,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn store_claimed_retry_attempt_authority(
         &self,
-        loss: &runner::RunnerLeaseLoss,
-        replacement: &runner::RunnerClaimedAttemptReplacement,
+        loss: &signalbox_domain::RunnerLeaseLoss,
+        replacement: &signalbox_domain::RunnerClaimedAttemptReplacement,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn load_claimed_retry_attempt_reservation(
         &self,
         lease: signalbox_domain::RunnerLeaseId,
-        generation: runner::RunnerGeneration,
+        generation: signalbox_domain::RunnerGeneration,
     ) -> result::Result<
-        option::Option<tool_attempt::ToolAttemptDispatchCorrelation>,
+        option::Option<signalbox_domain::ToolAttemptDispatchCorrelation>,
         runner_protocol::RunnerProtocolStoreError,
     >;
     pub async fn store_claimed_retry_replacement(
         &self,
-        retired: &tool_attempt::EndedToolAttempt,
-        retry: &runner::RunnerLease,
+        retired: &signalbox_domain::EndedToolAttempt,
+        retry: &signalbox_domain::RunnerLease,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn load_lease(
         &self,
         lease: signalbox_domain::RunnerLeaseId,
-        generation: runner::RunnerGeneration,
+        generation: signalbox_domain::RunnerGeneration,
     ) -> result::Result<
-        option::Option<runner::RunnerLease>,
+        option::Option<signalbox_domain::RunnerLease>,
         runner_protocol::RunnerProtocolStoreError,
     >;
     pub async fn load_lease_loss(
         &self,
         lease: signalbox_domain::RunnerLeaseId,
-        generation: runner::RunnerGeneration,
+        generation: signalbox_domain::RunnerGeneration,
     ) -> result::Result<
-        option::Option<runner::RunnerLeaseLoss>,
+        option::Option<signalbox_domain::RunnerLeaseLoss>,
         runner_protocol::RunnerProtocolStoreError,
     >;
 }
@@ -1875,22 +1103,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for runner_protocol::RunnerEnrollmentRequestFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for runner_protocol::RunnerEnrollmentRequestFailure {}
 impl<T> parse_display::IntoResult<T> for runner_protocol::RunnerEnrollmentRequestFailure {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for runner_protocol::RunnerEnrollmentRequestFailure
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for runner_protocol::RunnerEnrollmentRequestFailure {
     fn into_request(self) -> request::Request<T>;
@@ -1902,26 +1117,6 @@ impl<L> layered::LayerExt<L> for runner_protocol::RunnerEnrollmentRequestFailure
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for runner_protocol::RunnerEnrollmentRequestFailure
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for runner_protocol::RunnerEnrollmentRequestFailure
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for runner_protocol::RunnerEnrollmentRequestFailure
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for runner_protocol::RunnerEnrollmentRequestFailure {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;

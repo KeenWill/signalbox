@@ -6,8 +6,8 @@
 
 ```rust
 pub enum ReplaceSessionDefaultsHandlingOutcome {
-    Applied(replace_session_defaults::ReplaceSessionDefaultsAppliedResult),
-    Rejected(replace_session_defaults::ReplaceSessionDefaultsRejectedResult),
+    Applied(signalbox_domain::ReplaceSessionDefaultsAppliedResult),
+    Rejected(signalbox_domain::ReplaceSessionDefaultsRejectedResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
@@ -20,27 +20,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for replace_session_defaults::ReplaceSessionDefaultsHandlingOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for replace_session_defaults::ReplaceSessionDefaultsHandlingOutcome
-{
-}
 impl<T> parse_display::IntoResult<T>
     for replace_session_defaults::ReplaceSessionDefaultsHandlingOutcome
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for replace_session_defaults::ReplaceSessionDefaultsHandlingOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T>
     for replace_session_defaults::ReplaceSessionDefaultsHandlingOutcome
@@ -54,26 +38,6 @@ impl<L> layered::LayerExt<L> for replace_session_defaults::ReplaceSessionDefault
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for replace_session_defaults::ReplaceSessionDefaultsHandlingOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for replace_session_defaults::ReplaceSessionDefaultsHandlingOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for replace_session_defaults::ReplaceSessionDefaultsHandlingOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -92,27 +56,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for replace_session_defaults::ReplaceSessionDefaultsRejectionOnlyOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for replace_session_defaults::ReplaceSessionDefaultsRejectionOnlyOutcome
-{
-}
 impl<T> parse_display::IntoResult<T>
     for replace_session_defaults::ReplaceSessionDefaultsRejectionOnlyOutcome
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for replace_session_defaults::ReplaceSessionDefaultsRejectionOnlyOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T>
     for replace_session_defaults::ReplaceSessionDefaultsRejectionOnlyOutcome
@@ -128,26 +76,6 @@ impl<L> layered::LayerExt<L>
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for replace_session_defaults::ReplaceSessionDefaultsRejectionOnlyOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for replace_session_defaults::ReplaceSessionDefaultsRejectionOnlyOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for replace_session_defaults::ReplaceSessionDefaultsRejectionOnlyOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -166,7 +94,7 @@ pub enum ReplaceSessionDefaultsCorruption {
         reason: mapping::PositiveOrdinalMappingError,
     },
     CurrentSession(session::SessionCorruption),
-    Domain(replace_session_defaults::ReplaceSessionDefaultsReconstitutionFailure),
+    Domain(signalbox_domain::ReplaceSessionDefaultsReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for replace_session_defaults::ReplaceSessionDefaultsCorruption
@@ -175,24 +103,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for replace_session_defaults::ReplaceSessionDefaultsCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for replace_session_defaults::ReplaceSessionDefaultsCorruption {}
 impl<T> parse_display::IntoResult<T>
     for replace_session_defaults::ReplaceSessionDefaultsCorruption
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for replace_session_defaults::ReplaceSessionDefaultsCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for replace_session_defaults::ReplaceSessionDefaultsCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -204,26 +119,6 @@ impl<L> layered::LayerExt<L> for replace_session_defaults::ReplaceSessionDefault
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for replace_session_defaults::ReplaceSessionDefaultsCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for replace_session_defaults::ReplaceSessionDefaultsCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for replace_session_defaults::ReplaceSessionDefaultsCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for replace_session_defaults::ReplaceSessionDefaultsCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -247,21 +142,11 @@ pub enum ReplaceSessionDefaultsRepositoryError {
     Corruption(replace_session_defaults::ReplaceSessionDefaultsCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither
-    for replace_session_defaults::ReplaceSessionDefaultsRepositoryError
-{
-}
 impl<T> parse_display::IntoResult<T>
     for replace_session_defaults::ReplaceSessionDefaultsRepositoryError
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for replace_session_defaults::ReplaceSessionDefaultsRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T>
     for replace_session_defaults::ReplaceSessionDefaultsRepositoryError
@@ -275,26 +160,6 @@ impl<L> layered::LayerExt<L> for replace_session_defaults::ReplaceSessionDefault
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for replace_session_defaults::ReplaceSessionDefaultsRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for replace_session_defaults::ReplaceSessionDefaultsRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for replace_session_defaults::ReplaceSessionDefaultsRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for replace_session_defaults::ReplaceSessionDefaultsRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -325,24 +190,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for replace_session_defaults::ReplaceSessionDefaultsRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for replace_session_defaults::ReplaceSessionDefaultsRepository {}
 impl<T> parse_display::IntoResult<T>
     for replace_session_defaults::ReplaceSessionDefaultsRepository
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for replace_session_defaults::ReplaceSessionDefaultsRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for replace_session_defaults::ReplaceSessionDefaultsRepository {
     fn into_request(self) -> request::Request<T>;
@@ -355,47 +207,27 @@ impl<L> layered::LayerExt<L> for replace_session_defaults::ReplaceSessionDefault
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for replace_session_defaults::ReplaceSessionDefaultsRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for replace_session_defaults::ReplaceSessionDefaultsRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for replace_session_defaults::ReplaceSessionDefaultsRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl replace_session_defaults::ReplaceSessionDefaultsRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn handle(
         &self,
-        command: replace_session_defaults::ReplaceSessionDefaults,
+        command: signalbox_domain::ReplaceSessionDefaults,
     ) -> result::Result<
         replace_session_defaults::ReplaceSessionDefaultsHandlingOutcome,
         replace_session_defaults::ReplaceSessionDefaultsRepositoryError,
     >;
     pub async fn handle_where_prompt_member(
         &self,
-        command: replace_session_defaults::ReplaceSessionDefaults,
-        prompt_member: replace_session_defaults::PromptMemberStatement,
+        command: signalbox_domain::ReplaceSessionDefaults,
+        prompt_member: signalbox_application::PromptMemberStatement,
     ) -> result::Result<
         replace_session_defaults::ReplaceSessionDefaultsHandlingOutcome,
         replace_session_defaults::ReplaceSessionDefaultsRepositoryError,
     >;
     pub async fn handle_rejection_only_where_prompt_member(
         &self,
-        command: replace_session_defaults::ReplaceSessionDefaults,
-        prompt_member: replace_session_defaults::PromptMemberStatement,
+        command: signalbox_domain::ReplaceSessionDefaults,
+        prompt_member: signalbox_application::PromptMemberStatement,
     ) -> result::Result<
         replace_session_defaults::ReplaceSessionDefaultsRejectionOnlyOutcome,
         replace_session_defaults::ReplaceSessionDefaultsRepositoryError,
@@ -404,21 +236,21 @@ impl replace_session_defaults::ReplaceSessionDefaultsRepository {
         &self,
         command_id: signalbox_domain::DurableCommandId,
     ) -> result::Result<
-        option::Option<replace_session_defaults::ReconstitutedReplaceSessionDefaults>,
+        option::Option<signalbox_domain::ReconstitutedReplaceSessionDefaults>,
         replace_session_defaults::ReplaceSessionDefaultsRepositoryError,
     >;
 }
-impl replace_session_defaults::ReplaceSessionDefaultsTransaction
+impl signalbox_application::ReplaceSessionDefaultsTransaction
     for replace_session_defaults::ReplaceSessionDefaultsRepository
 {
     type Error = replace_session_defaults::ReplaceSessionDefaultsRepositoryError;
     async fn handle(
         &mut self,
-        command: replace_session_defaults::ReplaceSessionDefaults,
-        prompt_member: replace_session_defaults::PromptMemberStatement,
+        command: signalbox_domain::ReplaceSessionDefaults,
+        prompt_member: signalbox_application::PromptMemberStatement,
     ) -> result::Result<
-        replace_session_defaults::ReplaceSessionDefaultsOutcome,
-        <Self as replace_session_defaults::ReplaceSessionDefaultsTransaction>::Error,
+        signalbox_application::ReplaceSessionDefaultsOutcome,
+        <Self as signalbox_application::ReplaceSessionDefaultsTransaction>::Error,
     >;
 }
 ```

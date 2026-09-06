@@ -12,12 +12,6 @@ pub enum WorkspacePathRejection {
     Symlink,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspacePathRejection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for WorkspacePathRejection {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -53,12 +47,6 @@ pub struct WorkspaceRootIdentity {
     pub inode: u64,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceRootIdentity
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## WorkspaceRoot
@@ -66,12 +54,6 @@ where
 ```rust
 pub struct WorkspaceRoot {/* private */}
 // derives: clone::Clone
-impl<T> dyn_clone::DynClone for WorkspaceRoot
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Debug for WorkspaceRoot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -119,12 +101,6 @@ pub struct WorkspaceDirectoryEntry {
     pub kind: WorkspaceEntryKind,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> dyn_clone::DynClone for WorkspaceDirectoryEntry
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## WorkspaceEntryKind
@@ -137,12 +113,6 @@ pub enum WorkspaceEntryKind {
     Other,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
-impl<T> dyn_clone::DynClone for WorkspaceEntryKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## WorkspaceDirectoryRead
@@ -155,12 +125,6 @@ pub struct WorkspaceDirectoryRead {
     pub truncated: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceDirectoryRead
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## WorkspaceFileBytes
@@ -173,12 +137,6 @@ pub struct WorkspaceFileBytes {
     pub mode: u32,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceFileBytes
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## WorkspaceFileSystem
@@ -222,12 +180,6 @@ pub trait WorkspaceFileSystem: clone::Clone + marker::Send + marker::Sync + 'sta
 ```rust
 pub struct LocalWorkspaceFileSystem;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl<T> dyn_clone::DynClone for LocalWorkspaceFileSystem
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl WorkspaceMutationFileSystem for LocalWorkspaceFileSystem {
     type Root = WorkspaceRoot;
     fn open_root(

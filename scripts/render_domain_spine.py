@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -56,11 +57,53 @@ def rust_string(value):
                          for char in value) + '"'
 
 
+def cfg_attributes(attribute):
+    if not attribute.startswith('#[attr = CfgTrace(['):
+        return []
+    value = attribute.removeprefix('#[attr = CfgTrace([').removesuffix('])]')
+    value = re.sub(r', (?:span: )?[^,\n]*? \(#\d+\)', '', value)
+    string = r'"(?:\\.|[^"\\])*"'
+    name_value = rf'NameValue \{{ name: ({string}), value: (None|Some\(({string})\)) \}}'
+    tokens = re.findall(rf'{name_value}|(All\(\[|Any\(\[|Not\(|\]\)|\)|,)', value)
+    position = 0
+
+    def predicate():
+        nonlocal position
+        name, _, literal, token = tokens[position]
+        position += 1
+        if name:
+            return json.loads(name) + (' = ' + literal if literal else '')
+        if token == 'Not(':
+            result = 'not(' + predicate() + ')'
+            assert tokens[position][3] == ')'
+            position += 1
+            return result
+        assert token in {'All([', 'Any(['}, token
+        parts = predicates('])')
+        return token[:3].lower() + '(' + ', '.join(parts) + ')'
+
+    def predicates(ending=None):
+        nonlocal position
+        result = []
+        while position < len(tokens) and tokens[position][3] != ending:
+            result.append(predicate())
+            if position < len(tokens) and tokens[position][3] == ',':
+                position += 1
+        if ending:
+            assert position < len(tokens) and tokens[position][3] == ending
+            position += 1
+        return result
+
+    return ['#[cfg(' + condition + ')]' for condition in predicates()]
+
+
 def attributes(item):
     result = []
     for attribute in item['attrs']:
         if attribute == 'non_exhaustive':
             result.append('#[non_exhaustive]')
+        elif isinstance(attribute, dict) and 'other' in attribute:
+            result.extend(cfg_attributes(attribute['other']))
         elif isinstance(attribute, dict) and 'must_use' in attribute:
             reason = attribute['must_use']['reason']
             result.append('#[must_use' + (' = ' + rust_string(reason) if reason is not None else '') + ']')
@@ -75,6 +118,18 @@ def attributes(item):
         parts = [key + ' = ' + rust_string(value) for key, value in item['deprecation'].items() if value is not None]
         result.append('#[deprecated' + ('(' + ', '.join(parts) + ')' if parts else '') + ']')
     return ''.join(value + '\n' for value in result)
+
+
+def item_cfg(item):
+    return tuple(condition.removeprefix('#[cfg(').removesuffix(')]')
+                 for attribute in item['attrs'] if isinstance(attribute, dict)
+                 for condition in cfg_attributes(attribute.get('other', '')))
+
+
+def contains_generic(value, name):
+    if isinstance(value, dict):
+        return value.get('generic') == name or any(contains_generic(child, name) for child in value.values())
+    return isinstance(value, list) and any(contains_generic(child, name) for child in value)
 
 
 def format_rust(code):
@@ -101,12 +156,13 @@ def format_rust(code):
 
 
 class Renderer:
-    def __init__(self, document):
+    def __init__(self, document, public_exports=None):
         self.index = document['index']
         self.paths = document['paths']
         self.root = self.item(document['root'])
         self.crate_id = self.root['crate_id']
         self.crate = self.root['name']
+        self.public_exports = public_exports or {}
         self.root_exports = {}
         for identity in self.root['inner']['module']['items']:
             item = self.item(identity)
@@ -122,9 +178,72 @@ class Renderer:
             name = export['name'] if export else item['name']
             if str(target) not in self.root_exports or name == definition['name']:
                 self.root_exports[str(target)] = name
+        routes = defaultdict(list)
+
+        def visit(identity, inherited=(), ancestors=()):
+            if identity in ancestors:
+                return
+            item = self.item(identity)
+            conditions = tuple(dict.fromkeys(inherited + item_cfg(item)))
+            routes[str(identity)].append(conditions)
+            body = item['inner']
+            if 'module' in body:
+                for child in body['module']['items']:
+                    visit(child, conditions, ancestors + (identity,))
+            elif 'use' in body and body['use']['id'] is not None:
+                target = self.index.get(str(body['use']['id']))
+                if target and target['crate_id'] == self.crate_id:
+                    visit(target['id'], conditions, ancestors + (identity,))
+
+        visit(self.root['id'])
+        self.conditions = {}
+        for identity, alternatives in routes.items():
+            alternatives = list(dict.fromkeys(alternatives))
+            self.conditions[identity] = () if () in alternatives else alternatives[0] if len(alternatives) == 1 else (
+                'any(' + ', '.join('all(' + ', '.join(route) + ')' for route in alternatives) + ')',)
+
+    def attributes(self, item):
+        conditions = self.conditions.get(str(item['id']))
+        if conditions is None:
+            return attributes(item)
+        ungated = {**item, 'attrs': [attribute for attribute in item['attrs']
+                                   if not (isinstance(attribute, dict)
+                                           and attribute.get('other', '').startswith('#[attr = CfgTrace(['))]}
+        return ''.join('#[cfg(' + condition + ')]\n' for condition in conditions) + attributes(ungated)
 
     def item(self, identity):
         return self.index[str(identity)]
+
+    def exports(self):
+        result = {}
+
+        def visit(identity, public, ancestors=()):
+            if identity in ancestors:
+                return
+            item = self.item(identity)
+            if item['crate_id'] != self.crate_id:
+                return
+            kind, body = next(iter(item['inner'].items()))
+            if kind == 'use':
+                target = body['id']
+                if target is not None and str(target) in self.index:
+                    visit(target, public if body['is_glob'] else public + [body['name']], ancestors + (identity,))
+                return
+            definition = self.paths.get(str(identity))
+            if definition:
+                key = '::'.join(definition['path'])
+                candidate = '::'.join(public)
+                previous = result.get(key)
+                if previous is None or (candidate.count('::'), candidate) < (previous.count('::'), previous):
+                    result[key] = candidate
+            if kind == 'module':
+                for child in body['items']:
+                    definition = self.item(child)
+                    name = [] if 'use' in definition['inner'] else [definition['name']]
+                    visit(child, public + name, ancestors + (identity,))
+
+        visit(self.root['id'], [self.crate])
+        return result
 
     def full_path(self, path):
         summary = self.paths.get(str(path['id']))
@@ -133,7 +252,10 @@ class Renderer:
     def path(self, path):
         if str(path['id']) in self.root_exports:
             return self.root_exports[str(path['id'])] + self.args(path.get('args'))
-        parts = self.full_path(path).split('::')
+        full = self.full_path(path)
+        if full in self.public_exports:
+            return self.public_exports[full].removeprefix(self.crate + '::') + self.args(path.get('args'))
+        parts = full.split('::')
         parts = parts[1:] if parts[0] == self.crate else parts[-2:]
         return '::'.join(parts) + self.args(path.get('args'))
 
@@ -280,7 +402,7 @@ class Renderer:
             return '/* private */'
         item = self.item(identity)
         prefix = ('pub ' if public else '') + item['name'] + ': ' if named else ('pub ' if public else '')
-        return attributes(item) + prefix + self.type(item['inner']['struct_field'])
+        return self.attributes(item) + prefix + self.type(item['inner']['struct_field'])
 
     def shape(self, kind, *, public=False):
         if kind == 'unit':
@@ -302,7 +424,7 @@ class Renderer:
         return ' { ' + ', '.join(fields) + ' }'
 
     def declaration(self, item, *, associated=False, trait_definition=False):
-        return attributes(item) + self.declaration_body(item, associated=associated, trait_definition=trait_definition)
+        return self.attributes(item) + self.declaration_body(item, associated=associated, trait_definition=trait_definition)
 
     def declaration_body(self, item, *, associated=False, trait_definition=False):
         kind, body = next(iter(item['inner'].items()))
@@ -327,7 +449,7 @@ class Renderer:
                 line = variant['name'] + self.shape(value['kind'])
                 if value['discriminant']:
                     line += ' = ' + value['discriminant']['expr']
-                variants.append(textwrap.indent(attributes(variant) + line + ',', '    '))
+                variants.append(textwrap.indent(self.attributes(variant) + line + ',', '    '))
             return 'pub enum ' + generic_name + where + ' {\n' + '\n'.join(variants) + '\n}'
         if kind == 'trait':
             bounds = self.bounds(body['bounds'])
@@ -349,7 +471,7 @@ class Renderer:
         span = item['span']
         return (span['filename'], *span['begin']) if span else ('', 0, 0)
 
-    def impl_block(self, item):
+    def impl_block(self, item, conditions=()):
         body = item['inner']['impl']
         trait = body['trait']
         generics = body['generics']
@@ -359,7 +481,8 @@ class Renderer:
         header += self.type(body['for']) + self.where(generics)
         methods = [self.declaration(self.item(i), associated=bool(trait)) for i in body['items']
                    if trait or self.item(i)['visibility'] == 'public']
-        return header + ' {\n' + '\n'.join(textwrap.indent(m, '    ') for m in methods) + '\n}' if methods else header + ' {}'
+        cfg = ''.join('#[cfg(' + condition + ')]\n' for condition in dict.fromkeys(conditions + item_cfg(item)))
+        return cfg + (header + ' {\n' + '\n'.join(textwrap.indent(m, '    ') for m in methods) + '\n}' if methods else header + ' {}')
 
     def block(self, item):
         kind, body = next(iter(item['inner'].items()))
@@ -387,10 +510,15 @@ class Renderer:
                 continue
             if value['blanket_impl'] and BLANKET_TRAIT.fullmatch(full):
                 continue
+            if value['blanket_impl'] and trait and self.paths.get(str(trait['id']), {}).get('crate_id') != self.crate_id:
+                if any('type' in param['kind'] and not contains_generic(
+                        [value['for'], trait], param['name'])
+                       for param in value['generics']['params']):
+                    continue
             if 'automatically_derived' in implementation['attrs']:
                 derives.append(self.path(trait))
             else:
-                declarations.append(self.impl_block(implementation))
+                declarations.append(self.impl_block(implementation, self.conditions.get(str(item['id']), item_cfg(item))))
         if derives:
             declarations.insert(1, '// derives: ' + ', '.join(dict.fromkeys(derives)))
         name = body['name'] if kind == 'use' else item['name']
@@ -436,7 +564,8 @@ class Renderer:
             blocks = [self.block(item) for item in items]
             whole = page(module, blocks)
             links = []
-            if fits(whole):
+            previous = list((ROOT / 'docs/api' / crate / module).glob('*.md'))
+            if fits(whole) and not previous:
                 files[f'{module}.md'] = whole
                 links.append(f'[{module}]({module}.md)')
             else:
@@ -445,9 +574,14 @@ class Renderer:
                     kind = next(iter(item['inner']))
                     groups['traits' if kind == 'trait' else 'functions' if kind in {'function', 'constant', 'static'} else 'types'].append(block)
                 for kind, group in groups.items():
+                    parts = sorted((path for path in previous if re.fullmatch(rf'{kind}(?:-\d+)?\.md', path.name)),
+                                   key=lambda path: int(path.stem.rpartition('-')[2]) if '-' in path.stem else 1)
+                    boundaries = {headings[-1] for path in parts[:-1]
+                                  if (headings := re.findall(r'^## (.+)$', path.read_text(), re.MULTILINE))}
                     chunks = [[]]
                     for block in group:
-                        if not fits(page(f'{module}: {kind}', chunks[-1] + [block])):
+                        if (chunks[-1] and chunks[-1][-1].splitlines()[0].removeprefix('## ') in boundaries
+                                or not fits(page(f'{module}: {kind}', chunks[-1] + [block]))):
                             if not chunks[-1]:
                                 raise ValueError(f'{module}: one item exceeds the page limits')
                             chunks.append([])
@@ -481,9 +615,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--json-dir', type=Path, help='Read already-built rustdoc JSON instead of building')
     args = parser.parse_args()
-    for crate in configuration()['crates']:
-        path = args.json_dir / f"{crate.replace('-', '_')}.json" if args.json_dir else build_json(crate)
+    paths = {crate: args.json_dir / f"{crate.replace('-', '_')}.json" if args.json_dir else build_json(crate)
+             for crate in configuration()['crates']}
+    public_exports = {}
+    for path in paths.values():
         renderer = Renderer(json.loads(path.read_text()))
+        public_exports.update(renderer.exports())
+    for crate, path in paths.items():
+        renderer = Renderer(json.loads(path.read_text()), public_exports)
         files = renderer.files(crate)
         write_files(ROOT / 'docs/api' / crate, files)
         print(f'{crate}: {len(files)} Markdown files')

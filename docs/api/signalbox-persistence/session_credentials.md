@@ -13,22 +13,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for SessionModelCredential
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionModelCredential {}
 impl<T> parse_display::IntoResult<T> for SessionModelCredential {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for SessionModelCredential
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for SessionModelCredential {
     fn into_request(self) -> request::Request<T>;
@@ -40,26 +27,6 @@ impl<L> layered::LayerExt<L> for SessionModelCredential {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for SessionModelCredential
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for SessionModelCredential
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for SessionModelCredential
-where
-    T: ?marker::Sized,
-{
 }
 impl SessionModelCredential {
     pub fn model_family(&self) -> &str;
@@ -84,22 +51,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for SessionCredentialPin
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionCredentialPin {}
 impl<T> parse_display::IntoResult<T> for SessionCredentialPin {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for SessionCredentialPin
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for SessionCredentialPin {
     fn into_request(self) -> request::Request<T>;
@@ -111,24 +65,6 @@ impl<L> layered::LayerExt<L> for SessionCredentialPin {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for SessionCredentialPin
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for SessionCredentialPin
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive> for SessionCredentialPin where
-    T: ?marker::Sized
-{
 }
 impl SessionCredentialPin {
     pub fn try_new(
@@ -153,22 +89,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for SessionCredentialPinError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionCredentialPinError {}
 impl<T> parse_display::IntoResult<T> for SessionCredentialPinError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for SessionCredentialPinError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for SessionCredentialPinError {
     fn into_request(self) -> request::Request<T>;
@@ -180,26 +103,6 @@ impl<L> layered::LayerExt<L> for SessionCredentialPinError {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for SessionCredentialPinError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for SessionCredentialPinError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for SessionCredentialPinError
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -214,22 +117,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for ModelCredentialFamilyCatalog
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for ModelCredentialFamilyCatalog {}
 impl<T> parse_display::IntoResult<T> for ModelCredentialFamilyCatalog {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for ModelCredentialFamilyCatalog
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for ModelCredentialFamilyCatalog {
     fn into_request(self) -> request::Request<T>;
@@ -242,31 +132,11 @@ impl<L> layered::LayerExt<L> for ModelCredentialFamilyCatalog {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for ModelCredentialFamilyCatalog
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for ModelCredentialFamilyCatalog
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for ModelCredentialFamilyCatalog
-where
-    T: ?marker::Sized,
-{
-}
 impl ModelCredentialFamilyCatalog {
     pub fn try_new(
         entries: impl collect::IntoIterator<
             Item = (
-                model_call::ResolvedProviderTarget,
+                signalbox_domain::ResolvedProviderTarget,
                 sync::Arc<str>,
                 option::Option<sync::Arc<str>>,
             ),
@@ -276,22 +146,22 @@ impl ModelCredentialFamilyCatalog {
         self,
         entries: impl collect::IntoIterator<
             Item = (
-                model_call::ResolvedProviderTarget,
-                model_call::ResolvedProviderTarget,
+                signalbox_domain::ResolvedProviderTarget,
+                signalbox_domain::ResolvedProviderTarget,
             ),
         >,
     ) -> result::Result<Self, ModelCredentialFamilyCatalogError>;
-    pub fn family(&self, target: model_call::ResolvedProviderTarget) -> option::Option<&str>;
+    pub fn family(&self, target: signalbox_domain::ResolvedProviderTarget) -> option::Option<&str>;
     pub fn family_for_call(
         &self,
-        selected: model_call::ResolvedProviderTarget,
-        fast_mode: model_settings::FastMode,
+        selected: signalbox_domain::ResolvedProviderTarget,
+        fast_mode: signalbox_domain::FastMode,
     ) -> option::Option<&str>;
     pub fn serving_target_for_call(
         &self,
-        selected: model_call::ResolvedProviderTarget,
-        fast_mode: model_settings::FastMode,
-    ) -> model_call::ResolvedProviderTarget;
+        selected: signalbox_domain::ResolvedProviderTarget,
+        fast_mode: signalbox_domain::FastMode,
+    ) -> signalbox_domain::ResolvedProviderTarget;
 }
 ```
 
@@ -308,22 +178,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for ModelCredentialFamilyCatalogError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for ModelCredentialFamilyCatalogError {}
 impl<T> parse_display::IntoResult<T> for ModelCredentialFamilyCatalogError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for ModelCredentialFamilyCatalogError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for ModelCredentialFamilyCatalogError {
     fn into_request(self) -> request::Request<T>;
@@ -336,26 +193,6 @@ impl<L> layered::LayerExt<L> for ModelCredentialFamilyCatalogError {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for ModelCredentialFamilyCatalogError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for ModelCredentialFamilyCatalogError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for ModelCredentialFamilyCatalogError
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## current_session_credential
@@ -365,7 +202,7 @@ pub async fn current_session_credential(
     pool: &sqlx_postgres::PgPool,
     session: signalbox_domain::SessionId,
     family: &str,
-) -> result::Result<model_execution::ModelCallCredentialReference, error::Error>;
+) -> result::Result<signalbox_application::ModelCallCredentialReference, error::Error>;
 ```
 
 ## current_session_credential_with_migration_fallback
@@ -376,5 +213,5 @@ pub async fn current_session_credential_with_migration_fallback(
     session: signalbox_domain::SessionId,
     family: &str,
     migration_fallback_family: option::Option<&str>,
-) -> result::Result<model_execution::ModelCallCredentialReference, error::Error>;
+) -> result::Result<signalbox_application::ModelCallCredentialReference, error::Error>;
 ```

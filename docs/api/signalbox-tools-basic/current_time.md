@@ -27,13 +27,6 @@ where
 ```rust
 pub struct SystemCurrentTimeClock;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl<T> dyn_clone::DynClone for SystemCurrentTimeClock
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SystemCurrentTimeClock {}
 impl CurrentTimeClock for SystemCurrentTimeClock {
     fn now(&self) -> time::SystemTime;
 }
@@ -49,13 +42,6 @@ pub enum CurrentTimeToolConstructionError {
     Duplicate,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for CurrentTimeToolConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for CurrentTimeToolConstructionError {}
 impl fmt::Display for CurrentTimeToolConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -69,13 +55,6 @@ impl error::Error for CurrentTimeToolConstructionError {
 ```rust
 pub struct CurrentTimeTool<Clock> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for CurrentTimeTool<Clock>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for CurrentTimeTool<Clock> {}
 impl<Clock> signalbox_tool_contract::ToolContract for CurrentTimeTool<Clock> {
     type Arguments = current_time::CurrentTimeArguments;
     const NAME: &'static str;
@@ -83,7 +62,12 @@ impl<Clock> signalbox_tool_contract::ToolContract for CurrentTimeTool<Clock> {
 }
 impl<Clock> CurrentTimeTool<Clock> {
     pub fn try_new(clock: Clock) -> result::Result<Self, CurrentTimeToolConstructionError>;
-    pub fn into_parts(self) -> (tool_loop::CompiledToolCatalog, CurrentTimeExecutor<Clock>);
+    pub fn into_parts(
+        self,
+    ) -> (
+        signalbox_application::CompiledToolCatalog,
+        CurrentTimeExecutor<Clock>,
+    );
 }
 ```
 
@@ -92,25 +76,18 @@ impl<Clock> CurrentTimeTool<Clock> {
 ```rust
 pub struct CurrentTimeExecutor<Clock> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for CurrentTimeExecutor<Clock>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for CurrentTimeExecutor<Clock> {}
-impl<Clock> tool_loop::ToolExecutor for CurrentTimeExecutor<Clock>
+impl<Clock> signalbox_application::ToolExecutor for CurrentTimeExecutor<Clock>
 where
     Clock: CurrentTimeClock,
 {
     type Error = CurrentTimeExecutorError;
     fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> impl future::Future<
         Output = result::Result<
-            tool_loop::CorrelatedToolExecutorEvidence,
-            <Self as tool_loop::ToolExecutor>::Error,
+            signalbox_application::CorrelatedToolExecutorEvidence,
+            <Self as signalbox_application::ToolExecutor>::Error,
         >,
     > + marker::Send;
 }
@@ -125,20 +102,13 @@ pub enum CurrentTimeExecutorError {
     ResultEncoding,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for CurrentTimeExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for CurrentTimeExecutorError {}
 impl fmt::Display for CurrentTimeExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for CurrentTimeExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for CurrentTimeExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for CurrentTimeExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```

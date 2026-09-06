@@ -14,7 +14,7 @@ pub enum ProgramJournalCorruption {
         value: string::String,
     },
     Inconsistent(&'static str),
-    Domain(program_journal::ProgramJournalError),
+    Domain(signalbox_domain::ProgramJournalError),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for program_journal::ProgramJournalCorruption
@@ -23,22 +23,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for program_journal::ProgramJournalCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for program_journal::ProgramJournalCorruption {}
 impl<T> parse_display::IntoResult<T> for program_journal::ProgramJournalCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for program_journal::ProgramJournalCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for program_journal::ProgramJournalCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -50,26 +37,6 @@ impl<L> layered::LayerExt<L> for program_journal::ProgramJournalCorruption {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for program_journal::ProgramJournalCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for program_journal::ProgramJournalCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for program_journal::ProgramJournalCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for program_journal::ProgramJournalCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -90,16 +57,9 @@ pub enum ProgramJournalRepositoryError {
     Corruption(program_journal::ProgramJournalCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for program_journal::ProgramJournalRepositoryError {}
 impl<T> parse_display::IntoResult<T> for program_journal::ProgramJournalRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for program_journal::ProgramJournalRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for program_journal::ProgramJournalRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -111,26 +71,6 @@ impl<L> layered::LayerExt<L> for program_journal::ProgramJournalRepositoryError 
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for program_journal::ProgramJournalRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for program_journal::ProgramJournalRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for program_journal::ProgramJournalRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for program_journal::ProgramJournalRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -163,22 +103,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for program_journal::ProgramJournalRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for program_journal::ProgramJournalRepository {}
 impl<T> parse_display::IntoResult<T> for program_journal::ProgramJournalRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for program_journal::ProgramJournalRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for program_journal::ProgramJournalRepository {
     fn into_request(self) -> request::Request<T>;
@@ -191,26 +118,6 @@ impl<L> layered::LayerExt<L> for program_journal::ProgramJournalRepository {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for program_journal::ProgramJournalRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for program_journal::ProgramJournalRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for program_journal::ProgramJournalRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl program_journal::ProgramJournalRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn create_stream(
@@ -220,64 +127,67 @@ impl program_journal::ProgramJournalRepository {
     pub async fn append_request(
         &self,
         run: signalbox_domain::ProgramRunId,
-        scope: option::Option<program_journal::ScopeOrdinal>,
-        kind: program_journal::RequestKind,
-    ) -> result::Result<program_journal::RequestFrame, program_journal::ProgramJournalRepositoryError>;
+        scope: option::Option<signalbox_domain::ScopeOrdinal>,
+        kind: signalbox_domain::RequestKind,
+    ) -> result::Result<
+        signalbox_domain::RequestFrame,
+        program_journal::ProgramJournalRepositoryError,
+    >;
     pub async fn append_request_if_tail(
         &self,
         run: signalbox_domain::ProgramRunId,
         expected_last_position: u64,
-        scope: option::Option<program_journal::ScopeOrdinal>,
-        kind: program_journal::RequestKind,
+        scope: option::Option<signalbox_domain::ScopeOrdinal>,
+        kind: signalbox_domain::RequestKind,
     ) -> result::Result<
-        option::Option<program_journal::RequestFrame>,
+        option::Option<signalbox_domain::RequestFrame>,
         program_journal::ProgramJournalRepositoryError,
     >;
     pub async fn append_delivery(
         &self,
         run: signalbox_domain::ProgramRunId,
-        kind: program_journal::DeliveryKind,
+        kind: signalbox_domain::DeliveryKind,
     ) -> result::Result<
-        program_journal::DeliveryFrame,
+        signalbox_domain::DeliveryFrame,
         program_journal::ProgramJournalRepositoryError,
     >;
     pub async fn append_delivery_if_tail(
         &self,
         run: signalbox_domain::ProgramRunId,
         expected_last_position: u64,
-        kind: program_journal::DeliveryKind,
+        kind: signalbox_domain::DeliveryKind,
     ) -> result::Result<
-        option::Option<program_journal::DeliveryFrame>,
+        option::Option<signalbox_domain::DeliveryFrame>,
         program_journal::ProgramJournalRepositoryError,
     >;
     pub async fn append_delivery_in_transaction(
         transaction: &mut transaction::Transaction<'_, database::Postgres>,
         run: signalbox_domain::ProgramRunId,
-        kind: program_journal::DeliveryKind,
+        kind: signalbox_domain::DeliveryKind,
     ) -> result::Result<
-        program_journal::DeliveryFrame,
+        signalbox_domain::DeliveryFrame,
         program_journal::ProgramJournalRepositoryError,
     >;
     pub async fn append_nondeterminism_fault(
         &self,
-        failure: program_journal::NondeterminismError,
+        failure: signalbox_domain::NondeterminismError,
     ) -> result::Result<
-        program_journal::DeliveryFrame,
+        signalbox_domain::DeliveryFrame,
         program_journal::ProgramJournalRepositoryError,
     >;
     pub async fn append_nondeterminism_fault_if_tail(
         &self,
-        failure: program_journal::NondeterminismError,
+        failure: signalbox_domain::NondeterminismError,
         expected_last_position: u64,
     ) -> result::Result<
-        option::Option<program_journal::DeliveryFrame>,
+        option::Option<signalbox_domain::DeliveryFrame>,
         program_journal::ProgramJournalRepositoryError,
     >;
     pub async fn load(
         &self,
         run: signalbox_domain::ProgramRunId,
     ) -> result::Result<
-        option::Option<program_journal::ProgramJournal>,
+        option::Option<signalbox_domain::ProgramJournal>,
         program_journal::ProgramJournalRepositoryError,
     >;
 }

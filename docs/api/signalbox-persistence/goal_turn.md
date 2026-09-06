@@ -13,22 +13,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for goal_turn::GoalTurnCandidates
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for goal_turn::GoalTurnCandidates {}
 impl<T> parse_display::IntoResult<T> for goal_turn::GoalTurnCandidates {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for goal_turn::GoalTurnCandidates
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for goal_turn::GoalTurnCandidates {
     fn into_request(self) -> request::Request<T>;
@@ -40,26 +27,6 @@ impl<L> layered::LayerExt<L> for goal_turn::GoalTurnCandidates {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for goal_turn::GoalTurnCandidates
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for goal_turn::GoalTurnCandidates
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for goal_turn::GoalTurnCandidates
-where
-    T: ?marker::Sized,
-{
 }
 impl goal_turn::GoalTurnCandidates {
     pub const fn accepted_input(self) -> signalbox_domain::AcceptedInputId;
@@ -82,16 +49,16 @@ pub enum GoalTurnContinuationOutcome {
     },
     NotTerminal,
     Blocked {
-        event: goal::GoalEventOrdinal,
+        event: signalbox_domain::GoalEventOrdinal,
     },
     NotPursuing,
     NotCurrentGoalTurn,
     UnknownModelAlias {
-        alias: configuration::ModelAlias,
+        alias: signalbox_domain::ModelAlias,
     },
     EventOrdinalExhausted,
     AcceptancePositionExhausted {
-        last: queue_order::SessionInputPosition,
+        last: signalbox_domain::SessionInputPosition,
     },
     AlreadyScheduled,
 }
@@ -102,22 +69,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for goal_turn::GoalTurnContinuationOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for goal_turn::GoalTurnContinuationOutcome {}
 impl<T> parse_display::IntoResult<T> for goal_turn::GoalTurnContinuationOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for goal_turn::GoalTurnContinuationOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for goal_turn::GoalTurnContinuationOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -129,25 +83,5 @@ impl<L> layered::LayerExt<L> for goal_turn::GoalTurnContinuationOutcome {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for goal_turn::GoalTurnContinuationOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for goal_turn::GoalTurnContinuationOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for goal_turn::GoalTurnContinuationOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```

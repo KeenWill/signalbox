@@ -22,22 +22,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for blob_derivation::BlobDerivationCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for blob_derivation::BlobDerivationCorruption {}
 impl<T> parse_display::IntoResult<T> for blob_derivation::BlobDerivationCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for blob_derivation::BlobDerivationCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for blob_derivation::BlobDerivationCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -49,26 +36,6 @@ impl<L> layered::LayerExt<L> for blob_derivation::BlobDerivationCorruption {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for blob_derivation::BlobDerivationCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for blob_derivation::BlobDerivationCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for blob_derivation::BlobDerivationCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for blob_derivation::BlobDerivationCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -87,16 +54,9 @@ pub enum BlobDerivationRepositoryError {
     Corruption(blob_derivation::BlobDerivationCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for blob_derivation::BlobDerivationRepositoryError {}
 impl<T> parse_display::IntoResult<T> for blob_derivation::BlobDerivationRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for blob_derivation::BlobDerivationRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for blob_derivation::BlobDerivationRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -108,26 +68,6 @@ impl<L> layered::LayerExt<L> for blob_derivation::BlobDerivationRepositoryError 
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for blob_derivation::BlobDerivationRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for blob_derivation::BlobDerivationRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for blob_derivation::BlobDerivationRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for blob_derivation::BlobDerivationRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -156,22 +96,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for blob_derivation::BlobDerivationRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for blob_derivation::BlobDerivationRepository {}
 impl<T> parse_display::IntoResult<T> for blob_derivation::BlobDerivationRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for blob_derivation::BlobDerivationRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for blob_derivation::BlobDerivationRepository {
     fn into_request(self) -> request::Request<T>;
@@ -184,59 +111,39 @@ impl<L> layered::LayerExt<L> for blob_derivation::BlobDerivationRepository {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for blob_derivation::BlobDerivationRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for blob_derivation::BlobDerivationRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for blob_derivation::BlobDerivationRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl blob_derivation::BlobDerivationRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn find_deterministic(
         &self,
-        key: blob::DeterministicBlobDerivationKey,
+        key: signalbox_domain::DeterministicBlobDerivationKey,
     ) -> result::Result<
-        option::Option<blob::BlobDerivation>,
+        option::Option<signalbox_domain::BlobDerivation>,
         blob_derivation::BlobDerivationRepositoryError,
     >;
     pub async fn record(
         &self,
-        derivation: blob::BlobDerivation,
+        derivation: signalbox_domain::BlobDerivation,
     ) -> result::Result<
-        blob_derivation::BlobDerivationRecordOutcome,
+        signalbox_application::BlobDerivationRecordOutcome,
         blob_derivation::BlobDerivationRepositoryError,
     >;
 }
-impl blob_derivation::BlobDerivationStore for blob_derivation::BlobDerivationRepository {
+impl signalbox_application::BlobDerivationStore for blob_derivation::BlobDerivationRepository {
     type Error = blob_derivation::BlobDerivationRepositoryError;
     async fn find_deterministic(
         &self,
-        key: blob::DeterministicBlobDerivationKey,
+        key: signalbox_domain::DeterministicBlobDerivationKey,
     ) -> result::Result<
-        option::Option<blob::BlobDerivation>,
-        <Self as blob_derivation::BlobDerivationStore>::Error,
+        option::Option<signalbox_domain::BlobDerivation>,
+        <Self as signalbox_application::BlobDerivationStore>::Error,
     >;
     async fn record_deterministic(
         &self,
-        key: blob::DeterministicBlobDerivationKey,
-        derivation: blob::BlobDerivation,
+        key: signalbox_domain::DeterministicBlobDerivationKey,
+        derivation: signalbox_domain::BlobDerivation,
     ) -> result::Result<
-        blob_derivation::BlobDerivationRecordOutcome,
-        <Self as blob_derivation::BlobDerivationStore>::Error,
+        signalbox_application::BlobDerivationRecordOutcome,
+        <Self as signalbox_application::BlobDerivationStore>::Error,
     >;
 }
 ```

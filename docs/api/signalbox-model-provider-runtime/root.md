@@ -7,12 +7,6 @@
 ```rust
 pub struct ProviderTextDelta {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ProviderTextDelta
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ProviderTextDelta {
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn turn(&self) -> signalbox_domain::TurnId;
@@ -36,23 +30,20 @@ pub trait ProviderTextDeltaSink: marker::Send + marker::Sync {
 ```rust
 pub struct RuntimeModelDefinition {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for RuntimeModelDefinition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl RuntimeModelDefinition {
     pub fn try_new(
-        target: model_call::ResolvedProviderTarget,
+        target: signalbox_domain::ResolvedProviderTarget,
         provider_model: string::String,
         max_output_tokens: u32,
         context_window_tokens: u32,
     ) -> result::Result<Self, RuntimeModelDefinitionError>;
-    pub const fn target(&self) -> model_call::ResolvedProviderTarget;
+    pub const fn target(&self) -> signalbox_domain::ResolvedProviderTarget;
     pub fn provider_model(&self) -> &str;
-    pub const fn with_fast_target(self, fast_target: model_call::ResolvedProviderTarget) -> Self;
-    pub const fn fast_target(&self) -> option::Option<model_call::ResolvedProviderTarget>;
+    pub const fn with_fast_target(
+        self,
+        fast_target: signalbox_domain::ResolvedProviderTarget,
+    ) -> Self;
+    pub const fn fast_target(&self) -> option::Option<signalbox_domain::ResolvedProviderTarget>;
     pub const fn with_provider_compaction(self) -> Self;
     pub const fn provider_compaction_supported(&self) -> bool;
     pub const fn max_output_tokens(&self) -> u32;
@@ -70,12 +61,6 @@ pub enum RuntimeModelDefinitionError {
     OutputLimitExceedsContextWindow,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for RuntimeModelDefinitionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for RuntimeModelDefinitionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -89,24 +74,18 @@ impl error::Error for RuntimeModelDefinitionError {
 ```rust
 pub struct RuntimeModelCatalog {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for RuntimeModelCatalog
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl RuntimeModelCatalog {
     pub fn try_from_definitions(
         definitions: impl collect::IntoIterator<Item = RuntimeModelDefinition>,
     ) -> result::Result<Self, RuntimeModelCatalogError>;
     pub fn resolve(
         &self,
-        target: model_call::ResolvedProviderTarget,
+        target: signalbox_domain::ResolvedProviderTarget,
     ) -> option::Option<&RuntimeModelDefinition>;
     pub fn effective_definition<'catalog>(
         &'catalog self,
         definition: &'catalog RuntimeModelDefinition,
-        fast_mode: model_settings::FastMode,
+        fast_mode: signalbox_domain::FastMode,
     ) -> option::Option<&'catalog RuntimeModelDefinition>;
 }
 ```
@@ -116,20 +95,14 @@ impl RuntimeModelCatalog {
 ```rust
 pub enum RuntimeModelCatalogError {
     ConflictingTarget {
-        target: model_call::ResolvedProviderTarget,
+        target: signalbox_domain::ResolvedProviderTarget,
     },
     MissingFastTarget {
-        target: model_call::ResolvedProviderTarget,
-        fast_target: model_call::ResolvedProviderTarget,
+        target: signalbox_domain::ResolvedProviderTarget,
+        fast_target: signalbox_domain::ResolvedProviderTarget,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for RuntimeModelCatalogError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for RuntimeModelCatalogError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -147,20 +120,14 @@ pub enum ProviderTargetRelation {
     DifferentLineage,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ProviderTargetRelation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## relate_provider_target
 
 ```rust
 pub fn relate_provider_target(
-    configured: &target::ResolvedTarget,
-    reported: &target::ProviderReportedModel,
+    configured: &signalbox_model_runtime::ResolvedTarget,
+    reported: &signalbox_model_runtime::ProviderReportedModel,
 ) -> ProviderTargetRelation;
 ```
 
@@ -211,12 +178,6 @@ pub enum ModelCallCauseToken {
     InvalidToolProposal,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ModelCallCauseToken
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ModelCallCauseToken {
     pub fn parse(value: &str) -> option::Option<Self>;
     pub const fn as_str(self) -> &'static str;
@@ -237,12 +198,6 @@ pub enum BoundaryLossCode {
     StreamProtocolViolation,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl<T> dyn_clone::DynClone for BoundaryLossCode
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl BoundaryLossCode {
     pub const fn as_str(self) -> &'static str;
 }
@@ -254,7 +209,7 @@ impl BoundaryLossCode {
 pub enum ModelCallCauseCode {
     Completed,
     Refused,
-    ProviderError(evidence::ProviderErrorKind),
+    ProviderError(signalbox_model_runtime::ProviderErrorKind),
     CancellationConfirmed,
     CancelledBeforeSend,
     ConnectFailed,
@@ -277,12 +232,6 @@ pub enum ModelCallCauseCode {
     InvalidToolProposal,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ModelCallCauseCode
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ModelCallCauseCode {
     pub const fn as_str(self) -> &'static str;
     pub const fn token(self) -> ModelCallCauseToken;
@@ -298,12 +247,6 @@ pub enum CredentialAccessCode {
     Unreadable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl<T> dyn_clone::DynClone for CredentialAccessCode
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl CredentialAccessCode {
     pub const fn as_str(self) -> &'static str;
 }
@@ -331,12 +274,6 @@ pub enum RuntimeModelCallProviderError {
     InvalidToolProposal,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for RuntimeModelCallProviderError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for RuntimeModelCallProviderError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -346,8 +283,8 @@ impl error::Error for RuntimeModelCallProviderError {
 impl RuntimeModelCallProviderError {
     pub const fn cause_code(self) -> ModelCallCauseCode;
 }
-impl operator_failure::ClassifyOperatorFailure for RuntimeModelCallProviderError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for RuntimeModelCallProviderError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -355,12 +292,6 @@ impl operator_failure::ClassifyOperatorFailure for RuntimeModelCallProviderError
 
 ```rust
 pub struct RuntimeModelCallProvider<R> {/* private */}
-impl<T> dyn_clone::DynClone for RuntimeModelCallProvider<R>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<R> RuntimeModelCallProvider<R> {
     pub fn new(
         runtime: R,
@@ -375,53 +306,55 @@ impl<R> clone::Clone for RuntimeModelCallProvider<R> {
 impl<R> fmt::Debug for RuntimeModelCallProvider<R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl<R> model_execution::ModelCallInputTokenCounter for RuntimeModelCallProvider<R>
+impl<R> signalbox_application::ModelCallInputTokenCounter for RuntimeModelCallProvider<R>
 where
-    R: input_count::ModelInputTokenCounter<signalbox_domain::ModelCallId>
+    R: signalbox_model_runtime::ModelInputTokenCounter<signalbox_domain::ModelCallId>
         + marker::Send
         + marker::Sync,
 {
     type Error = RuntimeInputTokenCountError;
     async fn count_input_tokens<Cancellation>(
         &self,
-        operation: model_execution::PreparedModelOperation,
+        operation: signalbox_application::PreparedModelOperation,
         cancellation: Cancellation,
     ) -> result::Result<
-        model_execution::ModelCallInputTokenCount,
-        <Self as model_execution::ModelCallInputTokenCounter>::Error,
+        signalbox_application::ModelCallInputTokenCount,
+        <Self as signalbox_application::ModelCallInputTokenCounter>::Error,
     >
     where
         Cancellation: future::Future<Output = ()> + marker::Send + 'static;
 }
-impl<R> model_execution::ModelCallProvider for RuntimeModelCallProvider<R>
+impl<R> signalbox_application::ModelCallProvider for RuntimeModelCallProvider<R>
 where
-    R: runtime::ModelRuntime<signalbox_domain::ModelCallId> + marker::Send + marker::Sync,
+    R: signalbox_model_runtime::ModelRuntime<signalbox_domain::ModelCallId>
+        + marker::Send
+        + marker::Sync,
 {
     type Capability = RuntimeModelCallCapability<
-        <R as runtime::ModelRuntime<signalbox_domain::ModelCallId>>::Prepared,
+        <R as signalbox_model_runtime::ModelRuntime<signalbox_domain::ModelCallId>>::Prepared,
     >;
     type Error = RuntimeModelCallProviderError;
     async fn prepare_capability<Cancellation>(
         &mut self,
-        operation: model_execution::PreparedModelOperation,
+        operation: signalbox_application::PreparedModelOperation,
         cancellation: Cancellation,
     ) -> result::Result<
-        model_execution::ModelCallCapabilityPreparation<
-            <Self as model_execution::ModelCallProvider>::Capability,
+        signalbox_application::ModelCallCapabilityPreparation<
+            <Self as signalbox_application::ModelCallProvider>::Capability,
         >,
-        <Self as model_execution::ModelCallProvider>::Error,
+        <Self as signalbox_application::ModelCallProvider>::Error,
     >
     where
         Cancellation: future::Future<Output = ()> + marker::Send + 'static;
     async fn invoke<AcceptancePossible, Cancellation>(
         &mut self,
-        authorized: model_execution::AuthorizedModelCall,
-        capability: <Self as model_execution::ModelCallProvider>::Capability,
+        authorized: signalbox_domain::AuthorizedModelCall,
+        capability: <Self as signalbox_application::ModelCallProvider>::Capability,
         acceptance_possible: AcceptancePossible,
         cancellation: Cancellation,
     ) -> result::Result<
-        model_execution::CorrelatedModelCallTerminalObservation,
-        <Self as model_execution::ModelCallProvider>::Error,
+        signalbox_domain::CorrelatedModelCallTerminalObservation,
+        <Self as signalbox_application::ModelCallProvider>::Error,
     >
     where
         AcceptancePossible: function::FnOnce() + marker::Send,
@@ -438,20 +371,14 @@ pub enum RuntimeInputTokenCountError {
     CorrelationMismatch,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for RuntimeInputTokenCountError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for RuntimeInputTokenCountError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RuntimeInputTokenCountError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for RuntimeInputTokenCountError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for RuntimeInputTokenCountError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
     fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```
@@ -476,13 +403,12 @@ impl InvalidRuntimeToolSchema {
 
 ```rust
 pub fn runtime_tool_definitions(
-    definitions: &[tool_loop::ToolDefinition],
-) -> result::Result<vec::Vec<tool::ToolDefinition>, InvalidRuntimeToolSchema>;
+    definitions: &[signalbox_application::ToolDefinition],
+) -> result::Result<vec::Vec<signalbox_model_runtime::ToolDefinition>, InvalidRuntimeToolSchema>;
 ```
 
 ## render_delegation_outcome
 
 ```rust
-pub fn render_delegation_outcome(outcome: &session_delegation::DelegationOutcome)
-    -> string::String;
+pub fn render_delegation_outcome(outcome: &signalbox_domain::DelegationOutcome) -> string::String;
 ```

@@ -7,16 +7,9 @@
 ```rust
 pub struct PostgresEligibilitySweepError(/* private */);
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for scheduler::PostgresEligibilitySweepError {}
 impl<T> parse_display::IntoResult<T> for scheduler::PostgresEligibilitySweepError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for scheduler::PostgresEligibilitySweepError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for scheduler::PostgresEligibilitySweepError {
     fn into_request(self) -> request::Request<T>;
@@ -29,26 +22,6 @@ impl<L> layered::LayerExt<L> for scheduler::PostgresEligibilitySweepError {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for scheduler::PostgresEligibilitySweepError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for scheduler::PostgresEligibilitySweepError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for scheduler::PostgresEligibilitySweepError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for scheduler::PostgresEligibilitySweepError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -58,8 +31,8 @@ impl error::Error for scheduler::PostgresEligibilitySweepError {
 impl convert::From<error::Error> for scheduler::PostgresEligibilitySweepError {
     fn from(error: error::Error) -> Self;
 }
-impl operator_failure::ClassifyOperatorFailure for scheduler::PostgresEligibilitySweepError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for scheduler::PostgresEligibilitySweepError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -74,22 +47,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for scheduler::PostgresEligibilitySweep
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for scheduler::PostgresEligibilitySweep {}
 impl<T> parse_display::IntoResult<T> for scheduler::PostgresEligibilitySweep {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for scheduler::PostgresEligibilitySweep
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for scheduler::PostgresEligibilitySweep {
     fn into_request(self) -> request::Request<T>;
@@ -102,39 +62,22 @@ impl<L> layered::LayerExt<L> for scheduler::PostgresEligibilitySweep {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for scheduler::PostgresEligibilitySweep
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for scheduler::PostgresEligibilitySweep
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for scheduler::PostgresEligibilitySweep
-where
-    T: ?marker::Sized,
-{
-}
 impl scheduler::PostgresEligibilitySweep {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn find_sessions(
         &mut self,
-    ) -> result::Result<scheduler::EligibilitySweepBatch, scheduler::PostgresEligibilitySweepError>;
+    ) -> result::Result<
+        signalbox_application::EligibilitySweepBatch,
+        scheduler::PostgresEligibilitySweepError,
+    >;
 }
-impl scheduler::EligibilitySweep for scheduler::PostgresEligibilitySweep {
+impl signalbox_application::EligibilitySweep for scheduler::PostgresEligibilitySweep {
     type Error = scheduler::PostgresEligibilitySweepError;
     async fn find_sessions(
         &mut self,
     ) -> result::Result<
-        scheduler::EligibilitySweepBatch,
-        <Self as scheduler::EligibilitySweep>::Error,
+        signalbox_application::EligibilitySweepBatch,
+        <Self as signalbox_application::EligibilitySweep>::Error,
     >;
 }
 ```

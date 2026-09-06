@@ -22,22 +22,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_timeline::SessionTimelineCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_timeline::SessionTimelineCorruption {}
 impl<T> parse_display::IntoResult<T> for session_timeline::SessionTimelineCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_timeline::SessionTimelineCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_timeline::SessionTimelineCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -49,26 +36,6 @@ impl<L> layered::LayerExt<L> for session_timeline::SessionTimelineCorruption {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_timeline::SessionTimelineCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_timeline::SessionTimelineCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_timeline::SessionTimelineCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for session_timeline::SessionTimelineCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -89,16 +56,9 @@ pub enum SessionTimelineRepositoryError {
     Outbox(outbox::OutboxDispatchError),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for session_timeline::SessionTimelineRepositoryError {}
 impl<T> parse_display::IntoResult<T> for session_timeline::SessionTimelineRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_timeline::SessionTimelineRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_timeline::SessionTimelineRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -110,26 +70,6 @@ impl<L> layered::LayerExt<L> for session_timeline::SessionTimelineRepositoryErro
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_timeline::SessionTimelineRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_timeline::SessionTimelineRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_timeline::SessionTimelineRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for session_timeline::SessionTimelineRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -163,22 +103,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_timeline::SessionTimelineRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_timeline::SessionTimelineRepository {}
 impl<T> parse_display::IntoResult<T> for session_timeline::SessionTimelineRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_timeline::SessionTimelineRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_timeline::SessionTimelineRepository {
     fn into_request(self) -> request::Request<T>;
@@ -191,124 +118,104 @@ impl<L> layered::LayerExt<L> for session_timeline::SessionTimelineRepository {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_timeline::SessionTimelineRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_timeline::SessionTimelineRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_timeline::SessionTimelineRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl session_timeline::SessionTimelineRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn read_descriptor(
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        option::Option<session_timeline::SessionTimelineDescriptor>,
+        option::Option<signalbox_application::SessionTimelineDescriptor>,
         session_timeline::SessionTimelineRepositoryError,
     >;
     pub async fn read_window(
         &self,
         session: signalbox_domain::SessionId,
-        anchor: session_timeline::TimelineWindowAnchor,
-        limits: session_timeline::TimelineWindowLimits,
+        anchor: signalbox_application::TimelineWindowAnchor,
+        limits: signalbox_application::TimelineWindowLimits,
     ) -> result::Result<
-        option::Option<session_timeline::SessionTimelineWindow>,
+        option::Option<signalbox_application::SessionTimelineWindow>,
         session_timeline::SessionTimelineRepositoryError,
     >;
     pub async fn read_item_details(
         &self,
         session: signalbox_domain::SessionId,
-        address: session_timeline::TimelineAddress,
-        cursor: option::Option<session_timeline::TimelineDetailCursor>,
-        limits: session_timeline::TimelineDetailLimits,
+        address: signalbox_application::TimelineAddress,
+        cursor: option::Option<signalbox_application::TimelineDetailCursor>,
+        limits: signalbox_application::TimelineDetailLimits,
     ) -> result::Result<
-        option::Option<session_timeline::SessionTimelineDetailPage>,
+        option::Option<signalbox_application::SessionTimelineDetailPage>,
         session_timeline::SessionTimelineRepositoryError,
     >;
     pub async fn read_turn_details(
         &self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
-        cursor: option::Option<session_timeline::TimelineDetailCursor>,
-        limits: session_timeline::TimelineDetailLimits,
+        cursor: option::Option<signalbox_application::TimelineDetailCursor>,
+        limits: signalbox_application::TimelineDetailLimits,
     ) -> result::Result<
-        option::Option<session_timeline::SessionTimelineDetailPage>,
+        option::Option<signalbox_application::SessionTimelineDetailPage>,
         session_timeline::SessionTimelineRepositoryError,
     >;
     pub async fn read_region_details(
         &self,
         session: signalbox_domain::SessionId,
-        first: session_timeline::TimelineAddress,
-        through: session_timeline::TimelineAddress,
-        cursor: option::Option<session_timeline::TimelineDetailCursor>,
-        limits: session_timeline::TimelineDetailLimits,
+        first: signalbox_application::TimelineAddress,
+        through: signalbox_application::TimelineAddress,
+        cursor: option::Option<signalbox_application::TimelineDetailCursor>,
+        limits: signalbox_application::TimelineDetailLimits,
     ) -> result::Result<
-        option::Option<session_timeline::SessionTimelineDetailPage>,
+        option::Option<signalbox_application::SessionTimelineDetailPage>,
         session_timeline::SessionTimelineRepositoryError,
     >;
 }
-impl session_timeline::SessionTimelineReader for session_timeline::SessionTimelineRepository {
+impl signalbox_application::SessionTimelineReader for session_timeline::SessionTimelineRepository {
     type Error = session_timeline::SessionTimelineRepositoryError;
     async fn read_descriptor(
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        option::Option<session_timeline::SessionTimelineDescriptor>,
-        <Self as session_timeline::SessionTimelineReader>::Error,
+        option::Option<signalbox_application::SessionTimelineDescriptor>,
+        <Self as signalbox_application::SessionTimelineReader>::Error,
     >;
     async fn read_window(
         &self,
         session: signalbox_domain::SessionId,
-        anchor: session_timeline::TimelineWindowAnchor,
-        limits: session_timeline::TimelineWindowLimits,
+        anchor: signalbox_application::TimelineWindowAnchor,
+        limits: signalbox_application::TimelineWindowLimits,
     ) -> result::Result<
-        option::Option<session_timeline::SessionTimelineWindow>,
-        <Self as session_timeline::SessionTimelineReader>::Error,
+        option::Option<signalbox_application::SessionTimelineWindow>,
+        <Self as signalbox_application::SessionTimelineReader>::Error,
     >;
     async fn read_item_details(
         &self,
         session: signalbox_domain::SessionId,
-        address: session_timeline::TimelineAddress,
-        cursor: option::Option<session_timeline::TimelineDetailCursor>,
-        limits: session_timeline::TimelineDetailLimits,
+        address: signalbox_application::TimelineAddress,
+        cursor: option::Option<signalbox_application::TimelineDetailCursor>,
+        limits: signalbox_application::TimelineDetailLimits,
     ) -> result::Result<
-        option::Option<session_timeline::SessionTimelineDetailPage>,
-        <Self as session_timeline::SessionTimelineReader>::Error,
+        option::Option<signalbox_application::SessionTimelineDetailPage>,
+        <Self as signalbox_application::SessionTimelineReader>::Error,
     >;
     async fn read_turn_details(
         &self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
-        cursor: option::Option<session_timeline::TimelineDetailCursor>,
-        limits: session_timeline::TimelineDetailLimits,
+        cursor: option::Option<signalbox_application::TimelineDetailCursor>,
+        limits: signalbox_application::TimelineDetailLimits,
     ) -> result::Result<
-        option::Option<session_timeline::SessionTimelineDetailPage>,
-        <Self as session_timeline::SessionTimelineReader>::Error,
+        option::Option<signalbox_application::SessionTimelineDetailPage>,
+        <Self as signalbox_application::SessionTimelineReader>::Error,
     >;
     async fn read_region_details(
         &self,
         session: signalbox_domain::SessionId,
-        first: session_timeline::TimelineAddress,
-        through: session_timeline::TimelineAddress,
-        cursor: option::Option<session_timeline::TimelineDetailCursor>,
-        limits: session_timeline::TimelineDetailLimits,
+        first: signalbox_application::TimelineAddress,
+        through: signalbox_application::TimelineAddress,
+        cursor: option::Option<signalbox_application::TimelineDetailCursor>,
+        limits: signalbox_application::TimelineDetailLimits,
     ) -> result::Result<
-        option::Option<session_timeline::SessionTimelineDetailPage>,
-        <Self as session_timeline::SessionTimelineReader>::Error,
+        option::Option<signalbox_application::SessionTimelineDetailPage>,
+        <Self as signalbox_application::SessionTimelineReader>::Error,
     >;
 }
 ```

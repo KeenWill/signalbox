@@ -13,22 +13,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for conversation_import::ImportedRawBlobInput
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import::ImportedRawBlobInput {}
 impl<T> parse_display::IntoResult<T> for conversation_import::ImportedRawBlobInput {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import::ImportedRawBlobInput
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_import::ImportedRawBlobInput {
     fn into_request(self) -> request::Request<T>;
@@ -40,26 +27,6 @@ impl<L> layered::LayerExt<L> for conversation_import::ImportedRawBlobInput {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import::ImportedRawBlobInput
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import::ImportedRawBlobInput
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import::ImportedRawBlobInput
-where
-    T: ?marker::Sized,
-{
 }
 impl conversation_import::ImportedRawBlobInput {
     pub const fn new(expected: signalbox_blob_store::ExpectedBlob, bytes: sync::Arc<[u8]>) -> Self;
@@ -83,22 +50,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for conversation_import::ImportedRawBlobPublication
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import::ImportedRawBlobPublication {}
 impl<T> parse_display::IntoResult<T> for conversation_import::ImportedRawBlobPublication {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import::ImportedRawBlobPublication
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_import::ImportedRawBlobPublication {
     fn into_request(self) -> request::Request<T>;
@@ -110,26 +64,6 @@ impl<L> layered::LayerExt<L> for conversation_import::ImportedRawBlobPublication
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import::ImportedRawBlobPublication
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import::ImportedRawBlobPublication
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import::ImportedRawBlobPublication
-where
-    T: ?marker::Sized,
-{
 }
 impl conversation_import::ImportedRawBlobPublication {
     pub const fn store(&self) -> &signalbox_blob_store::BlobStoreName;
@@ -161,22 +95,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for conversation_import::ImportedRawBlobStorageError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import::ImportedRawBlobStorageError {}
 impl<T> parse_display::IntoResult<T> for conversation_import::ImportedRawBlobStorageError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import::ImportedRawBlobStorageError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_import::ImportedRawBlobStorageError {
     fn into_request(self) -> request::Request<T>;
@@ -188,26 +109,6 @@ impl<L> layered::LayerExt<L> for conversation_import::ImportedRawBlobStorageErro
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import::ImportedRawBlobStorageError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import::ImportedRawBlobStorageError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import::ImportedRawBlobStorageError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for conversation_import::ImportedRawBlobStorageError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -268,8 +169,9 @@ pub trait ImportedRawBlobStorage: fmt::Debug + marker::Send + marker::Sync {
 ## corrupt_integration_imported_blob
 
 ```rust
+#[cfg(feature = "postgres-integration")]
 pub fn corrupt_integration_imported_blob(
-    digest: blob::BlobDigest,
+    digest: signalbox_domain::BlobDigest,
     bytes: sync::Arc<[u8]>,
 ) -> result::Result<(), conversation_import::ImportedRawBlobStorageError>;
 ```
@@ -295,24 +197,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for conversation_import::ImportedConversationEncodingCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import::ImportedConversationEncodingCorruption {}
 impl<T> parse_display::IntoResult<T>
     for conversation_import::ImportedConversationEncodingCorruption
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import::ImportedConversationEncodingCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_import::ImportedConversationEncodingCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -324,26 +213,6 @@ impl<L> layered::LayerExt<L> for conversation_import::ImportedConversationEncodi
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import::ImportedConversationEncodingCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import::ImportedConversationEncodingCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import::ImportedConversationEncodingCorruption
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -361,24 +230,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for conversation_import::ImportedConversationIdentityCollision
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import::ImportedConversationIdentityCollision {}
 impl<T> parse_display::IntoResult<T>
     for conversation_import::ImportedConversationIdentityCollision
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import::ImportedConversationIdentityCollision
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_import::ImportedConversationIdentityCollision {
     fn into_request(self) -> request::Request<T>;
@@ -390,26 +246,6 @@ impl<L> layered::LayerExt<L> for conversation_import::ImportedConversationIdenti
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import::ImportedConversationIdentityCollision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import::ImportedConversationIdentityCollision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import::ImportedConversationIdentityCollision
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -433,14 +269,14 @@ pub enum ImportedConversationCorruption {
     },
     RawRecordHashCollision,
     RawRecordDeclaredEntryCountMismatch {
-        position: position::ImportedRawRecordPosition,
+        position: signalbox_domain::ImportedRawRecordPosition,
         declared: u64,
         actual: u64,
     },
     SourceSessionLineageMismatch,
     DisplayTitleMismatch,
     ExistingSnapshotMismatch,
-    Domain(reconstitution::ImportedConversationReconstitutionFailure),
+    Domain(signalbox_domain::ImportedConversationReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for conversation_import::ImportedConversationCorruption
@@ -449,22 +285,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for conversation_import::ImportedConversationCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import::ImportedConversationCorruption {}
 impl<T> parse_display::IntoResult<T> for conversation_import::ImportedConversationCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import::ImportedConversationCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_import::ImportedConversationCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -476,26 +299,6 @@ impl<L> layered::LayerExt<L> for conversation_import::ImportedConversationCorrup
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import::ImportedConversationCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import::ImportedConversationCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import::ImportedConversationCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for conversation_import::ImportedConversationCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -516,16 +319,9 @@ pub enum ImportedConversationRepositoryError {
     Corruption(conversation_import::ImportedConversationCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for conversation_import::ImportedConversationRepositoryError {}
 impl<T> parse_display::IntoResult<T> for conversation_import::ImportedConversationRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import::ImportedConversationRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_import::ImportedConversationRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -537,26 +333,6 @@ impl<L> layered::LayerExt<L> for conversation_import::ImportedConversationReposi
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import::ImportedConversationRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import::ImportedConversationRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import::ImportedConversationRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for conversation_import::ImportedConversationRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -595,22 +371,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for conversation_import::ImportedConversationRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import::ImportedConversationRepository {}
 impl<T> parse_display::IntoResult<T> for conversation_import::ImportedConversationRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import::ImportedConversationRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_import::ImportedConversationRepository {
     fn into_request(self) -> request::Request<T>;
@@ -623,57 +386,38 @@ impl<L> layered::LayerExt<L> for conversation_import::ImportedConversationReposi
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import::ImportedConversationRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import::ImportedConversationRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import::ImportedConversationRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl conversation_import::ImportedConversationRepository {
     pub fn with_blob_storage(
         pool: sqlx_postgres::PgPool,
         blob_storage: sync::Arc<dyn conversation_import::ImportedRawBlobStorage>,
     ) -> Self;
+    #[cfg(feature = "postgres-integration")]
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn resolve_or_insert(
         &self,
-        conversation: conversation::ImportedConversation,
+        conversation: signalbox_domain::ImportedConversation,
     ) -> result::Result<
-        conversation_import::ImportedConversationStoreOutcome,
+        signalbox_application::ImportedConversationStoreOutcome,
         conversation_import::ImportedConversationRepositoryError,
     >;
     pub async fn load(
         &self,
         conversation: signalbox_domain::ImportedConversationId,
     ) -> result::Result<
-        option::Option<conversation::ImportedConversation>,
+        option::Option<signalbox_domain::ImportedConversation>,
         conversation_import::ImportedConversationRepositoryError,
     >;
 }
-impl conversation_import::ImportedConversationStore
+impl signalbox_application::ImportedConversationStore
     for conversation_import::ImportedConversationRepository
 {
     type Error = conversation_import::ImportedConversationRepositoryError;
     async fn resolve_or_insert(
         &mut self,
-        conversation: conversation::ImportedConversation,
+        conversation: signalbox_domain::ImportedConversation,
     ) -> result::Result<
-        conversation_import::ImportedConversationStoreOutcome,
-        <Self as conversation_import::ImportedConversationStore>::Error,
+        signalbox_application::ImportedConversationStoreOutcome,
+        <Self as signalbox_application::ImportedConversationStore>::Error,
     >;
 }
 ```
@@ -685,7 +429,7 @@ pub async fn load_normalized_entries(
     pool: &sqlx_postgres::PgPool,
     conversation: signalbox_domain::ImportedConversationId,
 ) -> result::Result<
-    option::Option<boxed::Box<[record::ImportedTranscriptEntryInput]>>,
+    option::Option<boxed::Box<[signalbox_domain::ImportedTranscriptEntryInput]>>,
     conversation_import::ImportedConversationRepositoryError,
 >;
 ```

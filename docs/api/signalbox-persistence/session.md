@@ -16,7 +16,7 @@ pub enum SessionCorruption {
         field: &'static str,
         reason: mapping::PositiveOrdinalMappingError,
     },
-    Domain(session::SessionReconstitutionFailure),
+    Domain(signalbox_domain::SessionReconstitutionFailure),
     Imported(create_session_from_imported_frontier::ImportedSessionCorruption),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -26,22 +26,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session::SessionCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session::SessionCorruption {}
 impl<T> parse_display::IntoResult<T> for session::SessionCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session::SessionCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session::SessionCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -53,26 +40,6 @@ impl<L> layered::LayerExt<L> for session::SessionCorruption {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session::SessionCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session::SessionCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session::SessionCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for session::SessionCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -90,16 +57,9 @@ pub enum SessionRepositoryError {
     Corruption(session::SessionCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for session::SessionRepositoryError {}
 impl<T> parse_display::IntoResult<T> for session::SessionRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session::SessionRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session::SessionRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -111,26 +71,6 @@ impl<L> layered::LayerExt<L> for session::SessionRepositoryError {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session::SessionRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session::SessionRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session::SessionRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for session::SessionRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -157,22 +97,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session::SessionRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session::SessionRepository {}
 impl<T> parse_display::IntoResult<T> for session::SessionRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session::SessionRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session::SessionRepository {
     fn into_request(self) -> request::Request<T>;
@@ -185,41 +112,21 @@ impl<L> layered::LayerExt<L> for session::SessionRepository {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session::SessionRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session::SessionRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session::SessionRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl session::SessionRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn load_session(
         &self,
         requested_session: signalbox_domain::SessionId,
-    ) -> result::Result<option::Option<session::Session>, session::SessionRepositoryError>;
+    ) -> result::Result<option::Option<signalbox_domain::Session>, session::SessionRepositoryError>;
 }
-impl load_session::SessionReader for session::SessionRepository {
+impl signalbox_application::SessionReader for session::SessionRepository {
     type Error = session::SessionRepositoryError;
     async fn load_session(
         &self,
         requested_session: signalbox_domain::SessionId,
     ) -> result::Result<
-        option::Option<session::Session>,
-        <Self as load_session::SessionReader>::Error,
+        option::Option<signalbox_domain::Session>,
+        <Self as signalbox_application::SessionReader>::Error,
     >;
 }
 ```

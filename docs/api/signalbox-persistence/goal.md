@@ -15,22 +15,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for goal::GoalExecutionFailureRecoveryCause
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for goal::GoalExecutionFailureRecoveryCause {}
 impl<T> parse_display::IntoResult<T> for goal::GoalExecutionFailureRecoveryCause {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for goal::GoalExecutionFailureRecoveryCause
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for goal::GoalExecutionFailureRecoveryCause {
     fn into_request(self) -> request::Request<T>;
@@ -43,26 +30,6 @@ impl<L> layered::LayerExt<L> for goal::GoalExecutionFailureRecoveryCause {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for goal::GoalExecutionFailureRecoveryCause
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for goal::GoalExecutionFailureRecoveryCause
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for goal::GoalExecutionFailureRecoveryCause
-where
-    T: ?marker::Sized,
-{
-}
 impl goal::GoalExecutionFailureRecoveryCause {
     pub const fn code(self) -> &'static str;
 }
@@ -72,7 +39,7 @@ impl goal::GoalExecutionFailureRecoveryCause {
 
 ```rust
 pub enum GoalCommandHandlingOutcome {
-    Recorded(goal_command::GoalCommandResult),
+    Recorded(signalbox_domain::GoalCommandResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
@@ -88,22 +55,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for goal::GoalCommandHandlingOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for goal::GoalCommandHandlingOutcome {}
 impl<T> parse_display::IntoResult<T> for goal::GoalCommandHandlingOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for goal::GoalCommandHandlingOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for goal::GoalCommandHandlingOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -116,36 +70,16 @@ impl<L> layered::LayerExt<L> for goal::GoalCommandHandlingOutcome {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for goal::GoalCommandHandlingOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for goal::GoalCommandHandlingOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for goal::GoalCommandHandlingOutcome
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## GoalTransitionOutcome
 
 ```rust
 pub enum GoalTransitionOutcome {
-    Applied(goal::GoalEvent),
+    Applied(signalbox_domain::GoalEvent),
     SessionClosing,
     GoalNotAttached,
-    Rejected(goal::GoalTransitionError),
+    Rejected(signalbox_domain::GoalTransitionError),
     NotCurrentGoalTurn,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -155,22 +89,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for goal::GoalTransitionOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for goal::GoalTransitionOutcome {}
 impl<T> parse_display::IntoResult<T> for goal::GoalTransitionOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for goal::GoalTransitionOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for goal::GoalTransitionOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -182,26 +103,6 @@ impl<L> layered::LayerExt<L> for goal::GoalTransitionOutcome {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for goal::GoalTransitionOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for goal::GoalTransitionOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for goal::GoalTransitionOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -216,22 +117,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for goal::PendingGoalExecutionFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for goal::PendingGoalExecutionFailure {}
 impl<T> parse_display::IntoResult<T> for goal::PendingGoalExecutionFailure {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for goal::PendingGoalExecutionFailure
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for goal::PendingGoalExecutionFailure {
     fn into_request(self) -> request::Request<T>;
@@ -244,29 +132,9 @@ impl<L> layered::LayerExt<L> for goal::PendingGoalExecutionFailure {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for goal::PendingGoalExecutionFailure
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for goal::PendingGoalExecutionFailure
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for goal::PendingGoalExecutionFailure
-where
-    T: ?marker::Sized,
-{
-}
 impl goal::PendingGoalExecutionFailure {
     pub const fn session(self) -> signalbox_domain::SessionId;
-    pub const fn blocked(self) -> goal::GoalEventOrdinal;
+    pub const fn blocked(self) -> signalbox_domain::GoalEventOrdinal;
 }
 ```
 
@@ -282,9 +150,9 @@ pub enum GoalCorruption {
     Inconsistent(&'static str),
     Column(&'static str),
     InvalidOrdinal(mapping::PositiveOrdinalMappingError),
-    InvalidText(goal::GoalTextError),
+    InvalidText(signalbox_domain::GoalTextError),
     InvalidCommandId(mapping::DurableCommandIdMappingError),
-    Domain(goal::GoalReconstitutionFailure),
+    Domain(signalbox_domain::GoalReconstitutionFailure),
     Session(session::SessionCorruption),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -294,22 +162,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for goal::GoalCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for goal::GoalCorruption {}
 impl<T> parse_display::IntoResult<T> for goal::GoalCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for goal::GoalCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for goal::GoalCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -321,24 +176,6 @@ impl<L> layered::LayerExt<L> for goal::GoalCorruption {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for goal::GoalCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for goal::GoalCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive> for goal::GoalCorruption where
-    T: ?marker::Sized
-{
 }
 impl fmt::Display for goal::GoalCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -360,16 +197,9 @@ pub enum GoalRepositoryError {
     Corruption(goal::GoalCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for goal::GoalRepositoryError {}
 impl<T> parse_display::IntoResult<T> for goal::GoalRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for goal::GoalRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for goal::GoalRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -381,26 +211,6 @@ impl<L> layered::LayerExt<L> for goal::GoalRepositoryError {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for goal::GoalRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for goal::GoalRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for goal::GoalRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for goal::GoalRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -427,22 +237,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for goal::GoalRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for goal::GoalRepository {}
 impl<T> parse_display::IntoResult<T> for goal::GoalRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for goal::GoalRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for goal::GoalRepository {
     fn into_request(self) -> request::Request<T>;
@@ -454,24 +251,6 @@ impl<L> layered::LayerExt<L> for goal::GoalRepository {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for goal::GoalRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for goal::GoalRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive> for goal::GoalRepository where
-    T: ?marker::Sized
-{
 }
 impl goal::GoalRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
@@ -485,43 +264,45 @@ impl goal::GoalRepository {
     >;
     pub async fn handle_user_command<SelectDefinition>(
         &self,
-        command: goal_command::GoalUserCommand,
+        command: signalbox_domain::GoalUserCommand,
         candidates: option::Option<goal_turn::GoalTurnCandidates>,
         select_definition: SelectDefinition,
     ) -> result::Result<goal::GoalCommandHandlingOutcome, goal::GoalRepositoryError>
     where
         SelectDefinition: function::FnOnce(
-            configuration::ModelAlias,
-        )
-            -> option::Option<configuration::FrozenAliasDefinition>;
+            signalbox_domain::ModelAlias,
+        ) -> option::Option<
+            signalbox_domain::FrozenAliasDefinition,
+        >;
     pub async fn handle_expected_user_command<SelectDefinition>(
         &self,
-        command: goal_command::GoalUserCommand,
+        command: signalbox_domain::GoalUserCommand,
         candidates: option::Option<goal_turn::GoalTurnCandidates>,
-        expected_head: goal::GoalEventOrdinal,
+        expected_head: signalbox_domain::GoalEventOrdinal,
         select_definition: SelectDefinition,
     ) -> result::Result<goal::GoalCommandHandlingOutcome, goal::GoalRepositoryError>
     where
         SelectDefinition: function::FnOnce(
-            configuration::ModelAlias,
-        )
-            -> option::Option<configuration::FrozenAliasDefinition>;
+            signalbox_domain::ModelAlias,
+        ) -> option::Option<
+            signalbox_domain::FrozenAliasDefinition,
+        >;
     pub async fn load_model_declaration_text(
         &self,
         session: signalbox_domain::SessionId,
-        provenance: goal::GoalModelProvenance,
+        provenance: signalbox_domain::GoalModelProvenance,
     ) -> result::Result<option::Option<string::String>, goal::GoalRepositoryError>;
     pub async fn load_command(
         &self,
         command_id: signalbox_domain::DurableCommandId,
     ) -> result::Result<
-        option::Option<goal_command::ReconstitutedGoalCommand>,
+        option::Option<signalbox_domain::ReconstitutedGoalCommand>,
         goal::GoalRepositoryError,
     >;
     pub async fn load_goal(
         &self,
         session: signalbox_domain::SessionId,
-    ) -> result::Result<option::Option<goal::Goal>, goal::GoalRepositoryError>;
+    ) -> result::Result<option::Option<signalbox_domain::Goal>, goal::GoalRepositoryError>;
     pub async fn session_owned(
         &self,
         session: signalbox_domain::SessionId,
@@ -529,7 +310,7 @@ impl goal::GoalRepository {
     pub async fn load_current_goal_turn(
         &self,
         session: signalbox_domain::SessionId,
-        generation: goal::GoalGeneration,
+        generation: signalbox_domain::GoalGeneration,
     ) -> result::Result<option::Option<signalbox_domain::TurnId>, goal::GoalRepositoryError>;
     pub async fn unchargeable_automatic_resume_turns(
         &self,
@@ -538,64 +319,62 @@ impl goal::GoalRepository {
     ) -> result::Result<boxed::Box<[signalbox_domain::TurnId]>, goal::GoalRepositoryError>;
     pub async fn pending_execution_failures_with_need(
         &self,
-        need: &goal::GoalNeed,
+        need: &signalbox_domain::GoalNeed,
     ) -> result::Result<boxed::Box<[goal::PendingGoalExecutionFailure]>, goal::GoalRepositoryError>;
     pub async fn pending_owned_execution_failure_with_need(
         &self,
         session: signalbox_domain::SessionId,
-        need: &goal::GoalNeed,
-    ) -> result::Result<option::Option<goal::GoalEventOrdinal>, goal::GoalRepositoryError>;
+        need: &signalbox_domain::GoalNeed,
+    ) -> result::Result<option::Option<signalbox_domain::GoalEventOrdinal>, goal::GoalRepositoryError>;
     pub async fn arm_owned_execution_failure(
         &self,
         session: signalbox_domain::SessionId,
-        unmonitored_need: &goal::GoalNeed,
-        scheduled_need: &goal::GoalNeed,
-    ) -> result::Result<option::Option<goal::GoalEventOrdinal>, goal::GoalRepositoryError>;
+        unmonitored_need: &signalbox_domain::GoalNeed,
+        scheduled_need: &signalbox_domain::GoalNeed,
+    ) -> result::Result<option::Option<signalbox_domain::GoalEventOrdinal>, goal::GoalRepositoryError>;
     pub async fn reconcile_current_after_execution<SelectDefinition>(
         &self,
         session: signalbox_domain::SessionId,
         candidates: goal_turn::GoalTurnCandidates,
-        failure_need: goal::GoalNeed,
+        failure_need: signalbox_domain::GoalNeed,
         select_definition: SelectDefinition,
     ) -> result::Result<goal_turn::GoalTurnContinuationOutcome, goal::GoalRepositoryError>
     where
         SelectDefinition: function::FnOnce(
-            configuration::ModelAlias,
-        )
-            -> option::Option<configuration::FrozenAliasDefinition>;
+            signalbox_domain::ModelAlias,
+        ) -> option::Option<
+            signalbox_domain::FrozenAliasDefinition,
+        >;
     pub async fn declare_blocked(
         &self,
         session: signalbox_domain::SessionId,
-        reason: goal::GoalModelBlockedReasonKind,
-        need: goal::GoalNeed,
-        provenance: goal::GoalModelProvenance,
+        reason: signalbox_domain::GoalModelBlockedReasonKind,
+        need: signalbox_domain::GoalNeed,
+        provenance: signalbox_domain::GoalModelProvenance,
     ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>;
     pub async fn declare_achieved(
         &self,
         session: signalbox_domain::SessionId,
-        report: goal::GoalReport,
-        provenance: goal::GoalModelProvenance,
-        verdict: session_lifecycle_command::FinishCheckVerdict,
+        report: signalbox_domain::GoalReport,
+        provenance: signalbox_domain::GoalModelProvenance,
+        verdict: signalbox_domain::FinishCheckVerdict,
     ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>;
     pub async fn load_finish_condition(
         &self,
         session: signalbox_domain::SessionId,
-    ) -> result::Result<
-        option::Option<session_lifecycle_command::FinishCondition>,
-        goal::GoalRepositoryError,
-    >;
+    ) -> result::Result<option::Option<signalbox_domain::FinishCondition>, goal::GoalRepositoryError>;
     pub async fn block_execution_failure(
         &self,
         session: signalbox_domain::SessionId,
-        need: goal::GoalNeed,
-        provenance: goal::GoalSchedulerProvenance,
+        need: signalbox_domain::GoalNeed,
+        provenance: signalbox_domain::GoalSchedulerProvenance,
     ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>;
     pub async fn block_execution_failure_for_current_ownership(
         &self,
         session: signalbox_domain::SessionId,
-        owned_need: goal::GoalNeed,
-        unmonitored_need: goal::GoalNeed,
-        provenance: goal::GoalSchedulerProvenance,
+        owned_need: signalbox_domain::GoalNeed,
+        unmonitored_need: signalbox_domain::GoalNeed,
+        provenance: signalbox_domain::GoalSchedulerProvenance,
     ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>;
 }
 ```

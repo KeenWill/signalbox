@@ -13,22 +13,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for convergence_sweep::ConvergenceSweepObservation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for convergence_sweep::ConvergenceSweepObservation {}
 impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepObservation {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for convergence_sweep::ConvergenceSweepObservation
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepObservation {
     fn into_request(self) -> request::Request<T>;
@@ -41,31 +28,11 @@ impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepObservation 
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for convergence_sweep::ConvergenceSweepObservation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for convergence_sweep::ConvergenceSweepObservation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for convergence_sweep::ConvergenceSweepObservation
-where
-    T: ?marker::Sized,
-{
+impl convergence_sweep::ConvergenceSweepObservation {
+    pub const fn head_sha(&self) -> &signalbox_domain::CommitSha;
 }
 impl convergence_sweep::ConvergenceSweepObservation {
-    pub const fn head_sha(&self) -> &repo_watch::CommitSha;
-}
-impl convergence_sweep::ConvergenceSweepObservation {
-    pub const fn new(head_sha: repo_watch::CommitSha, unresolved_threads: u64) -> Self;
+    pub const fn new(head_sha: signalbox_domain::CommitSha, unresolved_threads: u64) -> Self;
     pub const fn unresolved_threads(&self) -> u64;
 }
 ```
@@ -87,22 +54,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for convergence_sweep::ConvergenceSweepFailureKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for convergence_sweep::ConvergenceSweepFailureKind {}
 impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepFailureKind {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for convergence_sweep::ConvergenceSweepFailureKind
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepFailureKind {
     fn into_request(self) -> request::Request<T>;
@@ -114,26 +68,6 @@ impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepFailureKind 
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for convergence_sweep::ConvergenceSweepFailureKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for convergence_sweep::ConvergenceSweepFailureKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for convergence_sweep::ConvergenceSweepFailureKind
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -152,22 +86,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for convergence_sweep::ConvergenceSweepDecision
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for convergence_sweep::ConvergenceSweepDecision {}
 impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepDecision {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for convergence_sweep::ConvergenceSweepDecision
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepDecision {
     fn into_request(self) -> request::Request<T>;
@@ -179,26 +100,6 @@ impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepDecision {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for convergence_sweep::ConvergenceSweepDecision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for convergence_sweep::ConvergenceSweepDecision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for convergence_sweep::ConvergenceSweepDecision
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -213,22 +114,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for convergence_sweep::ConvergenceSweepDispatchState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for convergence_sweep::ConvergenceSweepDispatchState {}
 impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepDispatchState {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for convergence_sweep::ConvergenceSweepDispatchState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepDispatchState {
     fn into_request(self) -> request::Request<T>;
@@ -240,26 +128,6 @@ impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepDispatchStat
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for convergence_sweep::ConvergenceSweepDispatchState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for convergence_sweep::ConvergenceSweepDispatchState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for convergence_sweep::ConvergenceSweepDispatchState
-where
-    T: ?marker::Sized,
-{
 }
 impl convergence_sweep::ConvergenceSweepDispatchState {
     pub const fn dispatch_id(&self) -> uuid::Uuid;
@@ -281,22 +149,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for convergence_sweep::ConvergenceSweepTargetState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for convergence_sweep::ConvergenceSweepTargetState {}
 impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepTargetState {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for convergence_sweep::ConvergenceSweepTargetState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepTargetState {
     fn into_request(self) -> request::Request<T>;
@@ -308,26 +163,6 @@ impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepTargetState 
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for convergence_sweep::ConvergenceSweepTargetState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for convergence_sweep::ConvergenceSweepTargetState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for convergence_sweep::ConvergenceSweepTargetState
-where
-    T: ?marker::Sized,
-{
 }
 impl convergence_sweep::ConvergenceSweepTargetState {
     pub const fn is_parked(&self) -> bool;
@@ -371,22 +206,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for convergence_sweep::ConvergenceSweepFailureDisposition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for convergence_sweep::ConvergenceSweepFailureDisposition {}
 impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepFailureDisposition {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for convergence_sweep::ConvergenceSweepFailureDisposition
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepFailureDisposition {
     fn into_request(self) -> request::Request<T>;
@@ -398,26 +220,6 @@ impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepFailureDispo
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for convergence_sweep::ConvergenceSweepFailureDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for convergence_sweep::ConvergenceSweepFailureDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for convergence_sweep::ConvergenceSweepFailureDisposition
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -435,22 +237,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for convergence_sweep::ConvergenceSweepRetryPolicy
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for convergence_sweep::ConvergenceSweepRetryPolicy {}
 impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepRetryPolicy {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for convergence_sweep::ConvergenceSweepRetryPolicy
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepRetryPolicy {
     fn into_request(self) -> request::Request<T>;
@@ -462,26 +251,6 @@ impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepRetryPolicy 
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for convergence_sweep::ConvergenceSweepRetryPolicy
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for convergence_sweep::ConvergenceSweepRetryPolicy
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for convergence_sweep::ConvergenceSweepRetryPolicy
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -495,16 +264,9 @@ pub enum ConvergenceSweepStoreError {
     Lifecycle(boxed::Box<session_lifecycle::SessionLifecycleRepositoryError>),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for convergence_sweep::ConvergenceSweepStoreError {}
 impl<T> parse_display::IntoResult<T> for convergence_sweep::ConvergenceSweepStoreError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for convergence_sweep::ConvergenceSweepStoreError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for convergence_sweep::ConvergenceSweepStoreError {
     fn into_request(self) -> request::Request<T>;
@@ -516,26 +278,6 @@ impl<L> layered::LayerExt<L> for convergence_sweep::ConvergenceSweepStoreError {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for convergence_sweep::ConvergenceSweepStoreError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for convergence_sweep::ConvergenceSweepStoreError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for convergence_sweep::ConvergenceSweepStoreError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for convergence_sweep::ConvergenceSweepStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -562,22 +304,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for convergence_sweep::PostgresConvergenceSweepStore
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for convergence_sweep::PostgresConvergenceSweepStore {}
 impl<T> parse_display::IntoResult<T> for convergence_sweep::PostgresConvergenceSweepStore {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for convergence_sweep::PostgresConvergenceSweepStore
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for convergence_sweep::PostgresConvergenceSweepStore {
     fn into_request(self) -> request::Request<T>;
@@ -590,55 +319,38 @@ impl<L> layered::LayerExt<L> for convergence_sweep::PostgresConvergenceSweepStor
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for convergence_sweep::PostgresConvergenceSweepStore
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for convergence_sweep::PostgresConvergenceSweepStore
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for convergence_sweep::PostgresConvergenceSweepStore
-where
-    T: ?marker::Sized,
-{
-}
 impl convergence_sweep::PostgresConvergenceSweepStore {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn reconcile_configured_targets(
         &self,
-        configured: &[(repo_watch::RepositorySlug, repo_watch::PullRequestNumber)],
+        configured: &[(
+            signalbox_domain::RepositorySlug,
+            signalbox_domain::PullRequestNumber,
+        )],
     ) -> result::Result<
         vec::Vec<signalbox_domain::SessionId>,
         convergence_sweep::ConvergenceSweepStoreError,
     >;
     pub async fn reenroll_target(
         &self,
-        repository: &repo_watch::RepositorySlug,
-        pull_request: repo_watch::PullRequestNumber,
+        repository: &signalbox_domain::RepositorySlug,
+        pull_request: signalbox_domain::PullRequestNumber,
     ) -> result::Result<
         option::Option<signalbox_domain::SessionId>,
         convergence_sweep::ConvergenceSweepStoreError,
     >;
     pub async fn load_target(
         &self,
-        repository: &repo_watch::RepositorySlug,
-        pull_request: repo_watch::PullRequestNumber,
+        repository: &signalbox_domain::RepositorySlug,
+        pull_request: signalbox_domain::PullRequestNumber,
     ) -> result::Result<
         option::Option<convergence_sweep::ConvergenceSweepTargetState>,
         convergence_sweep::ConvergenceSweepStoreError,
     >;
     pub async fn load_target_with_cool_off(
         &self,
-        repository: &repo_watch::RepositorySlug,
-        pull_request: repo_watch::PullRequestNumber,
+        repository: &signalbox_domain::RepositorySlug,
+        pull_request: signalbox_domain::PullRequestNumber,
         cool_off: time::Duration,
     ) -> result::Result<
         option::Option<convergence_sweep::ConvergenceSweepTargetState>,
@@ -646,8 +358,8 @@ impl convergence_sweep::PostgresConvergenceSweepStore {
     >;
     pub async fn begin_commission(
         &self,
-        repository: &repo_watch::RepositorySlug,
-        pull_request: repo_watch::PullRequestNumber,
+        repository: &signalbox_domain::RepositorySlug,
+        pull_request: signalbox_domain::PullRequestNumber,
         observation: &convergence_sweep::ConvergenceSweepObservation,
         content_digest: [u8; 32],
         proposed_command: signalbox_domain::DurableCommandId,
@@ -658,8 +370,8 @@ impl convergence_sweep::PostgresConvergenceSweepStore {
     pub async fn record_dispatch(
         &self,
         event_id: uuid::Uuid,
-        repository: &repo_watch::RepositorySlug,
-        pull_request: repo_watch::PullRequestNumber,
+        repository: &signalbox_domain::RepositorySlug,
+        pull_request: signalbox_domain::PullRequestNumber,
         observation: &convergence_sweep::ConvergenceSweepObservation,
         dispatch_id: uuid::Uuid,
         session_id: signalbox_domain::SessionId,
@@ -667,16 +379,16 @@ impl convergence_sweep::PostgresConvergenceSweepStore {
     pub async fn record_decision(
         &self,
         event_id: uuid::Uuid,
-        repository: &repo_watch::RepositorySlug,
-        pull_request: repo_watch::PullRequestNumber,
+        repository: &signalbox_domain::RepositorySlug,
+        pull_request: signalbox_domain::PullRequestNumber,
         observation: &convergence_sweep::ConvergenceSweepObservation,
         decision: convergence_sweep::ConvergenceSweepDecision,
     ) -> result::Result<(), convergence_sweep::ConvergenceSweepStoreError>;
     pub async fn record_dispatch_decision(
         &self,
         event_id: uuid::Uuid,
-        repository: &repo_watch::RepositorySlug,
-        pull_request: repo_watch::PullRequestNumber,
+        repository: &signalbox_domain::RepositorySlug,
+        pull_request: signalbox_domain::PullRequestNumber,
         observation: &convergence_sweep::ConvergenceSweepObservation,
         dispatch: (uuid::Uuid, signalbox_domain::SessionId),
         decision: convergence_sweep::ConvergenceSweepDecision,
@@ -684,8 +396,8 @@ impl convergence_sweep::PostgresConvergenceSweepStore {
     pub async fn record_failure(
         &self,
         event_id: uuid::Uuid,
-        repository: &repo_watch::RepositorySlug,
-        pull_request: repo_watch::PullRequestNumber,
+        repository: &signalbox_domain::RepositorySlug,
+        pull_request: signalbox_domain::PullRequestNumber,
         observation: option::Option<&convergence_sweep::ConvergenceSweepObservation>,
         failure: convergence_sweep::ConvergenceSweepFailureKind,
         retry_policy: convergence_sweep::ConvergenceSweepRetryPolicy,
@@ -696,8 +408,8 @@ impl convergence_sweep::PostgresConvergenceSweepStore {
     pub async fn record_no_model_activity_failure(
         &self,
         event_id: uuid::Uuid,
-        repository: &repo_watch::RepositorySlug,
-        pull_request: repo_watch::PullRequestNumber,
+        repository: &signalbox_domain::RepositorySlug,
+        pull_request: signalbox_domain::PullRequestNumber,
         observation: &convergence_sweep::ConvergenceSweepObservation,
         expected_session: signalbox_domain::SessionId,
     ) -> result::Result<

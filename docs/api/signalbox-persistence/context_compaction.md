@@ -10,15 +10,15 @@ pub struct PrepareContextCompactionRequest {
     pub session: signalbox_domain::SessionId,
     pub requested_through_position: option::Option<u64>,
     pub automatic_for_turn: option::Option<signalbox_domain::TurnId>,
-    pub defaults_version: configuration::SessionConfigurationDefaultsVersion,
-    pub selection: configuration::DirectModelSelection,
-    pub target: model_call::ResolvedProviderTarget,
+    pub defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+    pub selection: signalbox_domain::DirectModelSelection,
+    pub target: signalbox_domain::ResolvedProviderTarget,
     pub input_includes_cache_tokens: bool,
     pub credential_reference: string::String,
     pub call: signalbox_domain::ModelCallId,
-    pub compaction: context_compaction::ContextCompactionId,
-    pub summary_entry: context_frontier::SemanticTranscriptEntryId,
-    pub result_frontier: context_frontier::ContextFrontierId,
+    pub compaction: signalbox_domain::ContextCompactionId,
+    pub summary_entry: signalbox_domain::SemanticTranscriptEntryId,
+    pub result_frontier: signalbox_domain::ContextFrontierId,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for context_compaction::PrepareContextCompactionRequest
@@ -27,22 +27,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for context_compaction::PrepareContextCompactionRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for context_compaction::PrepareContextCompactionRequest {}
 impl<T> parse_display::IntoResult<T> for context_compaction::PrepareContextCompactionRequest {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for context_compaction::PrepareContextCompactionRequest
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for context_compaction::PrepareContextCompactionRequest {
     fn into_request(self) -> request::Request<T>;
@@ -54,26 +41,6 @@ impl<L> layered::LayerExt<L> for context_compaction::PrepareContextCompactionReq
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for context_compaction::PrepareContextCompactionRequest
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for context_compaction::PrepareContextCompactionRequest
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for context_compaction::PrepareContextCompactionRequest
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -88,22 +55,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for context_compaction::PreparedContextCompaction
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for context_compaction::PreparedContextCompaction {}
 impl<T> parse_display::IntoResult<T> for context_compaction::PreparedContextCompaction {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for context_compaction::PreparedContextCompaction
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for context_compaction::PreparedContextCompaction {
     fn into_request(self) -> request::Request<T>;
@@ -116,46 +70,26 @@ impl<L> layered::LayerExt<L> for context_compaction::PreparedContextCompaction {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for context_compaction::PreparedContextCompaction
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for context_compaction::PreparedContextCompaction
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for context_compaction::PreparedContextCompaction
-where
-    T: ?marker::Sized,
-{
-}
 impl context_compaction::PreparedContextCompaction {
     pub fn credential_reference(&self) -> &str;
-    pub fn summarized_entries(&self) -> &[context_frontier::SemanticTranscriptEntryRef];
+    pub fn summarized_entries(&self) -> &[signalbox_domain::SemanticTranscriptEntryRef];
     pub fn summarized_positions(&self) -> &[u64];
 }
 impl context_compaction::PreparedContextCompaction {
     pub const fn command(&self) -> signalbox_domain::DurableCommandId;
     pub const fn session(&self) -> signalbox_domain::SessionId;
-    pub const fn compaction(&self) -> context_compaction::ContextCompactionId;
-    pub const fn predecessor(&self) -> option::Option<context_compaction::ContextCompactionId>;
+    pub const fn compaction(&self) -> signalbox_domain::ContextCompactionId;
+    pub const fn predecessor(&self) -> option::Option<signalbox_domain::ContextCompactionId>;
     pub const fn call(&self) -> signalbox_domain::ModelCallId;
-    pub const fn selection(&self) -> configuration::DirectModelSelection;
-    pub const fn target(&self) -> model_call::ResolvedProviderTarget;
-    pub const fn source_frontier(&self) -> context_frontier::ContextFrontierId;
+    pub const fn selection(&self) -> signalbox_domain::DirectModelSelection;
+    pub const fn target(&self) -> signalbox_domain::ResolvedProviderTarget;
+    pub const fn source_frontier(&self) -> signalbox_domain::ContextFrontierId;
     pub const fn first_position(&self) -> u64;
     pub const fn through_position(&self) -> u64;
-    pub const fn first(&self) -> context_frontier::SemanticTranscriptEntryRef;
-    pub const fn through(&self) -> context_frontier::SemanticTranscriptEntryRef;
-    pub const fn summary_entry(&self) -> context_frontier::SemanticTranscriptEntryId;
-    pub const fn result_frontier(&self) -> context_frontier::ContextFrontierId;
+    pub const fn first(&self) -> signalbox_domain::SemanticTranscriptEntryRef;
+    pub const fn through(&self) -> signalbox_domain::SemanticTranscriptEntryRef;
+    pub const fn summary_entry(&self) -> signalbox_domain::SemanticTranscriptEntryId;
+    pub const fn result_frontier(&self) -> signalbox_domain::ContextFrontierId;
 }
 ```
 
@@ -170,22 +104,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for context_compaction::AutomaticContextCompactionPreview
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for context_compaction::AutomaticContextCompactionPreview {}
 impl<T> parse_display::IntoResult<T> for context_compaction::AutomaticContextCompactionPreview {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for context_compaction::AutomaticContextCompactionPreview
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for context_compaction::AutomaticContextCompactionPreview {
     fn into_request(self) -> request::Request<T>;
@@ -198,31 +119,11 @@ impl<L> layered::LayerExt<L> for context_compaction::AutomaticContextCompactionP
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for context_compaction::AutomaticContextCompactionPreview
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for context_compaction::AutomaticContextCompactionPreview
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for context_compaction::AutomaticContextCompactionPreview
-where
-    T: ?marker::Sized,
-{
-}
 impl context_compaction::AutomaticContextCompactionPreview {
     pub fn members(&self) -> &[context_compaction::AutomaticContextCompactionPreviewMember];
 }
 impl context_compaction::AutomaticContextCompactionPreview {
-    pub const fn source_frontier(&self) -> context_frontier::ContextFrontierId;
+    pub const fn source_frontier(&self) -> signalbox_domain::ContextFrontierId;
 }
 ```
 
@@ -237,24 +138,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for context_compaction::AutomaticContextCompactionPreviewMember
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for context_compaction::AutomaticContextCompactionPreviewMember {}
 impl<T> parse_display::IntoResult<T>
     for context_compaction::AutomaticContextCompactionPreviewMember
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for context_compaction::AutomaticContextCompactionPreviewMember
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for context_compaction::AutomaticContextCompactionPreviewMember {
     fn into_request(self) -> request::Request<T>;
@@ -267,29 +155,9 @@ impl<L> layered::LayerExt<L> for context_compaction::AutomaticContextCompactionP
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for context_compaction::AutomaticContextCompactionPreviewMember
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for context_compaction::AutomaticContextCompactionPreviewMember
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for context_compaction::AutomaticContextCompactionPreviewMember
-where
-    T: ?marker::Sized,
-{
-}
 impl context_compaction::AutomaticContextCompactionPreviewMember {
     pub const fn position(self) -> u64;
-    pub const fn reference(self) -> context_frontier::SemanticTranscriptEntryRef;
+    pub const fn reference(self) -> signalbox_domain::SemanticTranscriptEntryRef;
     pub const fn is_safe_boundary(self) -> bool;
 }
 ```
@@ -298,11 +166,11 @@ impl context_compaction::AutomaticContextCompactionPreviewMember {
 
 ```rust
 pub struct AppliedContextCompaction {
-    pub compaction: context_compaction::ContextCompactionId,
+    pub compaction: signalbox_domain::ContextCompactionId,
     pub call: signalbox_domain::ModelCallId,
     pub through_position: u64,
-    pub summary_entry: context_frontier::SemanticTranscriptEntryId,
-    pub result_frontier: context_frontier::ContextFrontierId,
+    pub summary_entry: signalbox_domain::SemanticTranscriptEntryId,
+    pub result_frontier: signalbox_domain::ContextFrontierId,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for context_compaction::AppliedContextCompaction
@@ -311,22 +179,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for context_compaction::AppliedContextCompaction
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for context_compaction::AppliedContextCompaction {}
 impl<T> parse_display::IntoResult<T> for context_compaction::AppliedContextCompaction {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for context_compaction::AppliedContextCompaction
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for context_compaction::AppliedContextCompaction {
     fn into_request(self) -> request::Request<T>;
@@ -338,26 +193,6 @@ impl<L> layered::LayerExt<L> for context_compaction::AppliedContextCompaction {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for context_compaction::AppliedContextCompaction
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for context_compaction::AppliedContextCompaction
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for context_compaction::AppliedContextCompaction
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -383,22 +218,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for context_compaction::PrepareContextCompactionOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for context_compaction::PrepareContextCompactionOutcome {}
 impl<T> parse_display::IntoResult<T> for context_compaction::PrepareContextCompactionOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for context_compaction::PrepareContextCompactionOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for context_compaction::PrepareContextCompactionOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -410,26 +232,6 @@ impl<L> layered::LayerExt<L> for context_compaction::PrepareContextCompactionOut
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for context_compaction::PrepareContextCompactionOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for context_compaction::PrepareContextCompactionOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for context_compaction::PrepareContextCompactionOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -450,22 +252,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for context_compaction::ContextCompactionCommandLookup
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for context_compaction::ContextCompactionCommandLookup {}
 impl<T> parse_display::IntoResult<T> for context_compaction::ContextCompactionCommandLookup {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for context_compaction::ContextCompactionCommandLookup
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for context_compaction::ContextCompactionCommandLookup {
     fn into_request(self) -> request::Request<T>;
@@ -477,26 +266,6 @@ impl<L> layered::LayerExt<L> for context_compaction::ContextCompactionCommandLoo
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for context_compaction::ContextCompactionCommandLookup
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for context_compaction::ContextCompactionCommandLookup
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for context_compaction::ContextCompactionCommandLookup
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -516,22 +285,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for context_compaction::FailedContextCompactionDisposition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for context_compaction::FailedContextCompactionDisposition {}
 impl<T> parse_display::IntoResult<T> for context_compaction::FailedContextCompactionDisposition {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for context_compaction::FailedContextCompactionDisposition
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for context_compaction::FailedContextCompactionDisposition {
     fn into_request(self) -> request::Request<T>;
@@ -543,26 +299,6 @@ impl<L> layered::LayerExt<L> for context_compaction::FailedContextCompactionDisp
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for context_compaction::FailedContextCompactionDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for context_compaction::FailedContextCompactionDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for context_compaction::FailedContextCompactionDisposition
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -577,22 +313,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for context_compaction::ContextCompactionRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for context_compaction::ContextCompactionRepository {}
 impl<T> parse_display::IntoResult<T> for context_compaction::ContextCompactionRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for context_compaction::ContextCompactionRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for context_compaction::ContextCompactionRepository {
     fn into_request(self) -> request::Request<T>;
@@ -604,26 +327,6 @@ impl<L> layered::LayerExt<L> for context_compaction::ContextCompactionRepository
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for context_compaction::ContextCompactionRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for context_compaction::ContextCompactionRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for context_compaction::ContextCompactionRepository
-where
-    T: ?marker::Sized,
-{
 }
 impl context_compaction::ContextCompactionRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
@@ -658,7 +361,7 @@ impl context_compaction::ContextCompactionRepository {
         &self,
         prepared: &context_compaction::PreparedContextCompaction,
         summary: &str,
-        usage: context_compaction::ContextCompactionTokenUsage,
+        usage: signalbox_domain::ContextCompactionTokenUsage,
     ) -> result::Result<
         context_compaction::AppliedContextCompaction,
         context_compaction::ContextCompactionRepositoryError,
@@ -672,7 +375,7 @@ impl context_compaction::ContextCompactionRepository {
         &self,
         prepared: &context_compaction::PreparedContextCompaction,
         disposition: context_compaction::FailedContextCompactionDisposition,
-        usage: context_compaction::ContextCompactionTokenUsage,
+        usage: signalbox_domain::ContextCompactionTokenUsage,
     ) -> result::Result<(), context_compaction::ContextCompactionRepositoryError>;
 }
 ```
@@ -695,22 +398,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for context_compaction::ContextCompactionCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for context_compaction::ContextCompactionCorruption {}
 impl<T> parse_display::IntoResult<T> for context_compaction::ContextCompactionCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for context_compaction::ContextCompactionCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for context_compaction::ContextCompactionCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -722,26 +412,6 @@ impl<L> layered::LayerExt<L> for context_compaction::ContextCompactionCorruption
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for context_compaction::ContextCompactionCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for context_compaction::ContextCompactionCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for context_compaction::ContextCompactionCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for context_compaction::ContextCompactionCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -761,16 +431,9 @@ pub enum ContextCompactionRepositoryError {
     Corruption(context_compaction::ContextCompactionCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for context_compaction::ContextCompactionRepositoryError {}
 impl<T> parse_display::IntoResult<T> for context_compaction::ContextCompactionRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for context_compaction::ContextCompactionRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for context_compaction::ContextCompactionRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -783,36 +446,16 @@ impl<L> layered::LayerExt<L> for context_compaction::ContextCompactionRepository
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for context_compaction::ContextCompactionRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for context_compaction::ContextCompactionRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for context_compaction::ContextCompactionRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for context_compaction::ContextCompactionRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for context_compaction::ContextCompactionRepositoryError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure
+impl signalbox_application::ClassifyOperatorFailure
     for context_compaction::ContextCompactionRepositoryError
 {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 impl convert::From<error::Error> for context_compaction::ContextCompactionRepositoryError {
     fn from(error: error::Error) -> Self;

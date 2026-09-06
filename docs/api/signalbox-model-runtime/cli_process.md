@@ -5,12 +5,14 @@
 ## CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED
 
 ```rust
+#[cfg(feature = "cli-process")]
 pub const CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED: bool;
 ```
 
 ## CliProcessLabels
 
 ```rust
+#[cfg(feature = "cli-process")]
 pub struct CliProcessLabels {
     pub provider: &'static str,
     pub process: &'static str,
@@ -18,25 +20,15 @@ pub struct CliProcessLabels {
     pub bounded_event: &'static str,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug
-impl<T> dyn_clone::DynClone for CliProcessLabels
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CliEnvironmentVariable
 
 ```rust
+#[cfg(feature = "cli-process")]
 pub struct CliEnvironmentVariable {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for CliEnvironmentVariable
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
+#[cfg(feature = "cli-process")]
 impl CliEnvironmentVariable {
     pub const fn inherited(name: &'static str) -> Self;
     pub const fn credential_home(name: &'static str) -> Self;
@@ -48,7 +40,9 @@ impl CliEnvironmentVariable {
 ## CliEnvironmentOverride
 
 ```rust
+#[cfg(feature = "cli-process")]
 pub struct CliEnvironmentOverride {/* private */}
+#[cfg(feature = "cli-process")]
 impl CliEnvironmentOverride {
     pub fn new(name: &'static str, value: impl convert::Into<os_str::OsString>) -> Self;
     pub fn replacing_inherited(
@@ -62,23 +56,19 @@ impl CliEnvironmentOverride {
 ## CliTerminalTextCapture
 
 ```rust
+#[cfg(feature = "cli-process")]
 pub enum CliTerminalTextCapture {
     Disabled,
     TerminalOnly,
     StreamAndTerminal,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for CliTerminalTextCapture
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CliProcessRequest
 
 ```rust
+#[cfg(feature = "cli-process")]
 pub struct CliProcessRequest<D> {
     pub command: process::Command,
     pub prompt: vec::Vec<u8>,
@@ -96,39 +86,39 @@ pub struct CliProcessRequest<D> {
 ## CliDecodeFailureClass
 
 ```rust
+#[cfg(feature = "cli-process")]
 pub enum CliDecodeFailureClass {
     ProviderDecode,
     StreamProtocolViolation,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for CliDecodeFailureClass
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CliDecodeFailure
 
 ```rust
+#[cfg(feature = "cli-process")]
 pub struct CliDecodeFailure {/* private */}
 // derives: fmt::Debug
+#[cfg(feature = "cli-process")]
 impl CliDecodeFailure {
     pub fn new(class: CliDecodeFailureClass, detail: string::String) -> Self;
     pub fn class(&self) -> CliDecodeFailureClass;
     pub fn detail(&self) -> &str;
     pub fn into_parts(self) -> (CliDecodeFailureClass, string::String);
 }
+#[cfg(feature = "cli-process")]
 impl fmt::Display for CliDecodeFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
+#[cfg(feature = "cli-process")]
 impl error::Error for CliDecodeFailure {}
 ```
 
 ## CliSession
 
 ```rust
+#[cfg(feature = "cli-process")]
 pub trait CliSession<C>: marker::Sized {
     const LABELS: CliProcessLabels;
     fn correlation(&self) -> &C;
@@ -173,6 +163,7 @@ pub trait CliSession<C>: marker::Sized {
 ## execute_cli_process
 
 ```rust
+#[cfg(feature = "cli-process")]
 pub async fn execute_cli_process<C: clone::Clone + marker::Send + marker::Sync, D: CliSession<C>>(
     request: CliProcessRequest<D>,
     sink: &mut (dyn ObservationSink<C> + marker::Send),

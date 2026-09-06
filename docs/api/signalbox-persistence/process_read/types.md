@@ -6,8 +6,8 @@
 
 ```rust
 pub enum ProcessModelSelection {
-    Direct(configuration::DirectModelSelection),
-    Alias(configuration::ModelAlias),
+    Direct(signalbox_domain::DirectModelSelection),
+    Alias(signalbox_domain::ModelAlias),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for process_read::ProcessModelSelection
@@ -16,22 +16,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessModelSelection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessModelSelection {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessModelSelection {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessModelSelection
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessModelSelection {
     fn into_request(self) -> request::Request<T>;
@@ -43,26 +30,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessModelSelection {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessModelSelection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessModelSelection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessModelSelection
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -83,22 +50,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessRunnerProjectionState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessRunnerProjectionState {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessRunnerProjectionState {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessRunnerProjectionState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessRunnerProjectionState {
     fn into_request(self) -> request::Request<T>;
@@ -110,26 +64,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessRunnerProjectionState {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessRunnerProjectionState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessRunnerProjectionState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessRunnerProjectionState
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -149,22 +83,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessRunnerConnectionHealth
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessRunnerConnectionHealth {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessRunnerConnectionHealth {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessRunnerConnectionHealth
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessRunnerConnectionHealth {
     fn into_request(self) -> request::Request<T>;
@@ -176,26 +97,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessRunnerConnectionHealth {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessRunnerConnectionHealth
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessRunnerConnectionHealth
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessRunnerConnectionHealth
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -210,22 +111,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessRunnerProjection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessRunnerProjection {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessRunnerProjection {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessRunnerProjection
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessRunnerProjection {
     fn into_request(self) -> request::Request<T>;
@@ -238,36 +126,20 @@ impl<L> layered::LayerExt<L> for process_read::ProcessRunnerProjection {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessRunnerProjection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessRunnerProjection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessRunnerProjection
-where
-    T: ?marker::Sized,
-{
-}
 impl process_read::ProcessRunnerProjection {
-    pub const fn selector(&self) -> &runner::RunnerSelector;
+    pub const fn selector(&self) -> &signalbox_domain::RunnerSelector;
 }
 impl process_read::ProcessRunnerProjection {
     pub const fn runner(&self) -> option::Option<signalbox_domain::RunnerId>;
-    pub const fn placement_revision(&self) -> runner::RunnerGeneration;
-    pub const fn sandbox(&self) -> runner::RunnerSandboxProfile;
-    pub const fn credential_profile(&self) -> option::Option<&runner::CredentialProfileName>;
-    pub const fn repository(&self) -> option::Option<&runner::WorkspaceRepositoryKey>;
-    pub const fn working_directory(&self) -> option::Option<&runner::RunnerWorkingDirectory>;
+    pub const fn placement_revision(&self) -> signalbox_domain::RunnerGeneration;
+    pub const fn sandbox(&self) -> signalbox_domain::RunnerSandboxProfile;
+    pub const fn credential_profile(
+        &self,
+    ) -> option::Option<&signalbox_domain::CredentialProfileName>;
+    pub const fn repository(&self) -> option::Option<&signalbox_domain::WorkspaceRepositoryKey>;
+    pub const fn working_directory(
+        &self,
+    ) -> option::Option<&signalbox_domain::RunnerWorkingDirectory>;
     pub const fn connection_health(
         &self,
     ) -> option::Option<process_read::ProcessRunnerConnectionHealth>;
@@ -286,22 +158,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessSessionSummary
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessSessionSummary {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessSessionSummary {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessSessionSummary
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessSessionSummary {
     fn into_request(self) -> request::Request<T>;
@@ -314,28 +173,8 @@ impl<L> layered::LayerExt<L> for process_read::ProcessSessionSummary {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessSessionSummary
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessSessionSummary
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessSessionSummary
-where
-    T: ?marker::Sized,
-{
-}
 impl process_read::ProcessSessionSummary {
-    pub const fn placement(&self) -> &session_placement::VersionedSessionPlacement;
+    pub const fn placement(&self) -> &signalbox_domain::VersionedSessionPlacement;
 }
 impl process_read::ProcessSessionSummary {
     pub const fn session(&self) -> signalbox_domain::SessionId;
@@ -356,22 +195,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessSessionDefaults
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessSessionDefaults {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessSessionDefaults {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessSessionDefaults
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessSessionDefaults {
     fn into_request(self) -> request::Request<T>;
@@ -384,32 +210,12 @@ impl<L> layered::LayerExt<L> for process_read::ProcessSessionDefaults {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessSessionDefaults
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessSessionDefaults
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessSessionDefaults
-where
-    T: ?marker::Sized,
-{
-}
 impl process_read::ProcessSessionDefaults {
-    pub const fn defaults(&self) -> &configuration::SessionConfigurationDefaults;
+    pub const fn defaults(&self) -> &signalbox_domain::SessionConfigurationDefaults;
 }
 impl process_read::ProcessSessionDefaults {
     pub const fn session(&self) -> signalbox_domain::SessionId;
-    pub const fn version(&self) -> configuration::SessionConfigurationDefaultsVersion;
+    pub const fn version(&self) -> signalbox_domain::SessionConfigurationDefaultsVersion;
 }
 ```
 
@@ -428,22 +234,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessSessionDefaultsRead
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessSessionDefaultsRead {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessSessionDefaultsRead {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessSessionDefaultsRead
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessSessionDefaultsRead {
     fn into_request(self) -> request::Request<T>;
@@ -456,26 +249,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessSessionDefaultsRead {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessSessionDefaultsRead
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessSessionDefaultsRead
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessSessionDefaultsRead
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ProcessScopedTranscriptRead
@@ -484,19 +257,12 @@ where
 pub enum ProcessScopedTranscriptRead {
     Opened(boxed::Box<process_read::ProcessTranscriptReader>),
     TargetNotFound,
-    Refused(session_placement::SessionReadScopeRefusal),
+    Refused(signalbox_domain::SessionReadScopeRefusal),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for process_read::ProcessScopedTranscriptRead {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessScopedTranscriptRead {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessScopedTranscriptRead
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessScopedTranscriptRead {
     fn into_request(self) -> request::Request<T>;
@@ -509,26 +275,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessScopedTranscriptRead {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessScopedTranscriptRead
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessScopedTranscriptRead
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessScopedTranscriptRead
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ProcessSessionSummaryReader
@@ -536,16 +282,9 @@ where
 ```rust
 pub struct ProcessSessionSummaryReader {/* private */}
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for process_read::ProcessSessionSummaryReader {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessSessionSummaryReader {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessSessionSummaryReader
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessSessionSummaryReader {
     fn into_request(self) -> request::Request<T>;
@@ -557,26 +296,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessSessionSummaryReader {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessSessionSummaryReader
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessSessionSummaryReader
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessSessionSummaryReader
-where
-    T: ?marker::Sized,
-{
 }
 impl process_read::ProcessSessionSummaryReader {
     pub const fn summary_count(&self) -> option::Option<u64>;
@@ -604,22 +323,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessCurrentModelCallState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessCurrentModelCallState {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessCurrentModelCallState {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessCurrentModelCallState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessCurrentModelCallState {
     fn into_request(self) -> request::Request<T>;
@@ -631,26 +337,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessCurrentModelCallState {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessCurrentModelCallState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessCurrentModelCallState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessCurrentModelCallState
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -665,22 +351,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessCurrentModelCall
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessCurrentModelCall {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessCurrentModelCall {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessCurrentModelCall
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessCurrentModelCall {
     fn into_request(self) -> request::Request<T>;
@@ -692,26 +365,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessCurrentModelCall {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessCurrentModelCall
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessCurrentModelCall
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessCurrentModelCall
-where
-    T: ?marker::Sized,
-{
 }
 impl process_read::ProcessCurrentModelCall {
     pub const fn call(&self) -> signalbox_domain::ModelCallId;
@@ -733,22 +386,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessFailedModelCallDisposition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessFailedModelCallDisposition {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessFailedModelCallDisposition {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessFailedModelCallDisposition
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessFailedModelCallDisposition {
     fn into_request(self) -> request::Request<T>;
@@ -760,26 +400,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessFailedModelCallDisposition
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessFailedModelCallDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessFailedModelCallDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessFailedModelCallDisposition
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -805,22 +425,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessProviderModelCallFailureCause
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessProviderModelCallFailureCause {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessProviderModelCallFailureCause {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessProviderModelCallFailureCause
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessProviderModelCallFailureCause {
     fn into_request(self) -> request::Request<T>;
@@ -832,26 +439,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessProviderModelCallFailureCa
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessProviderModelCallFailureCause
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessProviderModelCallFailureCause
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessProviderModelCallFailureCause
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -870,22 +457,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessAttachmentPreparationFailureCause
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessAttachmentPreparationFailureCause {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessAttachmentPreparationFailureCause {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessAttachmentPreparationFailureCause
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessAttachmentPreparationFailureCause {
     fn into_request(self) -> request::Request<T>;
@@ -897,26 +471,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessAttachmentPreparationFailu
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessAttachmentPreparationFailureCause
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessAttachmentPreparationFailureCause
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessAttachmentPreparationFailureCause
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -931,22 +485,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessFailedTerminalModelCall
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessFailedTerminalModelCall {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessFailedTerminalModelCall {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessFailedTerminalModelCall
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessFailedTerminalModelCall {
     fn into_request(self) -> request::Request<T>;
@@ -958,26 +499,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessFailedTerminalModelCall {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessFailedTerminalModelCall
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessFailedTerminalModelCall
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessFailedTerminalModelCall
-where
-    T: ?marker::Sized,
-{
 }
 impl process_read::ProcessFailedTerminalModelCall {
     pub const fn call(&self) -> signalbox_domain::ModelCallId;
@@ -1006,22 +527,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessModelCallRecoveryPrecondition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessModelCallRecoveryPrecondition {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessModelCallRecoveryPrecondition {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessModelCallRecoveryPrecondition
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessModelCallRecoveryPrecondition {
     fn into_request(self) -> request::Request<T>;
@@ -1034,26 +542,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessModelCallRecoveryPrecondit
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessModelCallRecoveryPrecondition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessModelCallRecoveryPrecondition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessModelCallRecoveryPrecondition
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ProcessTurnState
@@ -1062,7 +550,7 @@ where
 pub enum ProcessTurnState {
     Queued {
         accepted_input: signalbox_domain::AcceptedInputId,
-        content: user_content::UserContent,
+        content: signalbox_domain::UserContent,
     },
     QueuedDelegated {
         spawning_request: signalbox_domain::ToolRequestId,
@@ -1106,31 +594,31 @@ pub enum ProcessTurnState {
     },
     ActiveAwaitingRunnerRecovery {
         runner: signalbox_domain::RunnerId,
-        placement_revision: runner::RunnerGeneration,
+        placement_revision: signalbox_domain::RunnerGeneration,
         interrupted_tool_attempt: option::Option<signalbox_domain::ToolAttemptId>,
     },
     Failed {
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
         terminal_attempt: option::Option<signalbox_domain::TurnAttemptId>,
         terminal_model_call: option::Option<process_read::ProcessFailedTerminalModelCall>,
     },
     Completed {
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
         terminal_attempt: signalbox_domain::TurnAttemptId,
         terminal_call: signalbox_domain::ModelCallId,
     },
     Refused {
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
         terminal_attempt: signalbox_domain::TurnAttemptId,
         terminal_call: signalbox_domain::ModelCallId,
     },
     Cancelled {
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
         terminal_attempt: signalbox_domain::TurnAttemptId,
         terminal_call: option::Option<signalbox_domain::ModelCallId>,
     },
     ReconciliationRequired {
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
         terminal_attempt: signalbox_domain::TurnAttemptId,
         operation: process_read::ProcessReconciliationOperation,
     },
@@ -1142,22 +630,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessTurnState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessTurnState {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessTurnState {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessTurnState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessTurnState {
     fn into_request(self) -> request::Request<T>;
@@ -1169,26 +644,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessTurnState {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessTurnState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessTurnState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessTurnState
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1206,22 +661,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessReconciliationOperation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessReconciliationOperation {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessReconciliationOperation {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessReconciliationOperation
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessReconciliationOperation {
     fn into_request(self) -> request::Request<T>;
@@ -1233,26 +675,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessReconciliationOperation {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessReconciliationOperation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessReconciliationOperation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessReconciliationOperation
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1267,22 +689,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessTranscriptTurn
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessTranscriptTurn {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessTranscriptTurn {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessTranscriptTurn
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessTranscriptTurn {
     fn into_request(self) -> request::Request<T>;
@@ -1295,26 +704,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessTranscriptTurn {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessTranscriptTurn
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessTranscriptTurn
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessTranscriptTurn
-where
-    T: ?marker::Sized,
-{
-}
 impl process_read::ProcessTranscriptTurn {
     pub const fn state(&self) -> &process_read::ProcessTurnState;
 }
@@ -1323,7 +712,7 @@ impl process_read::ProcessTranscriptTurn {
     pub const fn acceptance_position(&self) -> u64;
     pub const fn model_settings(
         &self,
-    ) -> option::Option<&model_settings::TurnModelSettingsResolved>;
+    ) -> option::Option<&signalbox_domain::TurnModelSettingsResolved>;
 }
 ```
 
@@ -1338,22 +727,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessModelCallTokenUsage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessModelCallTokenUsage {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessModelCallTokenUsage {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessModelCallTokenUsage
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessModelCallTokenUsage {
     fn into_request(self) -> request::Request<T>;
@@ -1365,26 +741,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessModelCallTokenUsage {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessModelCallTokenUsage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessModelCallTokenUsage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessModelCallTokenUsage
-where
-    T: ?marker::Sized,
-{
 }
 impl process_read::ProcessModelCallTokenUsage {
     pub const fn input_tokens(self) -> option::Option<u64>;
@@ -1408,22 +764,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessModelCallUsageProvenance
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessModelCallUsageProvenance {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessModelCallUsageProvenance {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessModelCallUsageProvenance
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessModelCallUsageProvenance {
     fn into_request(self) -> request::Request<T>;
@@ -1435,26 +778,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessModelCallUsageProvenance {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessModelCallUsageProvenance
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessModelCallUsageProvenance
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessModelCallUsageProvenance
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1472,22 +795,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessModelCallInputTokenSemantics
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessModelCallInputTokenSemantics {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessModelCallInputTokenSemantics {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessModelCallInputTokenSemantics
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessModelCallInputTokenSemantics {
     fn into_request(self) -> request::Request<T>;
@@ -1499,26 +809,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessModelCallInputTokenSemanti
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessModelCallInputTokenSemantics
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessModelCallInputTokenSemantics
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessModelCallInputTokenSemantics
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1533,22 +823,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessTranscriptModelCallUsage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessTranscriptModelCallUsage {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessTranscriptModelCallUsage {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessTranscriptModelCallUsage
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessTranscriptModelCallUsage {
     fn into_request(self) -> request::Request<T>;
@@ -1561,33 +838,13 @@ impl<L> layered::LayerExt<L> for process_read::ProcessTranscriptModelCallUsage {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessTranscriptModelCallUsage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessTranscriptModelCallUsage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessTranscriptModelCallUsage
-where
-    T: ?marker::Sized,
-{
-}
 impl process_read::ProcessTranscriptModelCallUsage {
     pub fn credential_profile(&self) -> &str;
 }
 impl process_read::ProcessTranscriptModelCallUsage {
     pub const fn turn(&self) -> signalbox_domain::TurnId;
     pub const fn call(&self) -> signalbox_domain::ModelCallId;
-    pub const fn target(&self) -> model_call::ResolvedProviderTarget;
+    pub const fn target(&self) -> signalbox_domain::ResolvedProviderTarget;
     pub const fn input_token_semantics(
         &self,
     ) -> option::Option<process_read::ProcessModelCallInputTokenSemantics>;
@@ -1610,22 +867,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessSessionAncestry
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessSessionAncestry {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessSessionAncestry {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessSessionAncestry
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessSessionAncestry {
     fn into_request(self) -> request::Request<T>;
@@ -1637,26 +881,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessSessionAncestry {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessSessionAncestry
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessSessionAncestry
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessSessionAncestry
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1676,22 +900,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessImportedSourceSpeaker
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessImportedSourceSpeaker {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessImportedSourceSpeaker {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessImportedSourceSpeaker
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessImportedSourceSpeaker {
     fn into_request(self) -> request::Request<T>;
@@ -1703,26 +914,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessImportedSourceSpeaker {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessImportedSourceSpeaker
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessImportedSourceSpeaker
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessImportedSourceSpeaker
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1747,22 +938,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessImportedContentKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessImportedContentKind {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessImportedContentKind {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessImportedContentKind
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessImportedContentKind {
     fn into_request(self) -> request::Request<T>;
@@ -1774,26 +952,6 @@ impl<L> layered::LayerExt<L> for process_read::ProcessImportedContentKind {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessImportedContentKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessImportedContentKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessImportedContentKind
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1811,22 +969,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for process_read::ProcessToolExecutionResultDisposition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessToolExecutionResultDisposition {}
 impl<T> parse_display::IntoResult<T> for process_read::ProcessToolExecutionResultDisposition {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessToolExecutionResultDisposition
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for process_read::ProcessToolExecutionResultDisposition {
     fn into_request(self) -> request::Request<T>;
@@ -1838,25 +983,5 @@ impl<L> layered::LayerExt<L> for process_read::ProcessToolExecutionResultDisposi
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessToolExecutionResultDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessToolExecutionResultDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessToolExecutionResultDisposition
-where
-    T: ?marker::Sized,
-{
 }
 ```

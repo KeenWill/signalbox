@@ -60,21 +60,11 @@ pub enum AutomaticReconciliationRepositoryError {
     Corruption(&'static str),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither
-    for automatic_reconciliation::AutomaticReconciliationRepositoryError
-{
-}
 impl<T> parse_display::IntoResult<T>
     for automatic_reconciliation::AutomaticReconciliationRepositoryError
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for automatic_reconciliation::AutomaticReconciliationRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T>
     for automatic_reconciliation::AutomaticReconciliationRepositoryError
@@ -89,26 +79,6 @@ impl<L> layered::LayerExt<L> for automatic_reconciliation::AutomaticReconciliati
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for automatic_reconciliation::AutomaticReconciliationRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for automatic_reconciliation::AutomaticReconciliationRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for automatic_reconciliation::AutomaticReconciliationRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for automatic_reconciliation::AutomaticReconciliationRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -116,12 +86,12 @@ impl error::Error for automatic_reconciliation::AutomaticReconciliationRepositor
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl automatic_reconciliation::AutomaticReconciliationRepositoryError {
-    pub const fn failure_kind(&self) -> turn_liveness::AutomaticReconciliationFailureKind;
+    pub const fn failure_kind(&self) -> signalbox_application::AutomaticReconciliationFailureKind;
 }
-impl operator_failure::ClassifyOperatorFailure
+impl signalbox_application::ClassifyOperatorFailure
     for automatic_reconciliation::AutomaticReconciliationRepositoryError
 {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
     fn operator_failure_cause_code(&self) -> &'static str;
 }
 impl convert::From<error::Error>
@@ -142,27 +112,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for automatic_reconciliation::PostgresAutomaticReconciliationRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for automatic_reconciliation::PostgresAutomaticReconciliationRepository
-{
-}
 impl<T> parse_display::IntoResult<T>
     for automatic_reconciliation::PostgresAutomaticReconciliationRepository
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for automatic_reconciliation::PostgresAutomaticReconciliationRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T>
     for automatic_reconciliation::PostgresAutomaticReconciliationRepository
@@ -179,26 +133,6 @@ impl<L> layered::LayerExt<L>
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for automatic_reconciliation::PostgresAutomaticReconciliationRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for automatic_reconciliation::PostgresAutomaticReconciliationRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for automatic_reconciliation::PostgresAutomaticReconciliationRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl automatic_reconciliation::PostgresAutomaticReconciliationRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub const fn with_policy(
@@ -210,20 +144,20 @@ impl automatic_reconciliation::PostgresAutomaticReconciliationRepository {
     pub async fn claim_due(
         &self,
     ) -> result::Result<
-        turn_liveness::AutomaticReconciliationBatch,
+        signalbox_application::AutomaticReconciliationBatch,
         automatic_reconciliation::AutomaticReconciliationRepositoryError,
     >;
     pub async fn reconcile(
         &self,
-        claimed: turn_liveness::ClaimedAutomaticReconciliation,
+        claimed: signalbox_application::ClaimedAutomaticReconciliation,
     ) -> result::Result<
-        turn_liveness::AutomaticReconciliationOutcome,
+        signalbox_application::AutomaticReconciliationOutcome,
         automatic_reconciliation::AutomaticReconciliationRepositoryError,
     >;
     pub async fn record_failure(
         &self,
-        claimed: turn_liveness::ClaimedAutomaticReconciliation,
-        failure: turn_liveness::AutomaticReconciliationFailureKind,
+        claimed: signalbox_application::ClaimedAutomaticReconciliation,
+        failure: signalbox_application::AutomaticReconciliationFailureKind,
     ) -> result::Result<(), automatic_reconciliation::AutomaticReconciliationRepositoryError>;
 }
 ```

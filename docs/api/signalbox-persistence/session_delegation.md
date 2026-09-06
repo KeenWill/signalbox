@@ -13,22 +13,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_delegation::RecordedDelegationWait
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_delegation::RecordedDelegationWait {}
 impl<T> parse_display::IntoResult<T> for session_delegation::RecordedDelegationWait {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_delegation::RecordedDelegationWait
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_delegation::RecordedDelegationWait {
     fn into_request(self) -> request::Request<T>;
@@ -41,28 +28,8 @@ impl<L> layered::LayerExt<L> for session_delegation::RecordedDelegationWait {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::RecordedDelegationWait
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::RecordedDelegationWait
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_delegation::RecordedDelegationWait
-where
-    T: ?marker::Sized,
-{
-}
 impl session_delegation::RecordedDelegationWait {
-    pub const fn wait(self) -> session_delegation::DelegationWait;
+    pub const fn wait(self) -> signalbox_domain::DelegationWait;
 }
 ```
 
@@ -77,22 +44,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_delegation::RecordedDelegationMessage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_delegation::RecordedDelegationMessage {}
 impl<T> parse_display::IntoResult<T> for session_delegation::RecordedDelegationMessage {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_delegation::RecordedDelegationMessage
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_delegation::RecordedDelegationMessage {
     fn into_request(self) -> request::Request<T>;
@@ -105,40 +59,20 @@ impl<L> layered::LayerExt<L> for session_delegation::RecordedDelegationMessage {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::RecordedDelegationMessage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::RecordedDelegationMessage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_delegation::RecordedDelegationMessage
-where
-    T: ?marker::Sized,
-{
-}
 impl session_delegation::RecordedDelegationMessage {
     pub const fn tool_request(&self) -> signalbox_domain::ToolRequestId;
     pub const fn message(&self) -> signalbox_domain::DelegationMessageId;
-    pub const fn direction(&self) -> session_delegation::DelegationMessageDirection;
-    pub const fn ordinal(&self) -> session_delegation::DelegationEventOrdinal;
+    pub const fn direction(&self) -> signalbox_domain::DelegationMessageDirection;
+    pub const fn ordinal(&self) -> signalbox_domain::DelegationEventOrdinal;
     pub const fn delivery_sequence(&self) -> nonzero::NonZeroU64;
 }
-impl session_delegation::DelegationMessageDeliveryProjection
+impl signalbox_application::DelegationMessageDeliveryProjection
     for session_delegation::RecordedDelegationMessage
 {
     fn tool_request(&self) -> signalbox_domain::ToolRequestId;
     fn message(&self) -> signalbox_domain::DelegationMessageId;
-    fn direction(&self) -> session_delegation::DelegationMessageDirection;
-    fn ordinal(&self) -> session_delegation::DelegationEventOrdinal;
+    fn direction(&self) -> signalbox_domain::DelegationMessageDirection;
+    fn ordinal(&self) -> signalbox_domain::DelegationEventOrdinal;
     fn delivery_sequence(&self) -> nonzero::NonZeroU64;
 }
 ```
@@ -154,22 +88,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_delegation::RecordedDelegationDelivery
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_delegation::RecordedDelegationDelivery {}
 impl<T> parse_display::IntoResult<T> for session_delegation::RecordedDelegationDelivery {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_delegation::RecordedDelegationDelivery
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_delegation::RecordedDelegationDelivery {
     fn into_request(self) -> request::Request<T>;
@@ -182,28 +103,8 @@ impl<L> layered::LayerExt<L> for session_delegation::RecordedDelegationDelivery 
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::RecordedDelegationDelivery
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::RecordedDelegationDelivery
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_delegation::RecordedDelegationDelivery
-where
-    T: ?marker::Sized,
-{
-}
 impl session_delegation::RecordedDelegationDelivery {
-    pub const fn outcome(&self) -> &session_delegation::DelegationOutcome;
+    pub const fn outcome(&self) -> &signalbox_domain::DelegationOutcome;
 }
 ```
 
@@ -219,7 +120,7 @@ pub enum DelegationOperationRejection {
     DeliverySequenceExhausted,
     Transition {
         spawning_request: signalbox_domain::ToolRequestId,
-        failure: session_delegation::DelegationTransitionFailure,
+        failure: signalbox_domain::DelegationTransitionFailure,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -229,22 +130,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_delegation::DelegationOperationRejection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_delegation::DelegationOperationRejection {}
 impl<T> parse_display::IntoResult<T> for session_delegation::DelegationOperationRejection {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_delegation::DelegationOperationRejection
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_delegation::DelegationOperationRejection {
     fn into_request(self) -> request::Request<T>;
@@ -256,26 +144,6 @@ impl<L> layered::LayerExt<L> for session_delegation::DelegationOperationRejectio
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::DelegationOperationRejection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::DelegationOperationRejection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_delegation::DelegationOperationRejection
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -297,22 +165,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_delegation::DelegationRequestExecutionState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_delegation::DelegationRequestExecutionState {}
 impl<T> parse_display::IntoResult<T> for session_delegation::DelegationRequestExecutionState {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_delegation::DelegationRequestExecutionState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_delegation::DelegationRequestExecutionState {
     fn into_request(self) -> request::Request<T>;
@@ -324,26 +179,6 @@ impl<L> layered::LayerExt<L> for session_delegation::DelegationRequestExecutionS
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::DelegationRequestExecutionState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::DelegationRequestExecutionState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_delegation::DelegationRequestExecutionState
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -369,22 +204,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_delegation::ProcessDelegationRequestRejection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_delegation::ProcessDelegationRequestRejection {}
 impl<T> parse_display::IntoResult<T> for session_delegation::ProcessDelegationRequestRejection {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_delegation::ProcessDelegationRequestRejection
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_delegation::ProcessDelegationRequestRejection {
     fn into_request(self) -> request::Request<T>;
@@ -396,26 +218,6 @@ impl<L> layered::LayerExt<L> for session_delegation::ProcessDelegationRequestRej
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::ProcessDelegationRequestRejection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::ProcessDelegationRequestRejection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_delegation::ProcessDelegationRequestRejection
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -462,20 +264,6 @@ impl<L> layered::LayerExt<L> for session_delegation::ProcessDelegationOutcome<T>
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::ProcessDelegationOutcome<T>
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::ProcessDelegationOutcome<T>
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
 impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
     for session_delegation::ProcessDelegationOutcome<T>
 where
@@ -499,22 +287,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_delegation::RecordDelegationWaitOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_delegation::RecordDelegationWaitOutcome {}
 impl<T> parse_display::IntoResult<T> for session_delegation::RecordDelegationWaitOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_delegation::RecordDelegationWaitOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_delegation::RecordDelegationWaitOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -526,26 +301,6 @@ impl<L> layered::LayerExt<L> for session_delegation::RecordDelegationWaitOutcome
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::RecordDelegationWaitOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::RecordDelegationWaitOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_delegation::RecordDelegationWaitOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -564,22 +319,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_delegation::RecordDelegationMessageOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_delegation::RecordDelegationMessageOutcome {}
 impl<T> parse_display::IntoResult<T> for session_delegation::RecordDelegationMessageOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_delegation::RecordDelegationMessageOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_delegation::RecordDelegationMessageOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -591,26 +333,6 @@ impl<L> layered::LayerExt<L> for session_delegation::RecordDelegationMessageOutc
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::RecordDelegationMessageOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::RecordDelegationMessageOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_delegation::RecordDelegationMessageOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -625,7 +347,7 @@ pub enum SessionDelegationCorruption {
         field: &'static str,
         value: string::String,
     },
-    Reconstitution(session_delegation::SessionDelegationReconstitutionFailure),
+    Reconstitution(signalbox_domain::SessionDelegationReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for session_delegation::SessionDelegationCorruption
@@ -634,22 +356,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_delegation::SessionDelegationCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_delegation::SessionDelegationCorruption {}
 impl<T> parse_display::IntoResult<T> for session_delegation::SessionDelegationCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_delegation::SessionDelegationCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_delegation::SessionDelegationCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -661,26 +370,6 @@ impl<L> layered::LayerExt<L> for session_delegation::SessionDelegationCorruption
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::SessionDelegationCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::SessionDelegationCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_delegation::SessionDelegationCorruption
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -695,16 +384,9 @@ pub enum SessionDelegationRepositoryError {
     Corruption(session_delegation::SessionDelegationCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for session_delegation::SessionDelegationRepositoryError {}
 impl<T> parse_display::IntoResult<T> for session_delegation::SessionDelegationRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_delegation::SessionDelegationRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_delegation::SessionDelegationRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -716,26 +398,6 @@ impl<L> layered::LayerExt<L> for session_delegation::SessionDelegationRepository
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::SessionDelegationRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::SessionDelegationRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_delegation::SessionDelegationRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for session_delegation::SessionDelegationRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -769,22 +431,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_delegation::SessionDelegationRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_delegation::SessionDelegationRepository {}
 impl<T> parse_display::IntoResult<T> for session_delegation::SessionDelegationRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_delegation::SessionDelegationRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_delegation::SessionDelegationRepository {
     fn into_request(self) -> request::Request<T>;
@@ -797,41 +446,21 @@ impl<L> layered::LayerExt<L> for session_delegation::SessionDelegationRepository
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_delegation::SessionDelegationRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_delegation::SessionDelegationRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_delegation::SessionDelegationRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl session_delegation::SessionDelegationRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn record_wait(
         &self,
-        request: session_delegation::DelegationAwaitRequest,
-        dispatch: &tool_attempt::ToolDispatchAuthority,
+        request: signalbox_domain::DelegationAwaitRequest,
+        dispatch: &signalbox_domain::ToolDispatchAuthority,
     ) -> result::Result<
         session_delegation::RecordDelegationWaitOutcome,
         session_delegation::SessionDelegationRepositoryError,
     >;
     pub async fn record_message(
         &self,
-        request: session_delegation::DelegationMessageRequest,
+        request: signalbox_domain::DelegationMessageRequest,
         message: signalbox_domain::DelegationMessageId,
-        dispatch: &tool_attempt::ToolDispatchAuthority,
+        dispatch: &signalbox_domain::ToolDispatchAuthority,
     ) -> result::Result<
         session_delegation::RecordDelegationMessageOutcome,
         session_delegation::SessionDelegationRepositoryError,
@@ -842,10 +471,10 @@ impl session_delegation::SessionDelegationRepository {
         turn: signalbox_domain::TurnId,
         request: signalbox_domain::ToolRequestId,
         child: signalbox_domain::SessionId,
-        mode: session_delegation::DelegationWaitMode,
+        mode: signalbox_domain::DelegationWaitMode,
     ) -> result::Result<
         session_delegation::ProcessDelegationOutcome<(
-            session_delegation::DelegationAwaitRequest,
+            signalbox_domain::DelegationAwaitRequest,
             session_delegation::RecordedDelegationWait,
         )>,
         session_delegation::SessionDelegationRepositoryError,
@@ -860,14 +489,14 @@ impl session_delegation::SessionDelegationRepository {
         message: signalbox_domain::DelegationMessageId,
     ) -> result::Result<
         session_delegation::ProcessDelegationOutcome<(
-            session_delegation::DelegationMessageRequest,
+            signalbox_domain::DelegationMessageRequest,
             boxed::Box<session_delegation::RecordedDelegationMessage>,
         )>,
         session_delegation::SessionDelegationRepositoryError,
     >;
     pub async fn load_foreground_delivery(
         &self,
-        wait: session_delegation::DelegationWait,
+        wait: signalbox_domain::DelegationWait,
     ) -> result::Result<
         option::Option<session_delegation::RecordedDelegationDelivery>,
         session_delegation::SessionDelegationRepositoryError,

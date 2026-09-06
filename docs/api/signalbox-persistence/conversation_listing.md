@@ -25,22 +25,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for conversation_listing::ConversationListingCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_listing::ConversationListingCorruption {}
 impl<T> parse_display::IntoResult<T> for conversation_listing::ConversationListingCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_listing::ConversationListingCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_listing::ConversationListingCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -52,26 +39,6 @@ impl<L> layered::LayerExt<L> for conversation_listing::ConversationListingCorrup
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_listing::ConversationListingCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_listing::ConversationListingCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_listing::ConversationListingCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for conversation_listing::ConversationListingCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -89,16 +56,9 @@ pub enum ConversationListingRepositoryError {
     Corruption(conversation_listing::ConversationListingCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for conversation_listing::ConversationListingRepositoryError {}
 impl<T> parse_display::IntoResult<T> for conversation_listing::ConversationListingRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_listing::ConversationListingRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_listing::ConversationListingRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -110,26 +70,6 @@ impl<L> layered::LayerExt<L> for conversation_listing::ConversationListingReposi
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_listing::ConversationListingRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_listing::ConversationListingRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_listing::ConversationListingRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for conversation_listing::ConversationListingRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -158,22 +98,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for conversation_listing::ConversationListingRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_listing::ConversationListingRepository {}
 impl<T> parse_display::IntoResult<T> for conversation_listing::ConversationListingRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_listing::ConversationListingRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_listing::ConversationListingRepository {
     fn into_request(self) -> request::Request<T>;
@@ -186,47 +113,27 @@ impl<L> layered::LayerExt<L> for conversation_listing::ConversationListingReposi
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_listing::ConversationListingRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_listing::ConversationListingRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_listing::ConversationListingRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl conversation_listing::ConversationListingRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn open_page(
         &self,
-        query: list_conversations::ConversationListQuery,
+        query: signalbox_application::ConversationListQuery,
     ) -> result::Result<
         conversation_listing::PostgresConversationPage,
         conversation_listing::ConversationListingRepositoryError,
     >;
 }
-impl list_conversations::ConversationLister
+impl signalbox_application::ConversationLister
     for conversation_listing::ConversationListingRepository
 {
     type Error = conversation_listing::ConversationListingRepositoryError;
     type Page = conversation_listing::PostgresConversationPage;
     async fn open_conversation_page(
         &self,
-        query: list_conversations::ConversationListQuery,
+        query: signalbox_application::ConversationListQuery,
     ) -> result::Result<
-        <Self as list_conversations::ConversationLister>::Page,
-        <Self as list_conversations::ConversationLister>::Error,
+        <Self as signalbox_application::ConversationLister>::Page,
+        <Self as signalbox_application::ConversationLister>::Error,
     >;
 }
 ```
@@ -236,16 +143,9 @@ impl list_conversations::ConversationLister
 ```rust
 pub struct PostgresConversationPage {/* private */}
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for conversation_listing::PostgresConversationPage {}
 impl<T> parse_display::IntoResult<T> for conversation_listing::PostgresConversationPage {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_listing::PostgresConversationPage
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for conversation_listing::PostgresConversationPage {
     fn into_request(self) -> request::Request<T>;
@@ -258,42 +158,24 @@ impl<L> layered::LayerExt<L> for conversation_listing::PostgresConversationPage 
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_listing::PostgresConversationPage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_listing::PostgresConversationPage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_listing::PostgresConversationPage
-where
-    T: ?marker::Sized,
-{
-}
 impl conversation_listing::PostgresConversationPage {
     pub async fn next_item(
         &mut self,
     ) -> result::Result<
-        option::Option<list_conversations::ConversationListItem>,
+        option::Option<signalbox_application::ConversationListItem>,
         conversation_listing::ConversationListingRepositoryError,
     >;
 }
-impl list_conversations::ConversationPageReader for conversation_listing::PostgresConversationPage {
+impl signalbox_application::ConversationPageReader
+    for conversation_listing::PostgresConversationPage
+{
     type Error = conversation_listing::ConversationListingRepositoryError;
     async fn next_item(
         &mut self,
     ) -> result::Result<
-        option::Option<list_conversations::ConversationListItem>,
-        <Self as list_conversations::ConversationPageReader>::Error,
+        option::Option<signalbox_application::ConversationListItem>,
+        <Self as signalbox_application::ConversationPageReader>::Error,
     >;
-    fn next_after(&self) -> option::Option<list_conversations::ConversationListCursor>;
+    fn next_after(&self) -> option::Option<signalbox_application::ConversationListCursor>;
 }
 ```

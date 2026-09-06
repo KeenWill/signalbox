@@ -19,22 +19,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for usage::UsageProjectionCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for usage::UsageProjectionCorruption {}
 impl<T> parse_display::IntoResult<T> for usage::UsageProjectionCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for usage::UsageProjectionCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for usage::UsageProjectionCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -46,26 +33,6 @@ impl<L> layered::LayerExt<L> for usage::UsageProjectionCorruption {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for usage::UsageProjectionCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for usage::UsageProjectionCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for usage::UsageProjectionCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for usage::UsageProjectionCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -83,16 +50,9 @@ pub enum UsageRepositoryError {
     Corruption(usage::UsageProjectionCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for usage::UsageRepositoryError {}
 impl<T> parse_display::IntoResult<T> for usage::UsageRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for usage::UsageRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for usage::UsageRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -104,26 +64,6 @@ impl<L> layered::LayerExt<L> for usage::UsageRepositoryError {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for usage::UsageRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for usage::UsageRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for usage::UsageRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for usage::UsageRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -150,22 +90,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for usage::UsageRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for usage::UsageRepository {}
 impl<T> parse_display::IntoResult<T> for usage::UsageRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for usage::UsageRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for usage::UsageRepository {
     fn into_request(self) -> request::Request<T>;
@@ -178,48 +105,34 @@ impl<L> layered::LayerExt<L> for usage::UsageRepository {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for usage::UsageRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for usage::UsageRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for usage::UsageRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl usage::UsageRepository {
     #[must_use]
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn aggregate(
         &self,
-        query: usage::UsageQuery,
-    ) -> result::Result<usage::UsageAggregateReport, usage::UsageRepositoryError>;
+        query: signalbox_application::UsageQuery,
+    ) -> result::Result<signalbox_application::UsageAggregateReport, usage::UsageRepositoryError>;
     pub async fn calls(
         &self,
-        query: usage::UsageCallQuery,
-    ) -> result::Result<usage::UsageCallPage, usage::UsageRepositoryError>;
+        query: signalbox_application::UsageCallQuery,
+    ) -> result::Result<signalbox_application::UsageCallPage, usage::UsageRepositoryError>;
 }
-impl usage::UsageReader for usage::UsageRepository {
+impl signalbox_application::UsageReader for usage::UsageRepository {
     type Error = usage::UsageRepositoryError;
     async fn aggregate(
         &self,
-        query: usage::UsageQuery,
-    ) -> result::Result<usage::UsageAggregateReport, <Self as usage::UsageReader>::Error>;
+        query: signalbox_application::UsageQuery,
+    ) -> result::Result<
+        signalbox_application::UsageAggregateReport,
+        <Self as signalbox_application::UsageReader>::Error,
+    >;
     async fn calls(
         &self,
-        query: usage::UsageCallQuery,
-    ) -> result::Result<usage::UsageCallPage, <Self as usage::UsageReader>::Error>;
+        query: signalbox_application::UsageCallQuery,
+    ) -> result::Result<
+        signalbox_application::UsageCallPage,
+        <Self as signalbox_application::UsageReader>::Error,
+    >;
 }
 ```
 
@@ -227,5 +140,7 @@ impl usage::UsageReader for usage::UsageRepository {
 
 ```rust
 #[must_use]
-pub fn usage_timestamp_is_representable(timestamp: usage::UsageTimestampMicros) -> bool;
+pub fn usage_timestamp_is_representable(
+    timestamp: signalbox_application::UsageTimestampMicros,
+) -> bool;
 ```

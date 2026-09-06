@@ -26,15 +26,6 @@ pub trait ModelRuntime<C> {
 
 ```rust
 pub struct CancellationSignal(/* private */);
-impl<F> into_future::IntoFuture for CancellationSignal
-where
-    F: future::Future,
-{
-    type Output = <F as future::Future>::Output;
-    type IntoFuture = F;
-    fn into_future(self) -> <F as into_future::IntoFuture>::IntoFuture;
-}
-impl<T> future::FutureExt for CancellationSignal where T: future::Future + ?marker::Sized {}
 impl CancellationSignal {
     pub fn never() -> Self;
     pub fn when(future: impl future::Future<Output = ()> + marker::Send + 'static) -> Self;

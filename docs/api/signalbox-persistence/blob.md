@@ -13,22 +13,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for blob::BlobStoreBindingRecord
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for blob::BlobStoreBindingRecord {}
 impl<T> parse_display::IntoResult<T> for blob::BlobStoreBindingRecord {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for blob::BlobStoreBindingRecord
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for blob::BlobStoreBindingRecord {
     fn into_request(self) -> request::Request<T>;
@@ -40,26 +27,6 @@ impl<L> layered::LayerExt<L> for blob::BlobStoreBindingRecord {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for blob::BlobStoreBindingRecord
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for blob::BlobStoreBindingRecord
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for blob::BlobStoreBindingRecord
-where
-    T: ?marker::Sized,
-{
 }
 impl blob::BlobStoreBindingRecord {
     pub const fn store(&self) -> &signalbox_blob_store::BlobStoreName;
@@ -81,22 +48,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for blob::BlobReplicaRecord
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for blob::BlobReplicaRecord {}
 impl<T> parse_display::IntoResult<T> for blob::BlobReplicaRecord {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for blob::BlobReplicaRecord
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for blob::BlobReplicaRecord {
     fn into_request(self) -> request::Request<T>;
@@ -108,26 +62,6 @@ impl<L> layered::LayerExt<L> for blob::BlobReplicaRecord {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for blob::BlobReplicaRecord
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for blob::BlobReplicaRecord
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for blob::BlobReplicaRecord
-where
-    T: ?marker::Sized,
-{
 }
 impl blob::BlobReplicaRecord {
     pub const fn store(&self) -> &signalbox_blob_store::BlobStoreName;
@@ -152,22 +86,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for blob::BlobCatalogEntry
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for blob::BlobCatalogEntry {}
 impl<T> parse_display::IntoResult<T> for blob::BlobCatalogEntry {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for blob::BlobCatalogEntry
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for blob::BlobCatalogEntry {
     fn into_request(self) -> request::Request<T>;
@@ -179,26 +100,6 @@ impl<L> layered::LayerExt<L> for blob::BlobCatalogEntry {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for blob::BlobCatalogEntry
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for blob::BlobCatalogEntry
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for blob::BlobCatalogEntry
-where
-    T: ?marker::Sized,
-{
 }
 impl blob::BlobCatalogEntry {
     pub fn replicas(&self) -> &[blob::BlobReplicaRecord];
@@ -238,22 +139,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for blob::BlobCatalogCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for blob::BlobCatalogCorruption {}
 impl<T> parse_display::IntoResult<T> for blob::BlobCatalogCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for blob::BlobCatalogCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for blob::BlobCatalogCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -265,26 +153,6 @@ impl<L> layered::LayerExt<L> for blob::BlobCatalogCorruption {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for blob::BlobCatalogCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for blob::BlobCatalogCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for blob::BlobCatalogCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for blob::BlobCatalogCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -303,16 +171,9 @@ pub enum BlobCatalogRepositoryError {
     Corruption(blob::BlobCatalogCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for blob::BlobCatalogRepositoryError {}
 impl<T> parse_display::IntoResult<T> for blob::BlobCatalogRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for blob::BlobCatalogRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for blob::BlobCatalogRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -324,26 +185,6 @@ impl<L> layered::LayerExt<L> for blob::BlobCatalogRepositoryError {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for blob::BlobCatalogRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for blob::BlobCatalogRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for blob::BlobCatalogRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for blob::BlobCatalogRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -373,22 +214,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for blob::BlobCatalogRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for blob::BlobCatalogRepository {}
 impl<T> parse_display::IntoResult<T> for blob::BlobCatalogRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for blob::BlobCatalogRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for blob::BlobCatalogRepository {
     fn into_request(self) -> request::Request<T>;
@@ -401,28 +229,9 @@ impl<L> layered::LayerExt<L> for blob::BlobCatalogRepository {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for blob::BlobCatalogRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for blob::BlobCatalogRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for blob::BlobCatalogRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl blob::BlobCatalogRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
+    #[cfg(feature = "test-support")]
     pub async fn inject_registration_fault(
         &self,
     ) -> result::Result<blob::BlobCatalogRegistrationFault, blob::BlobCatalogRepositoryError>;
@@ -436,7 +245,7 @@ impl blob::BlobCatalogRepository {
     ) -> result::Result<blob::BlobStoreBindingRecord, blob::BlobCatalogRepositoryError>;
     pub async fn find(
         &self,
-        digest: blob::BlobDigest,
+        digest: signalbox_domain::BlobDigest,
     ) -> result::Result<option::Option<blob::BlobCatalogEntry>, blob::BlobCatalogRepositoryError>;
     pub async fn register_verified_replica(
         &self,
@@ -450,21 +259,18 @@ impl blob::BlobCatalogRepository {
 ## BlobCatalogRegistrationFault
 
 ```rust
+#[cfg(feature = "test-support")]
 pub struct BlobCatalogRegistrationFault {/* private */}
-impl<T> into_either::IntoEither for blob::BlobCatalogRegistrationFault {}
+#[cfg(feature = "test-support")]
 impl<T> parse_display::IntoResult<T> for blob::BlobCatalogRegistrationFault {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
 }
-impl<V, T> types::VZip<V> for blob::BlobCatalogRegistrationFault
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
+#[cfg(feature = "test-support")]
 impl<T> request::IntoRequest<T> for blob::BlobCatalogRegistrationFault {
     fn into_request(self) -> request::Request<T>;
 }
+#[cfg(feature = "test-support")]
 impl<L> layered::LayerExt<L> for blob::BlobCatalogRegistrationFault {
     fn named_layer<S>(
         &self,
@@ -473,26 +279,7 @@ impl<L> layered::LayerExt<L> for blob::BlobCatalogRegistrationFault {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for blob::BlobCatalogRegistrationFault
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for blob::BlobCatalogRegistrationFault
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for blob::BlobCatalogRegistrationFault
-where
-    T: ?marker::Sized,
-{
-}
+#[cfg(feature = "test-support")]
 impl blob::BlobCatalogRegistrationFault {
     pub async fn restore(self) -> result::Result<(), blob::BlobCatalogRepositoryError>;
 }

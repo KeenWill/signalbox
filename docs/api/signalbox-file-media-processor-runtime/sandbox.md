@@ -5,58 +5,73 @@
 ## WorkerBinding
 
 ```rust
+#[cfg(target_os = "linux")]
 pub struct WorkerBinding {/* private */}
 // derives: clone::Clone, fmt::Debug
+#[cfg(target_os = "linux")]
 impl WorkerBinding {
     pub fn try_new(
         program: impl convert::Into<path::PathBuf>,
-        declaration: declaration::FileMediaProviderDeclaration,
+        declaration: signalbox_file_media_runtime::FileMediaProviderDeclaration,
     ) -> result::Result<Self, SandboxedFileMediaProcessorConstructionError>;
-    pub const fn declaration(&self) -> &declaration::FileMediaProviderDeclaration;
+    pub const fn declaration(&self) -> &signalbox_file_media_runtime::FileMediaProviderDeclaration;
 }
 ```
 
 ## SandboxedFileMediaProcessor
 
 ```rust
+#[cfg(target_os = "linux")]
 pub struct SandboxedFileMediaProcessor {/* private */}
 // derives: clone::Clone, fmt::Debug
+#[cfg(target_os = "linux")]
 impl SandboxedFileMediaProcessor {
     pub fn try_new(
         bubblewrap: impl convert::Into<path::PathBuf>,
         bindings: vec::Vec<WorkerBinding>,
-        ceilings: limits::FileMediaProcessCeilings,
+        ceilings: signalbox_file_media_runtime::FileMediaProcessCeilings,
     ) -> result::Result<Self, SandboxedFileMediaProcessorConstructionError>;
-    pub async fn verify_isolation(&self) -> registry::ProcessorIsolation;
-    pub const fn ceilings(&self) -> limits::FileMediaProcessCeilings;
+    pub async fn verify_isolation(&self) -> signalbox_file_media_runtime::ProcessorIsolation;
+    pub const fn ceilings(&self) -> signalbox_file_media_runtime::FileMediaProcessCeilings;
 }
-impl detection::FileMediaProcessor for SandboxedFileMediaProcessor {
+#[cfg(target_os = "linux")]
+impl signalbox_file_media_runtime::FileMediaProcessor for SandboxedFileMediaProcessor {
     fn probe<'a>(
         &'a self,
-        reader: &'a value::ReaderIdentity,
-        source: &'a dyn detection::VerifiedBlobSource,
-        cancellation: &'a dyn detection::CancellationSignal,
-    ) -> detection::FileMediaProcessorFuture<'a, detection::ProcessorProbeOutput>;
+        reader: &'a signalbox_file_media_runtime::ReaderIdentity,
+        source: &'a dyn signalbox_file_media_runtime::VerifiedBlobSource,
+        cancellation: &'a dyn signalbox_file_media_runtime::CancellationSignal,
+    ) -> signalbox_file_media_runtime::FileMediaProcessorFuture<
+        'a,
+        signalbox_file_media_runtime::ProcessorProbeOutput,
+    >;
     fn validate<'a>(
         &'a self,
-        reader: &'a value::ReaderIdentity,
-        request: declaration::FileMediaProviderValidationRequest,
-        source: &'a dyn detection::VerifiedBlobSource,
-        cancellation: &'a dyn detection::CancellationSignal,
-    ) -> detection::FileMediaProcessorFuture<'a, detection::ProcessorValidationOutput>;
+        reader: &'a signalbox_file_media_runtime::ReaderIdentity,
+        request: signalbox_file_media_runtime::FileMediaProviderValidationRequest,
+        source: &'a dyn signalbox_file_media_runtime::VerifiedBlobSource,
+        cancellation: &'a dyn signalbox_file_media_runtime::CancellationSignal,
+    ) -> signalbox_file_media_runtime::FileMediaProcessorFuture<
+        'a,
+        signalbox_file_media_runtime::ProcessorValidationOutput,
+    >;
     fn read<'a>(
         &'a self,
-        reader: &'a value::ReaderIdentity,
-        request: declaration::FileMediaProviderReadRequest,
-        source: &'a dyn detection::VerifiedBlobSource,
-        cancellation: &'a dyn detection::CancellationSignal,
-    ) -> detection::FileMediaProcessorFuture<'a, detection::ProcessorReadOutput>;
+        reader: &'a signalbox_file_media_runtime::ReaderIdentity,
+        request: signalbox_file_media_runtime::FileMediaProviderReadRequest,
+        source: &'a dyn signalbox_file_media_runtime::VerifiedBlobSource,
+        cancellation: &'a dyn signalbox_file_media_runtime::CancellationSignal,
+    ) -> signalbox_file_media_runtime::FileMediaProcessorFuture<
+        'a,
+        signalbox_file_media_runtime::ProcessorReadOutput,
+    >;
 }
 ```
 
 ## SandboxedFileMediaProcessorConstructionError
 
 ```rust
+#[cfg(target_os = "linux")]
 pub enum SandboxedFileMediaProcessorConstructionError {
     Unsupported,
     Bubblewrap,
@@ -70,8 +85,10 @@ pub enum SandboxedFileMediaProcessorConstructionError {
     DuplicateReader,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+#[cfg(target_os = "linux")]
 impl fmt::Display for SandboxedFileMediaProcessorConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
+#[cfg(target_os = "linux")]
 impl error::Error for SandboxedFileMediaProcessorConstructionError {}
 ```

@@ -12,11 +12,11 @@ pub const MAX_FRAME_BYTES: usize;
 
 ```rust
 pub struct Frame {
-    pub message: frame::Message,
+    pub message: Message,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq
 impl Frame {
-    pub fn try_new(message: frame::Message) -> result::Result<Self, FrameError>;
+    pub fn try_new(message: Message) -> result::Result<Self, FrameError>;
 }
 ```
 
@@ -28,7 +28,7 @@ pub enum FrameError {
     TooLarge { bytes: usize },
     MalformedJson(error::Error),
     UnsupportedVersion(u64),
-    InvalidValue(value::ValueError),
+    InvalidValue(ValueError),
 }
 // derives: fmt::Debug
 impl fmt::Display for FrameError {

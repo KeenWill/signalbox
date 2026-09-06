@@ -17,13 +17,6 @@ pub struct WebUsageAggregateGroup {
     pub cost: WebUsageCost,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebUsageAggregateGroup
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebUsageAggregateGroup where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebUsageSummary
@@ -34,13 +27,6 @@ pub struct WebUsageSummary {
     pub truncated: bool,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebUsageSummary
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebUsageSummary where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebUsageCall
@@ -60,13 +46,6 @@ pub struct WebUsageCall {
     pub cost: WebUsageCost,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebUsageCall
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebUsageCall where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebUsageCallCursor
@@ -77,13 +56,6 @@ pub struct WebUsageCallCursor {
     pub call_id: WebUuid,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebUsageCallCursor
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebUsageCallCursor where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebUsageCallPage
@@ -94,13 +66,6 @@ pub struct WebUsageCallPage {
     pub continuation: option::Option<WebUsageCallCursor>,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebUsageCallPage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebUsageCallPage where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebApiErrorKind
@@ -111,13 +76,6 @@ pub enum WebApiErrorKind {
     Application,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebApiErrorKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebApiErrorKind where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebApiError
@@ -129,13 +87,6 @@ pub struct WebApiError {
     pub message: string::String,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebApiError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebApiError where T: for<'de> de::Deserialize<'de> {}
 impl fmt::Display for WebApiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -149,13 +100,6 @@ pub struct WebApiErrorResponse {
     pub error: WebApiError,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebApiErrorResponse
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebApiErrorResponse where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebAttentionState
@@ -174,13 +118,6 @@ pub enum WebAttentionState {
     Idle,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebAttentionState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebAttentionState where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebAttentionLifecycleState
@@ -197,13 +134,6 @@ pub enum WebAttentionLifecycleState {
     Terminal,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebAttentionLifecycleState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebAttentionLifecycleState where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebAttentionAction
@@ -215,13 +145,6 @@ pub enum WebAttentionAction {
     ReconcileTurn,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebAttentionAction
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebAttentionAction where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebAttentionBlockedReason
@@ -235,13 +158,6 @@ pub enum WebAttentionBlockedReason {
     FinishCheckFailed,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebAttentionBlockedReason
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebAttentionBlockedReason where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebAttentionActivityKind
@@ -255,13 +171,6 @@ pub enum WebAttentionActivityKind {
     Runner,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebAttentionActivityKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebAttentionActivityKind where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebAttentionGoalBlock
@@ -273,13 +182,6 @@ pub struct WebAttentionGoalBlock {
     pub need_summary: string::String,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebAttentionGoalBlock
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebAttentionGoalBlock where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebAttentionJudgeFacts
@@ -292,13 +194,6 @@ pub struct WebAttentionJudgeFacts {
     pub failed: string::String,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebAttentionJudgeFacts
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebAttentionJudgeFacts where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebAttentionActivity
@@ -309,13 +204,6 @@ pub struct WebAttentionActivity {
     pub kind: WebAttentionActivityKind,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebAttentionActivity
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebAttentionActivity where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebAttentionSummary
@@ -332,13 +220,6 @@ pub struct WebAttentionSummary {
     pub last_activity: WebAttentionActivity,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebAttentionSummary
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebAttentionSummary where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebAttentionSnapshot
@@ -350,13 +231,6 @@ pub struct WebAttentionSnapshot {
     pub continuation_after_session_id: option::Option<string::String>,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebAttentionSnapshot
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebAttentionSnapshot where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebAttentionStreamEvent
@@ -375,13 +249,6 @@ pub enum WebAttentionStreamEvent {
     },
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebAttentionStreamEvent
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebAttentionStreamEvent where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebSessionCatalogActivity
@@ -392,13 +259,6 @@ pub struct WebSessionCatalogActivity {
     pub kind: WebAttentionActivityKind,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebSessionCatalogActivity
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebSessionCatalogActivity where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebSessionCatalogSummary
@@ -419,13 +279,6 @@ pub struct WebSessionCatalogSummary {
     pub last_activity: WebSessionCatalogActivity,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebSessionCatalogSummary
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebSessionCatalogSummary where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebSessionCatalogSort
@@ -436,13 +289,6 @@ pub enum WebSessionCatalogSort {
     SessionIdentityAscending,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebSessionCatalogSort
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebSessionCatalogSort where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebSessionCatalogContinuation
@@ -458,14 +304,6 @@ pub enum WebSessionCatalogContinuation {
     },
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebSessionCatalogContinuation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebSessionCatalogContinuation where T: for<'de> de::Deserialize<'de>
-{}
 ```
 
 ## WebSessionCatalogSnapshot
@@ -479,13 +317,6 @@ pub struct WebSessionCatalogSnapshot {
     pub continuation: option::Option<WebSessionCatalogContinuation>,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebSessionCatalogSnapshot
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebSessionCatalogSnapshot where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## GeneratedArtifact
@@ -496,12 +327,6 @@ pub struct GeneratedArtifact {
     pub contents: string::String,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GeneratedArtifact
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## GenerateWebContractError
@@ -512,12 +337,6 @@ pub enum GenerateWebContractError {
     UnsupportedSchema,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GenerateWebContractError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for GenerateWebContractError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

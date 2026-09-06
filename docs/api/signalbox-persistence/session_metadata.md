@@ -6,7 +6,7 @@
 
 ```rust
 pub enum ReplaceSessionMetadataHandlingOutcome {
-    Recorded(session_metadata::ReplaceSessionMetadataResult),
+    Recorded(signalbox_domain::ReplaceSessionMetadataResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
@@ -18,22 +18,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_metadata::ReplaceSessionMetadataHandlingOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_metadata::ReplaceSessionMetadataHandlingOutcome {}
 impl<T> parse_display::IntoResult<T> for session_metadata::ReplaceSessionMetadataHandlingOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_metadata::ReplaceSessionMetadataHandlingOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_metadata::ReplaceSessionMetadataHandlingOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -45,26 +32,6 @@ impl<L> layered::LayerExt<L> for session_metadata::ReplaceSessionMetadataHandlin
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_metadata::ReplaceSessionMetadataHandlingOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_metadata::ReplaceSessionMetadataHandlingOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_metadata::ReplaceSessionMetadataHandlingOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -79,9 +46,9 @@ pub enum SessionMetadataCorruption {
     },
     Inconsistent(&'static str),
     InvalidDefaultsVersion(mapping::PositiveOrdinalMappingError),
-    InvalidContent(session_metadata::SessionMetadataContentError),
+    InvalidContent(signalbox_domain::SessionMetadataContentError),
     InvalidUpdatedAt,
-    Domain(session_metadata::ReplaceSessionMetadataReconstitutionFailure),
+    Domain(signalbox_domain::ReplaceSessionMetadataReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for session_metadata::SessionMetadataCorruption
@@ -90,22 +57,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_metadata::SessionMetadataCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_metadata::SessionMetadataCorruption {}
 impl<T> parse_display::IntoResult<T> for session_metadata::SessionMetadataCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_metadata::SessionMetadataCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_metadata::SessionMetadataCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -117,26 +71,6 @@ impl<L> layered::LayerExt<L> for session_metadata::SessionMetadataCorruption {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_metadata::SessionMetadataCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_metadata::SessionMetadataCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_metadata::SessionMetadataCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for session_metadata::SessionMetadataCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -158,16 +92,9 @@ pub enum SessionMetadataRepositoryError {
     Corruption(session_metadata::SessionMetadataCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for session_metadata::SessionMetadataRepositoryError {}
 impl<T> parse_display::IntoResult<T> for session_metadata::SessionMetadataRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_metadata::SessionMetadataRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_metadata::SessionMetadataRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -179,26 +106,6 @@ impl<L> layered::LayerExt<L> for session_metadata::SessionMetadataRepositoryErro
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_metadata::SessionMetadataRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_metadata::SessionMetadataRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_metadata::SessionMetadataRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for session_metadata::SessionMetadataRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -227,22 +134,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_metadata::SessionMetadataRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_metadata::SessionMetadataRepository {}
 impl<T> parse_display::IntoResult<T> for session_metadata::SessionMetadataRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_metadata::SessionMetadataRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_metadata::SessionMetadataRepository {
     fn into_request(self) -> request::Request<T>;
@@ -255,31 +149,11 @@ impl<L> layered::LayerExt<L> for session_metadata::SessionMetadataRepository {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_metadata::SessionMetadataRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_metadata::SessionMetadataRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_metadata::SessionMetadataRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl session_metadata::SessionMetadataRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn handle(
         &self,
-        command: session_metadata::ReplaceSessionMetadata,
+        command: signalbox_domain::ReplaceSessionMetadata,
     ) -> result::Result<
         session_metadata::ReplaceSessionMetadataHandlingOutcome,
         session_metadata::SessionMetadataRepositoryError,
@@ -288,55 +162,55 @@ impl session_metadata::SessionMetadataRepository {
         &self,
         command_id: signalbox_domain::DurableCommandId,
     ) -> result::Result<
-        option::Option<session_metadata::ReconstitutedReplaceSessionMetadata>,
+        option::Option<signalbox_domain::ReconstitutedReplaceSessionMetadata>,
         session_metadata::SessionMetadataRepositoryError,
     >;
     pub async fn load_session_metadata(
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        option::Option<session_metadata::SessionMetadataSnapshot>,
+        option::Option<signalbox_domain::SessionMetadataSnapshot>,
         session_metadata::SessionMetadataRepositoryError,
     >;
     pub async fn open_page(
         &self,
-        query: session_metadata::SessionMetadataListQuery,
+        query: signalbox_application::SessionMetadataListQuery,
     ) -> result::Result<
         session_metadata::PostgresSessionMetadataPage,
         session_metadata::SessionMetadataRepositoryError,
     >;
 }
-impl session_metadata::ReplaceSessionMetadataTransaction
+impl signalbox_application::ReplaceSessionMetadataTransaction
     for session_metadata::SessionMetadataRepository
 {
     type Error = session_metadata::SessionMetadataRepositoryError;
     async fn handle(
         &mut self,
-        command: session_metadata::ReplaceSessionMetadata,
+        command: signalbox_domain::ReplaceSessionMetadata,
     ) -> result::Result<
-        session_metadata::ReplaceSessionMetadataOutcome,
-        <Self as session_metadata::ReplaceSessionMetadataTransaction>::Error,
+        signalbox_application::ReplaceSessionMetadataOutcome,
+        <Self as signalbox_application::ReplaceSessionMetadataTransaction>::Error,
     >;
 }
-impl session_metadata::SessionMetadataReader for session_metadata::SessionMetadataRepository {
+impl signalbox_application::SessionMetadataReader for session_metadata::SessionMetadataRepository {
     type Error = session_metadata::SessionMetadataRepositoryError;
     async fn load_session_metadata(
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        option::Option<session_metadata::SessionMetadataSnapshot>,
-        <Self as session_metadata::SessionMetadataReader>::Error,
+        option::Option<signalbox_domain::SessionMetadataSnapshot>,
+        <Self as signalbox_application::SessionMetadataReader>::Error,
     >;
 }
-impl session_metadata::SessionMetadataLister for session_metadata::SessionMetadataRepository {
+impl signalbox_application::SessionMetadataLister for session_metadata::SessionMetadataRepository {
     type Error = session_metadata::SessionMetadataRepositoryError;
     type Page = session_metadata::PostgresSessionMetadataPage;
     async fn open_session_metadata_page(
         &self,
-        query: session_metadata::SessionMetadataListQuery,
+        query: signalbox_application::SessionMetadataListQuery,
     ) -> result::Result<
-        <Self as session_metadata::SessionMetadataLister>::Page,
-        <Self as session_metadata::SessionMetadataLister>::Error,
+        <Self as signalbox_application::SessionMetadataLister>::Page,
+        <Self as signalbox_application::SessionMetadataLister>::Error,
     >;
 }
 ```
@@ -346,16 +220,9 @@ impl session_metadata::SessionMetadataLister for session_metadata::SessionMetada
 ```rust
 pub struct PostgresSessionMetadataPage {/* private */}
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for session_metadata::PostgresSessionMetadataPage {}
 impl<T> parse_display::IntoResult<T> for session_metadata::PostgresSessionMetadataPage {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_metadata::PostgresSessionMetadataPage
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_metadata::PostgresSessionMetadataPage {
     fn into_request(self) -> request::Request<T>;
@@ -368,42 +235,24 @@ impl<L> layered::LayerExt<L> for session_metadata::PostgresSessionMetadataPage {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_metadata::PostgresSessionMetadataPage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_metadata::PostgresSessionMetadataPage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_metadata::PostgresSessionMetadataPage
-where
-    T: ?marker::Sized,
-{
-}
 impl session_metadata::PostgresSessionMetadataPage {
     pub async fn next_item(
         &mut self,
     ) -> result::Result<
-        option::Option<session_metadata::SessionMetadataListItem>,
+        option::Option<signalbox_application::SessionMetadataListItem>,
         session_metadata::SessionMetadataRepositoryError,
     >;
     pub const fn next_after_session(&self) -> option::Option<signalbox_domain::SessionId>;
 }
-impl session_metadata::SessionMetadataPageReader for session_metadata::PostgresSessionMetadataPage {
+impl signalbox_application::SessionMetadataPageReader
+    for session_metadata::PostgresSessionMetadataPage
+{
     type Error = session_metadata::SessionMetadataRepositoryError;
     async fn next_item(
         &mut self,
     ) -> result::Result<
-        option::Option<session_metadata::SessionMetadataListItem>,
-        <Self as session_metadata::SessionMetadataPageReader>::Error,
+        option::Option<signalbox_application::SessionMetadataListItem>,
+        <Self as signalbox_application::SessionMetadataPageReader>::Error,
     >;
     fn next_after_session(&self) -> option::Option<signalbox_domain::SessionId>;
 }

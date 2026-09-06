@@ -13,22 +13,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for review_orchestration::PostgresReviewOrchestrationStore
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_orchestration::PostgresReviewOrchestrationStore {}
 impl<T> parse_display::IntoResult<T> for review_orchestration::PostgresReviewOrchestrationStore {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_orchestration::PostgresReviewOrchestrationStore
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for review_orchestration::PostgresReviewOrchestrationStore {
     fn into_request(self) -> request::Request<T>;
@@ -40,26 +27,6 @@ impl<L> layered::LayerExt<L> for review_orchestration::PostgresReviewOrchestrati
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_orchestration::PostgresReviewOrchestrationStore
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_orchestration::PostgresReviewOrchestrationStore
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_orchestration::PostgresReviewOrchestrationStore
-where
-    T: ?marker::Sized,
-{
 }
 impl review_orchestration::PostgresReviewOrchestrationStore {
     pub async fn record_command_recovery(
@@ -81,14 +48,14 @@ impl review_orchestration::PostgresReviewOrchestrationStore {
     ) -> result::Result<bool, review_orchestration::ReviewOrchestrationStoreError>;
     pub async fn load_attempt(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
     ) -> result::Result<
-        option::Option<review_orchestration::ReviewOrchestrationAttempt>,
+        option::Option<signalbox_application::ReviewOrchestrationAttempt>,
         review_orchestration::ReviewOrchestrationStoreError,
     >;
     pub async fn load_progress(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
     ) -> result::Result<
         option::Option<review_orchestration::ReviewOrchestrationProgress>,
         review_orchestration::ReviewOrchestrationStoreError,
@@ -96,21 +63,21 @@ impl review_orchestration::PostgresReviewOrchestrationStore {
     pub async fn load_concern_replay_facts(
         &self,
         command: review_orchestration::ReviewOrchestrationCommand,
-        concern: &review_workflow::ReviewKey,
+        concern: &signalbox_domain::ReviewKey,
     ) -> result::Result<
-        option::Option<(review_orchestration::ReviewConcernClaim, usize, bool)>,
+        option::Option<(signalbox_application::ReviewConcernClaim, usize, bool)>,
         review_orchestration::ReviewOrchestrationStoreError,
     >;
     pub async fn current_stage(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
     ) -> result::Result<
         option::Option<review_orchestration::ReviewOrchestrationCurrentStage>,
         review_orchestration::ReviewOrchestrationStoreError,
     >;
     pub async fn load_snapshot(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
     ) -> result::Result<
         option::Option<review_orchestration::ReviewOrchestrationSnapshotFacts>,
         review_orchestration::ReviewOrchestrationStoreError,
@@ -125,129 +92,129 @@ impl review_orchestration::PostgresReviewOrchestrationStore {
         review_orchestration::ReviewOrchestrationStoreError,
     >;
 }
-impl review_orchestration::ReviewOrchestrationAttemptStore
+impl signalbox_application::ReviewOrchestrationAttemptStore
     for review_orchestration::PostgresReviewOrchestrationStore
 {
     type Error = review_orchestration::ReviewOrchestrationStoreError;
     async fn record_attempt(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttempt,
+        attempt: signalbox_application::ReviewOrchestrationAttempt,
     ) -> result::Result<
-        review_orchestration::ReviewDurableSealOutcome,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        signalbox_application::ReviewDurableSealOutcome,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn load_import(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
     ) -> result::Result<
-        option::Option<review_orchestration::ReviewImportOutcome>,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        option::Option<signalbox_application::ReviewImportOutcome>,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn record_import(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        outcome: review_orchestration::ReviewImportOutcome,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
+        outcome: signalbox_application::ReviewImportOutcome,
     ) -> result::Result<
-        review_orchestration::ReviewDurableSealOutcome,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        signalbox_application::ReviewDurableSealOutcome,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn load_concern_claims(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
     ) -> result::Result<
-        vec::Vec<review_orchestration::ReviewConcernClaim>,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        vec::Vec<signalbox_application::ReviewConcernClaim>,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn record_concern_claim(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        claim: review_orchestration::ReviewConcernClaim,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
+        claim: signalbox_application::ReviewConcernClaim,
     ) -> result::Result<
-        review_orchestration::ReviewDurableSealOutcome,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        signalbox_application::ReviewDurableSealOutcome,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn seal_complete_fanout(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        claims: vec::Vec<review_orchestration::ReviewConcernClaim>,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
+        claims: vec::Vec<signalbox_application::ReviewConcernClaim>,
     ) -> result::Result<
-        review_orchestration::ReviewDurableSealOutcome,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        signalbox_application::ReviewDurableSealOutcome,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn seal_judgment_plan(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        plan: review_orchestration::ReviewJudgmentPlan,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
+        plan: signalbox_application::ReviewJudgmentPlan,
     ) -> result::Result<
-        review_orchestration::ReviewDurableSealOutcome,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        signalbox_application::ReviewDurableSealOutcome,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn load_judgment_plan(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
     ) -> result::Result<
-        option::Option<review_orchestration::ReviewJudgmentPlan>,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        option::Option<signalbox_application::ReviewJudgmentPlan>,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn load_applied_judgment_effects(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
     ) -> result::Result<
-        vec::Vec<review_orchestration::ReviewJudgmentEffectId>,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        vec::Vec<signalbox_application::ReviewJudgmentEffectId>,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn record_applied_judgment_effect(
         &mut self,
-        effect: review_orchestration::ReviewJudgmentEffectId,
+        effect: signalbox_application::ReviewJudgmentEffectId,
     ) -> result::Result<
-        review_orchestration::ReviewDurableSealOutcome,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        signalbox_application::ReviewDurableSealOutcome,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn seal_repair_inventory(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        findings: vec::Vec<review_workflow::ReviewFindingRef>,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
+        findings: vec::Vec<signalbox_domain::ReviewFindingRef>,
     ) -> result::Result<
-        review_orchestration::ReviewDurableSealOutcome,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        signalbox_application::ReviewDurableSealOutcome,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn record_repair_outcomes(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        outcomes: vec::Vec<review_orchestration::ReviewRepairMemberOutcome>,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
+        outcomes: vec::Vec<signalbox_application::ReviewRepairMemberOutcome>,
     ) -> result::Result<
-        review_orchestration::ReviewDurableSealOutcome,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        signalbox_application::ReviewDurableSealOutcome,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn load_repair_outcomes(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
     ) -> result::Result<
-        option::Option<vec::Vec<review_orchestration::ReviewRepairMemberOutcome>>,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        option::Option<vec::Vec<signalbox_application::ReviewRepairMemberOutcome>>,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn seal_publication_inventory(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        findings: vec::Vec<review_workflow::ReviewFindingRef>,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
+        findings: vec::Vec<signalbox_domain::ReviewFindingRef>,
     ) -> result::Result<
-        review_orchestration::ReviewDurableSealOutcome,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        signalbox_application::ReviewDurableSealOutcome,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn record_publication_outcomes(
         &mut self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
-        outcomes: vec::Vec<review_orchestration::ReviewPublicationMemberOutcome>,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
+        outcomes: vec::Vec<signalbox_application::ReviewPublicationMemberOutcome>,
     ) -> result::Result<
-        review_orchestration::ReviewDurableSealOutcome,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        signalbox_application::ReviewDurableSealOutcome,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
     async fn load_publication_outcomes(
         &self,
-        attempt: review_orchestration::ReviewOrchestrationAttemptId,
+        attempt: signalbox_application::ReviewOrchestrationAttemptId,
     ) -> result::Result<
-        option::Option<vec::Vec<review_orchestration::ReviewPublicationMemberOutcome>>,
-        <Self as review_orchestration::ReviewOrchestrationAttemptStore>::Error,
+        option::Option<vec::Vec<signalbox_application::ReviewPublicationMemberOutcome>>,
+        <Self as signalbox_application::ReviewOrchestrationAttemptStore>::Error,
     >;
 }
 ```
@@ -276,22 +243,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for review_orchestration::ReviewOrchestrationCurrentStage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_orchestration::ReviewOrchestrationCurrentStage {}
 impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCurrentStage {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_orchestration::ReviewOrchestrationCurrentStage
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCurrentStage {
     fn into_request(self) -> request::Request<T>;
@@ -303,26 +257,6 @@ impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationCurren
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_orchestration::ReviewOrchestrationCurrentStage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_orchestration::ReviewOrchestrationCurrentStage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_orchestration::ReviewOrchestrationCurrentStage
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -351,22 +285,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for review_orchestration::ReviewOrchestrationStage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_orchestration::ReviewOrchestrationStage {}
 impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationStage {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_orchestration::ReviewOrchestrationStage
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationStage {
     fn into_request(self) -> request::Request<T>;
@@ -378,26 +299,6 @@ impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationStage 
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_orchestration::ReviewOrchestrationStage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_orchestration::ReviewOrchestrationStage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_orchestration::ReviewOrchestrationStage
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -422,22 +323,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for review_orchestration::ReviewOrchestrationProgress
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_orchestration::ReviewOrchestrationProgress {}
 impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationProgress {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_orchestration::ReviewOrchestrationProgress
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationProgress {
     fn into_request(self) -> request::Request<T>;
@@ -450,40 +338,20 @@ impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationProgre
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_orchestration::ReviewOrchestrationProgress
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_orchestration::ReviewOrchestrationProgress
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_orchestration::ReviewOrchestrationProgress
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ReviewOrchestrationSnapshotFacts
 
 ```rust
 pub struct ReviewOrchestrationSnapshotFacts {
-    pub attempt: review_orchestration::ReviewOrchestrationAttempt,
+    pub attempt: signalbox_application::ReviewOrchestrationAttempt,
     pub current_stage: review_orchestration::ReviewOrchestrationCurrentStage,
-    pub concern_claims: vec::Vec<review_orchestration::ReviewConcernClaim>,
-    pub judgment_plan: option::Option<review_orchestration::ReviewJudgmentPlan>,
-    pub applied_judgment_effects: vec::Vec<review_orchestration::ReviewJudgmentEffectId>,
-    pub repair_outcomes: option::Option<vec::Vec<review_orchestration::ReviewRepairMemberOutcome>>,
+    pub concern_claims: vec::Vec<signalbox_application::ReviewConcernClaim>,
+    pub judgment_plan: option::Option<signalbox_application::ReviewJudgmentPlan>,
+    pub applied_judgment_effects: vec::Vec<signalbox_application::ReviewJudgmentEffectId>,
+    pub repair_outcomes: option::Option<vec::Vec<signalbox_application::ReviewRepairMemberOutcome>>,
     pub publication_outcomes:
-        option::Option<vec::Vec<review_orchestration::ReviewPublicationMemberOutcome>>,
+        option::Option<vec::Vec<signalbox_application::ReviewPublicationMemberOutcome>>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for review_orchestration::ReviewOrchestrationSnapshotFacts
@@ -492,22 +360,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for review_orchestration::ReviewOrchestrationSnapshotFacts
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_orchestration::ReviewOrchestrationSnapshotFacts {}
 impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationSnapshotFacts {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_orchestration::ReviewOrchestrationSnapshotFacts
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationSnapshotFacts {
     fn into_request(self) -> request::Request<T>;
@@ -519,26 +374,6 @@ impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationSnapsh
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_orchestration::ReviewOrchestrationSnapshotFacts
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_orchestration::ReviewOrchestrationSnapshotFacts
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_orchestration::ReviewOrchestrationSnapshotFacts
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -561,22 +396,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for review_orchestration::ReviewOrchestrationCommandKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_orchestration::ReviewOrchestrationCommandKind {}
 impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCommandKind {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_orchestration::ReviewOrchestrationCommandKind
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCommandKind {
     fn into_request(self) -> request::Request<T>;
@@ -589,26 +411,6 @@ impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationComman
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_orchestration::ReviewOrchestrationCommandKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_orchestration::ReviewOrchestrationCommandKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_orchestration::ReviewOrchestrationCommandKind
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ReviewOrchestrationCommand
@@ -617,7 +419,7 @@ where
 pub struct ReviewOrchestrationCommand {
     pub command_id: signalbox_domain::DurableCommandId,
     pub semantic_digest: [u8; 32],
-    pub attempt: review_orchestration::ReviewOrchestrationAttemptId,
+    pub attempt: signalbox_application::ReviewOrchestrationAttemptId,
     pub kind: review_orchestration::ReviewOrchestrationCommandKind,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -627,22 +429,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for review_orchestration::ReviewOrchestrationCommand
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_orchestration::ReviewOrchestrationCommand {}
 impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCommand {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_orchestration::ReviewOrchestrationCommand
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCommand {
     fn into_request(self) -> request::Request<T>;
@@ -655,33 +444,13 @@ impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationComman
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_orchestration::ReviewOrchestrationCommand
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_orchestration::ReviewOrchestrationCommand
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_orchestration::ReviewOrchestrationCommand
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ReviewOrchestrationCommandResult
 
 ```rust
 pub struct ReviewOrchestrationCommandResult {
-    pub attempt: review_orchestration::ReviewOrchestrationAttemptId,
+    pub attempt: signalbox_application::ReviewOrchestrationAttemptId,
     pub stage: review_orchestration::ReviewOrchestrationStage,
     pub progress: review_orchestration::ReviewOrchestrationProgress,
 }
@@ -692,22 +461,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for review_orchestration::ReviewOrchestrationCommandResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_orchestration::ReviewOrchestrationCommandResult {}
 impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCommandResult {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_orchestration::ReviewOrchestrationCommandResult
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCommandResult {
     fn into_request(self) -> request::Request<T>;
@@ -720,26 +476,6 @@ impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationComman
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_orchestration::ReviewOrchestrationCommandResult
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_orchestration::ReviewOrchestrationCommandResult
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_orchestration::ReviewOrchestrationCommandResult
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ReviewOrchestrationCommandClaim
@@ -750,16 +486,9 @@ pub enum ReviewOrchestrationCommandClaim {
     Conflicting,
     New(review_orchestration::ReviewOrchestrationCommandGuard),
 }
-impl<T> into_either::IntoEither for review_orchestration::ReviewOrchestrationCommandClaim {}
 impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCommandClaim {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_orchestration::ReviewOrchestrationCommandClaim
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCommandClaim {
     fn into_request(self) -> request::Request<T>;
@@ -772,42 +501,15 @@ impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationComman
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_orchestration::ReviewOrchestrationCommandClaim
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_orchestration::ReviewOrchestrationCommandClaim
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_orchestration::ReviewOrchestrationCommandClaim
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ReviewOrchestrationCommandGuard
 
 ```rust
 pub struct ReviewOrchestrationCommandGuard {/* private */}
-impl<T> into_either::IntoEither for review_orchestration::ReviewOrchestrationCommandGuard {}
 impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationCommandGuard {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_orchestration::ReviewOrchestrationCommandGuard
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationCommandGuard {
     fn into_request(self) -> request::Request<T>;
@@ -819,26 +521,6 @@ impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationComman
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_orchestration::ReviewOrchestrationCommandGuard
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_orchestration::ReviewOrchestrationCommandGuard
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_orchestration::ReviewOrchestrationCommandGuard
-where
-    T: ?marker::Sized,
-{
 }
 impl review_orchestration::ReviewOrchestrationCommandGuard {
     pub const fn is_pending(&self) -> bool;
@@ -862,16 +544,9 @@ pub enum ReviewOrchestrationStoreError {
     Corruption(&'static str),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for review_orchestration::ReviewOrchestrationStoreError {}
 impl<T> parse_display::IntoResult<T> for review_orchestration::ReviewOrchestrationStoreError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_orchestration::ReviewOrchestrationStoreError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for review_orchestration::ReviewOrchestrationStoreError {
     fn into_request(self) -> request::Request<T>;
@@ -883,26 +558,6 @@ impl<L> layered::LayerExt<L> for review_orchestration::ReviewOrchestrationStoreE
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_orchestration::ReviewOrchestrationStoreError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_orchestration::ReviewOrchestrationStoreError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_orchestration::ReviewOrchestrationStoreError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for review_orchestration::ReviewOrchestrationStoreError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;

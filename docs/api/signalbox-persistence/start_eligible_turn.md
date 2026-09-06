@@ -18,22 +18,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for start_eligible_turn::StartEligibleTurnIdentityCollision
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for start_eligible_turn::StartEligibleTurnIdentityCollision {}
 impl<T> parse_display::IntoResult<T> for start_eligible_turn::StartEligibleTurnIdentityCollision {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for start_eligible_turn::StartEligibleTurnIdentityCollision
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for start_eligible_turn::StartEligibleTurnIdentityCollision {
     fn into_request(self) -> request::Request<T>;
@@ -45,26 +32,6 @@ impl<L> layered::LayerExt<L> for start_eligible_turn::StartEligibleTurnIdentityC
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for start_eligible_turn::StartEligibleTurnIdentityCollision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for start_eligible_turn::StartEligibleTurnIdentityCollision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for start_eligible_turn::StartEligibleTurnIdentityCollision
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for start_eligible_turn::StartEligibleTurnIdentityCollision {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -90,22 +57,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for start_eligible_turn::StartEligibleTurnCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for start_eligible_turn::StartEligibleTurnCorruption {}
 impl<T> parse_display::IntoResult<T> for start_eligible_turn::StartEligibleTurnCorruption {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for start_eligible_turn::StartEligibleTurnCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for start_eligible_turn::StartEligibleTurnCorruption {
     fn into_request(self) -> request::Request<T>;
@@ -117,26 +71,6 @@ impl<L> layered::LayerExt<L> for start_eligible_turn::StartEligibleTurnCorruptio
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for start_eligible_turn::StartEligibleTurnCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for start_eligible_turn::StartEligibleTurnCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for start_eligible_turn::StartEligibleTurnCorruption
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for start_eligible_turn::StartEligibleTurnCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -159,16 +93,9 @@ pub enum StartEligibleTurnRepositoryError {
     HubInvariant(&'static str),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for start_eligible_turn::StartEligibleTurnRepositoryError {}
 impl<T> parse_display::IntoResult<T> for start_eligible_turn::StartEligibleTurnRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for start_eligible_turn::StartEligibleTurnRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for start_eligible_turn::StartEligibleTurnRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -181,36 +108,16 @@ impl<L> layered::LayerExt<L> for start_eligible_turn::StartEligibleTurnRepositor
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for start_eligible_turn::StartEligibleTurnRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for start_eligible_turn::StartEligibleTurnRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for start_eligible_turn::StartEligibleTurnRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for start_eligible_turn::StartEligibleTurnRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for start_eligible_turn::StartEligibleTurnRepositoryError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure
+impl signalbox_application::ClassifyOperatorFailure
     for start_eligible_turn::StartEligibleTurnRepositoryError
 {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 impl convert::From<start_eligible_turn::StartEligibleTurnCorruption>
     for start_eligible_turn::StartEligibleTurnRepositoryError
@@ -231,16 +138,9 @@ pub enum CommitActivationPreviewError {
     WorkspaceInstructions(workspace_instructions::WorkspaceInstructionRepositoryError),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for start_eligible_turn::CommitActivationPreviewError {}
 impl<T> parse_display::IntoResult<T> for start_eligible_turn::CommitActivationPreviewError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for start_eligible_turn::CommitActivationPreviewError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for start_eligible_turn::CommitActivationPreviewError {
     fn into_request(self) -> request::Request<T>;
@@ -253,36 +153,16 @@ impl<L> layered::LayerExt<L> for start_eligible_turn::CommitActivationPreviewErr
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for start_eligible_turn::CommitActivationPreviewError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for start_eligible_turn::CommitActivationPreviewError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for start_eligible_turn::CommitActivationPreviewError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for start_eligible_turn::CommitActivationPreviewError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for start_eligible_turn::CommitActivationPreviewError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure
+impl signalbox_application::ClassifyOperatorFailure
     for start_eligible_turn::CommitActivationPreviewError
 {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -297,22 +177,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for start_eligible_turn::PreparedActivationPreview
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for start_eligible_turn::PreparedActivationPreview {}
 impl<T> parse_display::IntoResult<T> for start_eligible_turn::PreparedActivationPreview {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for start_eligible_turn::PreparedActivationPreview
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for start_eligible_turn::PreparedActivationPreview {
     fn into_request(self) -> request::Request<T>;
@@ -325,28 +192,8 @@ impl<L> layered::LayerExt<L> for start_eligible_turn::PreparedActivationPreview 
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for start_eligible_turn::PreparedActivationPreview
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for start_eligible_turn::PreparedActivationPreview
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for start_eligible_turn::PreparedActivationPreview
-where
-    T: ?marker::Sized,
-{
-}
 impl start_eligible_turn::PreparedActivationPreview {
-    pub const fn prepared(&self) -> &turn_eligibility::PreparedTurnActivation;
+    pub const fn prepared(&self) -> &signalbox_domain::PreparedTurnActivation;
 }
 ```
 
@@ -354,7 +201,7 @@ impl start_eligible_turn::PreparedActivationPreview {
 
 ```rust
 pub enum CommitActivationPreviewOutcome {
-    Activated(boxed::Box<turn_eligibility::ActivatedTurn>),
+    Activated(boxed::Box<signalbox_domain::ActivatedTurn>),
     Stale,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -364,22 +211,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for start_eligible_turn::CommitActivationPreviewOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for start_eligible_turn::CommitActivationPreviewOutcome {}
 impl<T> parse_display::IntoResult<T> for start_eligible_turn::CommitActivationPreviewOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for start_eligible_turn::CommitActivationPreviewOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for start_eligible_turn::CommitActivationPreviewOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -391,26 +225,6 @@ impl<L> layered::LayerExt<L> for start_eligible_turn::CommitActivationPreviewOut
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for start_eligible_turn::CommitActivationPreviewOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for start_eligible_turn::CommitActivationPreviewOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for start_eligible_turn::CommitActivationPreviewOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -428,24 +242,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for start_eligible_turn::CommitCompactionFailurePreviewOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for start_eligible_turn::CommitCompactionFailurePreviewOutcome {}
 impl<T> parse_display::IntoResult<T>
     for start_eligible_turn::CommitCompactionFailurePreviewOutcome
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for start_eligible_turn::CommitCompactionFailurePreviewOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for start_eligible_turn::CommitCompactionFailurePreviewOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -457,26 +258,6 @@ impl<L> layered::LayerExt<L> for start_eligible_turn::CommitCompactionFailurePre
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for start_eligible_turn::CommitCompactionFailurePreviewOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for start_eligible_turn::CommitCompactionFailurePreviewOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for start_eligible_turn::CommitCompactionFailurePreviewOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -494,27 +275,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome
-{
-}
 impl<T> parse_display::IntoResult<T>
     for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T>
     for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome
@@ -529,26 +294,6 @@ impl<L> layered::LayerExt<L> for start_eligible_turn::CommitCountedAttachmentFai
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for start_eligible_turn::CommitCountedAttachmentFailurePreviewOutcome
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## StartEligibleTurnRepository
@@ -562,22 +307,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for start_eligible_turn::StartEligibleTurnRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for start_eligible_turn::StartEligibleTurnRepository {}
 impl<T> parse_display::IntoResult<T> for start_eligible_turn::StartEligibleTurnRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for start_eligible_turn::StartEligibleTurnRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for start_eligible_turn::StartEligibleTurnRepository {
     fn into_request(self) -> request::Request<T>;
@@ -590,32 +322,12 @@ impl<L> layered::LayerExt<L> for start_eligible_turn::StartEligibleTurnRepositor
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for start_eligible_turn::StartEligibleTurnRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for start_eligible_turn::StartEligibleTurnRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for start_eligible_turn::StartEligibleTurnRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl start_eligible_turn::StartEligibleTurnRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn preview(
         &self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: signalbox_domain::AcceptedInputTurnActivationIdentities,
     ) -> result::Result<
         option::Option<start_eligible_turn::PreparedActivationPreview>,
         start_eligible_turn::StartEligibleTurnRepositoryError,
@@ -644,8 +356,8 @@ impl start_eligible_turn::StartEligibleTurnRepository {
         preview: start_eligible_turn::PreparedActivationPreview,
         prospective: model_execution::ProspectiveModelCall,
         model_calls: &model_execution::PostgresModelCallRepository,
-        failure: model_execution::AttachmentPreparationFailure,
-        identities: model_execution::FailedModelCallTurnIdentities,
+        failure: signalbox_application::AttachmentPreparationFailure,
+        identities: signalbox_domain::FailedModelCallTurnIdentities,
         instruction_evidence: option::Option<
             workspace_instructions::CountedActivationInstructionEvidence<'_>,
         >,
@@ -657,8 +369,8 @@ impl start_eligible_turn::StartEligibleTurnRepository {
         &self,
         preview: start_eligible_turn::PreparedActivationPreview,
         model_calls: &model_execution::PostgresModelCallRepository,
-        identities: model_execution::FailedModelCallTurnIdentities,
-        terminal_cause: turn_lifecycle::TurnTerminalCause,
+        identities: signalbox_domain::FailedModelCallTurnIdentities,
+        terminal_cause: signalbox_domain::TurnTerminalCause,
         recovery_cause: option::Option<goal::GoalExecutionFailureRecoveryCause>,
     ) -> result::Result<
         start_eligible_turn::CommitCompactionFailurePreviewOutcome,
@@ -667,34 +379,34 @@ impl start_eligible_turn::StartEligibleTurnRepository {
     pub async fn handle(
         &self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: signalbox_domain::AcceptedInputTurnActivationIdentities,
     ) -> result::Result<
-        start_eligible_turn::StartEligibleTurnOutcome,
+        signalbox_application::StartEligibleTurnOutcome,
         start_eligible_turn::StartEligibleTurnRepositoryError,
     >;
 }
-impl start_eligible_turn::StartEligibleTurnTransaction
+impl signalbox_application::StartEligibleTurnTransaction
     for start_eligible_turn::StartEligibleTurnRepository
 {
     type Error = start_eligible_turn::StartEligibleTurnRepositoryError;
     async fn handle(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: signalbox_domain::AcceptedInputTurnActivationIdentities,
     ) -> result::Result<
-        start_eligible_turn::StartEligibleTurnOutcome,
-        <Self as start_eligible_turn::StartEligibleTurnTransaction>::Error,
+        signalbox_application::StartEligibleTurnOutcome,
+        <Self as signalbox_application::StartEligibleTurnTransaction>::Error,
     >;
     async fn handle_with_activation_observer(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: signalbox_domain::AcceptedInputTurnActivationIdentities,
         observer: sync::Arc<
             dyn function::Fn(signalbox_domain::TurnId) + marker::Send + marker::Sync,
         >,
     ) -> result::Result<
-        start_eligible_turn::StartEligibleTurnOutcome,
-        <Self as start_eligible_turn::StartEligibleTurnTransaction>::Error,
+        signalbox_application::StartEligibleTurnOutcome,
+        <Self as signalbox_application::StartEligibleTurnTransaction>::Error,
     >;
 }
 ```

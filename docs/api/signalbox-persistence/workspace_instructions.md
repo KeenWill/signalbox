@@ -6,8 +6,8 @@
 
 ```rust
 pub enum RecordTurnInstructionSnapshotOutcome {
-    Recorded(workspace_instruction::TurnInstructionManifestId),
-    AlreadyRecorded(workspace_instruction::TurnInstructionManifestId),
+    Recorded(signalbox_domain::TurnInstructionManifestId),
+    AlreadyRecorded(signalbox_domain::TurnInstructionManifestId),
     DiscoveryIncomplete,
     TurnUnavailable,
 }
@@ -18,24 +18,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for workspace_instructions::RecordTurnInstructionSnapshotOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for workspace_instructions::RecordTurnInstructionSnapshotOutcome {}
 impl<T> parse_display::IntoResult<T>
     for workspace_instructions::RecordTurnInstructionSnapshotOutcome
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for workspace_instructions::RecordTurnInstructionSnapshotOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for workspace_instructions::RecordTurnInstructionSnapshotOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -48,26 +35,6 @@ impl<L> layered::LayerExt<L> for workspace_instructions::RecordTurnInstructionSn
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for workspace_instructions::RecordTurnInstructionSnapshotOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for workspace_instructions::RecordTurnInstructionSnapshotOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for workspace_instructions::RecordTurnInstructionSnapshotOutcome
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## TurnInstructionManifestPreflight
@@ -75,7 +42,7 @@ where
 ```rust
 pub enum TurnInstructionManifestPreflight {
     Absent,
-    Available(workspace_instruction::TurnInstructionManifestId),
+    Available(signalbox_domain::TurnInstructionManifestId),
     TurnUnavailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -85,22 +52,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for workspace_instructions::TurnInstructionManifestPreflight
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for workspace_instructions::TurnInstructionManifestPreflight {}
 impl<T> parse_display::IntoResult<T> for workspace_instructions::TurnInstructionManifestPreflight {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for workspace_instructions::TurnInstructionManifestPreflight
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for workspace_instructions::TurnInstructionManifestPreflight {
     fn into_request(self) -> request::Request<T>;
@@ -112,26 +66,6 @@ impl<L> layered::LayerExt<L> for workspace_instructions::TurnInstructionManifest
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for workspace_instructions::TurnInstructionManifestPreflight
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for workspace_instructions::TurnInstructionManifestPreflight
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for workspace_instructions::TurnInstructionManifestPreflight
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -146,27 +80,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for workspace_instructions::WorkspaceInstructionPlacementObservation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for workspace_instructions::WorkspaceInstructionPlacementObservation
-{
-}
 impl<T> parse_display::IntoResult<T>
     for workspace_instructions::WorkspaceInstructionPlacementObservation
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for workspace_instructions::WorkspaceInstructionPlacementObservation
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T>
     for workspace_instructions::WorkspaceInstructionPlacementObservation
@@ -180,26 +98,6 @@ impl<L> layered::LayerExt<L> for workspace_instructions::WorkspaceInstructionPla
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for workspace_instructions::WorkspaceInstructionPlacementObservation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for workspace_instructions::WorkspaceInstructionPlacementObservation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for workspace_instructions::WorkspaceInstructionPlacementObservation
-where
-    T: ?marker::Sized,
-{
 }
 impl workspace_instructions::WorkspaceInstructionPlacementObservation {
     pub const fn runner_owned(&self) -> bool;
@@ -217,27 +115,11 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for workspace_instructions::CountedActivationInstructionEvidence<'a>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for workspace_instructions::CountedActivationInstructionEvidence<'a>
-{
-}
 impl<T> parse_display::IntoResult<T>
     for workspace_instructions::CountedActivationInstructionEvidence<'a>
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for workspace_instructions::CountedActivationInstructionEvidence<'a>
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T>
     for workspace_instructions::CountedActivationInstructionEvidence<'a>
@@ -252,32 +134,12 @@ impl<L> layered::LayerExt<L> for workspace_instructions::CountedActivationInstru
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for workspace_instructions::CountedActivationInstructionEvidence<'a>
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for workspace_instructions::CountedActivationInstructionEvidence<'a>
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for workspace_instructions::CountedActivationInstructionEvidence<'a>
-where
-    T: ?marker::Sized,
-{
-}
 impl<'a> workspace_instructions::CountedActivationInstructionEvidence<'a> {
     pub const fn new(
-        discovery: workspace_instruction::InstructionDiscoveryId,
-        manifest: &'a workspace_instruction::TurnInstructionManifest,
-        snapshot: &'a workspace_instructions::InstructionDiscoverySnapshot,
-        bundle_ids: &'a [workspace_instruction::InstructionBundleId],
+        discovery: signalbox_domain::InstructionDiscoveryId,
+        manifest: &'a signalbox_domain::TurnInstructionManifest,
+        snapshot: &'a signalbox_application::InstructionDiscoverySnapshot,
+        bundle_ids: &'a [signalbox_domain::InstructionBundleId],
         placement: &'a workspace_instructions::WorkspaceInstructionPlacementObservation,
     ) -> Self;
 }
@@ -295,18 +157,11 @@ pub enum WorkspaceInstructionRepositoryError {
     Corruption(&'static str),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for workspace_instructions::WorkspaceInstructionRepositoryError {}
 impl<T> parse_display::IntoResult<T>
     for workspace_instructions::WorkspaceInstructionRepositoryError
 {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for workspace_instructions::WorkspaceInstructionRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for workspace_instructions::WorkspaceInstructionRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -319,26 +174,6 @@ impl<L> layered::LayerExt<L> for workspace_instructions::WorkspaceInstructionRep
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for workspace_instructions::WorkspaceInstructionRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for workspace_instructions::WorkspaceInstructionRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for workspace_instructions::WorkspaceInstructionRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for workspace_instructions::WorkspaceInstructionRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -348,10 +183,10 @@ impl error::Error for workspace_instructions::WorkspaceInstructionRepositoryErro
 impl convert::From<error::Error> for workspace_instructions::WorkspaceInstructionRepositoryError {
     fn from(value: error::Error) -> Self;
 }
-impl operator_failure::ClassifyOperatorFailure
+impl signalbox_application::ClassifyOperatorFailure
     for workspace_instructions::WorkspaceInstructionRepositoryError
 {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
     fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```
@@ -367,22 +202,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for workspace_instructions::WorkspaceInstructionRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for workspace_instructions::WorkspaceInstructionRepository {}
 impl<T> parse_display::IntoResult<T> for workspace_instructions::WorkspaceInstructionRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for workspace_instructions::WorkspaceInstructionRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for workspace_instructions::WorkspaceInstructionRepository {
     fn into_request(self) -> request::Request<T>;
@@ -394,26 +216,6 @@ impl<L> layered::LayerExt<L> for workspace_instructions::WorkspaceInstructionRep
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for workspace_instructions::WorkspaceInstructionRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for workspace_instructions::WorkspaceInstructionRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for workspace_instructions::WorkspaceInstructionRepository
-where
-    T: ?marker::Sized,
-{
 }
 impl workspace_instructions::WorkspaceInstructionRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
@@ -435,21 +237,21 @@ impl workspace_instructions::WorkspaceInstructionRepository {
     >;
     pub async fn record_turn_start<NextBundleId>(
         &self,
-        discovery: workspace_instruction::InstructionDiscoveryId,
-        manifest: workspace_instruction::TurnInstructionManifest,
-        snapshot: &workspace_instructions::InstructionDiscoverySnapshot,
+        discovery: signalbox_domain::InstructionDiscoveryId,
+        manifest: signalbox_domain::TurnInstructionManifest,
+        snapshot: &signalbox_application::InstructionDiscoverySnapshot,
         next_bundle_id: NextBundleId,
     ) -> result::Result<
         workspace_instructions::RecordTurnInstructionSnapshotOutcome,
         workspace_instructions::WorkspaceInstructionRepositoryError,
     >
     where
-        NextBundleId: function::FnMut() -> workspace_instruction::InstructionBundleId;
+        NextBundleId: function::FnMut() -> signalbox_domain::InstructionBundleId;
     pub async fn record_turn_start_for_observed_placement<NextBundleId>(
         &self,
-        discovery: workspace_instruction::InstructionDiscoveryId,
-        manifest: workspace_instruction::TurnInstructionManifest,
-        snapshot: &workspace_instructions::InstructionDiscoverySnapshot,
+        discovery: signalbox_domain::InstructionDiscoveryId,
+        manifest: signalbox_domain::TurnInstructionManifest,
+        snapshot: &signalbox_application::InstructionDiscoverySnapshot,
         placement: &workspace_instructions::WorkspaceInstructionPlacementObservation,
         next_bundle_id: NextBundleId,
     ) -> result::Result<
@@ -457,24 +259,24 @@ impl workspace_instructions::WorkspaceInstructionRepository {
         workspace_instructions::WorkspaceInstructionRepositoryError,
     >
     where
-        NextBundleId: function::FnMut() -> workspace_instruction::InstructionBundleId;
+        NextBundleId: function::FnMut() -> signalbox_domain::InstructionBundleId;
     pub async fn record_counted_activation<NextBundleId>(
         &self,
-        discovery: workspace_instruction::InstructionDiscoveryId,
-        manifest: workspace_instruction::TurnInstructionManifest,
-        snapshot: &workspace_instructions::InstructionDiscoverySnapshot,
+        discovery: signalbox_domain::InstructionDiscoveryId,
+        manifest: signalbox_domain::TurnInstructionManifest,
+        snapshot: &signalbox_application::InstructionDiscoverySnapshot,
         next_bundle_id: NextBundleId,
     ) -> result::Result<
         workspace_instructions::RecordTurnInstructionSnapshotOutcome,
         workspace_instructions::WorkspaceInstructionRepositoryError,
     >
     where
-        NextBundleId: function::FnMut() -> workspace_instruction::InstructionBundleId;
+        NextBundleId: function::FnMut() -> signalbox_domain::InstructionBundleId;
     pub async fn record_counted_activation_for_observed_placement<NextBundleId>(
         &self,
-        discovery: workspace_instruction::InstructionDiscoveryId,
-        manifest: workspace_instruction::TurnInstructionManifest,
-        snapshot: &workspace_instructions::InstructionDiscoverySnapshot,
+        discovery: signalbox_domain::InstructionDiscoveryId,
+        manifest: signalbox_domain::TurnInstructionManifest,
+        snapshot: &signalbox_application::InstructionDiscoverySnapshot,
         placement: &workspace_instructions::WorkspaceInstructionPlacementObservation,
         next_bundle_id: NextBundleId,
     ) -> result::Result<
@@ -482,7 +284,7 @@ impl workspace_instructions::WorkspaceInstructionRepository {
         workspace_instructions::WorkspaceInstructionRepositoryError,
     >
     where
-        NextBundleId: function::FnMut() -> workspace_instruction::InstructionBundleId;
+        NextBundleId: function::FnMut() -> signalbox_domain::InstructionBundleId;
     pub async fn observe_session_runner_placement(
         &self,
         session: signalbox_domain::SessionId,

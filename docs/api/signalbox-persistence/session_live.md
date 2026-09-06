@@ -15,16 +15,9 @@ pub enum SessionLiveRepositoryError {
     },
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for session_live::SessionLiveRepositoryError {}
 impl<T> parse_display::IntoResult<T> for session_live::SessionLiveRepositoryError {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_live::SessionLiveRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_live::SessionLiveRepositoryError {
     fn into_request(self) -> request::Request<T>;
@@ -36,26 +29,6 @@ impl<L> layered::LayerExt<L> for session_live::SessionLiveRepositoryError {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_live::SessionLiveRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_live::SessionLiveRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_live::SessionLiveRepositoryError
-where
-    T: ?marker::Sized,
-{
 }
 impl fmt::Display for session_live::SessionLiveRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -82,22 +55,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for session_live::SessionLiveRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_live::SessionLiveRepository {}
 impl<T> parse_display::IntoResult<T> for session_live::SessionLiveRepository {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_live::SessionLiveRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for session_live::SessionLiveRepository {
     fn into_request(self) -> request::Request<T>;
@@ -110,33 +70,13 @@ impl<L> layered::LayerExt<L> for session_live::SessionLiveRepository {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_live::SessionLiveRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_live::SessionLiveRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_live::SessionLiveRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl session_live::SessionLiveRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn read_live_snapshot(
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        option::Option<session_live::SessionLiveSnapshot>,
+        option::Option<signalbox_application::SessionLiveSnapshot>,
         session_live::SessionLiveRepositoryError,
     >;
     pub async fn read_live_snapshot_at_completion<T>(
@@ -144,18 +84,18 @@ impl session_live::SessionLiveRepository {
         session: signalbox_domain::SessionId,
         at_completion: impl function::FnOnce() -> T,
     ) -> result::Result<
-        option::Option<(session_live::SessionLiveSnapshot, T)>,
+        option::Option<(signalbox_application::SessionLiveSnapshot, T)>,
         session_live::SessionLiveRepositoryError,
     >;
 }
-impl session_live::SessionLiveReader for session_live::SessionLiveRepository {
+impl signalbox_application::SessionLiveReader for session_live::SessionLiveRepository {
     type Error = session_live::SessionLiveRepositoryError;
     async fn read_live_snapshot(
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        option::Option<session_live::SessionLiveSnapshot>,
-        <Self as session_live::SessionLiveReader>::Error,
+        option::Option<signalbox_application::SessionLiveSnapshot>,
+        <Self as signalbox_application::SessionLiveReader>::Error,
     >;
 }
 ```

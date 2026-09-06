@@ -49,25 +49,6 @@ pub const GITHUB_TOOL_NAMES: [&str; 4];
 ```rust
 pub struct GitHubEgressPolicy {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitHubEgressPolicy
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubEgressPolicy
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl GitHubEgressPolicy {
     pub const fn github_api_only() -> Self;
     pub const fn admitted_origin(&self) -> &'static str;
@@ -79,26 +60,6 @@ impl GitHubEgressPolicy {
 ```rust
 pub struct GitHubRepository {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>
-impl<T> dyn_clone::DynClone for GitHubRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for GitHubRepository where T: for<'de> de::Deserialize<'de> {}
-impl<T> policy::PolicyExt for GitHubRepository
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl GitHubRepository {
     pub fn as_str(&self) -> &str;
 }
@@ -118,26 +79,6 @@ impl schemars::JsonSchema for GitHubRepository {
 ```rust
 pub struct PullRequestNumber(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>
-impl<T> dyn_clone::DynClone for PullRequestNumber
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for PullRequestNumber where T: for<'de> de::Deserialize<'de> {}
-impl<T> policy::PolicyExt for PullRequestNumber
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl PullRequestNumber {
     pub const fn get(self) -> u32;
 }
@@ -157,26 +98,6 @@ impl schemars::JsonSchema for PullRequestNumber {
 ```rust
 pub struct GitHubRevision(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>
-impl<T> dyn_clone::DynClone for GitHubRevision
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for GitHubRevision where T: for<'de> de::Deserialize<'de> {}
-impl<T> policy::PolicyExt for GitHubRevision
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl GitHubRevision {
     pub fn as_str(&self) -> &str;
 }
@@ -196,26 +117,6 @@ impl schemars::JsonSchema for GitHubRevision {
 ```rust
 pub struct PullRequestArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for PullRequestArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for PullRequestArguments where T: for<'de> de::Deserialize<'de> {}
-impl<T> policy::PolicyExt for PullRequestArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl PullRequestArguments {
     pub fn repository(&self) -> &GitHubRepository;
     pub const fn number(&self) -> PullRequestNumber;
@@ -227,26 +128,6 @@ impl PullRequestArguments {
 ```rust
 pub struct CreatePullRequestArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for CreatePullRequestArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for CreatePullRequestArguments where T: for<'de> de::Deserialize<'de> {}
-impl<T> policy::PolicyExt for CreatePullRequestArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl CreatePullRequestArguments {
     pub fn title(&self) -> &str;
     pub fn body(&self) -> &str;
@@ -264,26 +145,6 @@ pub enum PublishReviewEvent {
     RequestChanges,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for PublishReviewEvent
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for PublishReviewEvent where T: for<'de> de::Deserialize<'de> {}
-impl<T> policy::PolicyExt for PublishReviewEvent
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## DiffSide
@@ -294,26 +155,6 @@ pub enum DiffSide {
     Right,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for DiffSide
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for DiffSide where T: for<'de> de::Deserialize<'de> {}
-impl<T> policy::PolicyExt for DiffSide
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## InlineReviewComment
@@ -321,26 +162,6 @@ where
 ```rust
 pub struct InlineReviewComment {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for InlineReviewComment
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for InlineReviewComment where T: for<'de> de::Deserialize<'de> {}
-impl<T> policy::PolicyExt for InlineReviewComment
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl InlineReviewComment {
     pub fn path(&self) -> &str;
     pub const fn line(&self) -> u32;
@@ -354,26 +175,6 @@ impl InlineReviewComment {
 ```rust
 pub struct PublishReviewArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for PublishReviewArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for PublishReviewArguments where T: for<'de> de::Deserialize<'de> {}
-impl<T> policy::PolicyExt for PublishReviewArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl<'de> de::Deserialize<'de> for PublishReviewArguments {
     fn deserialize<Deserializer>(
         deserializer: Deserializer,
@@ -405,25 +206,6 @@ pub enum GitHubOperation {
     PublishReview(PublishReviewArguments),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitHubOperation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubOperation
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl GitHubOperation {
     pub const fn tool_name(&self) -> &'static str;
 }
@@ -434,25 +216,6 @@ impl GitHubOperation {
 ```rust
 pub struct InvalidGitHubArguments;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for InvalidGitHubArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for InvalidGitHubArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl fmt::Display for InvalidGitHubArguments {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -466,25 +229,6 @@ impl error::Error for InvalidGitHubArguments {
 ```rust
 pub struct SanitizedGitHubError(/* private */);
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SanitizedGitHubError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for SanitizedGitHubError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl SanitizedGitHubError {
     pub fn as_str(&self) -> &str;
 }
@@ -513,25 +257,6 @@ pub enum GitHubTransportFailure {
     EgressRejected,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitHubTransportFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubTransportFailure
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl fmt::Display for GitHubTransportFailure {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -554,25 +279,6 @@ pub enum GitHubResultKind {
     PublishedReview,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitHubResultKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubResultKind
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## GitHubResult
@@ -580,25 +286,6 @@ where
 ```rust
 pub struct GitHubResult {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitHubResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl GitHubResult {
     pub fn created_pull_request(value: value::Value) -> Self;
     pub fn metadata(value: value::Value) -> Self;
@@ -619,7 +306,7 @@ pub trait GitHubTransport: marker::Send {
     fn execute(
         &mut self,
         operation: GitHubOperation,
-        credential: &credential::CredentialValue,
+        credential: &signalbox_model_runtime::CredentialValue,
         egress_policy: &GitHubEgressPolicy,
     ) -> impl future::Future<Output = result::Result<GitHubResult, GitHubTransportFailure>> + marker::Send;
 }
@@ -630,25 +317,6 @@ pub trait GitHubTransport: marker::Send {
 ```rust
 pub struct GitHubTools<Credentials, Transport> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for GitHubTools<Credentials, Transport>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubTools<Credentials, Transport>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl<Credentials, Transport> GitHubTools<Credentials, Transport> {
     pub fn try_new(
         credentials: Credentials,
@@ -658,7 +326,7 @@ impl<Credentials, Transport> GitHubTools<Credentials, Transport> {
     pub fn into_parts(
         self,
     ) -> (
-        tool_loop::CompiledToolCatalog,
+        signalbox_application::CompiledToolCatalog,
         GitHubExecutor<Credentials, Transport>,
     );
 }
@@ -675,25 +343,6 @@ impl<Credentials> GitHubTools<Credentials, GitHubApiTransport> {
 ```rust
 pub struct GitHubPullRequestCreateTools<Credentials, Transport> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for GitHubPullRequestCreateTools<Credentials, Transport>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubPullRequestCreateTools<Credentials, Transport>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl<Credentials, Transport> GitHubPullRequestCreateTools<Credentials, Transport> {
     pub fn try_new(
         credentials: Credentials,
@@ -704,7 +353,7 @@ impl<Credentials, Transport> GitHubPullRequestCreateTools<Credentials, Transport
     pub fn into_parts(
         self,
     ) -> (
-        tool_loop::CompiledToolCatalog,
+        signalbox_application::CompiledToolCatalog,
         GitHubPullRequestCreateExecutor<Credentials, Transport>,
     );
 }
@@ -722,38 +371,19 @@ impl<Credentials> GitHubPullRequestCreateTools<Credentials, GitHubApiTransport> 
 ```rust
 pub struct GitHubPullRequestCreateExecutor<Credentials, Transport> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for GitHubPullRequestCreateExecutor<Credentials, Transport>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubPullRequestCreateExecutor<Credentials, Transport>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<Credentials, Transport> tool_loop::ToolExecutor
+impl<Credentials, Transport> signalbox_application::ToolExecutor
     for GitHubPullRequestCreateExecutor<Credentials, Transport>
 where
-    Credentials: credential::CredentialAccess,
+    Credentials: signalbox_model_runtime::CredentialAccess,
     Transport: GitHubTransport,
 {
     type Error = GitHubExecutorError;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -769,25 +399,6 @@ pub enum GitHubToolsConstructionError {
     Transport,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitHubToolsConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubToolsConstructionError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl fmt::Display for GitHubToolsConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -801,37 +412,19 @@ impl error::Error for GitHubToolsConstructionError {
 ```rust
 pub struct GitHubExecutor<Credentials, Transport> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for GitHubExecutor<Credentials, Transport>
+impl<Credentials, Transport> signalbox_application::ToolExecutor
+    for GitHubExecutor<Credentials, Transport>
 where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubExecutor<Credentials, Transport>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<Credentials, Transport> tool_loop::ToolExecutor for GitHubExecutor<Credentials, Transport>
-where
-    Credentials: credential::CredentialAccess,
+    Credentials: signalbox_model_runtime::CredentialAccess,
     Transport: GitHubTransport,
 {
     type Error = GitHubExecutorError;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -841,33 +434,14 @@ where
 ```rust
 pub struct GitHubExecutorError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitHubExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubExecutorError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl fmt::Display for GitHubExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for GitHubExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for GitHubExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for GitHubExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -876,25 +450,6 @@ impl operator_failure::ClassifyOperatorFailure for GitHubExecutorError {
 ```rust
 pub struct GitHubApiTransport {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for GitHubApiTransport
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubApiTransport
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl GitHubApiTransport {
     pub fn try_new() -> result::Result<Self, GitHubApiTransportConstructionError>;
 }
@@ -902,7 +457,7 @@ impl GitHubTransport for GitHubApiTransport {
     async fn execute(
         &mut self,
         operation: GitHubOperation,
-        credential: &credential::CredentialValue,
+        credential: &signalbox_model_runtime::CredentialValue,
         policy: &GitHubEgressPolicy,
     ) -> result::Result<GitHubResult, GitHubTransportFailure>;
 }
@@ -913,25 +468,6 @@ impl GitHubTransport for GitHubApiTransport {
 ```rust
 pub struct GitHubApiTransportConstructionError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitHubApiTransportConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for GitHubApiTransportConstructionError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl fmt::Display for GitHubApiTransportConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

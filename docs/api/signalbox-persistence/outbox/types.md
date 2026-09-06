@@ -13,22 +13,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedOutboxEvent
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedOutboxEvent {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedOutboxEvent {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedOutboxEvent
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedOutboxEvent {
     fn into_request(self) -> request::Request<T>;
@@ -40,26 +27,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedOutboxEvent {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedOutboxEvent
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedOutboxEvent
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedOutboxEvent
-where
-    T: ?marker::Sized,
-{
 }
 impl outbox::DispatchedOutboxEvent {
     pub const fn kind(&self) -> &outbox::DispatchedOutboxEventKind;
@@ -92,13 +59,13 @@ pub enum DispatchedOutboxEventKind {
         outcome: outbox::DispatchedInjectionOutcome,
     },
     SessionOwnershipChanged(outbox::DispatchedOwnershipChange),
-    SessionModelSettingsChanged(model_settings::SessionModelSettingsChanged),
-    TurnModelSettingsResolved(model_settings::TurnModelSettingsResolved),
+    SessionModelSettingsChanged(signalbox_domain::SessionModelSettingsChanged),
+    TurnModelSettingsResolved(signalbox_domain::TurnModelSettingsResolved),
     InputAccepted {
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: signalbox_domain::TurnId,
-        acceptance_position: queue_order::SessionInputPosition,
-        content: user_content::UserContent,
+        acceptance_position: signalbox_domain::SessionInputPosition,
+        content: signalbox_domain::UserContent,
     },
     TurnActivated {
         turn: signalbox_domain::TurnId,
@@ -116,21 +83,21 @@ pub enum DispatchedOutboxEventKind {
     },
     ToolApprovalDecided {
         turn: signalbox_domain::TurnId,
-        approval: tool::ToolApprovalResolution,
-        decider: tool::ToolApprovalDecider,
+        approval: signalbox_domain::ToolApprovalResolution,
+        decider: signalbox_domain::ToolApprovalDecider,
     },
     ContextCompacted {
-        compaction: context_compaction::ContextCompactionId,
+        compaction: signalbox_domain::ContextCompactionId,
         call: signalbox_domain::ModelCallId,
         through_position: u64,
-        summary_entry: context_frontier::SemanticTranscriptEntryId,
-        result_frontier: context_frontier::ContextFrontierId,
+        summary_entry: signalbox_domain::SemanticTranscriptEntryId,
+        result_frontier: signalbox_domain::ContextFrontierId,
     },
     RunnerStateTransition {
         runner: signalbox_domain::RunnerId,
-        placement_revision: runner::RunnerGeneration,
-        sandbox: runner::RunnerSandboxProfile,
-        working_directory: option::Option<runner::RunnerWorkingDirectory>,
+        placement_revision: signalbox_domain::RunnerGeneration,
+        sandbox: signalbox_domain::RunnerSandboxProfile,
+        working_directory: option::Option<signalbox_domain::RunnerWorkingDirectory>,
         state: outbox::DispatchedRunnerState,
     },
     DelegationUpdate(outbox::DispatchedDelegationUpdate),
@@ -143,22 +110,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedOutboxEventKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedOutboxEventKind {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedOutboxEventKind {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedOutboxEventKind
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedOutboxEventKind {
     fn into_request(self) -> request::Request<T>;
@@ -171,34 +125,14 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedOutboxEventKind {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedOutboxEventKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedOutboxEventKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedOutboxEventKind
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## DispatchedSessionCreation
 
 ```rust
 pub struct DispatchedSessionCreation {
-    pub cause: session::SessionCreationCause,
-    pub ownership: session_lifecycle::SessionOwnership,
+    pub cause: signalbox_domain::SessionCreationCause,
+    pub ownership: signalbox_domain::SessionOwnership,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for outbox::DispatchedSessionCreation
@@ -207,22 +141,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedSessionCreation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedSessionCreation {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedSessionCreation {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedSessionCreation
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedSessionCreation {
     fn into_request(self) -> request::Request<T>;
@@ -235,26 +156,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedSessionCreation {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedSessionCreation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedSessionCreation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedSessionCreation
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## DispatchedSessionStateChange
@@ -262,8 +163,8 @@ where
 ```rust
 pub struct DispatchedSessionStateChange {
     pub prior: outbox::DispatchedSessionStateKind,
-    pub state: session_lifecycle::SessionLifecycleState,
-    pub actor: session_lifecycle::LifecycleActor,
+    pub state: signalbox_domain::SessionLifecycleState,
+    pub actor: signalbox_domain::LifecycleActor,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for outbox::DispatchedSessionStateChange
@@ -272,22 +173,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedSessionStateChange
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedSessionStateChange {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedSessionStateChange {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedSessionStateChange
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedSessionStateChange {
     fn into_request(self) -> request::Request<T>;
@@ -300,26 +188,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedSessionStateChange {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedSessionStateChange
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedSessionStateChange
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedSessionStateChange
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## DispatchedSessionTerminal
@@ -327,9 +195,9 @@ where
 ```rust
 pub struct DispatchedSessionTerminal {
     pub prior: outbox::DispatchedSessionStateKind,
-    pub outcome: session_lifecycle::SessionTerminalOutcome,
-    pub standing: option::Option<session_lifecycle::SessionFailureCause>,
-    pub actor: session_lifecycle::LifecycleActor,
+    pub outcome: signalbox_domain::SessionTerminalOutcome,
+    pub standing: option::Option<signalbox_domain::SessionFailureCause>,
+    pub actor: signalbox_domain::LifecycleActor,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for outbox::DispatchedSessionTerminal
@@ -338,22 +206,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedSessionTerminal
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedSessionTerminal {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedSessionTerminal {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedSessionTerminal
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedSessionTerminal {
     fn into_request(self) -> request::Request<T>;
@@ -365,26 +220,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedSessionTerminal {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedSessionTerminal
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedSessionTerminal
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedSessionTerminal
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -407,22 +242,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedSessionStateKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedSessionStateKind {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedSessionStateKind {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedSessionStateKind
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedSessionStateKind {
     fn into_request(self) -> request::Request<T>;
@@ -435,26 +257,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedSessionStateKind {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedSessionStateKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedSessionStateKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedSessionStateKind
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## DispatchedTurnTerminalDisposition
@@ -463,24 +265,24 @@ where
 pub enum DispatchedTurnTerminalDisposition {
     Completed {
         call: signalbox_domain::ModelCallId,
-        completion_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        completion_entry: signalbox_domain::SemanticTranscriptEntryId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
     },
     Refused {
         call: signalbox_domain::ModelCallId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
     },
     Failed {
-        failure_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        failure_entry: signalbox_domain::SemanticTranscriptEntryId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
     },
     Cancelled {
-        cancellation_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        cancellation_entry: signalbox_domain::SemanticTranscriptEntryId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
     },
     ReconciliationRequired {
         operation: outbox::DispatchedReconciliationOperation,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
     },
     Retired,
 }
@@ -491,22 +293,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedTurnTerminalDisposition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedTurnTerminalDisposition {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedTurnTerminalDisposition {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedTurnTerminalDisposition
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedTurnTerminalDisposition {
     fn into_request(self) -> request::Request<T>;
@@ -518,26 +307,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedTurnTerminalDisposition {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedTurnTerminalDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedTurnTerminalDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedTurnTerminalDisposition
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -556,22 +325,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedGoalChange
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedGoalChange {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedGoalChange {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedGoalChange
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedGoalChange {
     fn into_request(self) -> request::Request<T>;
@@ -584,26 +340,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedGoalChange {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedGoalChange
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedGoalChange
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedGoalChange
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## DispatchedOwnershipChange
@@ -611,8 +347,8 @@ where
 ```rust
 pub struct DispatchedOwnershipChange {
     pub event_ordinal: u64,
-    pub transition: session_lifecycle::SessionOwnershipTransition,
-    pub actor: session_lifecycle::LifecycleActor,
+    pub transition: signalbox_domain::SessionOwnershipTransition,
+    pub actor: signalbox_domain::LifecycleActor,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for outbox::DispatchedOwnershipChange
@@ -621,22 +357,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedOwnershipChange
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedOwnershipChange {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedOwnershipChange {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedOwnershipChange
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedOwnershipChange {
     fn into_request(self) -> request::Request<T>;
@@ -648,26 +371,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedOwnershipChange {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedOwnershipChange
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedOwnershipChange
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedOwnershipChange
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -685,22 +388,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedCommandSettlement
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedCommandSettlement {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedCommandSettlement {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedCommandSettlement
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedCommandSettlement {
     fn into_request(self) -> request::Request<T>;
@@ -712,26 +402,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedCommandSettlement {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedCommandSettlement
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedCommandSettlement
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedCommandSettlement
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -754,22 +424,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedInjectionOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedInjectionOutcome {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedInjectionOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedInjectionOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedInjectionOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -781,26 +438,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedInjectionOutcome {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedInjectionOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedInjectionOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedInjectionOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -852,22 +489,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedDelegationUpdate
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedDelegationUpdate {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationUpdate {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedDelegationUpdate
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationUpdate {
     fn into_request(self) -> request::Request<T>;
@@ -879,26 +503,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationUpdate {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedDelegationUpdate
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedDelegationUpdate
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedDelegationUpdate
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -919,22 +523,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedDelegationPolicy
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedDelegationPolicy {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationPolicy {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedDelegationPolicy
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationPolicy {
     fn into_request(self) -> request::Request<T>;
@@ -946,26 +537,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationPolicy {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedDelegationPolicy
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedDelegationPolicy
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedDelegationPolicy
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -984,22 +555,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedBoundChildAction
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedBoundChildAction {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedBoundChildAction {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedBoundChildAction
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedBoundChildAction {
     fn into_request(self) -> request::Request<T>;
@@ -1011,26 +569,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedBoundChildAction {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedBoundChildAction
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedBoundChildAction
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedBoundChildAction
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1048,22 +586,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedDelegationWaitMode
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedDelegationWaitMode {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationWaitMode {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedDelegationWaitMode
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationWaitMode {
     fn into_request(self) -> request::Request<T>;
@@ -1075,26 +600,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationWaitMode {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedDelegationWaitMode
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedDelegationWaitMode
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedDelegationWaitMode
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1116,22 +621,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedDelegationOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedDelegationOutcome {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedDelegationOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -1143,26 +635,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationOutcome {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedDelegationOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedDelegationOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedDelegationOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1184,22 +656,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedDelegationReason
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedDelegationReason {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationReason {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedDelegationReason
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationReason {
     fn into_request(self) -> request::Request<T>;
@@ -1211,26 +670,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationReason {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedDelegationReason
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedDelegationReason
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedDelegationReason
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1264,22 +703,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedDelegationProvenance
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedDelegationProvenance {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationProvenance {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedDelegationProvenance
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationProvenance {
     fn into_request(self) -> request::Request<T>;
@@ -1291,26 +717,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationProvenance {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedDelegationProvenance
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedDelegationProvenance
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedDelegationProvenance
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1334,22 +740,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedDelegationWake
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedDelegationWake {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedDelegationWake {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedDelegationWake
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedDelegationWake {
     fn into_request(self) -> request::Request<T>;
@@ -1362,26 +755,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedDelegationWake {
     where
         L: tower_layer::Layer<S>;
 }
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedDelegationWake
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedDelegationWake
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedDelegationWake
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## DispatchedToolBatchState
@@ -1389,10 +762,10 @@ where
 ```rust
 pub enum DispatchedToolBatchState {
     Proposed {
-        frontier: context_frontier::ContextFrontierId,
+        frontier: signalbox_domain::ContextFrontierId,
     },
     ResultsProjected {
-        frontier: context_frontier::ContextFrontierId,
+        frontier: signalbox_domain::ContextFrontierId,
     },
     RecoveryRequired {
         attempt: signalbox_domain::ToolAttemptId,
@@ -1405,22 +778,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedToolBatchState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedToolBatchState {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedToolBatchState {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedToolBatchState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedToolBatchState {
     fn into_request(self) -> request::Request<T>;
@@ -1432,26 +792,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedToolBatchState {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedToolBatchState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedToolBatchState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedToolBatchState
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1475,22 +815,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedRunnerState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedRunnerState {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedRunnerState {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedRunnerState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedRunnerState {
     fn into_request(self) -> request::Request<T>;
@@ -1502,26 +829,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedRunnerState {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedRunnerState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedRunnerState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedRunnerState
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1539,22 +846,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedReconciliationOperation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedReconciliationOperation {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedReconciliationOperation {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedReconciliationOperation
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedReconciliationOperation {
     fn into_request(self) -> request::Request<T>;
@@ -1566,26 +860,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedReconciliationOperation {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedReconciliationOperation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedReconciliationOperation
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedReconciliationOperation
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1605,22 +879,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedModelCallState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedModelCallState {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedModelCallState {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedModelCallState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedModelCallState {
     fn into_request(self) -> request::Request<T>;
@@ -1632,26 +893,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedModelCallState {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedModelCallState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedModelCallState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedModelCallState
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1672,22 +913,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::DispatchedModelCallDisposition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::DispatchedModelCallDisposition {}
 impl<T> parse_display::IntoResult<T> for outbox::DispatchedModelCallDisposition {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::DispatchedModelCallDisposition
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::DispatchedModelCallDisposition {
     fn into_request(self) -> request::Request<T>;
@@ -1699,26 +927,6 @@ impl<L> layered::LayerExt<L> for outbox::DispatchedModelCallDisposition {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::DispatchedModelCallDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::DispatchedModelCallDisposition
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::DispatchedModelCallDisposition
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1736,22 +944,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::OutboxDeliveryDecision
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::OutboxDeliveryDecision {}
 impl<T> parse_display::IntoResult<T> for outbox::OutboxDeliveryDecision {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::OutboxDeliveryDecision
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::OutboxDeliveryDecision {
     fn into_request(self) -> request::Request<T>;
@@ -1763,26 +958,6 @@ impl<L> layered::LayerExt<L> for outbox::OutboxDeliveryDecision {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::OutboxDeliveryDecision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::OutboxDeliveryDecision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::OutboxDeliveryDecision
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1801,22 +976,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::OutboxDispatchOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::OutboxDispatchOutcome {}
 impl<T> parse_display::IntoResult<T> for outbox::OutboxDispatchOutcome {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::OutboxDispatchOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::OutboxDispatchOutcome {
     fn into_request(self) -> request::Request<T>;
@@ -1828,26 +990,6 @@ impl<L> layered::LayerExt<L> for outbox::OutboxDispatchOutcome {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::OutboxDispatchOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::OutboxDispatchOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::OutboxDispatchOutcome
-where
-    T: ?marker::Sized,
-{
 }
 ```
 
@@ -1865,22 +1007,9 @@ where
 {
     fn from_ref(input: &T) -> T;
 }
-impl<T> dyn_clone::DynClone for outbox::OutboxConsumer
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for outbox::OutboxConsumer {}
 impl<T> parse_display::IntoResult<T> for outbox::OutboxConsumer {
     type Err = never;
     fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for outbox::OutboxConsumer
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
 }
 impl<T> request::IntoRequest<T> for outbox::OutboxConsumer {
     fn into_request(self) -> request::Request<T>;
@@ -1892,25 +1021,5 @@ impl<L> layered::LayerExt<L> for outbox::OutboxConsumer {
     ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
     where
         L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for outbox::OutboxConsumer
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for outbox::OutboxConsumer
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for outbox::OutboxConsumer
-where
-    T: ?marker::Sized,
-{
 }
 ```

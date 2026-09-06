@@ -6,7 +6,7 @@
 
 ```rust
 pub struct OpenAiConfig {
-    pub model_capabilities: capability::ModelCapabilityCatalog,
+    pub model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
     pub base_url: string::String,
     pub connect_timeout: option::Option<time::Duration>,
     pub exchange_timeout: option::Option<time::Duration>,
@@ -14,25 +14,6 @@ pub struct OpenAiConfig {
     pub native_message_limit: option::Option<usize>,
 }
 // derives: fmt::Debug, clone::Clone
-impl<T> dyn_clone::DynClone for OpenAiConfig
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for OpenAiConfig
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl OpenAiConfig {
     pub fn new(native_message_limit: option::Option<usize>) -> Self;
 }
