@@ -2,87 +2,6 @@
 
 # tool_execution
 
-## ToolBatchPhaseReconstitutionInput
-
-```rust
-pub enum ToolBatchPhaseReconstitutionInput {
-    AwaitingApproval {
-        request: ToolRequestId,
-    },
-    Executing {
-        turn_attempt: TurnAttemptId,
-    },
-    AwaitingRecovery {
-        attempt: ToolAttemptId,
-    },
-    AwaitingChild {
-        request: ToolRequestId,
-        spawning_request: ToolRequestId,
-        child: SessionId,
-    },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ToolBatchReconstitutionInput
-
-```rust
-pub struct ToolBatchReconstitutionInput {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ToolBatchReconstitutionInput {
-    pub fn new(
-        session: SessionId,
-        turn: TurnId,
-        producing_call: ModelCallId,
-        yielded_snapshot: ResolvedContextFrontierSnapshot,
-        requests: vec::Vec<ToolRequest>,
-        approvals: vec::Vec<ToolApprovalResolution>,
-        attempts: vec::Vec<ReconstitutedToolAttempt>,
-        phase: ToolBatchPhaseReconstitutionInput,
-    ) -> Self;
-    pub fn with_retired_attempts(self, retired_attempts: vec::Vec<ToolAttemptId>) -> Self;
-    pub fn with_runner_authorized_attempts(
-        self,
-        runner_authorized_attempts: vec::Vec<ToolAttemptId>,
-    ) -> Self;
-    pub fn reconstitute(self) -> result::Result<ToolBatch, ToolBatchReconstitutionError>;
-}
-```
-
-## ToolBatchReconstitutionFailure
-
-```rust
-pub enum ToolBatchReconstitutionFailure {
-    EmptyRequestBatch,
-    TooManyRequests,
-    RequestOwnershipMismatch,
-    RequestOrderMismatch,
-    YieldedSnapshotSessionMismatch,
-    ApprovalInventoryMismatch,
-    AttemptInventoryMismatch,
-    AttemptAuthorizationMismatch,
-    MultipleLiveAttempts,
-    AttemptOrderMismatch,
-    ApprovalPhaseMismatch,
-    ExecutionPhaseMismatch,
-    RecoveryPhaseMismatch,
-    ChildWaitPhaseMismatch,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ToolBatchReconstitutionError
-
-```rust
-pub struct ToolBatchReconstitutionError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ToolBatchReconstitutionError {
-    pub const fn input(&self) -> &ToolBatchReconstitutionInput;
-    pub const fn failure(&self) -> ToolBatchReconstitutionFailure;
-    pub fn into_parts(self) -> (ToolBatchReconstitutionInput, ToolBatchReconstitutionFailure);
-}
-```
-
 ## ToolBatchPhase
 
 ```rust
@@ -127,6 +46,8 @@ impl ToolBatch {
     pub const fn phase(&self) -> ToolBatchPhase;
     pub fn awaiting_approval(&self) -> option::Option<AwaitingToolApproval>;
     pub fn awaiting_recovery(&self) -> option::Option<AwaitingToolRecovery>;
+}
+impl ToolBatch {
     pub fn prepare_user_decision(
         self,
         command: DecideToolRequest,
@@ -142,6 +63,8 @@ impl ToolBatch {
         approval: DelegateToolApproval,
         continuation_attempt: option::Option<TurnAttemptId>,
     ) -> result::Result<PreparedDelegateToolApproval, DelegateToolApprovalTransitionError>;
+}
+impl ToolBatch {
     pub fn prepare_next_attempt(
         &self,
         attempt: ToolAttemptId,
@@ -171,6 +94,8 @@ impl ToolBatch {
         &self,
         attempt: ToolAttemptId,
     ) -> result::Result<RunnerToolAttemptAuthorization, ToolBatchExecutionError>;
+}
+impl ToolBatch {
     pub fn prepare_result_projection(
         &self,
         entry_ids: vec::Vec<SemanticTranscriptEntryId>,
@@ -382,5 +307,86 @@ pub struct ToolResultProjectionError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ToolResultProjectionError {
     pub const fn failure(&self) -> ToolResultProjectionFailure;
+}
+```
+
+## ToolBatchPhaseReconstitutionInput
+
+```rust
+pub enum ToolBatchPhaseReconstitutionInput {
+    AwaitingApproval {
+        request: ToolRequestId,
+    },
+    Executing {
+        turn_attempt: TurnAttemptId,
+    },
+    AwaitingRecovery {
+        attempt: ToolAttemptId,
+    },
+    AwaitingChild {
+        request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ToolBatchReconstitutionInput
+
+```rust
+pub struct ToolBatchReconstitutionInput {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ToolBatchReconstitutionInput {
+    pub fn new(
+        session: SessionId,
+        turn: TurnId,
+        producing_call: ModelCallId,
+        yielded_snapshot: ResolvedContextFrontierSnapshot,
+        requests: vec::Vec<ToolRequest>,
+        approvals: vec::Vec<ToolApprovalResolution>,
+        attempts: vec::Vec<ReconstitutedToolAttempt>,
+        phase: ToolBatchPhaseReconstitutionInput,
+    ) -> Self;
+    pub fn with_retired_attempts(self, retired_attempts: vec::Vec<ToolAttemptId>) -> Self;
+    pub fn with_runner_authorized_attempts(
+        self,
+        runner_authorized_attempts: vec::Vec<ToolAttemptId>,
+    ) -> Self;
+    pub fn reconstitute(self) -> result::Result<ToolBatch, ToolBatchReconstitutionError>;
+}
+```
+
+## ToolBatchReconstitutionFailure
+
+```rust
+pub enum ToolBatchReconstitutionFailure {
+    EmptyRequestBatch,
+    TooManyRequests,
+    RequestOwnershipMismatch,
+    RequestOrderMismatch,
+    YieldedSnapshotSessionMismatch,
+    ApprovalInventoryMismatch,
+    AttemptInventoryMismatch,
+    AttemptAuthorizationMismatch,
+    MultipleLiveAttempts,
+    AttemptOrderMismatch,
+    ApprovalPhaseMismatch,
+    ExecutionPhaseMismatch,
+    RecoveryPhaseMismatch,
+    ChildWaitPhaseMismatch,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ToolBatchReconstitutionError
+
+```rust
+pub struct ToolBatchReconstitutionError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ToolBatchReconstitutionError {
+    pub const fn input(&self) -> &ToolBatchReconstitutionInput;
+    pub const fn failure(&self) -> ToolBatchReconstitutionFailure;
+    pub fn into_parts(self) -> (ToolBatchReconstitutionInput, ToolBatchReconstitutionFailure);
 }
 ```
