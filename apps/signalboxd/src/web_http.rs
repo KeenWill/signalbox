@@ -4498,6 +4498,10 @@ document.querySelector("#status").textContent = `${bootstrap.contract.name}:${re
 }
 
 /// Decodes one JSON request after enforcing the contract's byte ceiling.
+#[allow(
+    clippy::result_large_err,
+    reason = "The rejection is returned directly as an HTTP response."
+)]
 pub async fn decode_bounded_json<T>(request: Request) -> Result<T, Response>
 where
     T: DeserializeOwned,
@@ -4529,6 +4533,10 @@ where
 }
 
 /// Decodes one UTF-8 request body after enforcing a caller-owned byte ceiling.
+#[allow(
+    clippy::result_large_err,
+    reason = "The rejection is returned directly as an HTTP response."
+)]
 pub(crate) async fn decode_bounded_utf8(
     request: Request,
     maximum_bytes: usize,
