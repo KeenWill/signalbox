@@ -4602,6 +4602,7 @@ name = "signalbox-module-repo-watch-v2"
 version = "0.0.0"
 dependencies = [
  "rust_decimal",
+ "sha2 0.11.0",
  "signalbox-ownership-seam",
  "sqlx",
  "uuid",

@@ -7,6 +7,7 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use sha2::{Digest, Sha256};
 use signalbox_ownership_seam::{
     BranchName, CommitSha, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
     RepoWatchAuthorLogin, RepositorySlug,
@@ -90,8 +91,6 @@ pub struct WebhookDelivery<'a> {
     pub event: &'a str,
     /// Optional GitHub action member.
     pub action: Option<&'a str>,
-    /// Digest of the exact authenticated bytes.
-    pub body_digest: [u8; 32],
     /// Exact authenticated bytes.
     pub body: &'a [u8],
     /// Admission time.
@@ -247,6 +246,7 @@ impl RepoWatchStore {
     ) -> Result<WebhookAdmission, StoreError> {
         validate_webhook(&delivery)?;
         let hook_id = Decimal::from(delivery.hook_id);
+        let body_digest: [u8; 32] = Sha256::digest(delivery.body).into();
         let mut transaction = self.pool.begin().await?;
         let inserted = sqlx::query(
             "INSERT INTO webhook_delivery
@@ -260,7 +260,7 @@ impl RepoWatchStore {
         .bind(delivery.repository.as_str())
         .bind(delivery.event)
         .bind(delivery.action)
-        .bind(delivery.body_digest.as_slice())
+        .bind(body_digest.as_slice())
         .bind(delivery.received_at)
         .bind(delivery.expires_at)
         .execute(&mut *transaction)
@@ -304,7 +304,7 @@ impl RepoWatchStore {
         .bind(delivery.repository.as_str())
         .bind(delivery.event)
         .bind(delivery.action)
-        .bind(delivery.body_digest.as_slice())
+        .bind(body_digest.as_slice())
         .bind(delivery.body)
         .fetch_one(&mut *transaction)
         .await?;
@@ -390,7 +390,6 @@ mod tests {
             delivery_id: Uuid::from_u128(2),
             event: "pull_request",
             action: Some("opened"),
-            body_digest: [3; 32],
             body: b"{}",
             received_at: now,
             expires_at: now,

@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
+sha2 = { version = "0.11.0", default-features = false }
 signalbox-ownership-seam = { path = "../../ownership-seam" }
 sqlx = { version = "0.9.0", default-features = false, features = [
     "postgres",

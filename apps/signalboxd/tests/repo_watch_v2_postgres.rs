@@ -6,6 +6,7 @@
 
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
+use sha2::{Digest, Sha256};
 use signalbox_module_repo_watch_v2::{
     PullRequestLifecycle, PullRequestState, RepoWatchStore, RepositoryState, WebhookAdmission,
     WebhookDelivery, WebhookDisposition,
@@ -91,7 +92,6 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         delivery_id: Uuid::from_u128(10),
         event: "pull_request",
         action: Some("opened"),
-        body_digest: [11; 32],
         body,
         received_at: observed_at,
         expires_at: observed_at + Duration::from_secs(60),
@@ -100,6 +100,15 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store.admit_webhook(delivery()).await?,
         WebhookAdmission::Inserted
     );
+    let stored_digest: Vec<u8> = sqlx::query_scalar(
+        "SELECT body_digest
+           FROM webhook_delivery
+          WHERE hook_id = 9 AND delivery_id = $1",
+    )
+    .bind(Uuid::from_u128(10))
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(stored_digest, Sha256::digest(body).as_slice());
 
     store
         .upsert_repository(RepositoryState {
@@ -139,7 +148,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     );
 
     let mut conflict = delivery();
-    conflict.body_digest = [12; 32];
+    conflict.body = br#"{"action":"closed"}"#;
     assert_eq!(
         store.admit_webhook(conflict).await?,
         WebhookAdmission::ConflictingReuse
