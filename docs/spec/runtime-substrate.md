@@ -302,8 +302,10 @@ malformed value is no evidence; the Codex phrase admits only its bounded second
 and minute units.
 
 The non-acceptance proof on a provider error is an adapter-owned typed fact,
-never inferred from the error kind, status retryability or provider prose. An
-adapter admits it only when it decoded its own documented error envelope, the
+never inferred from the error kind, status retryability or provider prose. A
+`CredentialRejected` failure instead admits the `switch_now` successor without
+non-acceptance proof; its `non_acceptance_proven` bit remains false. An adapter
+admits the proof only when it decoded its own documented error envelope, the
 native token belongs to the closed set that adapter names for the proof, the
 HTTP status agrees with that token, and the envelope arrived as an error
 response decoded before any stream began. A status-derived fallback, an absent
@@ -315,10 +317,12 @@ no error envelope, admits the proof only when its event stream closes with a
 `turn.failed` event; a stream-level error that no matching `turn.failed` event
 closes carries none.
 
-The Anthropic proof set is `rate_limit_error`, `overloaded_error`, and
-`api_error` at HTTP 500. The OpenAI proof set is `rate_limit_exceeded`,
-`rate_limit_error`, `insufficient_quota`, and
-`server_error`/`internal_server_error` at HTTP 500.
+Provider-internal non-acceptance proof is admitted for Anthropic `api_error` at
+HTTP 500, OpenAI `server_error`/`internal_server_error` at HTTP 500, and a Codex
+CLI event stream that closes with `turn.failed` whose message classifies as
+`ProviderInternal`. Anthropic also admits `rate_limit_error` and
+`overloaded_error`; OpenAI also admits `rate_limit_exceeded`,
+`rate_limit_error`, and `insufficient_quota`.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion, and an unrecognized finish token is boundary
