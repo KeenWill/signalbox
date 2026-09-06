@@ -29,18 +29,12 @@ use signalbox_domain::{
 };
 
 /// Maximum number of ordered parts in one process-protocol user input.
-// numeric-bound: guard - prevents one submitted input from fragmenting into unbounded decoded parts
 pub const MAX_USER_INPUT_PARTS: usize = signalbox_domain::UserContent::MAX_PARTS;
 /// Maximum aggregate UTF-8 bytes across process-protocol text parts.
-// numeric-bound: guard - prevents one submitted input from exhausting wire-frame memory
 pub const MAX_USER_INPUT_TEXT_BYTES: usize = signalbox_domain::UserContent::MAX_TEXT_BYTES;
 /// Maximum encoded bytes in one process-protocol attachment media type.
-// numeric-bound: guard - the user-input wire grammar advertises accepting media types only to this
-// length
 pub const MAX_USER_INPUT_MEDIA_TYPE_BYTES: usize = signalbox_domain::DeclaredMediaType::MAX_BYTES;
 /// Maximum encoded bytes in one process-protocol attachment display filename.
-// numeric-bound: guard - the user-input wire grammar advertises accepting display filenames only to
-// this length
 pub const MAX_USER_INPUT_DISPLAY_FILENAME_BYTES: usize =
     signalbox_domain::AttachmentDisplayFilename::MAX_BYTES;
 
@@ -4969,7 +4963,6 @@ pub struct RunnerWorkingDirectory(
 
 impl RunnerWorkingDirectory {
     /// Maximum UTF-8 bytes admitted by the runner domain and process wire.
-    // numeric-bound: guard - mirrors the domain's exact runner-value wire grammar
     pub const MAX_UTF8_BYTES: usize = DomainRunnerWorkingDirectory::MAX_BYTES;
 
     /// Admits nonempty, NUL-free text within the exact byte bound.

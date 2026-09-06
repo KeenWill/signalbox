@@ -5,24 +5,16 @@ use std::{collections::BTreeSet, future::Future, time::SystemTime};
 use signalbox_domain::{SessionId, TurnId};
 
 /// Maximum session summaries returned by one coherent fleet snapshot.
-// numeric-bound: guard - prevents a growing fleet from projecting an unbounded snapshot response
 const ATTENTION_SNAPSHOT_ITEM_CEILING: u16 = 32;
 /// Maximum Unicode scalar values retained from blocked-goal need text.
-// numeric-bound: guard - prevents one operator-authored goal need from carrying unbounded text into
-// every summary
 const ATTENTION_GOAL_SUMMARY_CHARACTER_CEILING: u16 = 128;
 /// Maximum journal records consumed by one incremental follow read.
-// numeric-bound: guard - prevents a change-journal backlog from driving an unbounded follow read
-// and replacement batch
 const ATTENTION_CHANGE_ITEM_CEILING: u16 = 32;
 /// Maximum Unicode scalar values carried from one session title.
-// numeric-bound: guard - keeps the hot fleet page within its response byte bound
 const ATTENTION_TITLE_CHARACTER_CEILING: u16 = 128;
 /// Maximum exact tags accepted by one catalog filter.
-// numeric-bound: guard - bounds query decoding and indexed tag predicates
 const ATTENTION_FILTER_TAG_CEILING: u8 = 8;
 /// Maximum UTF-8 bytes accepted across search text and exact tags.
-// numeric-bound: guard - bounds one catalog query's decoded filter material
 const ATTENTION_FILTER_UTF8_BYTE_CEILING: u16 = 1_024;
 
 /// Returns the hard safety ceiling for one coherent fleet snapshot.
