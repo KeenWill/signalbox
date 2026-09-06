@@ -9214,59 +9214,6 @@ impl RepoWatchReviewObservation {
     // accessors: id(), reviewer(), state(), commit()
 }
 
-pub enum RepoWatchReviewDecision {
-    None,
-    Approved,
-    ReviewRequired,
-    ChangesRequested,
-}
-
-pub enum RepoWatchConvergenceVerdict {
-    NotConverged,
-    InternallyConverged,
-    MergeReady,
-}
-
-pub struct RepoWatchConvergenceAssessmentInput {
-    pub number: PullRequestNumber,
-    pub head_sha: CommitSha,
-    pub base_branch: BranchName,
-    pub base_revision: CommitSha,
-    pub mergeable_state: MergeableState,
-    pub settled: bool,
-    pub review_decision: RepoWatchReviewDecision,
-    pub unresolved_threads: Vec<ReviewThreadId>,
-    pub gating_check_count: u64,
-    pub non_green_gating_checks: Vec<CheckRunName>,
-}
-
-pub struct RepoWatchConvergenceAssessment { /* private */ }
-impl RepoWatchConvergenceAssessment {
-    pub fn try_new(
-        input: RepoWatchConvergenceAssessmentInput,
-    ) -> Result<Self, RepoWatchConvergenceAssessmentError>;
-    // accessors: number(), head_sha(), base_branch(), base_revision(), mergeable_state(),
-    // settled(), review_decision(), unresolved_threads(), gating_check_count(),
-    // non_green_gating_checks(), verdict()
-}
-
-pub struct RepoWatchConvergenceAssessmentError;
-
-pub struct RepoWatchStaleReviewClearanceCandidate { /* private */ }
-impl RepoWatchStaleReviewClearanceCandidate {
-    pub fn review_node_id_is_valid(value: &str) -> bool;
-    pub fn try_new(
-        assessment: &RepoWatchConvergenceAssessment,
-        review_node_id: String,
-        reviewer: RepoWatchAuthorLogin,
-        reviewed_head_sha: CommitSha,
-    ) -> Result<Self, RepoWatchStaleReviewClearanceCandidateError>;
-    // accessors: number(), current_head_sha(), review_node_id(), reviewer(),
-    // reviewed_head_sha()
-}
-
-pub struct RepoWatchStaleReviewClearanceCandidateError;
-
 pub enum RepoWatchThreadState {
     Open,
     Resolved,
@@ -13064,7 +13011,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
 | application: convergence_reconciliation            | 6 (+1 free fn)                   |
-| application: repo_watch                            | 37 (+3 free fn) (incl. 1 trait)  |
+| application: repo_watch                            | 30 (+3 free fn) (incl. 1 trait)  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
@@ -13077,4 +13024,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 16                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **434 (+29 free fn)**            |
+| **signalbox-application total**                    | **427 (+29 free fn)**            |

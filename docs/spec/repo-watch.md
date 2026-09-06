@@ -115,9 +115,9 @@ pending disposition atomically. Reusing a delivery identity with equal content
 is a replay; different content is a conflict. Settlement changes a pending
 disposition exactly once.
 
-The former repository-watch runtime, webhook runtime, convergence task, operator
-routes, and public-schema persistence surface do not exist. The removal
-migration drops the disposable derived data.
+Repository watch has no dedicated runtime, webhook listener, convergence task,
+operator routes, or public-schema persistence surface. Its durable state is the
+module-owned projection and command ledger described above.
 
 Contracts this page relies on but does not own: module-state pruning and outbox
 retention permission in [persistence protocol](persistence-protocol.md), session
