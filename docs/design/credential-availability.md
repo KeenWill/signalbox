@@ -61,9 +61,7 @@ deadline-free wait.
 
 A successor prepared on wait release retains any predecessor call and its
 non-acceptance proof in its origin. Release never readmits the member whose
-failure parked the turn. Goal disposition follows whether a wait was selected;
-an exhausted pool that selects no wait blocks the goal regardless of its
-configured action.
+failure parked the turn.
 
 Wait-transition fail (no call): a released wait finds the pool exhausted, no
 wait is selected again, and this chain has issued no call. The wait's own
