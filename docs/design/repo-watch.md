@@ -15,8 +15,9 @@ fetch. The module runtime composes and reloads the webhook listener.
 ## Design
 
 Webhook listener: the module runtime composes the listener; a reload that
-changes its bind address, path, or hook map closes and reopens it with the new
-settings, and deliveries in flight are retried.
+changes its bind address, path, or hook map binds the replacement before
+retiring the running listener, and deliveries in flight are retried. A bind
+failure keeps the running listener and fails the reload.
 
 Provenance: session creation accepts a repository-watch creation cause and
 module actor identity. A durable provenance record is linked to

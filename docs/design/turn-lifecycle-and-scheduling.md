@@ -52,8 +52,10 @@ Runner-loss recovery has two user commands, replace and abandon, whose request
 shapes and placement transitions are owned by
 [runner-protocol](../spec/runner-protocol.md). This subsystem owns their effect
 on the turn. Replacement is never refused because a model call is in flight; it
-stays staged and resumable while the call's daemon-locus tool rounds complete on
-the current placement, then takes over at the placement boundary. A runner-locus
+stays staged and resumable while the call's daemon-locus tool batch executes on
+the current placement, then takes over inside the
+[continuation transaction](../spec/tool-loop.md) that appends the tool results,
+before the next call is prepared against the changed placement. A runner-locus
 tool arriving on a lost placement follows the runner contract's
 replace-or-abandon exits. The command claims its identity and provisioning
 authorization immediately, and its terminal transaction commits only after any
