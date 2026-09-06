@@ -585,15 +585,17 @@ where
 {
 }
 impl operator_status::ProcessOperatorStatusHeldSlot {
-    pub const fn dispatch_id(&self) -> uuid::Uuid;
     pub fn repository(&self) -> &str;
     pub const fn origin(&self) -> &operator_status::ProcessOperatorStatusHeldSlotOrigin;
     pub fn rule_id(&self) -> &str;
-    pub const fn rule_version(&self) -> u64;
     pub const fn singleton(&self) -> &operator_status::ProcessOperatorStatusSingleton;
-    pub const fn held_for_seconds(&self) -> u64;
     pub fn session_ids(&self) -> &[uuid::Uuid];
     pub fn blockers(&self) -> &[operator_status::ProcessOperatorStatusHeldSlotBlocker];
+}
+impl operator_status::ProcessOperatorStatusHeldSlot {
+    pub const fn dispatch_id(&self) -> uuid::Uuid;
+    pub const fn rule_version(&self) -> u64;
+    pub const fn held_for_seconds(&self) -> u64;
 }
 ```
 
@@ -657,17 +659,19 @@ where
 {
 }
 impl operator_status::ProcessOperatorStatusQueuedObligation {
-    pub const fn obligation_id(&self) -> uuid::Uuid;
     pub fn repository(&self) -> &str;
     pub fn rule_id(&self) -> &str;
-    pub const fn rule_version(&self) -> u64;
     pub const fn singleton(&self) -> &operator_status::ProcessOperatorStatusSingleton;
+    pub fn occupying_session_ids(&self) -> &[uuid::Uuid];
+}
+impl operator_status::ProcessOperatorStatusQueuedObligation {
+    pub const fn obligation_id(&self) -> uuid::Uuid;
+    pub const fn rule_version(&self) -> u64;
     pub const fn first_event_id(&self) -> uuid::Uuid;
     pub const fn latest_event_id(&self) -> uuid::Uuid;
     pub const fn matched_event_count(&self) -> u64;
     pub const fn waiting_for_seconds(&self) -> u64;
     pub const fn occupying_dispatch_id(&self) -> option::Option<uuid::Uuid>;
-    pub fn occupying_session_ids(&self) -> &[uuid::Uuid];
     pub const fn cooldown_remaining_seconds(&self) -> option::Option<u64>;
     pub const fn cooldown_never_eligible(&self) -> bool;
     pub const fn ready(&self) -> bool;
@@ -737,15 +741,17 @@ where
 }
 impl operator_status::ProcessOperatorStatusPullRequestConvergence {
     pub fn repository(&self) -> &str;
-    pub const fn pull_request_number(&self) -> u64;
     pub fn head_sha(&self) -> &str;
     pub fn base_branch(&self) -> &str;
     pub fn base_revision(&self) -> &str;
+    pub fn non_green_gating_checks(&self) -> &[string::String];
+}
+impl operator_status::ProcessOperatorStatusPullRequestConvergence {
+    pub const fn pull_request_number(&self) -> u64;
     pub const fn mergeable_state(&self) -> operator_status::ProcessOperatorStatusMergeableState;
     pub const fn review_decision(&self) -> operator_status::ProcessOperatorStatusReviewDecision;
     pub const fn unresolved_thread_count(&self) -> u64;
     pub const fn gating_check_count(&self) -> u64;
-    pub fn non_green_gating_checks(&self) -> &[string::String];
     pub const fn verdict(&self) -> operator_status::ProcessOperatorStatusConvergenceVerdict;
     pub const fn seal(
         &self,
@@ -822,11 +828,13 @@ where
 }
 impl operator_status::ProcessOperatorStatusPendingStaleReviewClearance {
     pub fn repository(&self) -> &str;
-    pub const fn pull_request_number(&self) -> u64;
     pub fn current_head_sha(&self) -> &str;
     pub fn review_node_id(&self) -> &str;
     pub fn reviewer(&self) -> &str;
     pub fn reviewed_head_sha(&self) -> &str;
+}
+impl operator_status::ProcessOperatorStatusPendingStaleReviewClearance {
+    pub const fn pull_request_number(&self) -> u64;
     pub const fn pending_for_seconds(&self) -> u64;
 }
 ```

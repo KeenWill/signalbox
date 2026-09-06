@@ -57,9 +57,11 @@ where
 }
 impl<T> into_either::IntoEither for CurrentTimeToolConstructionError {}
 impl fmt::Display for CurrentTimeToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for CurrentTimeToolConstructionError {}
+impl error::Error for CurrentTimeToolConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## CurrentTimeTool
@@ -131,9 +133,11 @@ where
 }
 impl<T> into_either::IntoEither for CurrentTimeExecutorError {}
 impl fmt::Display for CurrentTimeExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for CurrentTimeExecutorError {}
+impl error::Error for CurrentTimeExecutorError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl operator_failure::ClassifyOperatorFailure for CurrentTimeExecutorError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
 }

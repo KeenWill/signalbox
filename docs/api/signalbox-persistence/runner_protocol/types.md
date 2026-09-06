@@ -537,9 +537,11 @@ where
 {
 }
 impl runner_protocol::RunnerConnectionLossPropagationPage {
+    pub fn sessions(&self) -> &[signalbox_domain::SessionId];
+}
+impl runner_protocol::RunnerConnectionLossPropagationPage {
     pub const fn loss(&self) -> runner_protocol::RunnerConnectionLossSnapshot;
     pub const fn propagated_through(&self) -> option::Option<signalbox_domain::SessionId>;
-    pub fn sessions(&self) -> &[signalbox_domain::SessionId];
     pub const fn is_complete(&self) -> bool;
 }
 ```
@@ -1006,8 +1008,10 @@ where
 {
 }
 impl runner_protocol::StoredValidatedRunnerRegistration {
-    pub const fn revision(&self) -> runner_protocol::RunnerRegistrationRevision;
     pub const fn registration(&self) -> &runner::ValidatedRunnerRegistration;
+}
+impl runner_protocol::StoredValidatedRunnerRegistration {
+    pub const fn revision(&self) -> runner_protocol::RunnerRegistrationRevision;
 }
 ```
 
@@ -1137,14 +1141,16 @@ where
 {
 }
 impl runner_protocol::IssuedRunnerEnrollmentIdentities {
+    pub const fn enrollment(self) -> signalbox_domain::RunnerEnrollmentId;
+    pub const fn runner(self) -> signalbox_domain::RunnerId;
+    pub const fn authentication(self) -> signalbox_domain::RunnerAuthenticationId;
+}
+impl runner_protocol::IssuedRunnerEnrollmentIdentities {
     pub const fn new(
         enrollment: signalbox_domain::RunnerEnrollmentId,
         runner: signalbox_domain::RunnerId,
         authentication: signalbox_domain::RunnerAuthenticationId,
     ) -> Self;
-    pub const fn enrollment(self) -> signalbox_domain::RunnerEnrollmentId;
-    pub const fn runner(self) -> signalbox_domain::RunnerId;
-    pub const fn authentication(self) -> signalbox_domain::RunnerAuthenticationId;
 }
 ```
 
@@ -1208,6 +1214,9 @@ where
 {
 }
 impl runner_protocol::PristineRunnerEnrollmentRequest {
+    pub const fn advertisement(&self) -> &runner::RunnerAdvertisement;
+}
+impl runner_protocol::PristineRunnerEnrollmentRequest {
     pub fn new(
         request: runner_protocol::RunnerEnrollmentRequestId,
         issued: runner_protocol::IssuedRunnerEnrollmentIdentities,
@@ -1218,7 +1227,6 @@ impl runner_protocol::PristineRunnerEnrollmentRequest {
     pub const fn issued(&self) -> runner_protocol::IssuedRunnerEnrollmentIdentities;
     pub fn allowed_classes(&self)
         -> impl iterator::Iterator<Item = &runner::RunnerCapabilityClass>;
-    pub const fn advertisement(&self) -> &runner::RunnerAdvertisement;
 }
 ```
 
@@ -1334,10 +1342,12 @@ where
 {
 }
 impl runner_protocol::RunnerEnrollmentReceipt {
-    pub const fn request(&self) -> runner_protocol::RunnerEnrollmentRequestId;
     pub const fn enrollment(&self) -> &runner::RunnerEnrollment;
-    pub const fn identities(&self) -> runner_protocol::IssuedRunnerEnrollmentIdentities;
     pub const fn registration(&self) -> &runner_protocol::StoredValidatedRunnerRegistration;
+}
+impl runner_protocol::RunnerEnrollmentReceipt {
+    pub const fn request(&self) -> runner_protocol::RunnerEnrollmentRequestId;
+    pub const fn identities(&self) -> runner_protocol::IssuedRunnerEnrollmentIdentities;
     pub fn advertisement(&self) -> runner::RunnerAdvertisement;
     pub fn into_parts(
         self,
@@ -1397,8 +1407,10 @@ where
 {
 }
 impl runner_protocol::RunnerEnrollmentOutcome {
-    pub const fn disposition(&self) -> runner_protocol::RunnerEnrollmentDisposition;
     pub const fn receipt(&self) -> &runner_protocol::RunnerEnrollmentReceipt;
+}
+impl runner_protocol::RunnerEnrollmentOutcome {
+    pub const fn disposition(&self) -> runner_protocol::RunnerEnrollmentDisposition;
     pub fn into_receipt(self) -> runner_protocol::RunnerEnrollmentReceipt;
 }
 ```
@@ -1451,8 +1463,10 @@ where
 {
 }
 impl runner_protocol::StoredSessionRunnerPlacement {
-    pub const fn event_ordinal(&self) -> u64;
     pub const fn placement(&self) -> &runner::SessionRunnerPlacement;
+}
+impl runner_protocol::StoredSessionRunnerPlacement {
+    pub const fn event_ordinal(&self) -> u64;
     pub const fn registration(
         &self,
     ) -> option::Option<&runner_protocol::StoredValidatedRunnerRegistration>;

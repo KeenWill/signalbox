@@ -65,13 +65,15 @@ where
         P: policy::Policy<B, E>;
 }
 impl<T> erased::ErasedDestructor for WebSearchExecutorError where T: 'static {}
+impl fmt::Display for WebSearchExecutorError {
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for WebSearchExecutorError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl fmt::Debug for WebSearchExecutorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl fmt::Display for WebSearchExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for WebSearchExecutorError {}
 impl operator_failure::ClassifyOperatorFailure for WebSearchExecutorError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
 }
@@ -404,13 +406,15 @@ where
         P: policy::Policy<B, E>;
 }
 impl<T> erased::ErasedDestructor for WebSearchProviderError where T: 'static {}
+impl fmt::Display for WebSearchProviderError {
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for WebSearchProviderError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl fmt::Debug for WebSearchProviderError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl fmt::Display for WebSearchProviderError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for WebSearchProviderError {}
 impl WebSearchProviderError {
     pub fn new(status: u16, body: vec::Vec<u8>) -> option::Option<Self>;
 }
@@ -454,9 +458,11 @@ where
 }
 impl<T> erased::ErasedDestructor for WebSearchToolConstructionError where T: 'static {}
 impl fmt::Display for WebSearchToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for WebSearchToolConstructionError {}
+impl error::Error for WebSearchToolConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## WebSearchTool
@@ -592,9 +598,11 @@ where
 }
 impl<T> erased::ErasedDestructor for ReqwestWebSearchConstructionError where T: 'static {}
 impl fmt::Display for ReqwestWebSearchConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ReqwestWebSearchConstructionError {}
+impl error::Error for ReqwestWebSearchConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## WebSearchTransportFailure
@@ -623,14 +631,14 @@ where
         P: policy::Policy<B, E>;
 }
 impl<T> erased::ErasedDestructor for WebSearchTransportFailure where T: 'static {}
-impl fmt::Debug for WebSearchTransportFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
 impl fmt::Display for WebSearchTransportFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for WebSearchTransportFailure {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+impl fmt::Debug for WebSearchTransportFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 

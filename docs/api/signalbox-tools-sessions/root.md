@@ -141,6 +141,12 @@ where
 {
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
+impl fmt::Display for DeliveredChildResultError {
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for DeliveredChildResultError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl DeliveredChildResultError {
     pub fn into_parts(
         self,
@@ -149,10 +155,6 @@ impl DeliveredChildResultError {
         session_delegation::DelegationEvent,
     );
 }
-impl fmt::Display for DeliveredChildResultError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for DeliveredChildResultError {}
 ```
 
 ## SessionDelegationPortOutcome
@@ -244,9 +246,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for SessionDelegationToolsConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for SessionDelegationToolsConstructionError {}
+impl error::Error for SessionDelegationToolsConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## SessionDelegationTools
@@ -413,7 +417,7 @@ impl<PortError> fmt::Display for SessionDelegationExecutorError<PortError>
 where
     PortError: fmt::Display,
 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<PortError> error::Error for SessionDelegationExecutorError<PortError>
 where
@@ -450,7 +454,9 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for DeliveredChildResultRenderError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for DeliveredChildResultRenderError {}
+impl error::Error for DeliveredChildResultRenderError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```

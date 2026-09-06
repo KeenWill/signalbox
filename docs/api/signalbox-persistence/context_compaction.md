@@ -137,6 +137,11 @@ where
 {
 }
 impl context_compaction::PreparedContextCompaction {
+    pub fn credential_reference(&self) -> &str;
+    pub fn summarized_entries(&self) -> &[context_frontier::SemanticTranscriptEntryRef];
+    pub fn summarized_positions(&self) -> &[u64];
+}
+impl context_compaction::PreparedContextCompaction {
     pub const fn command(&self) -> signalbox_domain::DurableCommandId;
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn compaction(&self) -> context_compaction::ContextCompactionId;
@@ -144,14 +149,11 @@ impl context_compaction::PreparedContextCompaction {
     pub const fn call(&self) -> signalbox_domain::ModelCallId;
     pub const fn selection(&self) -> configuration::DirectModelSelection;
     pub const fn target(&self) -> model_call::ResolvedProviderTarget;
-    pub fn credential_reference(&self) -> &str;
     pub const fn source_frontier(&self) -> context_frontier::ContextFrontierId;
     pub const fn first_position(&self) -> u64;
     pub const fn through_position(&self) -> u64;
     pub const fn first(&self) -> context_frontier::SemanticTranscriptEntryRef;
     pub const fn through(&self) -> context_frontier::SemanticTranscriptEntryRef;
-    pub fn summarized_entries(&self) -> &[context_frontier::SemanticTranscriptEntryRef];
-    pub fn summarized_positions(&self) -> &[u64];
     pub const fn summary_entry(&self) -> context_frontier::SemanticTranscriptEntryId;
     pub const fn result_frontier(&self) -> context_frontier::ContextFrontierId;
 }
@@ -217,8 +219,10 @@ where
 {
 }
 impl context_compaction::AutomaticContextCompactionPreview {
-    pub const fn source_frontier(&self) -> context_frontier::ContextFrontierId;
     pub fn members(&self) -> &[context_compaction::AutomaticContextCompactionPreviewMember];
+}
+impl context_compaction::AutomaticContextCompactionPreview {
+    pub const fn source_frontier(&self) -> context_frontier::ContextFrontierId;
 }
 ```
 

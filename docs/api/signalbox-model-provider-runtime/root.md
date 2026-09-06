@@ -75,9 +75,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for RuntimeModelDefinitionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for RuntimeModelDefinitionError {}
+impl error::Error for RuntimeModelDefinitionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## RuntimeModelCatalog
@@ -127,9 +129,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for RuntimeModelCatalogError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for RuntimeModelCatalogError {}
+impl error::Error for RuntimeModelCatalogError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## ProviderTargetRelation
@@ -332,9 +336,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for RuntimeModelCallProviderError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for RuntimeModelCallProviderError {}
+impl error::Error for RuntimeModelCallProviderError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl RuntimeModelCallProviderError {
     pub const fn cause_code(self) -> ModelCallCauseCode;
 }
@@ -437,9 +443,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for RuntimeInputTokenCountError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for RuntimeInputTokenCountError {}
+impl error::Error for RuntimeInputTokenCountError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl operator_failure::ClassifyOperatorFailure for RuntimeInputTokenCountError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
     fn operator_failure_cause_code(&self) -> &'static str;
@@ -451,14 +459,14 @@ impl operator_failure::ClassifyOperatorFailure for RuntimeInputTokenCountError {
 ```rust
 pub struct InvalidRuntimeToolSchema {/* private */}
 // derives: fmt::Debug
-impl InvalidRuntimeToolSchema {
-    pub fn tool_name(&self) -> &str;
-}
 impl fmt::Display for InvalidRuntimeToolSchema {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for InvalidRuntimeToolSchema {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+impl InvalidRuntimeToolSchema {
+    pub fn tool_name(&self) -> &str;
 }
 ```
 

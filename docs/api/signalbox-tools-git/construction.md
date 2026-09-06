@@ -15,7 +15,7 @@ pub enum LocalGitToolsConstructionError {
 }
 // derives: fmt::Debug
 impl fmt::Display for LocalGitToolsConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for LocalGitToolsConstructionError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;

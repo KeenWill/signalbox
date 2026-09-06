@@ -2,6 +2,39 @@
 
 # code_host: types-2
 
+## ThreadResolveResult
+
+```rust
+pub struct ThreadResolveResult {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl<T> dyn_clone::DynClone for code_host::result::ThreadResolveResult
+where
+    T: clone::Clone,
+{
+    fn __clone_box(&self, _: sealed::Private) -> *mut ();
+}
+impl<T> policy::PolicyExt for code_host::result::ThreadResolveResult
+where
+    T: ?marker::Sized,
+{
+    fn and<P, B, E>(self, other: P) -> and::And<T, P>
+    where
+        T: marker::Sized + policy::Policy<B, E>,
+        P: policy::Policy<B, E>;
+    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
+    where
+        T: marker::Sized + policy::Policy<B, E>,
+        P: policy::Policy<B, E>;
+}
+impl code_host::result::ThreadResolveResult {
+    pub fn try_new(
+        bounds: code_host::CodeHostNumericBounds,
+        thread_id: string::String,
+        resolution: code_host::result::ReviewThreadResolution,
+    ) -> option::Option<Self>;
+}
+```
+
 ## CiJobLogResult
 
 ```rust
@@ -231,11 +264,13 @@ where
         P: policy::Policy<B, E>;
 }
 impl code_host::review_slog::inventory::ReviewThreadInventoryItem {
+    pub fn id(&self) -> &str;
+}
+impl code_host::review_slog::inventory::ReviewThreadInventoryItem {
     pub fn try_new(
         bounds: code_host::CodeHostNumericBounds,
         fields: code_host::review_slog::inventory::ReviewThreadInventoryFields,
     ) -> option::Option<Self>;
-    pub fn id(&self) -> &str;
     pub const fn disposition(&self) -> code_host::review_slog::inventory::ReviewDispositionClass;
 }
 ```

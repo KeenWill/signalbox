@@ -62,8 +62,10 @@ where
 {
 }
 impl blob::BlobStoreBindingRecord {
-    pub const fn new(store: signalbox_blob_store::BlobStoreName, namespace_id: uuid::Uuid) -> Self;
     pub const fn store(&self) -> &signalbox_blob_store::BlobStoreName;
+}
+impl blob::BlobStoreBindingRecord {
+    pub const fn new(store: signalbox_blob_store::BlobStoreName, namespace_id: uuid::Uuid) -> Self;
     pub const fn namespace_id(&self) -> uuid::Uuid;
 }
 ```
@@ -128,12 +130,14 @@ where
 {
 }
 impl blob::BlobReplicaRecord {
+    pub const fn store(&self) -> &signalbox_blob_store::BlobStoreName;
+    pub const fn object_key(&self) -> &signalbox_blob_store::BlobObjectKey;
+}
+impl blob::BlobReplicaRecord {
     pub const fn new(
         store: signalbox_blob_store::BlobStoreName,
         object_key: signalbox_blob_store::BlobObjectKey,
     ) -> Self;
-    pub const fn store(&self) -> &signalbox_blob_store::BlobStoreName;
-    pub const fn object_key(&self) -> &signalbox_blob_store::BlobObjectKey;
 }
 ```
 
@@ -197,8 +201,10 @@ where
 {
 }
 impl blob::BlobCatalogEntry {
-    pub const fn expected(&self) -> signalbox_blob_store::ExpectedBlob;
     pub fn replicas(&self) -> &[blob::BlobReplicaRecord];
+}
+impl blob::BlobCatalogEntry {
+    pub const fn expected(&self) -> signalbox_blob_store::ExpectedBlob;
     pub fn replica_in_store(
         &self,
         store: &signalbox_blob_store::BlobStoreName,

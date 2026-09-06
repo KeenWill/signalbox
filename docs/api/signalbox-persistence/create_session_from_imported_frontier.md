@@ -341,7 +341,7 @@ impl create_session_from_imported_frontier::ImportedSessionRepository {
     ) -> Self;
     pub fn with_preloaded_conversation(
         self,
-        conversation: imported_conversation::ImportedConversation,
+        conversation: conversation::ImportedConversation,
     ) -> Self;
     pub fn new(pool: sqlx_postgres::PgPool, credential_pin: SessionCredentialPin) -> Self;
     pub async fn handle<NextSemanticEntryId>(

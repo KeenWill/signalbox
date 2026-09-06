@@ -62,12 +62,14 @@ where
 {
 }
 impl goal_turn::GoalTurnCandidates {
+    pub const fn accepted_input(self) -> signalbox_domain::AcceptedInputId;
+    pub const fn turn(self) -> signalbox_domain::TurnId;
+}
+impl goal_turn::GoalTurnCandidates {
     pub const fn new(
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: signalbox_domain::TurnId,
     ) -> Self;
-    pub const fn accepted_input(self) -> signalbox_domain::AcceptedInputId;
-    pub const fn turn(self) -> signalbox_domain::TurnId;
 }
 ```
 

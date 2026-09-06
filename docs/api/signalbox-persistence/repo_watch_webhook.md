@@ -68,9 +68,11 @@ where
 {
 }
 impl repo_watch_webhook::RepoWatchWebhookDeliveryKey {
-    pub const fn new(hook_id: nonzero::NonZeroU64, delivery_id: uuid::Uuid) -> Self;
     pub const fn hook_id(self) -> nonzero::NonZeroU64;
     pub const fn delivery_id(self) -> uuid::Uuid;
+}
+impl repo_watch_webhook::RepoWatchWebhookDeliveryKey {
+    pub const fn new(hook_id: nonzero::NonZeroU64, delivery_id: uuid::Uuid) -> Self;
 }
 ```
 
@@ -134,6 +136,12 @@ where
 {
 }
 impl repo_watch_webhook::RepoWatchWebhookAdmission {
+    pub const fn repository(&self) -> &repo_watch::RepositorySlug;
+    pub fn event_name(&self) -> &str;
+    pub const fn body_digest(&self) -> &[u8; 32];
+    pub fn body(&self) -> &[u8];
+}
+impl repo_watch_webhook::RepoWatchWebhookAdmission {
     pub fn try_new(
         key: repo_watch_webhook::RepoWatchWebhookDeliveryKey,
         repository: repo_watch::RepositorySlug,
@@ -143,11 +151,7 @@ impl repo_watch_webhook::RepoWatchWebhookAdmission {
         body: vec::Vec<u8>,
     ) -> result::Result<Self, repo_watch_webhook::RepoWatchWebhookRequestError>;
     pub const fn key(&self) -> repo_watch_webhook::RepoWatchWebhookDeliveryKey;
-    pub const fn repository(&self) -> &repo_watch::RepositorySlug;
-    pub fn event_name(&self) -> &str;
     pub fn action_name(&self) -> option::Option<&str>;
-    pub const fn body_digest(&self) -> &[u8; 32];
-    pub fn body(&self) -> &[u8];
 }
 ```
 
@@ -533,10 +537,12 @@ where
 {
 }
 impl repo_watch_webhook::RepoWatchWebhookPendingPageSize {
+    pub const fn get(self) -> u16;
+}
+impl repo_watch_webhook::RepoWatchWebhookPendingPageSize {
     pub fn try_new(
         value: nonzero::NonZeroU16,
     ) -> result::Result<Self, repo_watch_webhook::RepoWatchWebhookPageSizeError>;
-    pub const fn get(self) -> u16;
 }
 ```
 
@@ -667,13 +673,15 @@ where
 {
 }
 impl repo_watch_webhook::PendingRepoWatchWebhookDelivery {
-    pub const fn key(&self) -> repo_watch_webhook::RepoWatchWebhookDeliveryKey;
     pub const fn repository(&self) -> &repo_watch::RepositorySlug;
     pub fn event_name(&self) -> &str;
-    pub fn action_name(&self) -> option::Option<&str>;
     pub const fn body_digest(&self) -> &[u8; 32];
-    pub const fn receipt(&self) -> repo_watch_webhook::RepoWatchWebhookReceipt;
     pub fn body(&self) -> &[u8];
+}
+impl repo_watch_webhook::PendingRepoWatchWebhookDelivery {
+    pub const fn key(&self) -> repo_watch_webhook::RepoWatchWebhookDeliveryKey;
+    pub fn action_name(&self) -> option::Option<&str>;
+    pub const fn receipt(&self) -> repo_watch_webhook::RepoWatchWebhookReceipt;
 }
 ```
 
@@ -1082,12 +1090,14 @@ where
 {
 }
 impl repo_watch_webhook::RepoWatchWebhookTerminalRequest {
+    pub fn projections(&self) -> &[repo_watch_webhook::RepoWatchWebhookProjection];
+}
+impl repo_watch_webhook::RepoWatchWebhookTerminalRequest {
     pub fn try_new(
         projections: vec::Vec<repo_watch_webhook::RepoWatchWebhookProjection>,
         disposition: repo_watch_webhook::RepoWatchWebhookDisposition,
         outcome_code: option::Option<string::String>,
     ) -> result::Result<Self, repo_watch_webhook::RepoWatchWebhookRequestError>;
-    pub fn projections(&self) -> &[repo_watch_webhook::RepoWatchWebhookProjection];
     pub const fn disposition(&self) -> repo_watch_webhook::RepoWatchWebhookDisposition;
     pub fn outcome_code(&self) -> option::Option<&str>;
 }

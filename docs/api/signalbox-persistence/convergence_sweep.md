@@ -62,8 +62,10 @@ where
 {
 }
 impl convergence_sweep::ConvergenceSweepObservation {
-    pub const fn new(head_sha: repo_watch::CommitSha, unresolved_threads: u64) -> Self;
     pub const fn head_sha(&self) -> &repo_watch::CommitSha;
+}
+impl convergence_sweep::ConvergenceSweepObservation {
+    pub const fn new(head_sha: repo_watch::CommitSha, unresolved_threads: u64) -> Self;
     pub const fn unresolved_threads(&self) -> u64;
 }
 ```

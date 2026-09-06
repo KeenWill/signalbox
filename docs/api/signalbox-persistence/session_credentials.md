@@ -62,12 +62,14 @@ where
 {
 }
 impl SessionModelCredential {
+    pub fn model_family(&self) -> &str;
+    pub fn credential_reference(&self) -> &str;
+}
+impl SessionModelCredential {
     pub fn new(
         model_family: impl convert::Into<sync::Arc<str>>,
         credential_reference: impl convert::Into<sync::Arc<str>>,
     ) -> Self;
-    pub fn model_family(&self) -> &str;
-    pub fn credential_reference(&self) -> &str;
 }
 ```
 

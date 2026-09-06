@@ -19,9 +19,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for WorkspacePathRejection {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for WorkspacePathRejection {}
+impl error::Error for WorkspacePathRejection {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## WorkspaceRootError
@@ -36,7 +38,7 @@ pub enum WorkspaceRootError {
 }
 // derives: fmt::Debug
 impl fmt::Display for WorkspaceRootError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for WorkspaceRootError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
@@ -98,14 +100,14 @@ pub enum WorkspaceResolveError {
     },
 }
 // derives: fmt::Debug
-impl WorkspaceResolveError {
-    pub const fn rejection(&self) -> option::Option<WorkspacePathRejection>;
-}
 impl fmt::Display for WorkspaceResolveError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for WorkspaceResolveError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+impl WorkspaceResolveError {
+    pub const fn rejection(&self) -> option::Option<WorkspacePathRejection>;
 }
 ```
 

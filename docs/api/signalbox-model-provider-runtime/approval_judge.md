@@ -181,11 +181,13 @@ where
 {
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
+impl fmt::Display for ApprovalJudgeModelError {
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for ApprovalJudgeModelError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl ApprovalJudgeModelError {
     pub const fn usage(self) -> usage::TokenUsage;
 }
-impl fmt::Display for ApprovalJudgeModelError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for ApprovalJudgeModelError {}
 ```

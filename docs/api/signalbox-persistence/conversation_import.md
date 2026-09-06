@@ -132,6 +132,10 @@ where
 {
 }
 impl conversation_import::ImportedRawBlobPublication {
+    pub const fn store(&self) -> &signalbox_blob_store::BlobStoreName;
+    pub const fn object_key(&self) -> &signalbox_blob_store::BlobObjectKey;
+}
+impl conversation_import::ImportedRawBlobPublication {
     pub const fn new(
         expected: signalbox_blob_store::ExpectedBlob,
         store: signalbox_blob_store::BlobStoreName,
@@ -139,9 +143,7 @@ impl conversation_import::ImportedRawBlobPublication {
         object_key: signalbox_blob_store::BlobObjectKey,
     ) -> Self;
     pub const fn expected(&self) -> signalbox_blob_store::ExpectedBlob;
-    pub const fn store(&self) -> &signalbox_blob_store::BlobStoreName;
     pub const fn namespace_id(&self) -> uuid::Uuid;
-    pub const fn object_key(&self) -> &signalbox_blob_store::BlobObjectKey;
 }
 ```
 
@@ -431,14 +433,14 @@ pub enum ImportedConversationCorruption {
     },
     RawRecordHashCollision,
     RawRecordDeclaredEntryCountMismatch {
-        position: imported_conversation::ImportedRawRecordPosition,
+        position: position::ImportedRawRecordPosition,
         declared: u64,
         actual: u64,
     },
     SourceSessionLineageMismatch,
     DisplayTitleMismatch,
     ExistingSnapshotMismatch,
-    Domain(imported_conversation::ImportedConversationReconstitutionFailure),
+    Domain(reconstitution::ImportedConversationReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for conversation_import::ImportedConversationCorruption
@@ -649,7 +651,7 @@ impl conversation_import::ImportedConversationRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn resolve_or_insert(
         &self,
-        conversation: imported_conversation::ImportedConversation,
+        conversation: conversation::ImportedConversation,
     ) -> result::Result<
         conversation_import::ImportedConversationStoreOutcome,
         conversation_import::ImportedConversationRepositoryError,
@@ -658,7 +660,7 @@ impl conversation_import::ImportedConversationRepository {
         &self,
         conversation: signalbox_domain::ImportedConversationId,
     ) -> result::Result<
-        option::Option<imported_conversation::ImportedConversation>,
+        option::Option<conversation::ImportedConversation>,
         conversation_import::ImportedConversationRepositoryError,
     >;
 }
@@ -668,7 +670,7 @@ impl conversation_import::ImportedConversationStore
     type Error = conversation_import::ImportedConversationRepositoryError;
     async fn resolve_or_insert(
         &mut self,
-        conversation: imported_conversation::ImportedConversation,
+        conversation: conversation::ImportedConversation,
     ) -> result::Result<
         conversation_import::ImportedConversationStoreOutcome,
         <Self as conversation_import::ImportedConversationStore>::Error,
@@ -683,7 +685,7 @@ pub async fn load_normalized_entries(
     pool: &sqlx_postgres::PgPool,
     conversation: signalbox_domain::ImportedConversationId,
 ) -> result::Result<
-    option::Option<boxed::Box<[imported_conversation::ImportedTranscriptEntryInput]>>,
+    option::Option<boxed::Box<[record::ImportedTranscriptEntryInput]>>,
     conversation_import::ImportedConversationRepositoryError,
 >;
 ```

@@ -401,9 +401,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for ConversationToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ConversationToolConstructionError {}
+impl error::Error for ConversationToolConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## ConversationTools
@@ -466,7 +468,7 @@ impl<PortError> fmt::Display for ConversationExecutorError<PortError>
 where
     PortError: fmt::Display,
 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<PortError> error::Error for ConversationExecutorError<PortError>
 where

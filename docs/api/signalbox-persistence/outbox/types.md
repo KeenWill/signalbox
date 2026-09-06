@@ -62,10 +62,12 @@ where
 {
 }
 impl outbox::DispatchedOutboxEvent {
+    pub const fn kind(&self) -> &outbox::DispatchedOutboxEventKind;
+}
+impl outbox::DispatchedOutboxEvent {
     pub const fn sequence(&self) -> u64;
     pub const fn recorded_at(&self) -> offset_date_time::OffsetDateTime;
     pub const fn session(&self) -> option::Option<signalbox_domain::SessionId>;
-    pub const fn kind(&self) -> &outbox::DispatchedOutboxEventKind;
 }
 ```
 

@@ -260,6 +260,8 @@ where
 }
 impl process_read::ProcessRunnerProjection {
     pub const fn selector(&self) -> &runner::RunnerSelector;
+}
+impl process_read::ProcessRunnerProjection {
     pub const fn runner(&self) -> option::Option<signalbox_domain::RunnerId>;
     pub const fn placement_revision(&self) -> runner::RunnerGeneration;
     pub const fn sandbox(&self) -> runner::RunnerSandboxProfile;
@@ -333,10 +335,12 @@ where
 {
 }
 impl process_read::ProcessSessionSummary {
+    pub const fn placement(&self) -> &session_placement::VersionedSessionPlacement;
+}
+impl process_read::ProcessSessionSummary {
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn defaults_version(&self) -> u64;
     pub const fn model_selection(&self) -> process_read::ProcessModelSelection;
-    pub const fn placement(&self) -> &session_placement::VersionedSessionPlacement;
     pub const fn runner(&self) -> option::Option<&process_read::ProcessRunnerProjection>;
 }
 ```
@@ -401,9 +405,11 @@ where
 {
 }
 impl process_read::ProcessSessionDefaults {
+    pub const fn defaults(&self) -> &configuration::SessionConfigurationDefaults;
+}
+impl process_read::ProcessSessionDefaults {
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn version(&self) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn defaults(&self) -> &configuration::SessionConfigurationDefaults;
 }
 ```
 
@@ -1310,9 +1316,11 @@ where
 {
 }
 impl process_read::ProcessTranscriptTurn {
+    pub const fn state(&self) -> &process_read::ProcessTurnState;
+}
+impl process_read::ProcessTranscriptTurn {
     pub const fn turn(&self) -> signalbox_domain::TurnId;
     pub const fn acceptance_position(&self) -> u64;
-    pub const fn state(&self) -> &process_read::ProcessTurnState;
     pub const fn model_settings(
         &self,
     ) -> option::Option<&model_settings::TurnModelSettingsResolved>;
@@ -1574,10 +1582,12 @@ where
 {
 }
 impl process_read::ProcessTranscriptModelCallUsage {
+    pub fn credential_profile(&self) -> &str;
+}
+impl process_read::ProcessTranscriptModelCallUsage {
     pub const fn turn(&self) -> signalbox_domain::TurnId;
     pub const fn call(&self) -> signalbox_domain::ModelCallId;
     pub const fn target(&self) -> model_call::ResolvedProviderTarget;
-    pub fn credential_profile(&self) -> &str;
     pub const fn input_token_semantics(
         &self,
     ) -> option::Option<process_read::ProcessModelCallInputTokenSemantics>;

@@ -136,9 +136,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for FileMediaToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for FileMediaToolConstructionError {}
+impl error::Error for FileMediaToolConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## FileMediaExecutor
@@ -181,9 +183,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for FileMediaExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for FileMediaExecutorError {}
+impl error::Error for FileMediaExecutorError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl operator_failure::ClassifyOperatorFailure for FileMediaExecutorError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
 }

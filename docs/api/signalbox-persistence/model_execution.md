@@ -712,11 +712,13 @@ where
 {
 }
 impl model_execution::CredentialPoolRuntimeMember {
+    pub fn credential_reference(&self) -> &str;
+}
+impl model_execution::CredentialPoolRuntimeMember {
     pub fn new(
         credential_reference: impl convert::Into<sync::Arc<str>>,
         priority: nonzero::NonZeroU32,
     ) -> Self;
-    pub fn credential_reference(&self) -> &str;
     pub const fn priority(&self) -> nonzero::NonZeroU32;
 }
 ```
@@ -781,6 +783,9 @@ where
 {
 }
 impl model_execution::CredentialPoolRuntimePolicy {
+    pub fn name(&self) -> &str;
+}
+impl model_execution::CredentialPoolRuntimePolicy {
     pub fn new(
         name: impl convert::Into<sync::Arc<str>>,
         members: impl convert::Into<sync::Arc<[model_execution::CredentialPoolRuntimeMember]>>,
@@ -790,7 +795,6 @@ impl model_execution::CredentialPoolRuntimePolicy {
         overloaded: model_execution::CredentialPoolRuntimeAction,
         credential_rejected: model_execution::CredentialPoolRuntimeAction,
     ) -> Self;
-    pub fn name(&self) -> &str;
     pub fn members(&self) -> &[model_execution::CredentialPoolRuntimeMember];
 }
 ```
@@ -862,6 +866,9 @@ where
 {
 }
 impl model_execution::PostgresModelCallRepository {
+    pub const fn pool(&self) -> &sqlx_postgres::PgPool;
+}
+impl model_execution::PostgresModelCallRepository {
     pub fn new(
         pool: sqlx_postgres::PgPool,
         targets: model_execution::ModelTargetCatalog,
@@ -884,7 +891,6 @@ impl model_execution::PostgresModelCallRepository {
         self,
         limits: impl collect::IntoIterator<Item = model_execution::ToolContinuationUsageLimit>,
     ) -> Self;
-    pub const fn pool(&self) -> &sqlx_postgres::PgPool;
     pub async fn latest_reported_usage<'a>(
         &self,
         session: signalbox_domain::SessionId,

@@ -82,9 +82,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl PlanEntryId {
+    pub const fn creation_ordinal(self) -> PlanEventOrdinal;
+}
+impl PlanEntryId {
     pub const fn from_creation_ordinal(ordinal: PlanEventOrdinal) -> Self;
     pub const fn try_from_u64(value: u64) -> option::Option<Self>;
-    pub const fn creation_ordinal(self) -> PlanEventOrdinal;
     pub const fn as_u64(self) -> u64;
 }
 ```
@@ -120,8 +122,10 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl PlanText {
-    pub fn try_new(value: string::String) -> result::Result<Self, PlanTextError>;
     pub fn as_str(&self) -> &str;
+}
+impl PlanText {
+    pub fn try_new(value: string::String) -> result::Result<Self, PlanTextError>;
     pub fn into_string(self) -> string::String;
 }
 ```
@@ -142,9 +146,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for PlanTextError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for PlanTextError {}
+impl error::Error for PlanTextError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## PlanEventDraft
@@ -188,10 +194,12 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl PlanEventProvenance {
+    pub const fn correlation(self) -> tool_attempt::ToolAttemptDispatchCorrelation;
+}
+impl PlanEventProvenance {
     pub const fn from_invocation(correlation: tool_attempt::ToolAttemptDispatchCorrelation)
         -> Self;
     pub const fn session(self) -> signalbox_domain::SessionId;
-    pub const fn correlation(self) -> tool_attempt::ToolAttemptDispatchCorrelation;
 }
 ```
 
@@ -236,6 +244,9 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl PlanDependencyCycle {
+    pub fn path(&self) -> &[PlanEntryId];
+}
+impl PlanDependencyCycle {
     pub fn try_new(
         entry: PlanEntryId,
         dependency: PlanEntryId,
@@ -243,7 +254,6 @@ impl PlanDependencyCycle {
     ) -> option::Option<Self>;
     pub const fn entry(&self) -> PlanEntryId;
     pub const fn dependency(&self) -> PlanEntryId;
-    pub fn path(&self) -> &[PlanEntryId];
 }
 ```
 
@@ -259,6 +269,9 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl PlanEvent {
+    pub const fn kind(&self) -> &PlanEventKind;
+}
+impl PlanEvent {
     pub const fn new(
         ordinal: PlanEventOrdinal,
         provenance: PlanEventProvenance,
@@ -266,7 +279,6 @@ impl PlanEvent {
     ) -> Self;
     pub const fn ordinal(&self) -> PlanEventOrdinal;
     pub const fn provenance(&self) -> PlanEventProvenance;
-    pub const fn kind(&self) -> &PlanEventKind;
 }
 ```
 
@@ -282,6 +294,10 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl PlanEntry {
+    pub const fn text(&self) -> &PlanText;
+    pub fn dependencies(&self) -> &[PlanEntryId];
+}
+impl PlanEntry {
     pub const fn new(id: PlanEntryId, text: PlanText, status: PlanStatus) -> Self;
     pub fn with_dependencies(
         id: PlanEntryId,
@@ -291,9 +307,7 @@ impl PlanEntry {
         readiness: PlanReadiness,
     ) -> Self;
     pub const fn id(&self) -> PlanEntryId;
-    pub const fn text(&self) -> &PlanText;
     pub const fn status(&self) -> PlanStatus;
-    pub fn dependencies(&self) -> &[PlanEntryId];
     pub const fn readiness(&self) -> PlanReadiness;
 }
 ```
@@ -327,6 +341,8 @@ where
 }
 impl FoldedPlan {
     pub fn entries(&self) -> &[PlanEntry];
+}
+impl FoldedPlan {
     pub fn into_entries(self) -> vec::Vec<PlanEntry>;
 }
 ```
@@ -349,9 +365,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for PlanFoldError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for PlanFoldError {}
+impl error::Error for PlanFoldError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## fold_plan_events
@@ -372,10 +390,12 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl PlanAppendRequest {
+    pub const fn draft(&self) -> &PlanEventDraft;
+}
+impl PlanAppendRequest {
     pub const fn new(provenance: PlanEventProvenance, draft: PlanEventDraft) -> Self;
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn provenance(&self) -> PlanEventProvenance;
-    pub const fn draft(&self) -> &PlanEventDraft;
 }
 ```
 
@@ -467,8 +487,10 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl PlanHistoryPage {
-    pub fn new(events: vec::Vec<PlanEvent>, completeness: PlanPageCompleteness) -> Self;
     pub fn events(&self) -> &[PlanEvent];
+}
+impl PlanHistoryPage {
+    pub fn new(events: vec::Vec<PlanEvent>, completeness: PlanPageCompleteness) -> Self;
     pub const fn completeness(&self) -> PlanPageCompleteness;
 }
 ```
@@ -485,6 +507,9 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl PlanReadPage {
+    pub fn entries(&self) -> &[PlanEntry];
+}
+impl PlanReadPage {
     pub fn new(
         session: signalbox_domain::SessionId,
         entries: vec::Vec<PlanEntry>,
@@ -492,7 +517,6 @@ impl PlanReadPage {
         history: option::Option<PlanHistoryPage>,
     ) -> Self;
     pub const fn session(&self) -> signalbox_domain::SessionId;
-    pub fn entries(&self) -> &[PlanEntry];
     pub const fn completeness(&self) -> PlanPageCompleteness;
     pub const fn history(&self) -> option::Option<&PlanHistoryPage>;
 }
@@ -558,9 +582,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for PlanToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for PlanToolConstructionError {}
+impl error::Error for PlanToolConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## PlanTools
@@ -616,10 +642,16 @@ pub enum PlanExecutorError<PortError> {
     ResultEncoding,
 }
 // derives: fmt::Debug
-impl<PortError: fmt::Display> fmt::Display for PlanExecutorError<PortError> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+impl<PortError> fmt::Display for PlanExecutorError<PortError>
+where
+    PortError: fmt::Display,
+{
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl<PortError: error::Error + 'static> error::Error for PlanExecutorError<PortError> {
+impl<PortError> error::Error for PlanExecutorError<PortError>
+where
+    PortError: error::Error + 'static,
+{
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl<PortError: operator_failure::ClassifyOperatorFailure> operator_failure::ClassifyOperatorFailure

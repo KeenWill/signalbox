@@ -400,6 +400,8 @@ where
 }
 impl turn_liveness::QuiescentActiveTurnPage {
     pub fn candidates(&self) -> &[turn_liveness::StaleTurnCandidate];
+}
+impl turn_liveness::QuiescentActiveTurnPage {
     pub const fn rows(&self) -> usize;
     pub fn into_candidates(self) -> boxed::Box<[turn_liveness::StaleTurnCandidate]>;
     pub const fn resume_after(&self) -> option::Option<signalbox_domain::SessionId>;

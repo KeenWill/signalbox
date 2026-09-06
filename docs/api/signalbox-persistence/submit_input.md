@@ -87,7 +87,7 @@ pub enum SubmitInputCorruption {
         failure: user_content::NonEmptyUnicodeTextFailure,
     },
     CurrentSession(session::SessionCorruption),
-    Domain(submit_input::SubmitInputReconstitutionFailure),
+    Domain(reconstituted::SubmitInputReconstitutionFailure),
     Scheduling(turn_eligibility::AcceptedInputSchedulingReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -388,7 +388,7 @@ impl submit_input::SubmitInputRepository {
         &self,
         command_id: signalbox_domain::DurableCommandId,
     ) -> result::Result<
-        option::Option<submit_input::ReconstitutedSubmitInput>,
+        option::Option<reconstituted::ReconstitutedSubmitInput>,
         submit_input::SubmitInputRepositoryError,
     >;
 }

@@ -143,12 +143,14 @@ where
 }
 impl approval_judge::PreparedApprovalJudge {
     pub const fn request(&self) -> &tool::ToolRequest;
+    pub fn credential_reference(&self) -> &str;
+    pub const fn session_context(&self) -> &approval_judge::SessionAuthorityContext;
+}
+impl approval_judge::PreparedApprovalJudge {
     pub const fn call(&self) -> signalbox_domain::ModelCallId;
     pub const fn selection(&self) -> configuration::DirectModelSelection;
     pub const fn target(&self) -> model_call::ResolvedProviderTarget;
-    pub fn credential_reference(&self) -> &str;
     pub const fn input_includes_cache_tokens(&self) -> bool;
-    pub const fn session_context(&self) -> &approval_judge::SessionAuthorityContext;
 }
 ```
 

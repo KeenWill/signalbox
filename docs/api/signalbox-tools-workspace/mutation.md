@@ -211,9 +211,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for WorkspaceMutationCommitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for WorkspaceMutationCommitError {}
+impl error::Error for WorkspaceMutationCommitError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## WorkspaceMutationFileSystem
@@ -260,9 +262,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for WorkspaceMutationToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for WorkspaceMutationToolConstructionError {}
+impl error::Error for WorkspaceMutationToolConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## WorkspaceMutationTools
@@ -316,9 +320,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for WorkspaceMutationExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for WorkspaceMutationExecutorError {}
+impl error::Error for WorkspaceMutationExecutorError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl operator_failure::ClassifyOperatorFailure for WorkspaceMutationExecutorError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
 }

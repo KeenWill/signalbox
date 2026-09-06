@@ -263,6 +263,8 @@ where
 }
 impl process_read::ProcessToolApproval {
     pub const fn decision(&self) -> &tool::ToolApprovalDecision;
+}
+impl process_read::ProcessToolApproval {
     pub const fn decider(&self) -> tool::ToolApprovalDecider;
     pub const fn rationale(&self) -> option::Option<&tool::ToolDecisionRationale>;
 }
@@ -328,12 +330,14 @@ where
 {
 }
 impl process_read::ProcessTranscriptSnapshot {
-    pub const fn session(&self) -> signalbox_domain::SessionId;
-    pub const fn cursor(&self) -> u64;
-    pub const fn runner(&self) -> option::Option<&process_read::ProcessRunnerProjection>;
     pub fn turns(&self) -> &[process_read::ProcessTranscriptTurn];
     pub fn model_call_usage(&self) -> &[process_read::ProcessTranscriptModelCallUsage];
     pub fn entries(&self) -> &[process_read::ProcessTranscriptEntry];
+}
+impl process_read::ProcessTranscriptSnapshot {
+    pub const fn session(&self) -> signalbox_domain::SessionId;
+    pub const fn cursor(&self) -> u64;
+    pub const fn runner(&self) -> option::Option<&process_read::ProcessRunnerProjection>;
 }
 ```
 

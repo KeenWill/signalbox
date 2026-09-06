@@ -66,9 +66,14 @@ pub(super) fn absolute_https_url(url: &Url) -> bool {
         && url.password().is_none()
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded absolute credential-free HTTPS result location.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CodeHostUrl(String);
+pub struct CodeHostUrl(
+    /// Borrows the checked absolute HTTPS location.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CodeHostUrl {
     fn try_new(value: String) -> Option<Self> {
@@ -76,11 +81,6 @@ impl CodeHostUrl {
             && !value.chars().any(char::is_control)
             && Url::parse(&value).is_ok_and(|url| absolute_https_url(&url)))
         .then_some(Self(value))
-    }
-
-    /// Borrows the checked absolute HTTPS location.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     fn into_string(self) -> String {
@@ -202,9 +202,12 @@ impl ChangeRequestSummaryResult {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One changed-file summary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangedFile {
+    /// Borrows the repository-relative path.
+    #[get(str)]
     path: String,
     status: String,
     additions: u64,
@@ -226,11 +229,6 @@ impl ChangedFile {
             additions,
             deletions,
         })
-    }
-
-    /// Borrows the repository-relative path.
-    pub fn path(&self) -> &str {
-        &self.path
     }
 
     fn into_value(self) -> Value {

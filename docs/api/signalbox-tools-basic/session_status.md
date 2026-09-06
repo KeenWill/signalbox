@@ -26,9 +26,11 @@ where
 }
 impl<T> into_either::IntoEither for SessionStatusToolConstructionError {}
 impl fmt::Display for SessionStatusToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for SessionStatusToolConstructionError {}
+impl error::Error for SessionStatusToolConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## SessionStatusTool
@@ -158,9 +160,11 @@ where
 }
 impl<T> into_either::IntoEither for PostgresSessionStatusWriterError {}
 impl fmt::Display for PostgresSessionStatusWriterError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for PostgresSessionStatusWriterError {}
+impl error::Error for PostgresSessionStatusWriterError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl operator_failure::ClassifyOperatorFailure for PostgresSessionStatusWriterError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
 }
@@ -208,7 +212,7 @@ impl<WriterError> fmt::Display for SessionStatusExecutorError<WriterError>
 where
     WriterError: fmt::Display,
 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<WriterError> error::Error for SessionStatusExecutorError<WriterError>
 where

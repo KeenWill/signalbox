@@ -31,7 +31,7 @@ pub enum GitPushToolsConstructionError {
 }
 // derives: fmt::Debug
 impl fmt::Display for GitPushToolsConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for GitPushToolsConstructionError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;

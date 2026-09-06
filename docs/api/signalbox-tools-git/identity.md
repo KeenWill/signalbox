@@ -35,7 +35,9 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for InvalidGitIdentity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for InvalidGitIdentity {}
+impl error::Error for InvalidGitIdentity {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```

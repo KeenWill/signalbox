@@ -203,12 +203,14 @@ pub struct FailureDetail {
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for frame::FailureDetail where T: for<'de> de::Deserialize<'de> {}
 impl frame::FailureDetail {
+    pub const fn payload(&self) -> &value::Value;
+}
+impl frame::FailureDetail {
     pub fn try_new(
         code: value::DetailName,
         message: string::String,
         payload: value::Value,
     ) -> result::Result<Self, value::ValueError>;
-    pub const fn payload(&self) -> &value::Value;
 }
 ```
 

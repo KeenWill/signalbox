@@ -98,7 +98,7 @@ pub enum WorkspaceReadToolConstructionError {
 }
 // derives: fmt::Debug
 impl fmt::Display for WorkspaceReadToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for WorkspaceReadToolConstructionError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
@@ -170,9 +170,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for WorkspaceReadExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for WorkspaceReadExecutorError {}
+impl error::Error for WorkspaceReadExecutorError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl operator_failure::ClassifyOperatorFailure for WorkspaceReadExecutorError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
 }

@@ -7,7 +7,7 @@
 ```rust
 pub struct ImportedConversationPageRequest {
     pub after: option::Option<signalbox_domain::ImportedConversationId>,
-    pub format: option::Option<imported_conversation::ImportedConversationFormat>,
+    pub format: option::Option<format::ImportedConversationFormat>,
     pub source_session_id: option::Option<vec::Vec<u8>>,
     pub source_session_maximum_bytes: nonzero::NonZeroU32,
     pub limit: nonzero::NonZeroU32,
@@ -140,8 +140,8 @@ where
 ```rust
 pub struct ImportedConversationSummary {
     pub conversation: signalbox_domain::ImportedConversationId,
-    pub display_title: option::Option<imported_conversation::ImportedConversationDisplayTitle>,
-    pub format: imported_conversation::ImportedConversationFormat,
+    pub display_title: option::Option<conversation::ImportedConversationDisplayTitle>,
+    pub format: format::ImportedConversationFormat,
     pub source_session_id: option::Option<conversation_import_discovery::ImportedTextProjection>,
     pub source_session_digest: option::Option<[u8; 32]>,
     pub entry_count: u64,
@@ -408,8 +408,8 @@ where
 ```rust
 pub struct ImportedConversationDescriptor {
     pub conversation: signalbox_domain::ImportedConversationId,
-    pub display_title: option::Option<imported_conversation::ImportedConversationDisplayTitle>,
-    pub format: imported_conversation::ImportedConversationFormat,
+    pub display_title: option::Option<conversation::ImportedConversationDisplayTitle>,
+    pub format: format::ImportedConversationFormat,
     pub source_digest: [u8; 32],
     pub source_session_id: option::Option<conversation_import_discovery::ImportedTextProjection>,
     pub raw_record_count: u64,
@@ -549,8 +549,7 @@ pub struct ImportedEntryProjection {
     pub frontier: conversation_import_discovery::ImportedContinuationReference,
     pub raw_record_position: u64,
     pub record_entry_position: u64,
-    pub source_speaker:
-        imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedSpeaker>,
+    pub source_speaker: structured_value::ImportedSourceAttestation<content::ImportedSpeaker>,
     pub content: conversation_import_discovery::ImportedEntryContentProjection,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -616,7 +615,7 @@ where
 pub enum ImportedEntryContentProjection {
     SourceEvent,
     Text(
-        imported_conversation::ImportedSourceAttestation<
+        structured_value::ImportedSourceAttestation<
             conversation_import_discovery::ImportedTextProjection,
         >,
     ),

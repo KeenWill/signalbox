@@ -62,8 +62,10 @@ where
 {
 }
 impl repo_watch::RepoWatchCursorGeneration {
-    pub const INITIAL: Self;
     pub const fn get(self) -> u64;
+}
+impl repo_watch::RepoWatchCursorGeneration {
+    pub const INITIAL: Self;
     pub fn next(self) -> option::Option<Self>;
 }
 ```
@@ -128,6 +130,13 @@ where
 {
 }
 impl repo_watch::RepoWatchCursorCandidate {
+    pub const fn observation(&self) -> &repo_watch::RepoWatchObservation;
+    pub const fn event_identity_frontier(&self) -> &repo_watch::RepoWatchEventIdentityFrontierV1;
+    pub fn merged_pull_request_baselines(
+        &self,
+    ) -> &[repo_watch::RepoWatchMergedPullRequestBaselineV1];
+}
+impl repo_watch::RepoWatchCursorCandidate {
     pub fn new(observation: repo_watch::RepoWatchObservation) -> Self;
     pub fn with_event_identity_frontier(
         observation: repo_watch::RepoWatchObservation,
@@ -138,11 +147,6 @@ impl repo_watch::RepoWatchCursorCandidate {
         event_identity_frontier: repo_watch::RepoWatchEventIdentityFrontierV1,
         merged_pull_request_baselines: vec::Vec<repo_watch::RepoWatchMergedPullRequestBaselineV1>,
     ) -> result::Result<Self, repo_watch::RepoWatchRepositoryStateError>;
-    pub const fn observation(&self) -> &repo_watch::RepoWatchObservation;
-    pub const fn event_identity_frontier(&self) -> &repo_watch::RepoWatchEventIdentityFrontierV1;
-    pub fn merged_pull_request_baselines(
-        &self,
-    ) -> &[repo_watch::RepoWatchMergedPullRequestBaselineV1];
 }
 ```
 
@@ -207,8 +211,10 @@ where
 }
 impl repo_watch::RepoWatchCursor {
     pub const fn repository(&self) -> &repo_watch::RepositorySlug;
-    pub const fn generation(&self) -> repo_watch::RepoWatchCursorGeneration;
     pub const fn candidate(&self) -> &repo_watch::RepoWatchCursorCandidate;
+}
+impl repo_watch::RepoWatchCursor {
+    pub const fn generation(&self) -> repo_watch::RepoWatchCursorGeneration;
 }
 ```
 
@@ -336,6 +342,10 @@ where
 {
 }
 impl repo_watch::RepoWatchCommitRequest {
+    pub const fn candidate(&self) -> &repo_watch::RepoWatchCursorCandidate;
+    pub fn events(&self) -> &[repo_watch::RepoWatchEventOccurrenceV1];
+}
+impl repo_watch::RepoWatchCommitRequest {
     pub fn new(
         expected_generation: option::Option<repo_watch::RepoWatchCursorGeneration>,
         candidate: repo_watch::RepoWatchCursorCandidate,
@@ -349,8 +359,6 @@ impl repo_watch::RepoWatchCommitRequest {
     pub const fn expected_generation(
         &self,
     ) -> option::Option<repo_watch::RepoWatchCursorGeneration>;
-    pub const fn candidate(&self) -> &repo_watch::RepoWatchCursorCandidate;
-    pub fn events(&self) -> &[repo_watch::RepoWatchEventOccurrenceV1];
     pub const fn producer(&self) -> repo_watch::RepoWatchEventProducer;
 }
 ```
@@ -548,10 +556,12 @@ where
 {
 }
 impl repo_watch::RepoWatchEventPageSize {
+    pub const fn get(self) -> u16;
+}
+impl repo_watch::RepoWatchEventPageSize {
     pub fn try_new(
         value: nonzero::NonZeroU16,
     ) -> result::Result<Self, repo_watch::RepoWatchPageSizeError>;
-    pub const fn get(self) -> u16;
 }
 ```
 
@@ -682,8 +692,10 @@ where
 {
 }
 impl repo_watch::PositionedRepoWatchEvent {
-    pub const fn position(&self) -> repo_watch::RepoWatchEventPosition;
     pub const fn event(&self) -> &repo_watch::RepoWatchEvent;
+}
+impl repo_watch::PositionedRepoWatchEvent {
+    pub const fn position(&self) -> repo_watch::RepoWatchEventPosition;
     pub const fn producer(&self) -> repo_watch::RepoWatchEventProducer;
 }
 ```
@@ -749,6 +761,8 @@ where
 }
 impl repo_watch::RepoWatchEventPage {
     pub fn events(&self) -> &[repo_watch::PositionedRepoWatchEvent];
+}
+impl repo_watch::RepoWatchEventPage {
     pub const fn next_after(&self) -> option::Option<repo_watch::RepoWatchEventPosition>;
 }
 ```
@@ -974,8 +988,10 @@ where
 {
 }
 impl repo_watch::RepoWatchStaleReviewClearanceId {
-    pub const fn new(value: uuid::Uuid) -> Self;
     pub const fn get(self) -> uuid::Uuid;
+}
+impl repo_watch::RepoWatchStaleReviewClearanceId {
+    pub const fn new(value: uuid::Uuid) -> Self;
 }
 ```
 
@@ -1039,8 +1055,10 @@ where
 {
 }
 impl repo_watch::RepoWatchStaleReviewClearanceClaimToken {
-    pub const fn new(value: uuid::Uuid) -> Self;
     pub const fn get(self) -> uuid::Uuid;
+}
+impl repo_watch::RepoWatchStaleReviewClearanceClaimToken {
+    pub const fn new(value: uuid::Uuid) -> Self;
 }
 ```
 
@@ -1168,16 +1186,18 @@ where
 {
 }
 impl repo_watch::RepoWatchPlannedStaleReviewClearance {
+    pub const fn current_head_sha(&self) -> &repo_watch::CommitSha;
+    pub const fn base_branch(&self) -> &repo_watch::BranchName;
+    pub const fn base_revision(&self) -> &repo_watch::CommitSha;
+    pub const fn reviewer(&self) -> &repo_watch::RepoWatchAuthorLogin;
+    pub const fn reviewed_head_sha(&self) -> &repo_watch::CommitSha;
+}
+impl repo_watch::RepoWatchPlannedStaleReviewClearance {
     pub fn from_fixture(fixture: repo_watch::RepoWatchPlannedStaleReviewClearanceFixture) -> Self;
     pub const fn clearance_id(&self) -> repo_watch::RepoWatchStaleReviewClearanceId;
     pub const fn claim_token(&self) -> repo_watch::RepoWatchStaleReviewClearanceClaimToken;
     pub const fn number(&self) -> repo_watch::PullRequestNumber;
-    pub const fn current_head_sha(&self) -> &repo_watch::CommitSha;
-    pub const fn base_branch(&self) -> &repo_watch::BranchName;
-    pub const fn base_revision(&self) -> &repo_watch::CommitSha;
     pub const fn review_node_id(&self) -> &str;
-    pub const fn reviewer(&self) -> &repo_watch::RepoWatchAuthorLogin;
-    pub const fn reviewed_head_sha(&self) -> &repo_watch::CommitSha;
     pub const fn dismissal_message(&self) -> &str;
 }
 ```

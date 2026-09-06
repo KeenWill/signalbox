@@ -612,6 +612,10 @@ where
     T: ?marker::Sized,
 {
 }
+impl review_workflow::ReviewExternalLinkReservationConflict {
+    pub fn existing(&self) -> &review_workflow::ReviewExternalLink;
+    pub fn requested(&self) -> &review_workflow::ReviewExternalLink;
+}
 impl fmt::Display for review_workflow::ReviewExternalLinkReservationConflict {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -619,8 +623,6 @@ impl error::Error for review_workflow::ReviewExternalLinkReservationConflict {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl review_workflow::ReviewExternalLinkReservationConflict {
-    pub fn existing(&self) -> &review_workflow::ReviewExternalLink;
-    pub fn requested(&self) -> &review_workflow::ReviewExternalLink;
     pub fn into_parts(
         self,
     ) -> (
@@ -840,6 +842,9 @@ where
     T: ?marker::Sized,
 {
 }
+impl review_workflow::ReviewWorkflowCorruption {
+    pub fn detail(&self) -> &str;
+}
 impl fmt::Display for review_workflow::ReviewWorkflowCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -848,7 +853,6 @@ impl error::Error for review_workflow::ReviewWorkflowCorruption {
 }
 impl review_workflow::ReviewWorkflowCorruption {
     pub const fn aggregate(&self) -> &'static str;
-    pub fn detail(&self) -> &str;
 }
 ```
 

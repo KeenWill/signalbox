@@ -26,9 +26,11 @@ where
 }
 impl<T> into_either::IntoEither for EchoToolConstructionError {}
 impl fmt::Display for EchoToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for EchoToolConstructionError {}
+impl error::Error for EchoToolConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## EchoTool
@@ -93,9 +95,11 @@ where
 }
 impl<T> into_either::IntoEither for EchoExecutorError {}
 impl fmt::Display for EchoExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for EchoExecutorError {}
+impl error::Error for EchoExecutorError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl operator_failure::ClassifyOperatorFailure for EchoExecutorError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
 }

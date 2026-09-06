@@ -200,6 +200,8 @@ where
 impl lifecycle_metrics::LifecycleRate {
     pub const fn numerator(self) -> u64;
     pub const fn denominator(self) -> u64;
+}
+impl lifecycle_metrics::LifecycleRate {
     pub const fn parts_per_million(self) -> option::Option<u64>;
 }
 ```
@@ -474,6 +476,8 @@ where
 }
 impl lifecycle_metrics::LifecycleMetricsReport {
     pub fn weeks(&self) -> &[lifecycle_metrics::LifecycleWeeklyMetrics];
+}
+impl lifecycle_metrics::LifecycleMetricsReport {
     pub const fn nonterminal_past_deadline(&self) -> u64;
     pub fn latest_measured<Select>(
         &self,

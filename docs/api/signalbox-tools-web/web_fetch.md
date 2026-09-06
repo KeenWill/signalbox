@@ -74,9 +74,11 @@ where
 }
 impl<T> erased::ErasedDestructor for WebFetchEgressPolicyError where T: 'static {}
 impl fmt::Display for WebFetchEgressPolicyError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for WebFetchEgressPolicyError {}
+impl error::Error for WebFetchEgressPolicyError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## WebFetchToolConstructionError
@@ -111,9 +113,11 @@ where
 }
 impl<T> erased::ErasedDestructor for WebFetchToolConstructionError where T: 'static {}
 impl fmt::Display for WebFetchToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for WebFetchToolConstructionError {}
+impl error::Error for WebFetchToolConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## WebFetchTool
@@ -379,9 +383,11 @@ where
 }
 impl<T> erased::ErasedDestructor for WebFetchExecutorError where T: 'static {}
 impl fmt::Display for WebFetchExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for WebFetchExecutorError {}
+impl error::Error for WebFetchExecutorError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl operator_failure::ClassifyOperatorFailure for WebFetchExecutorError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
 }

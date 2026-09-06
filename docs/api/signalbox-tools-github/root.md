@@ -454,9 +454,11 @@ where
         P: policy::Policy<B, E>;
 }
 impl fmt::Display for InvalidGitHubArguments {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for InvalidGitHubArguments {}
+impl error::Error for InvalidGitHubArguments {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## SanitizedGitHubError
@@ -530,13 +532,15 @@ where
         T: marker::Sized + policy::Policy<B, E>,
         P: policy::Policy<B, E>;
 }
+impl fmt::Display for GitHubTransportFailure {
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for GitHubTransportFailure {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl GitHubTransportFailure {
     pub const fn rejected(status: u16) -> Self;
 }
-impl fmt::Display for GitHubTransportFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for GitHubTransportFailure {}
 ```
 
 ## GitHubResultKind
@@ -785,9 +789,11 @@ where
         P: policy::Policy<B, E>;
 }
 impl fmt::Display for GitHubToolsConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for GitHubToolsConstructionError {}
+impl error::Error for GitHubToolsConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## GitHubExecutor
@@ -855,9 +861,11 @@ where
         P: policy::Policy<B, E>;
 }
 impl fmt::Display for GitHubExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for GitHubExecutorError {}
+impl error::Error for GitHubExecutorError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl operator_failure::ClassifyOperatorFailure for GitHubExecutorError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
 }
@@ -925,7 +933,9 @@ where
         P: policy::Policy<B, E>;
 }
 impl fmt::Display for GitHubApiTransportConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for GitHubApiTransportConstructionError {}
+impl error::Error for GitHubApiTransportConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```

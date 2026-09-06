@@ -204,9 +204,11 @@ where
 {
 }
 impl repo_watch_dispatch_obligation::RepoWatchDispatchObligation {
+    pub const fn latest_event(&self) -> &repo_watch::RepoWatchEvent;
+}
+impl repo_watch_dispatch_obligation::RepoWatchDispatchObligation {
     pub const fn id(&self) -> uuid::Uuid;
     pub const fn first_event_id(&self) -> signalbox_domain::RepoWatchEventId;
-    pub const fn latest_event(&self) -> &repo_watch::RepoWatchEvent;
     pub const fn matched_event_count(&self) -> u64;
     pub const fn failed_attempts(&self) -> u64;
 }

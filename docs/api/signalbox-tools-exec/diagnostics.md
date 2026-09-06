@@ -55,7 +55,7 @@ pub enum CargoDiagnosticsToolConstructionError {
 }
 // derives: fmt::Debug
 impl fmt::Display for CargoDiagnosticsToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for CargoDiagnosticsToolConstructionError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
@@ -113,9 +113,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for InvalidCargoDiagnosticsArguments {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for InvalidCargoDiagnosticsArguments {}
+impl error::Error for InvalidCargoDiagnosticsArguments {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## CargoDiagnosticsExecutor
@@ -156,9 +158,11 @@ where
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
 impl fmt::Display for CargoDiagnosticsExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for CargoDiagnosticsExecutorError {}
+impl error::Error for CargoDiagnosticsExecutorError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl operator_failure::ClassifyOperatorFailure for CargoDiagnosticsExecutorError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
 }
@@ -199,7 +203,6 @@ pub struct CargoDiagnosticsResult {
     pub command: CargoDiagnosticsCommand,
     pub execution: CargoDiagnosticsExecution,
     pub diagnostics: CargoDiagnosticRecords,
-    pub tests: CargoTestRecords,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
 impl<T> dyn_clone::DynClone for CargoDiagnosticsResult
@@ -219,25 +222,9 @@ pub struct CargoDiagnosticsExecution {
     pub stdout: CargoDiagnosticsStream,
     pub stderr: CargoDiagnosticsStream,
     pub cargo_failure: option::Option<CargoFailureDetail>,
-    pub preparation_failure: option::Option<CargoDiagnosticsPreparationFailure>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
 impl<T> dyn_clone::DynClone for CargoDiagnosticsExecution
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-```
-
-## CargoDiagnosticsPreparationFailure
-
-```rust
-pub enum CargoDiagnosticsPreparationFailure {
-    CargoHostUnavailable,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoDiagnosticsPreparationFailure
 where
     T: clone::Clone,
 {
@@ -347,59 +334,4 @@ where
 {
     fn __clone_box(&self, _: sealed::Private) -> *mut ();
 }
-```
-
-## CargoTestRecords
-
-```rust
-pub struct CargoTestRecords {
-    pub values: vec::Vec<CargoTestResult>,
-    pub limit_reached: bool,
-    pub provenance: CargoEvidenceProvenance,
-    pub known_truncated: bool,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoTestRecords
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-```
-
-## CargoTestResult
-
-```rust
-pub struct CargoTestResult {
-    pub executable: string::String,
-    pub executable_completeness: CaptureCompleteness,
-    pub name: string::String,
-    pub name_completeness: CaptureCompleteness,
-    pub outcome: CargoTestOutcome,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoTestResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-```
-
-## CargoTestOutcome
-
-```rust
-pub enum CargoTestOutcome {
-    Passed,
-    Failed,
-    Ignored,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, ser::Serialize
-impl<T> dyn_clone::DynClone for CargoTestOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for CargoTestOutcome where T: for<'de> de::Deserialize<'de> {}
 ```

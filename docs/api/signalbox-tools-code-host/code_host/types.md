@@ -853,9 +853,11 @@ where
         P: policy::Policy<B, E>;
 }
 impl fmt::Display for code_host::github::GitHubCodeHostConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for code_host::github::GitHubCodeHostConstructionError {}
+impl error::Error for code_host::github::GitHubCodeHostConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## CodeHostNumericBounds
@@ -1044,9 +1046,11 @@ where
         P: policy::Policy<B, E>;
 }
 impl fmt::Display for code_host::CodeHostToolsConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for code_host::CodeHostToolsConstructionError {}
+impl error::Error for code_host::CodeHostToolsConstructionError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## CodeHostExecutor
@@ -1115,9 +1119,11 @@ where
         P: policy::Policy<B, E>;
 }
 impl fmt::Display for code_host::CodeHostExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for code_host::CodeHostExecutorError {}
+impl error::Error for code_host::CodeHostExecutorError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl operator_failure::ClassifyOperatorFailure for code_host::CodeHostExecutorError {
     fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
 }
@@ -1621,6 +1627,9 @@ where
         P: policy::Policy<B, E>;
 }
 impl code_host::result::ChangedFile {
+    pub fn path(&self) -> &str;
+}
+impl code_host::result::ChangedFile {
     pub fn try_new(
         bounds: code_host::CodeHostNumericBounds,
         path: string::String,
@@ -1628,7 +1637,6 @@ impl code_host::result::ChangedFile {
         additions: u64,
         deletions: u64,
     ) -> option::Option<Self>;
-    pub fn path(&self) -> &str;
 }
 ```
 
@@ -1957,38 +1965,5 @@ where
 }
 impl code_host::result::ThreadReplyResult {
     pub fn try_new(id: string::String, url: string::String) -> option::Option<Self>;
-}
-```
-
-## ThreadResolveResult
-
-```rust
-pub struct ThreadResolveResult {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ThreadResolveResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ThreadResolveResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::ThreadResolveResult {
-    pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
-        thread_id: string::String,
-        resolution: code_host::result::ReviewThreadResolution,
-    ) -> option::Option<Self>;
 }
 ```

@@ -8,8 +8,10 @@
 pub struct FileDigest(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl FileDigest {
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
     pub const fn as_bytes(&self) -> &[u8; 32];
+}
+impl FileDigest {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
 }
 impl fmt::Display for FileDigest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -37,10 +39,12 @@ pub enum AttachmentKind {
 pub struct DeclaredMediaType(/* private */);
 // derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
 impl DeclaredMediaType {
+    pub fn as_str(&self) -> &str;
+}
+impl DeclaredMediaType {
     pub fn try_new(
         value: impl convert::Into<sync::Arc<str>>,
     ) -> result::Result<Self, RegistryValueError>;
-    pub fn as_str(&self) -> &str;
     pub fn canonical_essence(&self) -> result::Result<CanonicalMediaType, MediaTypeParseError>;
 }
 impl fmt::Debug for DeclaredMediaType {
@@ -54,10 +58,12 @@ impl fmt::Debug for DeclaredMediaType {
 pub struct DisplayFilename(/* private */);
 // derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
 impl DisplayFilename {
+    pub fn as_str(&self) -> &str;
+}
+impl DisplayFilename {
     pub fn try_new(
         value: impl convert::Into<sync::Arc<str>>,
     ) -> result::Result<Self, RegistryValueError>;
-    pub fn as_str(&self) -> &str;
 }
 impl fmt::Debug for DisplayFilename {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -70,6 +76,9 @@ impl fmt::Debug for DisplayFilename {
 pub struct FileUse {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
 impl FileUse {
+    pub const fn declared_media_type(&self) -> &DeclaredMediaType;
+}
+impl FileUse {
     pub const fn new(
         digest: FileDigest,
         byte_length: nonzero::NonZeroU64,
@@ -80,7 +89,6 @@ impl FileUse {
     pub const fn digest(&self) -> FileDigest;
     pub const fn byte_length(&self) -> nonzero::NonZeroU64;
     pub const fn attachment_kind(&self) -> AttachmentKind;
-    pub const fn declared_media_type(&self) -> &DeclaredMediaType;
     pub const fn display_filename(&self) -> option::Option<&DisplayFilename>;
 }
 impl fmt::Debug for FileUse {
@@ -186,10 +194,12 @@ impl fmt::Display for ReasonCode {
 pub struct FileReaderRevision(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl FileReaderRevision {
+    pub fn as_str(&self) -> &str;
+}
+impl FileReaderRevision {
     pub fn try_new(
         value: impl convert::Into<sync::Arc<str>>,
     ) -> result::Result<Self, RegistryValueError>;
-    pub fn as_str(&self) -> &str;
 }
 ```
 
@@ -199,14 +209,16 @@ impl FileReaderRevision {
 pub struct ReaderIdentity {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl ReaderIdentity {
+    pub const fn provider(&self) -> &FileReaderProviderName;
+    pub const fn reader(&self) -> &FileReaderName;
+    pub const fn revision(&self) -> &FileReaderRevision;
+}
+impl ReaderIdentity {
     pub const fn new(
         provider: FileReaderProviderName,
         reader: FileReaderName,
         revision: FileReaderRevision,
     ) -> Self;
-    pub const fn provider(&self) -> &FileReaderProviderName;
-    pub const fn reader(&self) -> &FileReaderName;
-    pub const fn revision(&self) -> &FileReaderRevision;
 }
 ```
 
@@ -216,9 +228,11 @@ impl ReaderIdentity {
 pub struct CanonicalJsonObjectSchema {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl CanonicalJsonObjectSchema {
-    pub fn try_new(value: &str) -> result::Result<Self, RegistryValueError>;
     pub fn as_str(&self) -> &str;
     pub const fn value(&self) -> &value::Value;
+}
+impl CanonicalJsonObjectSchema {
+    pub fn try_new(value: &str) -> result::Result<Self, RegistryValueError>;
 }
 ```
 
@@ -228,9 +242,11 @@ impl CanonicalJsonObjectSchema {
 pub struct BoundedMetadata {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl BoundedMetadata {
-    pub fn try_new(value: &str) -> result::Result<Self, RegistryValueError>;
     pub fn as_str(&self) -> &str;
     pub const fn value(&self) -> &value::Value;
+}
+impl BoundedMetadata {
+    pub fn try_new(value: &str) -> result::Result<Self, RegistryValueError>;
 }
 ```
 
@@ -267,10 +283,12 @@ pub fn parse_json_without_duplicate_members_bounded(
 pub struct VisiblePartSelector(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl VisiblePartSelector {
+    pub fn as_str(&self) -> &str;
+}
+impl VisiblePartSelector {
     pub fn try_new(
         value: impl convert::Into<sync::Arc<str>>,
     ) -> result::Result<Self, RegistryValueError>;
-    pub fn as_str(&self) -> &str;
 }
 ```
 
@@ -280,10 +298,12 @@ impl VisiblePartSelector {
 pub struct ReadContinuationCursor(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl ReadContinuationCursor {
+    pub fn as_str(&self) -> &str;
+}
+impl ReadContinuationCursor {
     pub fn try_new(
         value: impl convert::Into<sync::Arc<str>>,
     ) -> result::Result<Self, RegistryValueError>;
-    pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
 ```
