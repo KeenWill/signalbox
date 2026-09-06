@@ -1,6 +1,6 @@
 //! Production GitHub REST/GraphQL adapter for the code-host tool suite.
 
-use std::{collections::HashSet, error::Error, fmt, future::Future, time::Duration};
+use std::{collections::HashSet, future::Future, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::{
@@ -2143,17 +2143,11 @@ fn omitted_optional_u64(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("GitHub code-host transport construction failed")]
 /// The fixed GitHub client or endpoint could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitHubCodeHostConstructionError;
-
-impl fmt::Display for GitHubCodeHostConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("GitHub code-host transport construction failed")
-    }
-}
-
-impl Error for GitHubCodeHostConstructionError {}
 
 async fn read_bounded<S, B, E>(
     mut stream: S,
