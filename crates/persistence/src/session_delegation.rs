@@ -2899,9 +2899,9 @@ fn require_single(
 mod tests {
     use super::*;
 
-    /// S18 / INV-010: either message direction locks the same endpoint order.
+    /// S18: either message direction locks the same endpoint order.
     #[test]
-    fn s18_inv010_opposite_message_directions_share_canonical_lock_order() {
+    fn s18_opposite_message_directions_share_canonical_lock_order() {
         let lower = SessionId::from_uuid(Uuid::from_u128(1));
         let higher = SessionId::from_uuid(Uuid::from_u128(2));
 

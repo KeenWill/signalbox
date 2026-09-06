@@ -9,7 +9,6 @@ owner-approved plans. Do not add speculative product behavior.
   page conventions.
 - Public API of the domain and application crates: `docs/domain-spine.md`,
   checked by CI against source.
-- Invariants: INV-tagged tests. `docs/invariants.md` is their generated index.
 - Committed but unbuilt design: `docs/design/`; undecided items:
   `docs/open-questions.md`.
 - Test style: `docs/agents/testing-style.md`. Literal-provenance and label rules
@@ -97,11 +96,7 @@ owner's private repositories may be named as provenance, not cited as rules.
   rationale.
 - Keep domain types distinct from storage records, protocol messages, and
   framework types.
-- Name tests for the scenario and invariant they enforce when the connection is
-  meaningful (`S12_INV011_rejects_stale_generation`). A test that enforces an
-  accepted invariant carries the INV tag in its name or doc comment; regenerate
-  the index with `python3 scripts/generate_invariants.py --write` in the same
-  change.
+- Name tests for the scenario they exercise when the connection is meaningful.
 - Update directly affected documentation in the implementing pull request. Do
   not reword, restructure, or reformat unrelated text.
 - Do not add `Co-Authored-By`, session, or URL trailers to commits or
@@ -142,7 +137,6 @@ both.
 Documentation bar:
 
 ```bash
-python3 scripts/generate_invariants.py --check
 python3 scripts/check_domain_spine.py
 python3 scripts/test_check_domain_spine.py
 python3 scripts/check_docs_consistency.py

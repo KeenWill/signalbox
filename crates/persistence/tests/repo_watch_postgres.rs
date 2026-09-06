@@ -1544,7 +1544,7 @@ async fn append_only_guards_reject_update_delete_and_truncate() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv073_stale_review_clearance_journals_are_append_only() -> Result<(), Box<dyn Error>> {
+async fn stale_review_clearance_journals_are_append_only() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let repository = repository()?;
     let store = PostgresRepoWatchStore::new(pool.clone());
