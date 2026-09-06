@@ -979,8 +979,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(plans[0].dispatch(), plans[1].dispatch());
     assert_eq!(plans[0].action_ordinal(), 1);
     assert_eq!(plans[1].action_ordinal(), 2);
-    let second_rule = RepoWatchRule::try_new(
-        RepoWatchRuleId::try_new(String::from("branch-ci-second"))?,
+    let collision_rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("branch-ci-collision"))?,
         RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
@@ -1003,7 +1003,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         model: 18,
     };
     let grouped = plan_repository_event(
-        &[rule.clone(), second_rule.clone()],
+        &[rule.clone(), collision_rule.clone()],
         &event,
         &mut grouped_ids,
         &mut grouped_factory,
@@ -1033,13 +1033,23 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store
             .reconcile_rules(
                 &repository,
-                &[rule.clone(), second_rule.clone()],
+                &[
+                    rule.clone(),
+                    second_rule.clone(),
+                    late_rule.clone(),
+                    collision_rule.clone(),
+                ],
                 observed_at,
             )
             .await?,
         RuleReconciliationAdmission::Applied {
-            rules: Box::new([RuleAdmission::Replayed, RuleAdmission::Replayed]),
-            deactivated: 1,
+            rules: Box::new([
+                RuleAdmission::Replayed,
+                RuleAdmission::Replayed,
+                RuleAdmission::Replayed,
+                RuleAdmission::Inserted,
+            ]),
+            deactivated: 0,
         }
     );
     let mut colliding_ids = FixedDispatchIds {
@@ -1051,7 +1061,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         model: 18,
     };
     let colliding_batches = plan_repository_event(
-        std::slice::from_ref(&second_rule),
+        std::slice::from_ref(&collision_rule),
         &event,
         &mut colliding_ids,
         &mut colliding_factory,
@@ -1071,7 +1081,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         model: 18,
     };
     let occupied_batches = plan_repository_event(
-        std::slice::from_ref(&second_rule),
+        std::slice::from_ref(&collision_rule),
         &event,
         &mut occupied_ids,
         &mut occupied_factory,
@@ -1143,10 +1153,22 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(retained_commands, 2);
     assert_eq!(
         store
-            .reconcile_rules(&repository, std::slice::from_ref(&second_rule), observed_at)
+            .reconcile_rules(
+                &repository,
+                &[
+                    second_rule.clone(),
+                    late_rule.clone(),
+                    collision_rule.clone()
+                ],
+                observed_at,
+            )
             .await?,
         RuleReconciliationAdmission::Applied {
-            rules: Box::new([RuleAdmission::Replayed]),
+            rules: Box::new([
+                RuleAdmission::Replayed,
+                RuleAdmission::Replayed,
+                RuleAdmission::Replayed,
+            ]),
             deactivated: 1,
         }
     );
@@ -1303,6 +1325,14 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_all(&module_pool)
     .await?;
     assert_eq!(retained_reaction_ordinals, [Decimal::from(2_u64)]);
+    let retained_reaction_kind: String = sqlx::query_scalar(
+        "SELECT command_kind FROM dispatch_ledger
+          WHERE command_id = $1",
+    )
+    .bind(lifecycle_command_id)
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(retained_reaction_kind, "session_lifecycle");
     let recovered_reaction = store
         .recover_pending_commands(&mut command_codec)
         .await?
