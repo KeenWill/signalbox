@@ -7676,7 +7676,7 @@ on_rate_limited = "escalate""#,
     }
 
     #[test]
-    fn configuration_rejects_switching_now_on_a_rejected_credential() {
+    fn configuration_admits_switching_now_on_a_rejected_credential() {
         let switching_now = configuration_with_anthropic_pool(
             r#"[[credential_pools]]
 name = "anthropic-main"
@@ -7686,14 +7686,8 @@ members = [{ profile = "anthropic-primary", priority = 1 }]
 on_credential_rejected = "switch_now""#,
         );
 
-        assert_eq!(
-            HubModelConfiguration::parse(&switching_now).err(),
-            Some(
-                HubModelConfigurationError::InadmissibleCredentialPoolAction {
-                    trigger: Arc::from("on_credential_rejected"),
-                }
-            )
-        );
+        HubModelConfiguration::parse(&switching_now)
+            .expect("credential rejection authorizes immediate rotation");
     }
 
     #[test]
