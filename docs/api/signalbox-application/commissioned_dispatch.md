@@ -100,7 +100,7 @@ impl PreparedCommissionedDispatch {
         signalbox_domain::CommissionedDispatchId,
         CommissionedDispatchFence,
         session::PreparedCreateSession,
-        submit_input::SubmitInput,
+        command::SubmitInput,
         goal_command::GoalUserCommand,
     );
 }

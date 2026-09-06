@@ -2,249 +2,6 @@
 
 # submit_input
 
-## SubmitInput
-
-```rust
-pub struct SubmitInput {/* private */}
-// derives: clone::Clone, fmt::Debug
-impl SubmitInput {
-    pub const fn new(
-        command_id: DurableCommandId,
-        session: SessionId,
-        content: UserContent,
-        delivery: DeliveryRequest,
-    ) -> Self;
-    pub const fn new_core_interrupt(
-        command_id: DurableCommandId,
-        session: SessionId,
-        content: UserContent,
-        expected_active_turn: TurnId,
-        descendant_scope: DescendantTerminationScope,
-        configuration: PerInputConfigurationChoices,
-    ) -> Self;
-    pub const fn command_id(&self) -> DurableCommandId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn actor(&self) -> Actor;
-    pub const fn content(&self) -> &UserContent;
-    pub const fn delivery(&self) -> DeliveryRequest;
-    pub fn prepare_session_not_found(self) -> PreparedSubmitInput;
-    pub fn prepare_attachment_blob_not_found(self, digest: BlobDigest) -> PreparedSubmitInput;
-    pub fn prepare_attachment_byte_budget_exceeded(self, maximum_bytes: u64)
-        -> PreparedSubmitInput;
-    pub fn prepare_when_no_active_turn(
-        self,
-        session: &Session,
-        accepted_input: AcceptedInputId,
-        turn: option::Option<TurnId>,
-        previous_position: option::Option<SessionInputPosition>,
-        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
-    ) -> result::Result<PreparedSubmitInput, SubmitInputPreparationError>;
-    pub fn prepare_when_no_active_turn_with_model_settings(
-        self,
-        session: &Session,
-        accepted_input: AcceptedInputId,
-        turn: option::Option<TurnId>,
-        previous_position: option::Option<SessionInputPosition>,
-        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
-        capabilities: &ModelCapabilityCatalog,
-    ) -> result::Result<PreparedSubmitInput, SubmitInputPreparationError>;
-    pub fn prepare_with_active_turn(
-        self,
-        scheduling: &AcceptedInputSchedulingProjection,
-        accepted_input: AcceptedInputId,
-        turn: option::Option<TurnId>,
-        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
-    ) -> result::Result<PreparedSubmitInput, SubmitInputPreparationError>;
-    pub fn prepare_with_active_turn_with_model_settings(
-        self,
-        scheduling: &AcceptedInputSchedulingProjection,
-        accepted_input: AcceptedInputId,
-        turn: option::Option<TurnId>,
-        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
-        capabilities: &ModelCapabilityCatalog,
-    ) -> result::Result<PreparedSubmitInput, SubmitInputPreparationError>;
-    pub fn prepare_with_delegated_active_turn(
-        self,
-        session: &Session,
-        actual_active_turn: TurnId,
-        previous_position: option::Option<SessionInputPosition>,
-        existing_interrupt: option::Option<DurableCommandId>,
-        awaiting_approval: bool,
-        accepted_input: AcceptedInputId,
-        turn: option::Option<TurnId>,
-        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
-    ) -> result::Result<PreparedSubmitInput, SubmitInputPreparationError>;
-}
-impl cmp::PartialEq for SubmitInput {
-    fn eq(&self, other: &Self) -> bool;
-}
-impl cmp::Eq for SubmitInput {}
-impl hash::Hash for SubmitInput {
-    fn hash<H: hash::Hasher>(&self, state: &mut H);
-}
-```
-
-## SubmitInputResult
-
-```rust
-pub enum SubmitInputResult {
-    Applied(SubmitInputAppliedResult),
-    Rejected(SubmitInputRejectedResult),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## SubmitInputAppliedResult
-
-```rust
-pub enum SubmitInputAppliedResult {
-    TurnOrigin(SubmitInputTurnOriginAppliedResult),
-    PendingSteering(SubmitInputPendingSteeringAppliedResult),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl SubmitInputAppliedResult {
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn acceptance_position(&self) -> SessionInputPosition;
-    pub const fn disposition(&self) -> AcceptedInputDisposition;
-    pub const fn turn_origin(&self) -> option::Option<&SubmitInputTurnOriginAppliedResult>;
-    pub const fn pending_steering(
-        &self,
-    ) -> option::Option<&SubmitInputPendingSteeringAppliedResult>;
-}
-```
-
-## SubmitInputTurnOriginAppliedResult
-
-```rust
-pub struct SubmitInputTurnOriginAppliedResult {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl SubmitInputTurnOriginAppliedResult {
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn turn(&self) -> TurnId;
-    pub const fn disposition(&self) -> AcceptedInputDisposition;
-    pub const fn queue_order(&self) -> AcceptedInputQueueOrder;
-    pub const fn acceptance_position(&self) -> SessionInputPosition;
-    pub const fn origin_configuration(&self) -> &OriginConfiguration;
-    pub const fn applied_interrupt(&self) -> option::Option<&AppliedInterruptCommandResult>;
-    pub fn model_settings_event(&self) -> option::Option<TurnModelSettingsResolved>;
-}
-```
-
-## SubmitInputPendingSteeringAppliedResult
-
-```rust
-pub struct SubmitInputPendingSteeringAppliedResult {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl SubmitInputPendingSteeringAppliedResult {
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn acceptance_position(&self) -> SessionInputPosition;
-    pub const fn binding(&self) -> SteeringBinding;
-}
-```
-
-## SubmitInputRejectedResult
-
-```rust
-pub enum SubmitInputRejectedResult {
-    AttachmentBlobNotFound {
-        digest: BlobDigest,
-    },
-    AttachmentByteBudgetExceeded {
-        maximum_bytes: u64,
-    },
-    SessionNotFound {
-        session: SessionId,
-    },
-    NoActiveTurn {
-        session: SessionId,
-        expected_active_turn: TurnId,
-    },
-    ActiveTurnPresent {
-        session: SessionId,
-        active_turn: TurnId,
-    },
-    ActiveTurnMismatch {
-        session: SessionId,
-        expected_active_turn: TurnId,
-        actual_active_turn: TurnId,
-    },
-    SessionDefaultsVersionMismatch {
-        session: SessionId,
-        expected: SessionConfigurationDefaultsVersion,
-        current: SessionConfigurationDefaultsVersion,
-    },
-    UnknownModelAlias {
-        session: SessionId,
-        alias: ModelAlias,
-    },
-    AcceptancePositionExhausted {
-        session: SessionId,
-        last: SessionInputPosition,
-    },
-    SafePointUnavailableWhileStopping {
-        session: SessionId,
-        active_turn: TurnId,
-        existing_command: DurableCommandId,
-    },
-    InterruptAlreadyApplied {
-        session: SessionId,
-        active_turn: TurnId,
-        existing_command: DurableCommandId,
-    },
-    InterruptUnavailableWhileAwaitingApproval {
-        session: SessionId,
-        active_turn: TurnId,
-    },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## PreparedSubmitInput
-
-```rust
-pub struct PreparedSubmitInput {/* private */}
-// derives: clone::Clone, fmt::Debug
-impl PreparedSubmitInput {
-    pub const fn command(&self) -> &SubmitInput;
-    pub const fn result(&self) -> &SubmitInputResult;
-    pub fn into_parts(self) -> (SubmitInput, SubmitInputResult);
-}
-```
-
-## SubmitInputPreparationFailure
-
-```rust
-pub enum SubmitInputPreparationFailure {
-    SessionMismatch {
-        provided_session: SessionId,
-    },
-    TurnCandidateMismatch,
-    AcceptedInputCandidateReusesActiveOrigin {
-        active_turn: TurnId,
-        accepted_input: AcceptedInputId,
-    },
-    ActiveTurnProjectionMissing,
-    InterruptQueueOrderInvalid,
-    ModelSettingsResolution(OriginModelSettingsError),
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## SubmitInputPreparationError
-
-```rust
-pub struct SubmitInputPreparationError {/* private */}
-// derives: clone::Clone, fmt::Debug
-impl SubmitInputPreparationError {
-    pub const fn command(&self) -> &SubmitInput;
-    pub const fn failure(&self) -> SubmitInputPreparationFailure;
-    pub fn into_parts(self) -> (SubmitInput, SubmitInputPreparationFailure);
-}
-```
-
 ## SubmitInputTurnOriginReconstitutionInput
 
 ```rust
@@ -723,4 +480,247 @@ impl ReconstitutedSubmitInput {
     pub const fn result(&self) -> &SubmitInputResult;
     pub fn into_parts(self) -> (SubmitInput, SubmitInputResult);
 }
+```
+
+## SubmitInput
+
+```rust
+pub struct SubmitInput {/* private */}
+// derives: clone::Clone, fmt::Debug
+impl SubmitInput {
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+    ) -> Self;
+    pub const fn new_core_interrupt(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        expected_active_turn: TurnId,
+        descendant_scope: DescendantTerminationScope,
+        configuration: PerInputConfigurationChoices,
+    ) -> Self;
+    pub const fn command_id(&self) -> DurableCommandId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn actor(&self) -> Actor;
+    pub const fn content(&self) -> &UserContent;
+    pub const fn delivery(&self) -> DeliveryRequest;
+    pub fn prepare_session_not_found(self) -> PreparedSubmitInput;
+    pub fn prepare_attachment_blob_not_found(self, digest: BlobDigest) -> PreparedSubmitInput;
+    pub fn prepare_attachment_byte_budget_exceeded(self, maximum_bytes: u64)
+        -> PreparedSubmitInput;
+    pub fn prepare_when_no_active_turn(
+        self,
+        session: &Session,
+        accepted_input: AcceptedInputId,
+        turn: option::Option<TurnId>,
+        previous_position: option::Option<SessionInputPosition>,
+        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
+    ) -> result::Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_when_no_active_turn_with_model_settings(
+        self,
+        session: &Session,
+        accepted_input: AcceptedInputId,
+        turn: option::Option<TurnId>,
+        previous_position: option::Option<SessionInputPosition>,
+        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> result::Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_with_active_turn(
+        self,
+        scheduling: &AcceptedInputSchedulingProjection,
+        accepted_input: AcceptedInputId,
+        turn: option::Option<TurnId>,
+        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
+    ) -> result::Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_with_active_turn_with_model_settings(
+        self,
+        scheduling: &AcceptedInputSchedulingProjection,
+        accepted_input: AcceptedInputId,
+        turn: option::Option<TurnId>,
+        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> result::Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_with_delegated_active_turn(
+        self,
+        session: &Session,
+        actual_active_turn: TurnId,
+        previous_position: option::Option<SessionInputPosition>,
+        existing_interrupt: option::Option<DurableCommandId>,
+        awaiting_approval: bool,
+        accepted_input: AcceptedInputId,
+        turn: option::Option<TurnId>,
+        select_definition: impl function::FnOnce(ModelAlias) -> option::Option<FrozenAliasDefinition>,
+    ) -> result::Result<PreparedSubmitInput, SubmitInputPreparationError>;
+}
+impl cmp::PartialEq for SubmitInput {
+    fn eq(&self, other: &Self) -> bool;
+}
+impl cmp::Eq for SubmitInput {}
+impl hash::Hash for SubmitInput {
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
+}
+```
+
+## PreparedSubmitInput
+
+```rust
+pub struct PreparedSubmitInput {/* private */}
+// derives: clone::Clone, fmt::Debug
+impl PreparedSubmitInput {
+    pub const fn command(&self) -> &SubmitInput;
+    pub const fn result(&self) -> &SubmitInputResult;
+    pub fn into_parts(self) -> (SubmitInput, SubmitInputResult);
+}
+```
+
+## SubmitInputPreparationFailure
+
+```rust
+pub enum SubmitInputPreparationFailure {
+    SessionMismatch {
+        provided_session: SessionId,
+    },
+    TurnCandidateMismatch,
+    AcceptedInputCandidateReusesActiveOrigin {
+        active_turn: TurnId,
+        accepted_input: AcceptedInputId,
+    },
+    ActiveTurnProjectionMissing,
+    InterruptQueueOrderInvalid,
+    ModelSettingsResolution(OriginModelSettingsError),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## SubmitInputPreparationError
+
+```rust
+pub struct SubmitInputPreparationError {/* private */}
+// derives: clone::Clone, fmt::Debug
+impl SubmitInputPreparationError {
+    pub const fn command(&self) -> &SubmitInput;
+    pub const fn failure(&self) -> SubmitInputPreparationFailure;
+    pub fn into_parts(self) -> (SubmitInput, SubmitInputPreparationFailure);
+}
+```
+
+## SubmitInputResult
+
+```rust
+pub enum SubmitInputResult {
+    Applied(SubmitInputAppliedResult),
+    Rejected(SubmitInputRejectedResult),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## SubmitInputAppliedResult
+
+```rust
+pub enum SubmitInputAppliedResult {
+    TurnOrigin(SubmitInputTurnOriginAppliedResult),
+    PendingSteering(SubmitInputPendingSteeringAppliedResult),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl SubmitInputAppliedResult {
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
+    pub const fn disposition(&self) -> AcceptedInputDisposition;
+    pub const fn turn_origin(&self) -> option::Option<&SubmitInputTurnOriginAppliedResult>;
+    pub const fn pending_steering(
+        &self,
+    ) -> option::Option<&SubmitInputPendingSteeringAppliedResult>;
+}
+```
+
+## SubmitInputTurnOriginAppliedResult
+
+```rust
+pub struct SubmitInputTurnOriginAppliedResult {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl SubmitInputTurnOriginAppliedResult {
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn disposition(&self) -> AcceptedInputDisposition;
+    pub const fn queue_order(&self) -> AcceptedInputQueueOrder;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
+    pub const fn origin_configuration(&self) -> &OriginConfiguration;
+    pub const fn applied_interrupt(&self) -> option::Option<&AppliedInterruptCommandResult>;
+    pub fn model_settings_event(&self) -> option::Option<TurnModelSettingsResolved>;
+}
+```
+
+## SubmitInputPendingSteeringAppliedResult
+
+```rust
+pub struct SubmitInputPendingSteeringAppliedResult {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl SubmitInputPendingSteeringAppliedResult {
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
+    pub const fn binding(&self) -> SteeringBinding;
+}
+```
+
+## SubmitInputRejectedResult
+
+```rust
+pub enum SubmitInputRejectedResult {
+    AttachmentBlobNotFound {
+        digest: BlobDigest,
+    },
+    AttachmentByteBudgetExceeded {
+        maximum_bytes: u64,
+    },
+    SessionNotFound {
+        session: SessionId,
+    },
+    NoActiveTurn {
+        session: SessionId,
+        expected_active_turn: TurnId,
+    },
+    ActiveTurnPresent {
+        session: SessionId,
+        active_turn: TurnId,
+    },
+    ActiveTurnMismatch {
+        session: SessionId,
+        expected_active_turn: TurnId,
+        actual_active_turn: TurnId,
+    },
+    SessionDefaultsVersionMismatch {
+        session: SessionId,
+        expected: SessionConfigurationDefaultsVersion,
+        current: SessionConfigurationDefaultsVersion,
+    },
+    UnknownModelAlias {
+        session: SessionId,
+        alias: ModelAlias,
+    },
+    AcceptancePositionExhausted {
+        session: SessionId,
+        last: SessionInputPosition,
+    },
+    SafePointUnavailableWhileStopping {
+        session: SessionId,
+        active_turn: TurnId,
+        existing_command: DurableCommandId,
+    },
+    InterruptAlreadyApplied {
+        session: SessionId,
+        active_turn: TurnId,
+        existing_command: DurableCommandId,
+    },
+    InterruptUnavailableWhileAwaitingApproval {
+        session: SessionId,
+        active_turn: TurnId,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
