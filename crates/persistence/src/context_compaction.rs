@@ -441,18 +441,13 @@ impl ContextCompactionRepository {
                 ContextCompactionCorruption::Inconsistent("compaction completion state").into(),
             );
         }
-        let source_count: Decimal = sqlx::query_scalar(
-            "SELECT member_count
-               FROM context_frontier
-              WHERE owning_session_id = $1
-                AND context_frontier_id = $2
-              FOR SHARE",
-        )
-        .bind(session_id_to_uuid(prepared.session))
-        .bind(prepared.source_frontier.into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(ContextCompactionCorruption::Missing("source frontier"))?;
+        let source_count: Decimal =
+            sqlx::query_scalar(crate::lock_inventory::CONTEXT_COMPACTION_SOURCE_FRONTIER)
+                .bind(session_id_to_uuid(prepared.session))
+                .bind(prepared.source_frontier.into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(ContextCompactionCorruption::Missing("source frontier"))?;
         let source_count = decode_u64(source_count, "source frontier member count")?;
         let result_count =
             source_count

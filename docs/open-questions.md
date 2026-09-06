@@ -589,6 +589,10 @@ questions below remain open.
 
 ## Actor attribution
 
+- **Module and create-session actors.** Whether repository watch and
+  commissioned dispatch gain a module actor naming the dispatch, and whether
+  create-session adopts actor attribution, remain undecided
+  ([identity-and-commands](design/identity-and-commands.md)).
 - **Actor-admissibility follow-ups.** See the authoritative routing and open
   edges in [identity-and-commands](spec/identity-and-commands.md).
 

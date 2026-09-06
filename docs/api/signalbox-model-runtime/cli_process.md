@@ -150,11 +150,10 @@ pub trait CliSession<C>: marker::Sized {
         cause: LossCause,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
-    fn classify_provider_error_after_exit(classification: &str) -> ProviderErrorKind;
     fn provider_error_after_exit(
         self,
         message: &str,
-        kind: ProviderErrorKind,
+        classification: &str,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
 }

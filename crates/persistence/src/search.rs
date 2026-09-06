@@ -537,18 +537,11 @@ impl SearchRepository {
             transaction.rollback().await?;
             return Err(SearchProjectionCorruption::Invalid("artifact timeline address").into());
         }
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(
-                 hashtextextended(
-                     concat_ws(chr(31), $1::text, $2::text),
-                     0
-                 )
-             )",
-        )
-        .bind(source_kind)
-        .bind(projection.artifact.into_uuid())
-        .execute(&mut *transaction)
-        .await?;
+        sqlx::query(crate::lock_inventory::SEARCH_ARTIFACT_IDENTITY)
+            .bind(source_kind)
+            .bind(projection.artifact.into_uuid())
+            .execute(&mut *transaction)
+            .await?;
         let identity_compatible = sqlx::query_scalar::<_, bool>(
             "SELECT NOT EXISTS (
                  SELECT 1

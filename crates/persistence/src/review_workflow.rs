@@ -683,20 +683,10 @@ impl ReviewWorkflowStore {
             // graph from snapshots taken after the winning event commits; the
             // held inventory keeps later event writes from changing that graph
             // across the loader statements.
-            sqlx::query(
-                "SELECT finding_id
-                   FROM review_finding
-                  WHERE target_id = (
-                            SELECT target_id
-                              FROM review_finding
-                             WHERE finding_id = $1
-                        )
-                  ORDER BY finding_id
-                  FOR NO KEY UPDATE",
-            )
-            .bind(finding.into_uuid())
-            .fetch_all(&mut *transaction)
-            .await?;
+            sqlx::query(crate::lock_inventory::REVIEW_TARGET_FINDINGS_TRANSITION)
+                .bind(finding.into_uuid())
+                .fetch_all(&mut *transaction)
+                .await?;
         }
         let current = if publication_link.is_some() {
             // The held reservation and finding locks make the subject projection
