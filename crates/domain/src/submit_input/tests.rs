@@ -20,7 +20,7 @@ use super::{
     SubmitInputRejectedSessionNotFoundReconstitutionInput,
     SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
     SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
-    SubmitInputTurnOriginReconstitutionInput, freeze_origin_configuration,
+    SubmitInputTurnOriginReconstitutionInput, command::freeze_origin_configuration,
     validation::StoredOriginConfigurationReconstitutionFacts,
     validation::reconstruct_origin_configuration,
 };

@@ -7,7 +7,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    error::Error,
     fmt,
     future::Future,
     num::NonZeroU64,
@@ -948,9 +947,11 @@ impl PreparedModelOperation {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A checked frontier could not be projected into the current text-only input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelFrontierRenderingError {
+    #[error("model frontier origin content is missing")]
     /// A frontier origin was missing its reconstituted accepted-input content.
     MissingOriginContent {
         /// The source-qualified origin entry.
@@ -958,45 +959,55 @@ pub enum ModelFrontierRenderingError {
         /// The accepted input whose content was absent.
         accepted_input: AcceptedInputId,
     },
+    #[error("model frontier attachment catalog fact is missing")]
     /// A referenced attachment lacked its immutable catalog length fact.
     MissingAttachmentBlobFact {
         /// Global blob identity whose catalog projection was absent.
         digest: BlobDigest,
     },
+    #[error("model frontier attachment stub could not be serialized")]
     /// Canonical attachment metadata could not be serialized.
     AttachmentStubSerialization,
+    #[error("model frontier attachment stub exceeded its byte bound")]
     /// Checked attachment metadata exceeded its derived rendered bound.
     AttachmentStubBoundExceeded,
+    #[error("model frontier tool evidence is duplicated")]
     /// Two storage evidence values claimed the same semantic entry.
     DuplicateToolEvidence {
         /// Duplicated source-qualified entry.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("model frontier tool evidence is missing or mismatched")]
     /// Reference-only tool history lacks exact correlated durable authority.
     MissingOrMismatchedToolEvidence {
         /// Source-qualified entry whose evidence is absent or cross-wired.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("model frontier contains an unrenderable tool result")]
     /// Durable ambiguity cannot be projected as an ordinary model-visible result.
     UnrenderableToolResult {
         /// Source-qualified result entry.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("model frontier tool evidence is not referenced")]
     /// Storage supplied evidence not named by the checked frontier.
     UnexpectedToolEvidence {
         /// Extra source-qualified entry.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("context projection entry is missing from its frontier")]
     /// A projection named an entry absent from its complete source frontier.
     MissingProjectedEntry {
         /// The absent source-qualified entry.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("model frontier delegation delivery is inconsistent")]
     /// A stored delegation wait mode contradicted its delivery position.
     InvalidDelegationDelivery {
         /// Source-qualified delegation-result entry.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("model frontier retained content exceeds its ceiling")]
     /// The projected frontier content exceeded its retained-content ceiling.
     ///
     /// Raised before any projected content is cloned, so the refusal bounds the
@@ -1007,54 +1018,10 @@ pub enum ModelFrontierRenderingError {
         /// The ceiling in force for this render.
         limit_bytes: usize,
     },
+    #[error("invalid context-compaction projection")]
     /// The complete durable frontier carries malformed summary provenance.
     InvalidContextProjection(ContextFrontierProjectionFailure),
 }
-
-impl fmt::Display for ModelFrontierRenderingError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingOriginContent { .. } => {
-                formatter.write_str("model frontier origin content is missing")
-            }
-            Self::MissingAttachmentBlobFact { .. } => {
-                formatter.write_str("model frontier attachment catalog fact is missing")
-            }
-            Self::AttachmentStubSerialization => {
-                formatter.write_str("model frontier attachment stub could not be serialized")
-            }
-            Self::AttachmentStubBoundExceeded => {
-                formatter.write_str("model frontier attachment stub exceeded its byte bound")
-            }
-            Self::DuplicateToolEvidence { .. } => {
-                formatter.write_str("model frontier tool evidence is duplicated")
-            }
-            Self::MissingOrMismatchedToolEvidence { .. } => {
-                formatter.write_str("model frontier tool evidence is missing or mismatched")
-            }
-            Self::UnrenderableToolResult { .. } => {
-                formatter.write_str("model frontier contains an unrenderable tool result")
-            }
-            Self::UnexpectedToolEvidence { .. } => {
-                formatter.write_str("model frontier tool evidence is not referenced")
-            }
-            Self::MissingProjectedEntry { .. } => {
-                formatter.write_str("context projection entry is missing from its frontier")
-            }
-            Self::InvalidDelegationDelivery { .. } => {
-                formatter.write_str("model frontier delegation delivery is inconsistent")
-            }
-            Self::RetainedFrontierContentLimitExceeded { .. } => {
-                formatter.write_str("model frontier retained content exceeds its ceiling")
-            }
-            Self::InvalidContextProjection(_) => {
-                formatter.write_str("invalid context-compaction projection")
-            }
-        }
-    }
-}
-
-impl Error for ModelFrontierRenderingError {}
 
 impl ClassifyOperatorFailure for ModelFrontierRenderingError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
@@ -1565,6 +1532,7 @@ pub enum ModelCallExecutionOutcome {
     ObservationAlreadyCommitted(ModelCallId),
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Failure annotated with the exact orchestration stage that failed.
 #[derive(Debug)]
 pub enum ModelCallExecutionError<
@@ -1574,18 +1542,32 @@ pub enum ModelCallExecutionError<
     ProviderError,
     ObservationError,
 > {
+    #[error("model-call prepare stage failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_prepare")]
     /// The prepare-call transaction failed.
     Prepare(PrepareError),
+    #[error("model-call render stage failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_render")]
     /// Provider-neutral request rendering failed closed.
     Render(ModelFrontierRenderingError),
+    #[error("model-call capability stage failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_capability_preparation")]
     /// Credential lookup or capability preparation failed as an operator error.
     CapabilityPreparation(ProviderError),
+    #[error("model-call prepared-failure commit failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_prepared_failure_commit")]
     /// The guarded prepared-call failure transaction failed.
     PreparedFailureCommit(FailureError),
+    #[error("model-call prepared-failure reread failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_prepared_failure_reread")]
     /// Authoritative reread of a retained prepared-call failure failed.
     PreparedFailureReread(FailureError),
+    #[error("model-call authorization stage failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_authorization")]
     /// Durable send authorization failed.
     Authorization(AuthorizationError),
+    #[error("model-call authorization reread failed: {reread_error}")]
+    #[operator(delegate = reread_error, code = "model_call_authorization_reread")]
     /// Authoritative reread after an ambiguous authorization also failed.
     AuthorizationReread {
         /// The original commit-ambiguous authorization failure.
@@ -1593,10 +1575,16 @@ pub enum ModelCallExecutionError<
         /// The failure to establish whether authorization committed.
         reread_error: AuthorizationError,
     },
+    #[error("model-call authorization reconciliation failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_authorization_reconciliation")]
     /// A later pass still could not reconcile retained non-consumption proof.
     AuthorizationReconciliation(AuthorizationError),
+    #[error("model-call provider stage failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_provider")]
     /// Provider work produced no trustworthy observation.
     Provider(ProviderError),
+    #[error("model-call observation commit failed: {error}")]
+    #[operator(delegate = error, code = "model_call_observation_commit")]
     /// The terminal-observation transaction failed.
     ObservationCommit {
         /// The failed observation transaction or authoritative reread.
@@ -1604,129 +1592,6 @@ pub enum ModelCallExecutionError<
         /// The unchanged provider observation retained for a later pass.
         retained_observation: CorrelatedModelCallTerminalObservation,
     },
-}
-
-impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> fmt::Display
-    for ModelCallExecutionError<
-        PrepareError,
-        FailureError,
-        AuthorizationError,
-        ProviderError,
-        ObservationError,
-    >
-where
-    PrepareError: fmt::Display,
-    FailureError: fmt::Display,
-    AuthorizationError: fmt::Display,
-    ProviderError: fmt::Display,
-    ObservationError: fmt::Display,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Prepare(error) => write!(formatter, "model-call prepare stage failed: {error}"),
-            Self::Render(error) => write!(formatter, "model-call render stage failed: {error}"),
-            Self::CapabilityPreparation(error) => {
-                write!(formatter, "model-call capability stage failed: {error}")
-            }
-            Self::PreparedFailureCommit(error) => {
-                write!(
-                    formatter,
-                    "model-call prepared-failure commit failed: {error}"
-                )
-            }
-            Self::PreparedFailureReread(error) => {
-                write!(
-                    formatter,
-                    "model-call prepared-failure reread failed: {error}"
-                )
-            }
-            Self::Authorization(error) => {
-                write!(formatter, "model-call authorization stage failed: {error}")
-            }
-            Self::AuthorizationReread { reread_error, .. } => {
-                write!(
-                    formatter,
-                    "model-call authorization reread failed: {reread_error}"
-                )
-            }
-            Self::AuthorizationReconciliation(error) => {
-                write!(
-                    formatter,
-                    "model-call authorization reconciliation failed: {error}"
-                )
-            }
-            Self::Provider(error) => write!(formatter, "model-call provider stage failed: {error}"),
-            Self::ObservationCommit { error, .. } => {
-                write!(formatter, "model-call observation commit failed: {error}")
-            }
-        }
-    }
-}
-
-impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> Error
-    for ModelCallExecutionError<
-        PrepareError,
-        FailureError,
-        AuthorizationError,
-        ProviderError,
-        ObservationError,
-    >
-where
-    PrepareError: Error + 'static,
-    FailureError: Error + 'static,
-    AuthorizationError: Error + 'static,
-    ProviderError: Error + 'static,
-    ObservationError: Error + 'static,
-{
-}
-
-impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError>
-    ClassifyOperatorFailure
-    for ModelCallExecutionError<
-        PrepareError,
-        FailureError,
-        AuthorizationError,
-        ProviderError,
-        ObservationError,
-    >
-where
-    PrepareError: ClassifyOperatorFailure,
-    FailureError: ClassifyOperatorFailure,
-    AuthorizationError: ClassifyOperatorFailure,
-    ProviderError: ClassifyOperatorFailure,
-    ObservationError: ClassifyOperatorFailure,
-{
-    fn operator_failure_class(&self) -> OperatorFailureClass {
-        match self {
-            Self::Prepare(error) => error.operator_failure_class(),
-            Self::Render(error) => error.operator_failure_class(),
-            Self::CapabilityPreparation(error) | Self::Provider(error) => {
-                error.operator_failure_class()
-            }
-            Self::PreparedFailureCommit(error) | Self::PreparedFailureReread(error) => {
-                error.operator_failure_class()
-            }
-            Self::Authorization(error) => error.operator_failure_class(),
-            Self::AuthorizationReread { reread_error, .. } => reread_error.operator_failure_class(),
-            Self::AuthorizationReconciliation(error) => error.operator_failure_class(),
-            Self::ObservationCommit { error, .. } => error.operator_failure_class(),
-        }
-    }
-
-    fn operator_failure_cause_code(&self) -> &'static str {
-        match self {
-            Self::Prepare(_) => "model_call_prepare",
-            Self::Render(_) => "model_call_render",
-            Self::CapabilityPreparation(_) => "model_call_capability_preparation",
-            Self::PreparedFailureCommit(_) => "model_call_prepared_failure_commit",
-            Self::PreparedFailureReread(_) => "model_call_prepared_failure_reread",
-            Self::Authorization(_) => "model_call_authorization",
-            Self::AuthorizationReread { .. } => "model_call_authorization_reread",
-            Self::AuthorizationReconciliation(_) => "model_call_authorization_reconciliation",
-            Self::Provider(_) => "model_call_provider",
-            Self::ObservationCommit { .. } => "model_call_observation_commit",
-        }
-    }
 }
 
 /// Coordinates one staged model-call execution invocation.
@@ -2861,33 +2726,23 @@ pub enum ScriptedModelCallStep {
     Return(ModelCallTerminalObservation),
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized failure from the deterministic scripted provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScriptedModelCallError {
+    #[error("scripted model-call actions are exhausted")]
     /// No scripted action remained for a requested capability.
     ScriptExhausted,
+    #[error("scripted model-call capability preparation failed")]
     /// The script explicitly selected a capability-stage operator failure.
     CapabilityOperatorFailure,
+    #[error("scripted model-call interaction failed")]
     /// The script explicitly selected an interaction-stage operator failure.
     InteractionOperatorFailure,
+    #[error("scripted model-call authorization does not match its capability")]
     /// Issued authorization did not match the prepared capability.
     AuthorizationMismatch,
 }
-
-impl fmt::Display for ScriptedModelCallError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ScriptExhausted => "scripted model-call actions are exhausted",
-            Self::CapabilityOperatorFailure => "scripted model-call capability preparation failed",
-            Self::InteractionOperatorFailure => "scripted model-call interaction failed",
-            Self::AuthorizationMismatch => {
-                "scripted model-call authorization does not match its capability"
-            }
-        })
-    }
-}
-
-impl Error for ScriptedModelCallError {}
 
 impl ClassifyOperatorFailure for ScriptedModelCallError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
@@ -3069,6 +2924,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     use std::{
         collections::VecDeque,
         io::{self, Write},

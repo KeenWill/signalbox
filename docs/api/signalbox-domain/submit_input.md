@@ -84,124 +84,6 @@ impl hash::Hash for SubmitInput {
 }
 ```
 
-## SubmitInputResult
-
-```rust
-pub enum SubmitInputResult {
-    Applied(SubmitInputAppliedResult),
-    Rejected(SubmitInputRejectedResult),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## SubmitInputAppliedResult
-
-```rust
-pub enum SubmitInputAppliedResult {
-    TurnOrigin(SubmitInputTurnOriginAppliedResult),
-    PendingSteering(SubmitInputPendingSteeringAppliedResult),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl SubmitInputAppliedResult {
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn acceptance_position(&self) -> SessionInputPosition;
-    pub const fn disposition(&self) -> AcceptedInputDisposition;
-    pub const fn turn_origin(&self) -> option::Option<&SubmitInputTurnOriginAppliedResult>;
-    pub const fn pending_steering(
-        &self,
-    ) -> option::Option<&SubmitInputPendingSteeringAppliedResult>;
-}
-```
-
-## SubmitInputTurnOriginAppliedResult
-
-```rust
-pub struct SubmitInputTurnOriginAppliedResult {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl SubmitInputTurnOriginAppliedResult {
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn turn(&self) -> TurnId;
-    pub const fn disposition(&self) -> AcceptedInputDisposition;
-    pub const fn queue_order(&self) -> AcceptedInputQueueOrder;
-    pub const fn acceptance_position(&self) -> SessionInputPosition;
-    pub const fn origin_configuration(&self) -> &OriginConfiguration;
-    pub const fn applied_interrupt(&self) -> option::Option<&AppliedInterruptCommandResult>;
-    pub fn model_settings_event(&self) -> option::Option<TurnModelSettingsResolved>;
-}
-```
-
-## SubmitInputPendingSteeringAppliedResult
-
-```rust
-pub struct SubmitInputPendingSteeringAppliedResult {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl SubmitInputPendingSteeringAppliedResult {
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn acceptance_position(&self) -> SessionInputPosition;
-    pub const fn binding(&self) -> SteeringBinding;
-}
-```
-
-## SubmitInputRejectedResult
-
-```rust
-pub enum SubmitInputRejectedResult {
-    AttachmentBlobNotFound {
-        digest: BlobDigest,
-    },
-    AttachmentByteBudgetExceeded {
-        maximum_bytes: u64,
-    },
-    SessionNotFound {
-        session: SessionId,
-    },
-    NoActiveTurn {
-        session: SessionId,
-        expected_active_turn: TurnId,
-    },
-    ActiveTurnPresent {
-        session: SessionId,
-        active_turn: TurnId,
-    },
-    ActiveTurnMismatch {
-        session: SessionId,
-        expected_active_turn: TurnId,
-        actual_active_turn: TurnId,
-    },
-    SessionDefaultsVersionMismatch {
-        session: SessionId,
-        expected: SessionConfigurationDefaultsVersion,
-        current: SessionConfigurationDefaultsVersion,
-    },
-    UnknownModelAlias {
-        session: SessionId,
-        alias: ModelAlias,
-    },
-    AcceptancePositionExhausted {
-        session: SessionId,
-        last: SessionInputPosition,
-    },
-    SafePointUnavailableWhileStopping {
-        session: SessionId,
-        active_turn: TurnId,
-        existing_command: DurableCommandId,
-    },
-    InterruptAlreadyApplied {
-        session: SessionId,
-        active_turn: TurnId,
-        existing_command: DurableCommandId,
-    },
-    InterruptUnavailableWhileAwaitingApproval {
-        session: SessionId,
-        active_turn: TurnId,
-    },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
 ## PreparedSubmitInput
 
 ```rust
@@ -723,4 +605,122 @@ pub struct SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstit
     pub active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
 }
 // derives: clone::Clone, fmt::Debug
+```
+
+## SubmitInputResult
+
+```rust
+pub enum SubmitInputResult {
+    Applied(SubmitInputAppliedResult),
+    Rejected(SubmitInputRejectedResult),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## SubmitInputAppliedResult
+
+```rust
+pub enum SubmitInputAppliedResult {
+    TurnOrigin(SubmitInputTurnOriginAppliedResult),
+    PendingSteering(SubmitInputPendingSteeringAppliedResult),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl SubmitInputAppliedResult {
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
+    pub const fn disposition(&self) -> AcceptedInputDisposition;
+    pub const fn turn_origin(&self) -> option::Option<&SubmitInputTurnOriginAppliedResult>;
+    pub const fn pending_steering(
+        &self,
+    ) -> option::Option<&SubmitInputPendingSteeringAppliedResult>;
+}
+```
+
+## SubmitInputTurnOriginAppliedResult
+
+```rust
+pub struct SubmitInputTurnOriginAppliedResult {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl SubmitInputTurnOriginAppliedResult {
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn disposition(&self) -> AcceptedInputDisposition;
+    pub const fn queue_order(&self) -> AcceptedInputQueueOrder;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
+    pub const fn origin_configuration(&self) -> &OriginConfiguration;
+    pub const fn applied_interrupt(&self) -> option::Option<&AppliedInterruptCommandResult>;
+    pub fn model_settings_event(&self) -> option::Option<TurnModelSettingsResolved>;
+}
+```
+
+## SubmitInputPendingSteeringAppliedResult
+
+```rust
+pub struct SubmitInputPendingSteeringAppliedResult {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl SubmitInputPendingSteeringAppliedResult {
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
+    pub const fn binding(&self) -> SteeringBinding;
+}
+```
+
+## SubmitInputRejectedResult
+
+```rust
+pub enum SubmitInputRejectedResult {
+    AttachmentBlobNotFound {
+        digest: BlobDigest,
+    },
+    AttachmentByteBudgetExceeded {
+        maximum_bytes: u64,
+    },
+    SessionNotFound {
+        session: SessionId,
+    },
+    NoActiveTurn {
+        session: SessionId,
+        expected_active_turn: TurnId,
+    },
+    ActiveTurnPresent {
+        session: SessionId,
+        active_turn: TurnId,
+    },
+    ActiveTurnMismatch {
+        session: SessionId,
+        expected_active_turn: TurnId,
+        actual_active_turn: TurnId,
+    },
+    SessionDefaultsVersionMismatch {
+        session: SessionId,
+        expected: SessionConfigurationDefaultsVersion,
+        current: SessionConfigurationDefaultsVersion,
+    },
+    UnknownModelAlias {
+        session: SessionId,
+        alias: ModelAlias,
+    },
+    AcceptancePositionExhausted {
+        session: SessionId,
+        last: SessionInputPosition,
+    },
+    SafePointUnavailableWhileStopping {
+        session: SessionId,
+        active_turn: TurnId,
+        existing_command: DurableCommandId,
+    },
+    InterruptAlreadyApplied {
+        session: SessionId,
+        active_turn: TurnId,
+        existing_command: DurableCommandId,
+    },
+    InterruptUnavailableWhileAwaitingApproval {
+        session: SessionId,
+        active_turn: TurnId,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
