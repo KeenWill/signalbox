@@ -1,0 +1,10 @@
+{
+  "source": "declined-finding.json",
+  "edge": "record resolved finding timestamp for a subsequent review request",
+  "mutations": [
+    {
+      "path": "/observed_at",
+      "value": "2026-09-05T14:00:00Z"
+    }
+  ]
+}

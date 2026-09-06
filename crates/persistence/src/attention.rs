@@ -1,6 +1,6 @@
 //! PostgreSQL adapter for coherent bounded fleet attention reads.
 
-use std::{collections::BTreeSet, error::Error, fmt, time::SystemTime};
+use std::{collections::BTreeSet, time::SystemTime};
 
 use signalbox_application::{
     AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
@@ -19,49 +19,22 @@ use crate::mapping::{
 
 const UNMONITORED_EXECUTION_FAILURE_NEED: &str = "The goal turn failed to execute and the session is unmonitored, so no automatic resumption is scheduled. Resolve the failed goal turn's execution condition, then resume the goal.";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(signalbox_derive::OperatorError, Clone, Debug, Eq, PartialEq)]
 pub enum AttentionCorruption {
+    #[error("missing operator attention {field_0}")]
     Missing(&'static str),
+    #[error("invalid operator attention {field_0}")]
     Invalid(&'static str),
+    #[error("unsupported operator attention {field}: {value}")]
     Unsupported { field: &'static str, value: String },
 }
 
-impl fmt::Display for AttentionCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing operator attention {field}"),
-            Self::Invalid(field) => write!(formatter, "invalid operator attention {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported operator attention {field}: {value}")
-            }
-        }
-    }
-}
-
-impl Error for AttentionCorruption {}
-
-#[derive(Debug)]
+#[derive(signalbox_derive::OperatorError, Debug)]
 pub enum AttentionRepositoryError {
-    Database(sqlx::Error),
-    Corruption(AttentionCorruption),
-}
-
-impl fmt::Display for AttentionRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "attention database failure: {error}"),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for AttentionRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    #[error("attention database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
+    Corruption(#[source] AttentionCorruption),
 }
 
 impl From<sqlx::Error> for AttentionRepositoryError {
@@ -371,20 +344,6 @@ macro_rules! summary_sql {
        AND goal.blocked_reason = 'execution_failure'
        AND lifecycle.owned
        AND goal.need <> $12
-       -- A headless approval escalation blocks the goal without arming any
-       -- automatic resumption: it writes its `execution_failure` block outside
-       -- `PostgresGoalPassDisposition` precisely so that only an operator can
-       -- resume the session (`docs/spec/goal-mode.md`). Seeding the lineage
-       -- from such a block would report a resumption as pending forever and
-       -- suppress `ProvideGoalNeed`, hiding the one session that actually
-       -- needs the operator. The block names its scheduler turn, which is the
-       -- turn both escalation tables record.
-       AND NOT EXISTS (
-           SELECT 1
-             FROM repo_watch_headless_approval_escalation AS escalation
-            WHERE escalation.session_id = goal.session_id
-              AND escalation.turn_id = goal.scheduler_turn_id
-       )
        AND NOT EXISTS (
            SELECT 1
              FROM commissioned_dispatch_headless_approval_escalation AS escalation
@@ -548,35 +507,6 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
                     AND approval_call.recommendation_kind = 'escalate_to_human')
                    OR approval_call.terminal_disposition_kind IN (
                        'known_failed', 'refused', 'cancelled', 'ambiguous'
-                   )
-               )
-               -- `unattended_escalation_applies` decides headlessness per
-               -- dispatch source, and only repository watch can suppress a
-               -- human. A commissioned dispatch takes the unattended path only
-               -- when its authority has been withdrawn, and that path
-               -- terminalizes the turn rather than parking it, so a
-               -- commissioned request still parked in `awaiting_tool_approval`
-               -- is always waiting on the commissioning operator.
-               AND (
-                   NOT (
-                       COALESCE(turn.goal_generation = 1, false)
-                       AND EXISTS (
-                           SELECT 1
-                             FROM repo_watch_dispatch_action AS dispatched
-                            WHERE dispatched.session_id = selected.session_id
-                       )
-                   )
-                   OR EXISTS (
-                       SELECT 1
-                         FROM accepted_input AS steering
-                        WHERE steering.session_id = selected.session_id
-                          AND steering.expected_active_turn_id = turn.turn_id
-                          AND steering.disposition_kind = 'pending_steering'
-                   )
-                   OR EXISTS (
-                       SELECT 1
-                         FROM repo_watch_headless_approval_escalation AS escalation
-                        WHERE escalation.session_id = selected.session_id
                    )
                )
            ELSE false

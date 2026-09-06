@@ -41,11 +41,7 @@ impl BlobDigest {
 
 impl fmt::Display for BlobDigest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(EXTERNAL_PREFIX)?;
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        write!(formatter, "{EXTERNAL_PREFIX}{}", hex::encode(self.0))
     }
 }
 
@@ -62,25 +58,19 @@ impl FromStr for BlobDigest {
                 BlobDigestParseFailure::InvalidLength,
             ));
         }
-        let mut bytes = [0_u8; 32];
-        for (destination, pair) in bytes.iter_mut().zip(encoded.as_bytes().chunks_exact(2)) {
-            let high = lowercase_hex_value(pair[0]).ok_or_else(|| {
-                BlobDigestParseError::new(value, BlobDigestParseFailure::InvalidHex)
-            })?;
-            let low = lowercase_hex_value(pair[1]).ok_or_else(|| {
-                BlobDigestParseError::new(value, BlobDigestParseFailure::InvalidHex)
-            })?;
-            *destination = (high << 4) | low;
+        if !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(BlobDigestParseError::new(
+                value,
+                BlobDigestParseFailure::InvalidHex,
+            ));
         }
+        let mut bytes = [0_u8; 32];
+        hex::decode_to_slice(encoded, &mut bytes)
+            .map_err(|_| BlobDigestParseError::new(value, BlobDigestParseFailure::InvalidHex))?;
         Ok(Self(bytes))
-    }
-}
-
-fn lowercase_hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
     }
 }
 
@@ -428,7 +418,7 @@ mod tests {
         "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     #[test]
-    fn inv056_exact_bytes_have_one_tagged_lowercase_identity() {
+    fn exact_bytes_have_one_tagged_lowercase_identity() {
         let first_producer = BlobDigest::digest(b"abc");
         let independently_owned_bytes = Vec::from(*b"abc");
         let second_producer = BlobDigest::digest(&independently_owned_bytes);
@@ -467,8 +457,8 @@ mod tests {
     }
 
     #[test]
-    /// INV-078: deterministic reuse is fixed by inputs, procedure, parameters, and implementation.
-    fn inv078_deterministic_derivation_keys_cover_exact_procedure_provenance() {
+    /// deterministic reuse is fixed by inputs, procedure, parameters, and implementation.
+    fn deterministic_derivation_keys_cover_exact_procedure_provenance() {
         let transformation = BlobTransformation::try_new(
             BlobTransformationName::try_new("image.thumbnail")
                 .expect("the fixture procedure name is valid"),

@@ -1,0 +1,22 @@
+{
+  "source": "informational-answer.json",
+  "edge": "question finding",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/0/body",
+      "value": "This double-dispatches drafts forever, can you confirm?"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/0/body",
+      "value": "This double-dispatches drafts forever, can you confirm?"
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/body",
+      "value": "ack"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/body",
+      "value": "ack"
+    }
+  ]
+}

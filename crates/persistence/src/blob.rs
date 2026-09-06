@@ -3,8 +3,6 @@
 //! Store I/O is deliberately absent from this adapter. Callers publish and
 //! verify bytes first, then register the durable facts in one transaction.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use signalbox_blob_store::{BlobObjectKey, BlobStoreName, ExpectedBlob, MAX_BLOB_STORES};
 use signalbox_domain::BlobDigest;
@@ -22,9 +20,12 @@ const LOAD_ENTRY: &str = r#"SELECT blob.digest, blob.byte_length,
       ORDER BY blob_replica.store_name COLLATE "C",
                blob_replica.object_key COLLATE "C""#;
 
+#[derive(signalbox_derive::Accessors)]
 /// One durable deployment store name and backend namespace identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobStoreBindingRecord {
+    /// Returns the durable deployment store name.
+    #[get]
     store: BlobStoreName,
     namespace_id: Uuid,
 }
@@ -38,21 +39,21 @@ impl BlobStoreBindingRecord {
         }
     }
 
-    /// Returns the durable deployment store name.
-    pub const fn store(&self) -> &BlobStoreName {
-        &self.store
-    }
-
     /// Returns the deployment-supplied backend namespace identity.
     pub const fn namespace_id(&self) -> Uuid {
         self.namespace_id
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One verified placement in a durable blob catalog entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobReplicaRecord {
+    /// Returns the durable deployment store identity.
+    #[get]
     store: BlobStoreName,
+    /// Returns the exact recorded object key.
+    #[get]
     object_key: BlobObjectKey,
 }
 
@@ -61,22 +62,15 @@ impl BlobReplicaRecord {
     pub const fn new(store: BlobStoreName, object_key: BlobObjectKey) -> Self {
         Self { store, object_key }
     }
-
-    /// Returns the durable deployment store identity.
-    pub const fn store(&self) -> &BlobStoreName {
-        &self.store
-    }
-
-    /// Returns the exact recorded object key.
-    pub const fn object_key(&self) -> &BlobObjectKey {
-        &self.object_key
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One immutable blob identity and all currently recorded verified replicas.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobCatalogEntry {
     expected: ExpectedBlob,
+    /// Returns verified replicas in durable store-name and object-key order.
+    #[get(unbox)]
     replicas: Box<[BlobReplicaRecord]>,
 }
 
@@ -84,11 +78,6 @@ impl BlobCatalogEntry {
     /// Returns the immutable digest and positive byte length.
     pub const fn expected(&self) -> ExpectedBlob {
         self.expected
-    }
-
-    /// Returns verified replicas in durable store-name and object-key order.
-    pub fn replicas(&self) -> &[BlobReplicaRecord] {
-        &self.replicas
     }
 
     /// Finds the verified replica in one routed store, if present.
@@ -100,71 +89,65 @@ impl BlobCatalogEntry {
 }
 
 /// Durable catalog facts disagreed or could not reconstruct typed values.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum BlobCatalogCorruption {
     /// A stored digest was not exactly one SHA-256 value.
+    #[error("stored blob digest is invalid")]
     InvalidDigest,
     /// A stored byte length was not a positive integral u64.
+    #[error("stored blob byte length is invalid")]
     InvalidByteLength,
     /// A stored deployment store name violated its type boundary.
+    #[error("stored blob replica store name is invalid")]
     InvalidStoreName,
     /// A store name was already bound to another namespace UUID.
+    #[error("blob store name is bound to another namespace")]
     StoreNamespaceMismatch,
     /// A namespace UUID was already bound to another store name.
+    #[error("blob namespace is bound to another store name")]
     NamespaceStoreMismatch,
     /// A supplied replica named a store other than its supplied binding.
+    #[error("blob replica disagrees with its store binding")]
     ReplicaBindingMismatch,
     /// A stored object key violated its type boundary.
+    #[error("stored blob replica object key is invalid")]
     InvalidObjectKey,
     /// One blob identity was paired with two positive byte lengths.
+    #[error("blob identity has conflicting byte lengths")]
     BlobLengthMismatch,
     /// One digest/store replica slot was paired with two object keys.
+    #[error("blob replica slot has conflicting object keys")]
     ReplicaKeyMismatch,
     /// One store/object key was paired with two blob identities.
+    #[error("blob object key names conflicting identities")]
     ObjectKeyCollision,
     /// A committed blob row had no verified replica.
+    #[error("blob identity has no verified replica")]
     BlobWithoutReplica,
     /// A left-joined replica row had only some nullable fields present.
+    #[error("blob replica row is incomplete")]
     PartialReplica,
     /// Registration returned without the replica it was required to record.
+    #[error("registered blob replica could not be reloaded")]
     MissingRegisteredReplica,
     /// Durable rows exceeded the version-one deployment store bound.
+    #[error("blob store identities exceed the deployment bound")]
     StoreLimitExceeded,
 }
 
-impl fmt::Display for BlobCatalogCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::InvalidDigest => "stored blob digest is invalid",
-            Self::InvalidByteLength => "stored blob byte length is invalid",
-            Self::InvalidStoreName => "stored blob replica store name is invalid",
-            Self::StoreNamespaceMismatch => "blob store name is bound to another namespace",
-            Self::NamespaceStoreMismatch => "blob namespace is bound to another store name",
-            Self::ReplicaBindingMismatch => "blob replica disagrees with its store binding",
-            Self::InvalidObjectKey => "stored blob replica object key is invalid",
-            Self::BlobLengthMismatch => "blob identity has conflicting byte lengths",
-            Self::ReplicaKeyMismatch => "blob replica slot has conflicting object keys",
-            Self::ObjectKeyCollision => "blob object key names conflicting identities",
-            Self::BlobWithoutReplica => "blob identity has no verified replica",
-            Self::PartialReplica => "blob replica row is incomplete",
-            Self::MissingRegisteredReplica => "registered blob replica could not be reloaded",
-            Self::StoreLimitExceeded => "blob store identities exceed the deployment bound",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl Error for BlobCatalogCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL unavailability, commit ambiguity, or durable catalog corruption.
 #[derive(Debug)]
 pub enum BlobCatalogRepositoryError {
+    #[error("blob catalog database failure: {field_0}")]
     /// PostgreSQL could not complete a statement.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("blob catalog commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL did not reveal whether the registration commit took effect.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Durable rows or competing registration facts disagreed.
-    Corruption(BlobCatalogCorruption),
+    Corruption(#[source] BlobCatalogCorruption),
 }
 
 impl BlobCatalogRepositoryError {
@@ -173,30 +156,6 @@ impl BlobCatalogRepositoryError {
         match self {
             Self::Corruption(corruption) => Some(*corruption),
             Self::Database(_) | Self::CommitAmbiguous(_) => None,
-        }
-    }
-}
-
-impl fmt::Display for BlobCatalogRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "blob catalog database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "blob catalog commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for BlobCatalogRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Corruption(error) => Some(error),
         }
     }
 }

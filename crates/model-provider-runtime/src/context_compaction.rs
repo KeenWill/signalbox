@@ -1,13 +1,13 @@
 //! Dedicated model execution for append-only context summaries.
 
-use std::{error::Error, fmt, future::Future, pin::Pin};
+use std::{fmt, future::Future, pin::Pin};
 
 use signalbox_domain::{DirectModelSelection, ModelCallId, ResolvedProviderTarget, SessionId};
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, CredentialReference,
     DeliveryMode, ModelOperation, ModelRuntime, ModelSettings, Observation, PreparationOutcome,
-    ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
-    UnsentCause,
+    ProviderCompactionMode, ProviderReportedModel, RequestedTarget, ResolvedTarget,
+    TerminalEvidence, TokenUsage, UnsentCause,
 };
 
 use crate::{ProviderTargetRelation, RuntimeModelCatalog, relate_provider_target};
@@ -118,6 +118,8 @@ where
             );
             operation.system = Some(request.system_prompt);
             operation.delivery = DeliveryMode::Buffered;
+            operation.provider_compaction = ProviderCompactionMode::Suppressed;
+            operation.provider_compaction_supported = definition.provider_compaction_supported();
             let prepared = match self
                 .runtime
                 .prepare(operation, CancellationSignal::never())
@@ -154,6 +156,9 @@ where
             }
             let reported_model = match &report.evidence {
                 TerminalEvidence::Completed(evidence) => evidence.reported_model.as_ref(),
+                TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+                    completion.reported_model.as_ref()
+                }
                 TerminalEvidence::Refused(evidence) => evidence.reported_model.as_ref(),
                 TerminalEvidence::ProviderError(evidence) => evidence.reported_model.as_ref(),
                 TerminalEvidence::CancellationConfirmed(evidence) => {
@@ -167,6 +172,9 @@ where
             }
             let completed = match report.evidence {
                 TerminalEvidence::Completed(completed) => completed,
+                TerminalEvidence::CompletedWithProviderCompaction { .. } => {
+                    return Err(ContextCompactionModelError::NonTextSummary);
+                }
                 TerminalEvidence::Refused(_) => {
                     return Err(ContextCompactionModelError::Refused);
                 }
@@ -213,6 +221,7 @@ where
                     AssistantPart::Thinking { text, .. } if text.is_empty() => {}
                     AssistantPart::Thinking { .. }
                     | AssistantPart::RedactedThinking { .. }
+                    | AssistantPart::ProviderCompaction { .. }
                     | AssistantPart::ToolCall(_)
                     | AssistantPart::SuppressedToolCall(_) => {
                         return Err(ContextCompactionModelError::NonTextSummary);
@@ -246,46 +255,53 @@ fn require_same_target(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized failure of one dedicated summary call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextCompactionModelError {
+    #[error("context compaction model execution failed")]
     /// The durable target has no runtime mapping.
     UnconfiguredTarget,
+    #[error("context compaction model execution failed")]
     /// Runtime preparation observed cancellation before send.
     CancelledBeforeSend,
+    #[error("context compaction model execution failed")]
     /// Credential or request preparation failed safely.
     PreparationFailed,
+    #[error("context compaction model execution failed")]
     /// Adapter request construction was defective.
     PreparationDefect,
+    #[error("context compaction model execution failed")]
     /// Runtime correlation differed from the durable call.
     CorrelationMismatch,
+    #[error("context compaction model execution failed")]
     /// The provider returned an explicit refusal.
     Refused,
+    #[error("context compaction model execution failed")]
     /// A complete, correlated provider error response was observed.
     ProviderError,
+    #[error("context compaction model execution failed")]
     /// The provider definitively confirmed cancellation.
     CancellationConfirmed,
+    #[error("context compaction model execution failed")]
     /// The request provably never reached an acceptance-capable boundary.
     ProvenUnsent,
+    #[error("context compaction model execution failed")]
     /// Provider acceptance or completion remained uncertain.
     BoundaryLoss,
+    #[error("context compaction model execution failed")]
     /// The provider reported a different model lineage.
     ProviderTargetSubstituted,
+    #[error("context compaction model execution failed")]
     /// The completion stopped before a complete summary.
     IncompleteSummary,
+    #[error("context compaction model execution failed")]
     /// Completion material was not plain text.
     NonTextSummary,
+    #[error("context compaction model execution failed")]
     /// Summary text was empty or contained U+0000.
     InvalidSummary,
 }
-
-impl fmt::Display for ContextCompactionModelError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("context compaction model execution failed")
-    }
-}
-
-impl Error for ContextCompactionModelError {}
 
 #[cfg(test)]
 mod tests {
@@ -354,13 +370,13 @@ mod tests {
         )
     }
 
-    /// S02 / INV-014: the dedicated compaction call configures no thinking
+    /// the dedicated compaction call configures no thinking
     /// display, so a Claude 5-family completion carries the omitted-display
     /// empty thinking block by default. Folding the summary drops it exactly as
     /// the ordinary bridge does, instead of failing the default path closed and
     /// stalling the very turn automatic compaction exists to rescue.
     #[tokio::test]
-    async fn s02_inv014_empty_thinking_part_is_dropped_from_a_compaction_summary() {
+    async fn empty_thinking_part_is_dropped_from_a_compaction_summary() {
         let model = compaction_model(vec![
             AssistantPart::Thinking {
                 text: String::new(),
@@ -377,11 +393,11 @@ mod tests {
         assert_eq!(result.summary, "compacted fixture summary");
     }
 
-    /// S02 / INV-014: thinking with actual text still fails the summary closed,
+    /// thinking with actual text still fails the summary closed,
     /// because accepting it would publish a summary that silently omits
     /// response material no durable representation can carry.
     #[tokio::test]
-    async fn s02_inv014_nonempty_thinking_part_still_fails_the_summary_closed() {
+    async fn nonempty_thinking_part_still_fails_the_summary_closed() {
         let model = compaction_model(vec![
             AssistantPart::Thinking {
                 text: String::from("visible reasoning"),
@@ -396,10 +412,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-014: redacted thinking carries withheld reasoning in opaque
+    /// redacted thinking carries withheld reasoning in opaque
     /// form and fails the summary closed for the same reason.
     #[tokio::test]
-    async fn s02_inv014_redacted_thinking_part_still_fails_the_summary_closed() {
+    async fn redacted_thinking_part_still_fails_the_summary_closed() {
         let model = compaction_model(vec![
             AssistantPart::RedactedThinking {
                 data: String::from("opaque-fixture-payload"),

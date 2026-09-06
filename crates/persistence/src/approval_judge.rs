@@ -13,18 +13,17 @@ use signalbox_application::{
 use signalbox_domain::{
     ActiveTurnPhase, BranchName, CommissionedDispatchId, CommitSha, ContextFrontierId,
     DelegateApprovalRecommendation, DelegateToolApproval, DirectModelSelection,
-    FrozenModelSelection, GoalGeneration, GoalGenerationSnapshot, GoalNeed,
-    GoalSchedulerProvenance, GoalStatement, ModelCallId, ModelTargetCatalog, ProviderModelIdentity,
-    ProviderReportedTokenUsage, PullRequestNumber, RepoWatchDispatchId, RepositorySlug,
-    ResolvedProviderTarget, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
-    SessionSystemPrompt, SessionTemplateName, ToolApprovalPosture, ToolDecisionRationale,
-    ToolRequest, ToolRequestId, TurnAttemptId, TurnId, TurnTerminalCause,
+    FrozenModelSelection, GoalGeneration, GoalGenerationSnapshot, GoalStatement, ModelCallId,
+    ModelTargetCatalog, ProviderModelIdentity, ProviderReportedTokenUsage, PullRequestNumber,
+    RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
+    SessionId, SessionSystemPrompt, SessionTemplateName, ToolApprovalPosture,
+    ToolDecisionRationale, ToolRequest, ToolRequestId, TurnAttemptId, TurnId, TurnTerminalCause,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
     ModelCredentialFamilyCatalog, commit_failure_is_ambiguous,
-    goal::{self, GoalRepositoryError, GoalTransitionOutcome, load_goal_from_connection},
+    goal::{self, GoalRepositoryError, load_goal_from_connection},
     mapping::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         ToolApprovalDecisionSourceStorageKind, approval_judge_recommendation_from_str,
@@ -102,24 +101,33 @@ impl SessionAuthorityContext {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact durable facts committed before approval-judge provider preparation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedApprovalJudge {
+    /// Borrows the exact parked request being judged.
+    #[get]
     request: ToolRequest,
     call: ModelCallId,
     selection: DirectModelSelection,
     target: ResolvedProviderTarget,
+    /// Borrows the pinned non-secret credential reference.
+    #[get(str)]
     credential_reference: String,
     input_includes_cache_tokens: bool,
+    /// Borrows the session authority this request was produced under.
+    ///
+    /// The context is read fresh on every preparation and is deliberately
+    /// absent from the durable judge binding, so it never participates in the
+    /// exact-call recheck that guards authorization and completion. Completion
+    /// does compare the goal it carries against the statement in force at that
+    /// moment, but by resolving that statement again rather than by binding
+    /// this value durably.
+    #[get]
     session_context: SessionAuthorityContext,
 }
 
 impl PreparedApprovalJudge {
-    /// Borrows the exact parked request being judged.
-    pub const fn request(&self) -> &ToolRequest {
-        &self.request
-    }
-
     /// Returns the dedicated model-call identity.
     pub const fn call(&self) -> ModelCallId {
         self.call
@@ -135,26 +143,9 @@ impl PreparedApprovalJudge {
         self.target
     }
 
-    /// Borrows the pinned non-secret credential reference.
-    pub fn credential_reference(&self) -> &str {
-        &self.credential_reference
-    }
-
     /// Reports whether the provider's input total includes cache axes.
     pub const fn input_includes_cache_tokens(&self) -> bool {
         self.input_includes_cache_tokens
-    }
-
-    /// Borrows the session authority this request was produced under.
-    ///
-    /// The context is read fresh on every preparation and is deliberately
-    /// absent from the durable judge binding, so it never participates in the
-    /// exact-call recheck that guards authorization and completion. Completion
-    /// does compare the goal it carries against the statement in force at that
-    /// moment, but by resolving that statement again rather than by binding
-    /// this value durably.
-    pub const fn session_context(&self) -> &SessionAuthorityContext {
-        &self.session_context
     }
 }
 
@@ -214,13 +205,6 @@ pub enum CompleteApprovalJudgeOutcome {
     /// The judge explicitly left the request parked for a user decision.
     EscalatedToHuman,
     /// An unattended turn was terminalized and audited for its dispatch.
-    ///
-    /// Whether the batch released is a fact about the batch rather than about
-    /// this completion — a sibling action still pursuing holds it, and settles
-    /// it later — so it is read from `repo_watch_dispatch_release` and the
-    /// escalation audit view instead of being reported here. Reporting it here
-    /// made an exact replay answer differently once a sibling finished, and
-    /// credited this completion with that sibling's effect.
     HeadlessEscalationTerminalized,
 }
 
@@ -601,15 +585,16 @@ impl PostgresApprovalJudgeRepository {
                 CompleteApprovalJudgeOutcome::Decided
             }
             None => {
-                if unattended_escalation_applies(&mut transaction, prepared, authority_stands)
-                    .await?
+                if let Some(dispatch) =
+                    unattended_escalation_dispatch(&mut transaction, prepared, authority_stands)
+                        .await?
                 {
                     persist_headless_escalation(
                         &mut transaction,
                         prepared,
                         decision.batch(),
                         identities,
-                        authority_stands,
+                        dispatch,
                         &mut next_closed_result_entry,
                     )
                     .await?;
@@ -716,68 +701,38 @@ impl PostgresApprovalJudgeRepository {
     }
 }
 
-/// Need text for the execution-failure block an unattended escalation appends.
+/// The first goal generation commissioned by a commissioned dispatch.
 ///
-/// It claims no release, because a batch a sibling action still pursues is not
-/// released by this escalation and becomes so only when that sibling ends. It
-/// promises no redispatch either: `repo_watch_owe_dispatch_requeue` records the
-/// replacement obligation only while the rule remains active and, for a
-/// pull-request target, while a later close or merge has not made the work
-/// stale — and the requeue it does record counts as a failed attempt, so the
-/// attempt that spends the lineage's budget parks the obligation in the same
-/// transaction rather than redispatching. It states that no automatic
-/// resumption is coming, which is true of this block alone among
-/// execution-failure blocks and is why it names the repair itself — the repair
-/// is the whole of what an operator is promised.
-const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. Repository watch redispatches the work under a fresh dispatch once its batch ends, unless its rule has been deactivated, the pull request has closed or merged since, or this attempt spent the lineage's retry budget and parked it for an operator or new pull-request activity; no automatic resumption is scheduled for this block either way. Resume this goal only to continue this session by hand: a further escalation on work you resumed waits for you instead of failing the turn again.";
-
-/// The generation a repository-watch dispatch commissions in the session it
-/// creates, which is the only generation its authority describes.
-///
-/// The dispatch creates the session and commissions its goal in one
-/// transaction, so the commission is that session's first generation. Repository
-/// watch identifies the commission it owns the same way where it stops one
-/// (`goal::insert_repo_watch_composed_stop`).
+/// A commissioned dispatch creates the session and commissions its goal in one
+/// transaction, so its authority describes that session's first generation.
 const DISPATCH_COMMISSIONED_GENERATION: GoalGeneration = GoalGeneration::new(NonZeroU64::MIN);
 
-/// Whether this escalation takes the unattended path rather than parking.
+/// Returns the commissioned dispatch for an unattended escalation closeout.
 ///
 /// Three conditions, each answering a different question about whether a user
 /// is there and whether the path has anything left to do.
 ///
-/// Without dispatch authority the session is an ordinary one, and the ordinary
-/// park is what its escalation gets. A steer accepted while this turn awaited
-/// its judge is a user attending the session, and is also the one shape the
-/// unattended path cannot durably take: terminalizing a turn a
+/// Without commissioned dispatch authority the session takes the ordinary
+/// park. A steer accepted while this turn awaited its judge is a user attending
+/// the session, and is also the one shape the unattended path cannot durably
+/// take: terminalizing a turn a
 /// `pending_steering` input still names violates
 /// `turn_lifecycle_pending_steering_closed` and would fail the whole
-/// completion, leaving the request parked and the judge call in flight, while
-/// reclassifying the steer into a queued successor would start fresh work in a
-/// session whose dispatch is being released for redispatch.
+/// completion, leaving the request parked and the judge call in flight.
 ///
-/// Work a repository-watch session has already escalated once is the third.
-/// Its exceptional block is never resumed automatically, so a later turn in
-/// that session is work an operator resumed and waits for them. An
-/// operator-commissioned session is attended by the commissioning operator:
-/// its completed delegate escalation is the bounded automatic decision's
-/// exhaustion point and parks the exact request for that operator instead of
-/// spending a goal retry on the same undecided action.
-///
-/// Standing authority is the last word on it. Withdrawn authority means the
-/// goal ended while this judge was in flight, so nobody is behind the work
-/// after all and it is terminalized rather than parked for a user who will
-/// never come. A turn no escalation preceded is the dispatched work itself,
-/// including one an ordinary execution failure had automatically resumed, and
-/// stays unattended.
+/// An operator-commissioned session is attended by the commissioning operator,
+/// so its completed delegate escalation parks while authority stands. Withdrawn
+/// authority means the goal ended while this judge was in flight, so nobody is
+/// behind the work and the turn is terminalized.
 ///
 /// [`goal mode`]: ../../../docs/spec/goal-mode.md
-async fn unattended_escalation_applies(
+async fn unattended_escalation_dispatch(
     connection: &mut PgConnection,
     prepared: &PreparedApprovalJudge,
     authority_stands: bool,
-) -> Result<bool, ApprovalJudgeRepositoryError> {
+) -> Result<Option<CommissionedDispatchId>, ApprovalJudgeRepositoryError> {
     let Some(dispatch) = prepared.session_context.dispatch() else {
-        return Ok(false);
+        return Ok(None);
     };
     if turn_awaits_pending_steering(
         connection,
@@ -786,23 +741,13 @@ async fn unattended_escalation_applies(
     )
     .await?
     {
-        return Ok(false);
+        return Ok(None);
     }
     match dispatch.dispatch() {
-        ApprovalJudgeDispatchProvenance::Commissioned(_) => Ok(!authority_stands),
-        ApprovalJudgeDispatchProvenance::RepoWatch(_) => {
-            let escalated_before: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                    SELECT 1
-                      FROM repo_watch_headless_approval_escalation
-                     WHERE session_id = $1
-                )",
-            )
-            .bind(session_id_to_uuid(prepared.request.session()))
-            .fetch_one(&mut *connection)
-            .await?;
-            Ok(!(escalated_before && authority_stands))
+        ApprovalJudgeDispatchProvenance::Commissioned(dispatch) if !authority_stands => {
+            Ok(Some(dispatch))
         }
+        _ => Ok(None),
     }
 }
 
@@ -837,18 +782,11 @@ async fn persist_headless_escalation(
     prepared: &PreparedApprovalJudge,
     batch: &signalbox_domain::ToolBatch,
     identities: ApprovalJudgeCompletionIdentities,
-    authority_stands: bool,
+    dispatch: CommissionedDispatchId,
     next_closed_result_entry: &mut impl FnMut(ToolRequestId) -> SemanticTranscriptEntryId,
 ) -> Result<(), ApprovalJudgeRepositoryError> {
     let session = prepared.request.session();
     let turn = prepared.request.turn();
-    let dispatch = prepared
-        .session_context
-        .dispatch()
-        .map(ApprovalJudgeDispatchAuthority::dispatch)
-        .ok_or(ApprovalJudgeCorruption::Missing(
-            "headless dispatch authority",
-        ))?;
     let predecessor_attempt: Uuid = sqlx::query_scalar(
         "SELECT turn_attempt_id FROM model_call
           WHERE model_call_id = $1 AND session_id = $2 AND turn_id = $3",
@@ -1033,92 +971,25 @@ async fn persist_headless_escalation(
         },
     )
     .await?;
-    let audited = match dispatch {
-        ApprovalJudgeDispatchProvenance::RepoWatch(dispatch) => sqlx::query(
-            "INSERT INTO repo_watch_headless_approval_escalation
-                    (model_call_id, request_id, dispatch_id, action_ordinal, session_id,
-                     turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id)
-                 SELECT $1, $2, action.dispatch_id, action.action_ordinal, $3, $4, $5, $6, $7
-                   FROM repo_watch_dispatch_action AS action
-                  WHERE action.session_id = $3 AND action.dispatch_id = $8",
-        )
-        .bind(prepared.call.into_uuid())
-        .bind(tool_request_id_to_uuid(prepared.request.id()))
-        .bind(session_id_to_uuid(session))
-        .bind(turn_id_to_uuid(turn))
-        .bind(attempt)
-        .bind(failure_entry.into_uuid())
-        .bind(identities.terminal_frontier().into_uuid())
-        .bind(dispatch.as_uuid())
-        .execute(&mut *connection)
-        .await
-        .map_err(classify_insert)?
-        .rows_affected(),
-        ApprovalJudgeDispatchProvenance::Commissioned(dispatch) => sqlx::query(
-            "INSERT INTO commissioned_dispatch_headless_approval_escalation
-                    (model_call_id, request_id, dispatch_id, session_id, turn_id,
-                     terminal_attempt_id, failure_entry_id, terminal_frontier_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        )
-        .bind(prepared.call.into_uuid())
-        .bind(tool_request_id_to_uuid(prepared.request.id()))
-        .bind(dispatch.as_uuid())
-        .bind(session_id_to_uuid(session))
-        .bind(turn_id_to_uuid(turn))
-        .bind(attempt)
-        .bind(failure_entry.into_uuid())
-        .bind(identities.terminal_frontier().into_uuid())
-        .execute(&mut *connection)
-        .await
-        .map_err(classify_insert)?
-        .rows_affected(),
-    };
+    let audited = sqlx::query(
+        "INSERT INTO commissioned_dispatch_headless_approval_escalation
+                (model_call_id, request_id, dispatch_id, session_id, turn_id,
+                 terminal_attempt_id, failure_entry_id, terminal_frontier_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(prepared.call.into_uuid())
+    .bind(tool_request_id_to_uuid(prepared.request.id()))
+    .bind(dispatch.as_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(attempt)
+    .bind(failure_entry.into_uuid())
+    .bind(identities.terminal_frontier().into_uuid())
+    .execute(&mut *connection)
+    .await
+    .map_err(classify_insert)?
+    .rows_affected();
     require_single(audited, "headless escalation audit")?;
-
-    if authority_stands && matches!(dispatch, ApprovalJudgeDispatchProvenance::RepoWatch(_)) {
-        // Deliberately not routed through `PostgresGoalPassDisposition`, which
-        // owns the bounded automatic resumption every other execution-failure
-        // block receives (`docs/spec/goal-mode.md`). Two reasons, both stated
-        // by that page's repository-watch exception. It must commit inside this
-        // transaction, atomically with the terminalization, the audit row, and
-        // the release attempt below; and the retry this failure is owed already
-        // exists and is a different one — repository watch redispatches the
-        // work under a fresh dispatch, so resuming the goal here would re-run
-        // the same escalating turn against a request no user is attending, up
-        // to the resumption budget, beside that redispatch. Where that
-        // redispatch is withheld, because the rule was deactivated or the pull
-        // request closed, the work is not wanted at all and resuming it is
-        // worse still. The need text above therefore names the repair itself
-        // rather than promising resumption. A commissioned dispatch owns no
-        // redispatch, so its terminal turn is left pursuing for the ordinary
-        // goal disposition adapter and durable eligibility sweep to reconcile
-        // into a bounded execution-failure resumption.
-        let need = GoalNeed::try_new(String::from(HEADLESS_ESCALATION_GOAL_NEED))
-            .map_err(|_| ApprovalJudgeCorruption::Inconsistent("headless escalation goal need"))?;
-        let outcome = goal::block_execution_failure_locked(
-            connection,
-            session,
-            need,
-            GoalSchedulerProvenance::new(turn),
-        )
-        .await
-        .map_err(map_goal_error)?;
-        if !matches!(outcome, GoalTransitionOutcome::Applied(_)) {
-            return Err(ApprovalJudgeCorruption::Inconsistent(
-                "headless escalation goal transition",
-            )
-            .into());
-        }
-    }
-    // Only a repository-watch dispatch holds a batch singleton to release; a
-    // commissioned dispatch owns no batch, so there is nothing to settle.
-    if matches!(dispatch, ApprovalJudgeDispatchProvenance::RepoWatch(_)) {
-        sqlx::query("SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2)")
-            .bind(turn_id_to_uuid(turn))
-            .bind(session_id_to_uuid(session))
-            .execute(&mut *connection)
-            .await?;
-    }
     Ok(())
 }
 
@@ -1277,25 +1148,14 @@ async fn load_session_authority_context(
     )
 }
 
-/// Reads the dispatch authority in force for one judged turn.
+/// Reads the commissioned-dispatch authority in force for one judged turn.
 ///
-/// Two append-only sources may record a fence: the repository-watch dispatch
-/// action and the operator-commissioned dispatch. Both commission generation
-/// one of the session they create in the transaction that creates it, so one
-/// generation gate serves both, and one session recording both is corruption.
-///
-/// A dispatch commissions generation one of the session it creates and owns
-/// nothing else in it: [`docs/spec/repo-watch.md`] admits a later unrelated
-/// successor goal on the same session, and that generation's turns were never
-/// described by the dispatch's repository, head, and base values. Binding by
-/// session alone would judge such a turn against that stale fence and send its
-/// escalation down the headless path, which fails the turn and blocks the goal
-/// instead of parking it for the user whose goal it is.
+/// A commissioned dispatch commissions generation one of the session it
+/// creates and owns nothing else in it. Binding by session alone would judge a
+/// later unrelated successor goal against the stale commissioned fence.
 ///
 /// A turn no generation recorded is not dispatched work either, and resolves to
 /// no authority for the same reason.
-///
-/// [`docs/spec/repo-watch.md`]: ../../../docs/spec/repo-watch.md
 async fn load_dispatch_authority(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1304,63 +1164,13 @@ async fn load_dispatch_authority(
     if generation != Some(DISPATCH_COMMISSIONED_GENERATION) {
         return Ok(None);
     }
-    let repo_watch = load_repo_watch_dispatch_authority(&mut *connection, session).await?;
-    let commissioned = load_commissioned_dispatch_authority(&mut *connection, session).await?;
-    match (repo_watch, commissioned) {
-        (Some(_), Some(_)) => {
-            Err(ApprovalJudgeCorruption::Inconsistent("dispatch session ownership").into())
-        }
-        (authority @ Some(_), None) | (None, authority) => Ok(authority),
-    }
-}
-
-/// Reads the repository-watch fence recorded for one dispatched session.
-async fn load_repo_watch_dispatch_authority(
-    connection: &mut PgConnection,
-    session: SessionId,
-) -> Result<Option<ApprovalJudgeDispatchAuthority>, ApprovalJudgeRepositoryError> {
-    let rows = sqlx::query(
-        "SELECT action.dispatch_id, event.repository, event.target_kind,
-                event.pull_request_number, event.head_sha, event.head_repository,
-                event.head_branch, event.base_branch, event.workflow_branch
-           FROM repo_watch_dispatch_action AS action
-           JOIN repo_watch_event AS event ON event.event_id = action.event_id
-          WHERE action.session_id = $1
-          ORDER BY action.dispatch_id
-          LIMIT 2",
-    )
-    .bind(session_id_to_uuid(session))
-    .fetch_all(&mut *connection)
-    .await?;
-    let row = match rows.as_slice() {
-        [] => return Ok(None),
-        [row] => row,
-        [_, _, ..] => {
-            return Err(ApprovalJudgeCorruption::Inconsistent("dispatch session ownership").into());
-        }
-    };
-    let dispatch = ApprovalJudgeDispatchProvenance::RepoWatch(RepoWatchDispatchId::from_uuid(
-        required(row, "dispatch_id")?,
-    ));
-    decode_dispatch_authority(DispatchAuthorityRow {
-        dispatch,
-        repository: required(row, "repository")?,
-        target_kind: required(row, "target_kind")?,
-        pull_request_number: row.try_get("pull_request_number")?,
-        head_sha: row.try_get("head_sha")?,
-        head_repository: row.try_get("head_repository")?,
-        head_branch: row.try_get("head_branch")?,
-        base_branch: row.try_get("base_branch")?,
-        branch: row.try_get("workflow_branch")?,
-    })
-    .map(Some)
+    load_commissioned_dispatch_authority(&mut *connection, session).await
 }
 
 /// Reads the commissioned fence recorded for one operator-commissioned session.
 ///
-/// The row is written by the commissioning transaction itself, so unlike the
-/// repository-watch source there is no action/event join and no multi-action
-/// ambiguity: the session identity is unique in the table.
+/// The row is written by the commissioning transaction itself, and the session
+/// identity is unique in the table.
 async fn load_commissioned_dispatch_authority(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1483,10 +1293,10 @@ fn decode_dispatch_authority(
 /// an ordinary input submitted into a session that has a goal — and the
 /// generation states nothing about those, so reading one against the session's
 /// lineage would let a goal attached after the turn already existed supply
-/// authority it never covered. Repository-watch dispatch, which is why a
-/// dispatched session's requests reach the judge at all, no longer produces
-/// one: the turn carrying its tagged context is the commissioned generation's
-/// own turn and carries the record.
+/// authority it never covered. A commissioned dispatch supplies its judged
+/// request without such a goal-machinery turn record: the turn carrying its
+/// tagged context is the commissioned generation's own turn and carries the
+/// dispatch authority.
 ///
 /// This is what the judge reads while it is prepared. Completion asks a
 /// different question of the same lineage and uses
@@ -1846,19 +1656,14 @@ async fn exact_completed(
 
 /// Reads the identities a headless escalation durably closed the turn under.
 ///
-/// Either audit family may hold the record — one call closes under exactly one
-/// dispatch source — and absence in both is the attended escalation, which
-/// records no such row.
+/// The commissioned-dispatch audit supplies the identities needed to replay the
+/// completion outcome.
 async fn headless_escalation_identities(
     connection: &mut PgConnection,
     call: ModelCallId,
 ) -> Result<Option<ApprovalJudgeCompletionIdentities>, ApprovalJudgeRepositoryError> {
     let Some(row) = sqlx::query(
         "SELECT terminal_attempt_id, failure_entry_id, terminal_frontier_id
-           FROM repo_watch_headless_approval_escalation
-          WHERE model_call_id = $1
-         UNION ALL
-         SELECT terminal_attempt_id, failure_entry_id, terminal_frontier_id
            FROM commissioned_dispatch_headless_approval_escalation
           WHERE model_call_id = $1",
     )
@@ -2044,41 +1849,20 @@ fn map_tool_error(error: ToolLoopRepositoryError) -> ApprovalJudgeRepositoryErro
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Committed judge facts could not form one exact lifecycle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApprovalJudgeCorruption {
+    #[error("approval judge storage is missing {field_0}")]
     /// Required durable fact was absent.
     Missing(&'static str),
+    #[error("approval judge storage has inconsistent {field_0}")]
     /// Related lifecycle facts disagreed.
     Inconsistent(&'static str),
+    #[error("approval judge storage has unsupported state {field_0}")]
     /// A stored state discriminator was unknown.
     UnsupportedState(String),
 }
-
-impl fmt::Display for ApprovalJudgeCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(relationship) => {
-                write!(
-                    formatter,
-                    "approval judge storage is missing {relationship}"
-                )
-            }
-            Self::Inconsistent(relationship) => {
-                write!(
-                    formatter,
-                    "approval judge storage has inconsistent {relationship}"
-                )
-            }
-            Self::UnsupportedState(discriminator) => write!(
-                formatter,
-                "approval judge storage has unsupported state {discriminator}"
-            ),
-        }
-    }
-}
-
-impl Error for ApprovalJudgeCorruption {}
 
 /// Database, collision, configuration, authority, or corruption failure.
 #[derive(Debug)]

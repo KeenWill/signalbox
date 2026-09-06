@@ -83,10 +83,10 @@ use signalbox_tools_exec::{
     CargoDiagnosticRecords, CargoDiagnosticSpan, CargoDiagnosticsCommand,
     CargoDiagnosticsExecution, CargoDiagnosticsExecutor, CargoDiagnosticsResult,
     CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance, CargoFailureDetail,
-    CargoTestOutcome, CargoTestRecords, CargoTestResult, ExecExecutor, ExecResult,
-    ExecutionConfinement, OutputCapture, OutputEncoding, ProcessOutcome, ProcessSpawnFailure,
-    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
-    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+    ExecExecutor, ExecResult, ExecutionConfinement, OutputCapture, OutputEncoding, ProcessOutcome,
+    ProcessSpawnFailure, ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner,
+    SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner,
+    UnsandboxedExecTool,
 };
 use signalbox_tools_git::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
@@ -274,8 +274,6 @@ const EXEC_RESULT: &str = "model loop observed\n";
 const EXEC_FORCED_SANDBOXED_ARGUMENTS: &str = r#"{"program":"printf","arguments":["forced sandboxed eval\n"],"working_directory":".","timeout_seconds":30}"#;
 const EXEC_FORCED_SANDBOXED_OUTPUT: &str = "forced sandboxed eval\n";
 const EXEC_FORCED_READ_ONLY_OUTPUT: &str = "forced unsandboxed eval\n";
-const SYNTHETIC_CARGO_TEST_EXECUTABLE: &str = "synthetic-test-executable";
-const SYNTHETIC_CARGO_TEST_NAME: &str = "synthetic_test_name";
 const SYNTHETIC_CARGO_DIAGNOSTIC_MESSAGE: &str = "synthetic compiler diagnostic";
 const SYNTHETIC_CARGO_DIAGNOSTIC_FILE: &str = "src/lib.rs";
 const LIVE_CARGO_DIAGNOSTIC_MESSAGE: &str =
@@ -7100,7 +7098,8 @@ impl OperationTracker {
                 MessagePart::Text(_)
                 | MessagePart::ToolCall(_)
                 | MessagePart::Thinking { .. }
-                | MessagePart::RedactedThinking { .. } => None,
+                | MessagePart::RedactedThinking { .. }
+                | MessagePart::ProviderCompaction { .. } => None,
             })
         });
         self.record_new_results(tool_results);
@@ -10717,6 +10716,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::ContextSummary { .. }
                 | ProcessTranscriptEntry::User { .. }
                 | ProcessTranscriptEntry::Assistant { .. }
+                | ProcessTranscriptEntry::ProviderCompaction { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }
                 | ProcessTranscriptEntry::TurnFailed { .. }
@@ -10758,6 +10758,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::ContextSummary { .. }
                 | ProcessTranscriptEntry::User { .. }
                 | ProcessTranscriptEntry::Assistant { .. }
+                | ProcessTranscriptEntry::ProviderCompaction { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
                 | ProcessTranscriptEntry::ToolDenied { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }
@@ -11107,6 +11108,7 @@ fn completed_tool_result_entry_indices(entries: &[ProcessTranscriptEntry]) -> BT
             | ProcessTranscriptEntry::ContextSummary { .. }
             | ProcessTranscriptEntry::User { .. }
             | ProcessTranscriptEntry::Assistant { .. }
+            | ProcessTranscriptEntry::ProviderCompaction { .. }
             | ProcessTranscriptEntry::AssistantToolUse { .. }
             | ProcessTranscriptEntry::ToolDenied { .. }
             | ProcessTranscriptEntry::ToolClosed { .. }
@@ -11561,12 +11563,6 @@ fn exec_result_infrastructure_label(result: &TrackedToolResult) -> Option<&'stat
     };
     let execution = result.get("execution").unwrap_or(&result);
     if execution
-        .get("preparation_failure")
-        .is_some_and(|failure| !failure.is_null())
-    {
-        return Some("preparation failure");
-    }
-    if execution
         .get("cargo_failure")
         .is_some_and(|failure| !failure.is_null())
     {
@@ -11657,7 +11653,6 @@ struct CargoDiagnosticsEvalResult {
     command: String,
     execution: CargoDiagnosticsEvalExecution,
     diagnostics: CargoDiagnosticsEvalRecords,
-    tests: CargoDiagnosticsEvalRecords,
     eval_receipt: String,
 }
 
@@ -11669,7 +11664,6 @@ struct CargoDiagnosticsEvalExecution {
     stdout: CargoDiagnosticsEvalStream,
     stderr: CargoDiagnosticsEvalStream,
     cargo_failure: serde_json::Value,
-    preparation_failure: serde_json::Value,
 }
 
 #[derive(serde::Deserialize)]
@@ -11737,15 +11731,10 @@ fn cargo_diagnostics_result_passed(result: &serde_json::Value) -> bool {
         && cargo_diagnostics_stream_is_valid(&result.execution.stdout)
         && cargo_diagnostics_stream_is_valid(&result.execution.stderr)
         && result.execution.cargo_failure.is_null()
-        && result.execution.preparation_failure.is_null()
         && result.diagnostics.provenance == "workspace_influenced"
         && !result.diagnostics.limit_reached
         && !result.diagnostics.known_truncated
         && cargo_diagnostics_are_exact_live_fixture_evidence(&result.diagnostics.values)
-        && result.tests.provenance == "workspace_influenced"
-        && result.tests.values.is_empty()
-        && !result.tests.limit_reached
-        && !result.tests.known_truncated
 }
 
 fn cargo_diagnostics_are_exact_live_fixture_evidence(records: &[serde_json::Value]) -> bool {
@@ -18193,7 +18182,6 @@ fn successful_cargo_diagnostics_result() -> serde_json::Value {
         stdout: stream,
         stderr: stream,
         cargo_failure: None,
-        preparation_failure: None,
     });
     result["diagnostics"]["values"] = serde_json::json!([live_cargo_diagnostic()]);
     result[EVAL_RECEIPT_FIELD] = serde_json::json!(SYNTHETIC_EVAL_RECEIPT);
@@ -18208,17 +18196,10 @@ fn cargo_diagnostics_result(execution: CargoDiagnosticsExecution) -> serde_json:
         provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
         known_truncated: false,
     };
-    let tests = CargoTestRecords {
-        values: Vec::new(),
-        limit_reached: false,
-        provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
-        known_truncated: false,
-    };
     serde_json::to_value(CargoDiagnosticsResult {
         command: CargoDiagnosticsCommand::Check,
         execution,
         diagnostics: records,
-        tests,
     })
     .expect("producer Cargo diagnostics result serializes")
 }
@@ -18678,37 +18659,6 @@ fn forced_cargo_workspace_verification_failure_is_infrastructure() {
 }
 
 #[test]
-fn forced_cargo_diagnostics_rejects_known_truncated_test_records() {
-    let mut result = successful_cargo_diagnostics_result();
-    result["tests"]["known_truncated"] = serde_json::json!(true);
-    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
-
-    assert_eq!(
-        outcome.forced_disposition(),
-        EvalDisposition::Infrastructure
-    );
-}
-
-#[test]
-fn forced_cargo_diagnostics_rejects_unexpected_test_records() {
-    let mut result = successful_cargo_diagnostics_result();
-    result["tests"]["values"] = serde_json::to_value(vec![CargoTestResult {
-        executable: String::from(SYNTHETIC_CARGO_TEST_EXECUTABLE),
-        executable_completeness: CaptureCompleteness::Complete,
-        name: String::from(SYNTHETIC_CARGO_TEST_NAME),
-        name_completeness: CaptureCompleteness::Complete,
-        outcome: CargoTestOutcome::Passed,
-    }])
-    .expect("producer Cargo test records serialize");
-    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
-
-    assert_eq!(
-        outcome.forced_disposition(),
-        EvalDisposition::Infrastructure
-    );
-}
-
-#[test]
 fn forced_cargo_diagnostics_reports_sandbox_setup_failure_as_infrastructure() {
     let stream = CargoDiagnosticsStream {
         completeness: CaptureCompleteness::Complete,
@@ -18722,7 +18672,6 @@ fn forced_cargo_diagnostics_reports_sandbox_setup_failure_as_infrastructure() {
         stdout: stream,
         stderr: stream,
         cargo_failure: None,
-        preparation_failure: None,
     });
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
@@ -18747,7 +18696,6 @@ fn forced_cargo_diagnostics_reports_a_cargo_failure_as_infrastructure() {
             message: String::from(SYNTHETIC_CARGO_FAILURE),
             message_completeness: CaptureCompleteness::Complete,
         }),
-        preparation_failure: None,
     });
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 

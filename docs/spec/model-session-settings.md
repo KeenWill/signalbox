@@ -25,15 +25,17 @@ layer resolves at input acceptance, under the turn-binding rule on
 [sessions-and-transcript.md](sessions-and-transcript.md).
 
 A model's capability record lists the reasoning levels and service tiers it
-supports, and how it supports fast mode. Input acceptance needs the exact record
-for its target whenever the per-call overlay has a member other than inherit,
-including clear, or the stored settings were validated for a different model.
-Provider defaults carry no validation selection, so an all-inherit overlay over
-them needs none even when the selection changes. Fast mode is unsupported, a
-request control on the selected target, or a declared alternate serving target;
-a model that declares no fast-mode support is unsupported. A model change
-carries the inherited settings to the new model, adjusts those the new model
-does not support, and records each adjustment.
+supports, and how it supports fast mode: unsupported, a request control on the
+selected target, or a declared alternate serving target; a model that declares
+no fast-mode support is unsupported. Input acceptance needs the exact record for
+its target whenever the per-call overlay has a member other than inherit,
+including clear, or the stored settings were validated for a different model;
+provider defaults carry no validation selection, so an all-inherit overlay over
+them needs none even when the selection changes. A model change carries the
+inherited settings to the new model, adjusts those the new model does not
+support, and records each adjustment. When supported reasoning levels exist, a
+model change moves an unsupported inherited level to the greatest supported
+level at or below it, or the lowest supported level when none lies below.
 
 Two durable events record settings outcomes: `SessionModelSettingsChanged` when
 a defaults replacement changes a setting or model, and
@@ -71,6 +73,9 @@ and is not in the settings vocabulary.
 Signalbox does not infer capability support from model-name prefixes and does
 not run a provider CLI during request preparation.
 
+Codex CLI context-window overrides are owned by
+[configuration and credentials](configuration-and-credentials.md).
+
 ## Boundary contracts
 
 A reasoning level of none is an explicit provider value, distinct from an absent
@@ -88,9 +93,9 @@ Override provenance is part of command equality. A copied value is not
 interchangeable with the same explicitly set value.
 
 Profile and global layers are resolved and copied when a session defaults epoch
-is installed, so an operator file edit cannot silently change an acknowledged
-session. A restart or a configuration edit never rewrites an existing epoch. A
-per-call override is resolved at input acceptance, and the complete result is
+is installed, and a restart or a configuration edit never rewrites an existing
+epoch, so an operator file edit cannot silently change an acknowledged session.
+A per-call override is resolved at input acceptance, and the complete result is
 frozen into the origin turn.
 
 Durable selection provenance retains the requested direct target even when fast
@@ -99,14 +104,17 @@ mode serves from a mapped target.
 Compatibility is decided before credential access, file creation, subprocess
 spawn, or HTTP traffic. An adapter never relies on provider rejection, provider
 clamping, an open CLI enum, or silent field dropping. An adapter-specific
-unsupported combination is also a preparation-time error.
+unsupported combination is also a preparation-time error. Configuration rejects
+unequal provider-projected capability records for one provider spelling, a fast
+target matching the model's own target or using another adapter, and
+disagreement between `fast_mode` and `fast_target_id`.
 
 An incompatibility counts as model-change-induced, and is adjusted instead of
 rejected, only when the affected setting is inherited.
 
-Reasoning-level mappings are exhaustive per-adapter tables evaluated during
-preparation. Every adapter answers every level with a provider value or a typed
-refusal.
+Reasoning-level mappings are exhaustive per-adapter tables, evaluated during
+preparation, in which every adapter answers every level with a provider value or
+a typed refusal.
 
 ## Planned
 

@@ -38,9 +38,13 @@ impl GoalTurnInsertion {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(signalbox_derive::Accessors, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GoalTurnCandidates {
+    /// Returns the accepted-input candidate.
+    #[get(copy)]
     accepted_input: AcceptedInputId,
+    /// Returns the turn candidate.
+    #[get(copy)]
     turn: TurnId,
 }
 
@@ -114,16 +118,6 @@ impl GoalTurnCandidates {
             accepted_input,
             turn,
         }
-    }
-
-    /// Returns the accepted-input candidate.
-    pub const fn accepted_input(self) -> AcceptedInputId {
-        self.accepted_input
-    }
-
-    /// Returns the turn candidate.
-    pub const fn turn(self) -> TurnId {
-        self.turn
     }
 }
 
@@ -295,12 +289,12 @@ pub(crate) async fn insert_goal_turn(
 
 /// Records an existing queued turn as the goal turn of one generation.
 ///
-/// A repository-watch dispatch submits its tagged context through its own
-/// command before the goal it commissions exists, so the generation cannot mint
-/// the turn that carries it. Binding writes the `goal_turn` row alone: the
-/// accepted input, queued origin, lifecycle, and model-settings resolution the
-/// turn already owns are exactly the ones the generation adopts, and writing
-/// them again would fabricate a second history for a turn that has one.
+/// A commissioned dispatch submits its context through its input command before
+/// the commissioned goal exists, so the generation cannot mint the turn that
+/// carries it. Binding writes the `goal_turn` row alone: the accepted input,
+/// queued origin, lifecycle, and model-settings resolution the turn already owns
+/// are exactly the ones the generation adopts, and writing them again would
+/// fabricate a second history for a turn that has one.
 ///
 /// No `InputAccepted` outbox event is appended here. The command that accepted
 /// this turn already published one naming the same accepted input and turn, and

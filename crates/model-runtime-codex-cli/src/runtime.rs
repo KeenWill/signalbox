@@ -237,9 +237,14 @@ pub async fn verify_pinned_codex_cli_version(
     let version = banner
         .lines()
         .next()
-        .and_then(|line| line.split_whitespace().next_back())
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|token| semver::Version::parse(token).ok())
+        })
         .ok_or(CodexCliVersionProbeError::InvalidBanner)?;
-    if version != SUPPORTED_CODEX_CLI_VERSION {
+    let supported = semver::Version::parse(SUPPORTED_CODEX_CLI_VERSION)
+        .map_err(|_| CodexCliVersionProbeError::InvalidBanner)?;
+    if version != supported {
         return Err(CodexCliVersionProbeError::VersionMismatch);
     }
     Ok(())
@@ -326,6 +331,7 @@ pub struct CodexCliRuntime {
     event_limit: usize,
     stderr_limit: usize,
     model_capabilities: ModelCapabilityCatalog,
+    model_context_window_overrides: HashMap<String, u32>,
 }
 
 /// Opaque one-shot capability for one Codex CLI spawn.
@@ -350,6 +356,7 @@ pub struct CodexCliPreparedRequest<C> {
     event_limit: usize,
     stderr_limit: usize,
     controls: CodexControls,
+    model_context_window_override: Option<u32>,
     credential_home: Option<PathBuf>,
 }
 
@@ -388,6 +395,8 @@ pub enum CodexCliConstructionError {
     UnreadableCredentialHome,
     /// A configured credential home contains no provisioned entries.
     EmptyCredentialHome,
+    /// A model context-window override has an invalid target or value.
+    InvalidModelContextWindowOverride,
 }
 
 impl std::fmt::Display for CodexCliConstructionError {
@@ -425,6 +434,9 @@ impl std::fmt::Display for CodexCliConstructionError {
                 formatter.write_str("Codex credential home cannot be enumerated")
             }
             Self::EmptyCredentialHome => formatter.write_str("Codex credential home is empty"),
+            Self::InvalidModelContextWindowOverride => formatter.write_str(
+                "Codex model context-window overrides require exact targets and positive values",
+            ),
         }
     }
 }
@@ -477,6 +489,15 @@ impl CodexCliRuntime {
         if config.event_limit == 0 || config.stderr_limit == 0 {
             return Err(CodexCliConstructionError::InvalidOutputLimit);
         }
+        if config
+            .model_context_window_overrides
+            .iter()
+            .any(|(target, value)| {
+                target.is_empty() || target.trim() != target || target.contains('\0') || *value == 0
+            })
+        {
+            return Err(CodexCliConstructionError::InvalidModelContextWindowOverride);
+        }
         for home in config.credential_homes.values() {
             if !home.is_absolute() {
                 return Err(CodexCliConstructionError::RelativeCredentialHome);
@@ -505,6 +526,7 @@ impl CodexCliRuntime {
             event_limit: config.event_limit,
             stderr_limit: config.stderr_limit,
             model_capabilities: config.model_capabilities,
+            model_context_window_overrides: config.model_context_window_overrides,
         })
     }
 
@@ -525,6 +547,8 @@ impl CodexCliRuntime {
             tool_choice: operation.tool_choice,
             output_contract: operation.output_contract,
             delivery: operation.delivery,
+            provider_compaction: operation.provider_compaction,
+            provider_compaction_supported: operation.provider_compaction_supported,
         };
         let capabilities = match self
             .model_capabilities
@@ -657,6 +681,10 @@ impl CodexCliRuntime {
             }
         };
         let prompt = std::mem::take(&mut translated.prompt);
+        let model_context_window_override = self
+            .model_context_window_overrides
+            .get(operation.resolved_target.as_str())
+            .copied();
         PreparationOutcome::Prepared(CodexCliPreparedRequest {
             executable: self.executable.clone(),
             working_directory: self.working_directory.clone(),
@@ -673,6 +701,7 @@ impl CodexCliRuntime {
             event_limit: self.event_limit,
             stderr_limit: self.stderr_limit,
             controls,
+            model_context_window_override,
             credential_home,
         })
     }
@@ -814,6 +843,11 @@ async fn execute_process<C: Clone + Send + Sync>(
             .arg("--config")
             .arg(format!("service_tier=\"{tier}\""));
     }
+    if let Some(context_window) = prepared.model_context_window_override {
+        command
+            .arg("--config")
+            .arg(format!("model_context_window={context_window}"));
+    }
     command
         .arg("--config")
         .arg("agents.enabled=false")
@@ -847,7 +881,7 @@ async fn execute_process<C: Clone + Send + Sync>(
     );
     // The selected profile controls this child only; the adapter passes the
     // path reference and never opens the login material, as required by
-    // `docs/spec/configuration-and-credentials.md#the-codex_home-delivery`.
+    // `docs/spec/configuration-and-credentials.md`.
     let environment_overrides = prepared
         .credential_home
         .map(|home| {
@@ -933,6 +967,16 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn pinned_version_probe_rejects_a_non_semver_banner() {
+        let (_directory, executable) = version_fixture("#!/bin/sh\nprintf 'codex-cli latest\\n'\n");
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
+
+        assert_eq!(result, Err(CodexCliVersionProbeError::InvalidBanner));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn pinned_version_probe_bounds_a_hung_executable() {
         let (_directory, executable) = version_fixture("#!/bin/sh\nsleep 30\n");
 
@@ -951,10 +995,10 @@ mod tests {
         assert_eq!(result, Err(CodexCliVersionProbeError::InvalidBanner));
     }
 
-    /// INV-035: the CLI receives only a reference to its ambient login store;
+    /// the CLI receives only a reference to its ambient login store;
     /// direct credential-value variables are absent from the inherited set.
     #[test]
-    fn inv_035_cli_environment_excludes_direct_credential_values() {
+    fn cli_environment_excludes_direct_credential_values() {
         assert!(
             CODEX_ENVIRONMENT
                 .iter()

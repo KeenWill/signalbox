@@ -856,6 +856,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: Some(3),
             },
+            retained_input_tokens: None,
+            retained_output_tokens: None,
         });
 
         let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {
@@ -868,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_split_json_escaped_credentials_are_redacted_before_tool_deltas_leave() {
+    fn split_json_escaped_credentials_are_redacted_before_tool_deltas_leave() {
         let credential = CredentialValue::new(b"key_loop".to_vec());
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &credential);

@@ -1,0 +1,22 @@
+{
+  "source": "settled.json",
+  "edge": "missing quiet review",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews/nodes",
+      "value": []
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews/nodes",
+      "value": []
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews/totalCount",
+      "value": 0
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews/totalCount",
+      "value": 0
+    }
+  ]
+}

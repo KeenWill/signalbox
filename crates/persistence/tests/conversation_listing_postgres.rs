@@ -513,11 +513,11 @@ async fn unified_pagination_reports_its_cursor_without_silent_truncation()
     Ok(())
 }
 
-/// S28: import derives and stores the display title once, from the summary
+/// import derives and stores the display title once, from the summary
 /// record for Claude Code and from the first attested user text for Codex.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_import_derives_and_stores_the_display_title() -> Result<(), Box<dyn Error>> {
+async fn import_derives_and_stores_the_display_title() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let imported_claude =
         import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE).await?;

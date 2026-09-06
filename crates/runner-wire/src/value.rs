@@ -49,19 +49,19 @@ impl fmt::Display for ValueError {
 
 impl Error for ValueError {}
 
+#[derive(signalbox_derive::Accessors)]
 /// A canonical lowercase hyphenated UUID on the runner boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct CanonicalUuid(Uuid);
+pub struct CanonicalUuid(
+    /// Returns the UUID for explicit domain mapping.
+    #[get(copy, as = "into_uuid")]
+    Uuid,
+);
 
 impl CanonicalUuid {
     /// Wraps a typed domain identity's UUID.
     pub const fn from_uuid(value: Uuid) -> Self {
         Self(value)
-    }
-
-    /// Returns the UUID for explicit domain mapping.
-    pub const fn into_uuid(self) -> Uuid {
-        self.0
     }
 
     fn parse(value: &str) -> Result<Self, ValueError> {
@@ -98,10 +98,15 @@ impl<'de> Deserialize<'de> for CanonicalUuid {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A positive unsigned runner generation, revision, sequence, or page.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub struct PositiveU64(NonZeroU64);
+pub struct PositiveU64(
+    /// Returns the checked integer.
+    #[get(inner, as = "get")]
+    NonZeroU64,
+);
 
 impl PositiveU64 {
     /// Checks that the boundary integer is positive.
@@ -110,11 +115,6 @@ impl PositiveU64 {
             Some(value) => Ok(Self(value)),
             None => Err(ValueError::PositiveInteger),
         }
-    }
-
-    /// Returns the checked integer.
-    pub const fn get(self) -> u64 {
-        self.0.get()
     }
 }
 
@@ -127,38 +127,28 @@ impl<'de> Deserialize<'de> for PositiveU64 {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A canonical lowercase SHA-256 hexadecimal digest.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Digest(String);
+pub struct Digest(
+    /// Returns the canonical hexadecimal text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl Digest {
     /// Checks the complete lowercase digest text.
     pub fn try_new(value: String) -> Result<Self, ValueError> {
-        if value.len() == 64
-            && value
-                .as_bytes()
-                .iter()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        {
+        let mut decoded = [0_u8; 32];
+        if hex::decode_to_slice(&value, &mut decoded).is_ok() && hex::encode(decoded) == value {
             Ok(Self(value))
         } else {
             Err(ValueError::Digest)
         }
     }
 
-    /// Returns the canonical hexadecimal text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
     pub(crate) fn from_sha256(bytes: [u8; 32]) -> Self {
-        let mut encoded = String::with_capacity(64);
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        bytes.into_iter().for_each(|byte| {
-            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-        });
-        Self(encoded)
+        Self(hex::encode(bytes))
     }
 }
 
@@ -180,10 +170,15 @@ impl<'de> Deserialize<'de> for Digest {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A domain-validated portable capability-class name.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub struct CapabilityName(String);
+pub struct CapabilityName(
+    /// Returns the checked text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CapabilityName {
     /// Checks and stores the domain spelling.
@@ -191,11 +186,6 @@ impl CapabilityName {
         RunnerCapabilityClass::try_new(value.clone())
             .map(|_| Self(value))
             .map_err(|_| ValueError::PortableName)
-    }
-
-    /// Returns the checked text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -208,10 +198,15 @@ impl<'de> Deserialize<'de> for CapabilityName {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A checked failure-detail name with the portable catalog-key grammar.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub struct DetailName(String);
+pub struct DetailName(
+    /// Returns the checked text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl DetailName {
     /// Checks the exact bounded catalog-key spelling.
@@ -219,11 +214,6 @@ impl DetailName {
         WorkspaceRepositoryKey::try_new(value.clone())
             .map(|_| Self(value))
             .map_err(|_| ValueError::PortableName)
-    }
-
-    /// Returns the checked text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -235,10 +225,15 @@ impl<'de> Deserialize<'de> for DetailName {
         Self::try_new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
+#[derive(signalbox_derive::Accessors)]
 /// A domain-validated tool name.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub struct WireToolName(String);
+pub struct WireToolName(
+    /// Returns the checked text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl WireToolName {
     /// Checks and stores the domain spelling.
@@ -246,11 +241,6 @@ impl WireToolName {
         ToolName::try_new(value.clone())
             .map(|_| Self(value))
             .map_err(|_| ValueError::PortableName)
-    }
-
-    /// Returns the checked text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -263,10 +253,15 @@ impl<'de> Deserialize<'de> for WireToolName {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A domain-validated credential-profile name.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub struct ProfileName(String);
+pub struct ProfileName(
+    /// Returns the checked text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl ProfileName {
     /// Checks and stores the domain spelling.
@@ -274,11 +269,6 @@ impl ProfileName {
         CredentialProfileName::try_new(value.clone())
             .map(|_| Self(value))
             .map_err(|_| ValueError::PortableName)
-    }
-
-    /// Returns the checked text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -291,10 +281,15 @@ impl<'de> Deserialize<'de> for ProfileName {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A domain-validated repository key.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub struct RepositoryKey(String);
+pub struct RepositoryKey(
+    /// Returns the checked text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl RepositoryKey {
     /// Checks and stores the domain spelling.
@@ -302,11 +297,6 @@ impl RepositoryKey {
         WorkspaceRepositoryKey::try_new(value.clone())
             .map(|_| Self(value))
             .map_err(|_| ValueError::PortableName)
-    }
-
-    /// Returns the checked text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 

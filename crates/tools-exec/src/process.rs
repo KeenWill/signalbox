@@ -389,17 +389,11 @@ impl ToolArgumentValidator for ExecArgumentValidator {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("{}", INVALID_ARGUMENTS_DETAIL)]
 /// Direct-command arguments violated a bound or workspace-relative shape.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidExecArguments;
-
-impl fmt::Display for InvalidExecArguments {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(INVALID_ARGUMENTS_DETAIL)
-    }
-}
-
-impl Error for InvalidExecArguments {}
 
 fn decode_arguments(
     arguments: &NormalizedToolArguments,
@@ -455,25 +449,17 @@ pub struct ExecExecutor<CommandRunner> {
     command_runner: CommandRunner,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A checked catalog/executor assumption failed inside command execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecExecutorError {
+    #[error("exec argument validation drifted")]
     /// Executor argument decoding disagreed with catalog validation.
     ArgumentValidationDrift,
+    #[error("exec result encoding failed")]
     /// Compact structured result encoding unexpectedly failed.
     ResultEncoding,
 }
-
-impl fmt::Display for ExecExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ArgumentValidationDrift => "exec argument validation drifted",
-            Self::ResultEncoding => "exec result encoding failed",
-        })
-    }
-}
-
-impl Error for ExecExecutorError {}
 
 impl ClassifyOperatorFailure for ExecExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
@@ -880,17 +866,6 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
     ) -> Result<ExecResult, InvalidExecArguments> {
         validate_arguments(&arguments)?;
         Ok(self.run_with_capture(arguments, EXEC_CAPTURE_BYTES).await)
-    }
-
-    pub(crate) fn pinned_workspace_root(&self) -> &Path {
-        #[cfg(target_os = "linux")]
-        {
-            &self.workspace_identity.bind_source
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            &self.workspace_root
-        }
     }
 
     pub(crate) async fn run_with_capture(

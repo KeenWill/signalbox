@@ -3,11 +3,7 @@
 //! byte, entry, and result-count limits enforced against the injected
 //! `WorkspaceFileSystem`.
 
-use std::{
-    error::Error,
-    fmt,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use glob::Pattern;
 use regex::Regex;
@@ -222,40 +218,25 @@ impl ReadToolKind {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A static read-family declaration or injected root could not be constructed.
 #[derive(Debug)]
 pub enum WorkspaceReadToolConstructionError {
+    #[error("workspace read-tool static name is invalid")]
     /// One static contract name was invalid.
     Name,
+    #[error("workspace read-tool static schema is invalid")]
     /// One static contract schema was invalid.
     Schema,
+    #[error("workspace read-tool static error detail is invalid")]
     /// One static error detail was invalid.
     ErrorDetail,
+    #[error("workspace read-tool catalog is duplicated")]
     /// The catalog unexpectedly contained a duplicate.
     Duplicate,
+    #[error("workspace read-tool root is invalid")]
     /// The injected root was invalid.
-    Root(WorkspaceRootError),
-}
-
-impl fmt::Display for WorkspaceReadToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Name => "workspace read-tool static name is invalid",
-            Self::Schema => "workspace read-tool static schema is invalid",
-            Self::ErrorDetail => "workspace read-tool static error detail is invalid",
-            Self::Duplicate => "workspace read-tool catalog is duplicated",
-            Self::Root(_) => "workspace read-tool root is invalid",
-        })
-    }
-}
-
-impl Error for WorkspaceReadToolConstructionError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Root(error) => Some(error),
-            Self::Name | Self::Schema | Self::ErrorDetail | Self::Duplicate => None,
-        }
-    }
+    Root(#[source] WorkspaceRootError),
 }
 
 /// Compiled read-family catalog and executor around injected filesystem
@@ -479,25 +460,17 @@ pub struct WorkspaceReadExecutor<FileSystem> {
     offset_not_boundary_detail: ToolExecutionErrorDetail,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A checked catalog/executor assumption failed inside the read family.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceReadExecutorError {
+    #[error("workspace read-tool argument validation drifted")]
     /// Executor argument decoding disagreed with catalog validation.
     ArgumentValidationDrift,
+    #[error("workspace read-tool result encoding failed")]
     /// Compact result encoding unexpectedly failed.
     ResultEncoding,
 }
-
-impl fmt::Display for WorkspaceReadExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ArgumentValidationDrift => "workspace read-tool argument validation drifted",
-            Self::ResultEncoding => "workspace read-tool result encoding failed",
-        })
-    }
-}
-
-impl Error for WorkspaceReadExecutorError {}
 
 impl ClassifyOperatorFailure for WorkspaceReadExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {

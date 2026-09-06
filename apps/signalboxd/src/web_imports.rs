@@ -169,7 +169,7 @@ async fn execute_list_imports(
     let exact_source_session_id_sha256 = request
         .source_session_id
         .as_deref()
-        .map(|value| lowercase_hex(&sha2::Sha256::digest(value.as_bytes())));
+        .map(|value| hex::encode(sha2::Sha256::digest(value.as_bytes())));
     let query = ImportedConversationPageRequest {
         after,
         format: request.format.map(domain_format),
@@ -432,10 +432,7 @@ fn web_summary(summary: ImportedConversationSummary) -> WebImportSummary {
         display_title: summary.display_title.map(|title| title.into_string()),
         format: web_format(summary.format),
         source_session_id: summary.source_session_id.map(web_source_session),
-        source_session_id_sha256: summary
-            .source_session_digest
-            .as_ref()
-            .map(|digest| lowercase_hex(digest)),
+        source_session_id_sha256: summary.source_session_digest.as_ref().map(hex::encode),
         entry_count: summary.entry_count,
     }
 }
@@ -448,7 +445,7 @@ fn web_descriptor(descriptor: ImportedConversationDescriptor) -> WebImportDescri
         entry_count: descriptor.entry_count,
         source: WebImportSourceEvidence {
             format: web_format(descriptor.format),
-            source_digest_sha256: lowercase_hex(&descriptor.source_digest),
+            source_digest_sha256: hex::encode(descriptor.source_digest),
             source_session_id: descriptor.source_session_id.map(web_source_session),
         },
         sizes: WebImportSizeFacts {
@@ -605,16 +602,6 @@ fn domain_relationship(
         WebImportedSessionRelationship::Resume => ImportedSessionRelationship::Resume,
         WebImportedSessionRelationship::Fork => ImportedSessionRelationship::Fork,
     }
-}
-
-fn lowercase_hex(bytes: &[u8]) -> String {
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-    }
-    encoded
 }
 
 fn optional_uuid(value: Option<&str>) -> Result<Option<Uuid>, &'static str> {

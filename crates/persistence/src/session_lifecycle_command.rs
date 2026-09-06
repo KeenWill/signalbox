@@ -1,4 +1,5 @@
-//! Claim, apply, and settle the §7 session-lifecycle command family.
+//! Claim, apply, and settle the session-lifecycle command family
+//! (docs/spec/session-lifecycle.md).
 //!
 //! One registry kind carries the lifecycle operations. Every claimed command
 //! records its typed row and a `command_settled` receipt; a closure that finds
@@ -484,7 +485,7 @@ async fn live_active_turn(
     Ok(turn.map(turn_id_from_uuid))
 }
 
-/// Retires every queued turn the closure strands (§10), one at a time so
+/// Retires every queued turn the closure strands, one at a time so
 /// each retirement publishes its own `turn_terminal{retired}`.
 pub(crate) async fn retire_queued_turns(
     connection: &mut PgConnection,

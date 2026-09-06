@@ -5,8 +5,6 @@
 //! transaction — no materialized view, cache, or analytical artifact — so
 //! every listed row is transactionally fresh (docs/spec/process-protocol.md).
 
-use std::{error::Error, fmt};
-
 use signalbox_application::{
     ConversationListCursor, ConversationListItem, ConversationListQuery, ConversationLister,
     ConversationPageReader,
@@ -103,11 +101,14 @@ const UNIFIED_PAGE_PROBE_SQL: &str = "SELECT EXISTS (
     )
     )";
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable unified-listing row failed checked decoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationListingCorruption {
+    #[error("missing unified conversation-listing {field_0}")]
     /// One required durable value is absent.
     Missing(&'static str),
+    #[error("unsupported unified conversation-listing {field}: {value}")]
     /// A closed discriminator is unsupported.
     Unsupported {
         /// Durable field being decoded.
@@ -115,6 +116,7 @@ pub enum ConversationListingCorruption {
         /// Unsupported non-content spelling.
         value: String,
     },
+    #[error("invalid unified conversation-listing {field}: {reason}")]
     /// One stored positive ordinal cannot construct its domain value.
     InvalidOrdinal {
         /// Durable field being decoded.
@@ -122,72 +124,24 @@ pub enum ConversationListingCorruption {
         /// Why the numeric value is invalid.
         reason: PositiveOrdinalMappingError,
     },
+    #[error("stored imported display title violates its shape contract")]
     /// A stored display title violates the derived-shape contract.
     InvalidDisplayTitle,
+    #[error("inconsistent unified conversation-listing state: {field_0}")]
     /// Two durable facts that must agree do not.
     Inconsistent(&'static str),
 }
 
-impl fmt::Display for ConversationListingCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => {
-                write!(formatter, "missing unified conversation-listing {field}")
-            }
-            Self::Unsupported { field, value } => {
-                write!(
-                    formatter,
-                    "unsupported unified conversation-listing {field}: {value}"
-                )
-            }
-            Self::InvalidOrdinal { field, reason } => {
-                write!(
-                    formatter,
-                    "invalid unified conversation-listing {field}: {reason}"
-                )
-            }
-            Self::InvalidDisplayTitle => {
-                formatter.write_str("stored imported display title violates its shape contract")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(
-                    formatter,
-                    "inconsistent unified conversation-listing state: {relationship}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ConversationListingCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL unified conversation-listing failure.
 #[derive(Debug)]
 pub enum ConversationListingRepositoryError {
+    #[error("unified conversation listing failed: {field_0}")]
     /// PostgreSQL could not complete the read.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Durable data cannot satisfy the unified-listing contract.
-    Corruption(ConversationListingCorruption),
-}
-
-impl fmt::Display for ConversationListingRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => {
-                write!(formatter, "unified conversation listing failed: {error}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ConversationListingRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] ConversationListingCorruption),
 }
 
 impl From<sqlx::Error> for ConversationListingRepositoryError {

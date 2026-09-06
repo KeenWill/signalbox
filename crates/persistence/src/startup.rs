@@ -1,6 +1,6 @@
 //! Atomic PostgreSQL recovery of prior-process active attempts.
 
-use std::{collections::BTreeSet, error::Error, fmt, time::Duration};
+use std::{collections::BTreeSet, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StartupScanIdGenerator,
@@ -39,112 +39,68 @@ use crate::{
 };
 
 /// Which fresh startup-recovery identity collided durably.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum StartupScanIdentityCollision {
     /// A proposed tool-closure semantic-entry identity already exists.
+    #[error("tool-closure semantic-entry identity already exists")]
     ToolClosureEntry,
     /// The proposed `TurnFailed` entry identity already exists.
+    #[error("failure semantic-entry identity already exists")]
     FailureEntry,
     /// The proposed terminal context-frontier identity already exists.
+    #[error("terminal context-frontier identity already exists")]
     TerminalFrontier,
     /// A proposed reclassified successor-turn identity already exists.
+    #[error("reclassified successor-turn identity already exists")]
     ReclassifiedTurn,
 }
 
-impl fmt::Display for StartupScanIdentityCollision {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let identity = match self {
-            Self::ToolClosureEntry => "tool-closure semantic-entry",
-            Self::FailureEntry => "failure semantic-entry",
-            Self::TerminalFrontier => "terminal context-frontier",
-            Self::ReclassifiedTurn => "reclassified successor-turn",
-        };
-        write!(formatter, "{identity} identity already exists")
-    }
-}
-
-impl Error for StartupScanIdentityCollision {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct or commit startup recovery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StartupScanCorruption {
+    #[error("missing startup-scan {field_0}")]
     /// One required durable record is absent.
     Missing(&'static str),
+    #[error("inconsistent startup-scan {field_0}")]
     /// Correlated durable records disagree.
     Inconsistent(&'static str),
+    #[error("startup-scan current Session is invalid: {field_0}")]
     /// The current session projection is invalid.
     CurrentSession(SessionCorruption),
+    #[error("startup-scan scheduling projection is invalid: {field_0}")]
     /// Complete scheduling records fail checked persistence mapping.
     Scheduling(SubmitInputCorruption),
+    #[error(transparent)]
     /// Complete model-call records fail checked persistence mapping.
     ModelCall(ModelCallCorruption),
 }
 
-impl fmt::Display for StartupScanCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(record) => write!(formatter, "missing startup-scan {record}"),
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent startup-scan {relationship}")
-            }
-            Self::CurrentSession(error) => {
-                write!(
-                    formatter,
-                    "startup-scan current Session is invalid: {error}"
-                )
-            }
-            Self::Scheduling(error) => {
-                write!(
-                    formatter,
-                    "startup-scan scheduling projection is invalid: {error}"
-                )
-            }
-            Self::ModelCall(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for StartupScanCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database, integrity, or identity-collision failure during startup scan.
 #[derive(Debug)]
 pub enum StartupScanRepositoryError {
+    #[error("startup scan failed: {source}")]
     /// PostgreSQL could not complete the operation.
     Database {
+        #[source]
         /// The underlying SQLx failure.
         source: sqlx::Error,
         /// Whether failure occurred while awaiting commit.
         commit_ambiguous: bool,
     },
+    #[error(transparent)]
     /// Durable records cannot reconstruct or commit the accepted shape.
     Corruption {
+        #[source]
         /// The invalid durable shape.
         source: StartupScanCorruption,
         /// The active durable turn observed for the scoped session.
         turn: Option<TurnId>,
     },
+    #[error(transparent)]
     /// A supplied fresh identity already names a durable record.
-    IdentityCollision(StartupScanIdentityCollision),
-}
-
-impl fmt::Display for StartupScanRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => write!(formatter, "startup scan failed: {source}"),
-            Self::Corruption { source, .. } => source.fmt(formatter),
-            Self::IdentityCollision(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for StartupScanRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption { source, .. } => Some(source),
-            Self::IdentityCollision(error) => Some(error),
-        }
-    }
+    IdentityCollision(#[source] StartupScanIdentityCollision),
 }
 
 impl ClassifyOperatorFailure for StartupScanRepositoryError {
@@ -884,7 +840,7 @@ where
 /// which is what keeps every terminal trigger firing for both; the cause is
 /// what makes the two distinguishable in the rows rather than only in a log.
 /// Proposes one fresh successor turn per steering input pending on the
-/// active turn, so a lost failure reclassifies rather than refuses (§8).
+/// active turn, so a lost failure reclassifies rather than refuses.
 pub(crate) fn lost_failure_identities<Generator>(
     identities: AcceptedInputTurnFailureIdentities,
     scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,
@@ -1251,10 +1207,10 @@ mod tests {
     };
     use crate::tool_loop::ToolLoopRepositoryError;
 
-    /// INV-034: a generated source-turn identity is a retryable collision, not
+    /// a generated source-turn identity is a retryable collision, not
     /// durable corruption.
     #[test]
-    fn inv034_generated_successor_source_candidate_is_a_retryable_collision() {
+    fn generated_successor_source_candidate_is_a_retryable_collision() {
         let source = TurnId::from_uuid(Uuid::from_u128(1));
         let mut proposed = BTreeSet::new();
 
@@ -1266,10 +1222,10 @@ mod tests {
         ));
     }
 
-    /// INV-034: a duplicate generated successor is a retryable collision, not
+    /// a duplicate generated successor is a retryable collision, not
     /// durable corruption.
     #[test]
-    fn inv034_generated_successor_duplicate_is_a_retryable_collision() {
+    fn generated_successor_duplicate_is_a_retryable_collision() {
         let source = TurnId::from_uuid(Uuid::from_u128(1));
         let successor = TurnId::from_uuid(Uuid::from_u128(2));
         let mut proposed = BTreeSet::new();

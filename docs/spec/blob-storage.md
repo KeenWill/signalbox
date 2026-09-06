@@ -236,7 +236,7 @@ carry their complete derivation record.
 
 A recorded derivation key is reused without running the producer only while its
 output is still retrievable. Missing or unverifiable output re-runs the producer
-and republishes the same output digests. The key is unchanged, so the append
+and republishes the same output digests under the unchanged key, so the append
 resolves back to the existing record and writes no second one. Publication to
 the generated-artifact route and catalog registration precede the derivation
 append.

@@ -3,8 +3,8 @@
 use std::{error::Error, fmt, future::Future, sync::Arc};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, EligibilityPass, ModelCallInputTokenCount, ModelCallInputTokenCounter,
-    OperatorFailureClass, ToolCatalog,
+    ClassifyOperatorFailure, EligibilityPass, InProcessEligibilityNudge, ModelCallInputTokenCount,
+    ModelCallInputTokenCounter, OperatorFailureClass, SchedulerPassExpiryHandler, ToolCatalog,
 };
 use signalbox_domain::{
     AcceptedInputTurnActivationIdentities, ContextFrontierId, FailedModelCallTurnIdentities,
@@ -17,14 +17,15 @@ use signalbox_persistence::{
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
     start_eligible_turn::{
         CommitActivationPreviewError, CommitActivationPreviewOutcome,
-        CommitCompactionFailurePreviewOutcome, PreparedActivationPreview,
-        StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
+        CommitCompactionFailurePreviewOutcome, CommitCountedAttachmentFailurePreviewOutcome,
+        PreparedActivationPreview, StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
     },
 };
 
 use crate::{
-    ActivatedTurnExecution, HubModelConfiguration, TurnPassExecutionStage,
-    WorkspaceInstructionRuntime, WorkspaceInstructionRuntimeError,
+    ActivatedTurnExecution, ExpiredPassRecoveryPolicy, HubModelConfiguration, ModelAdapter,
+    SchedulerPassOccupancyRecovery, TurnPassExecutionStage, WorkspaceInstructionRuntime,
+    WorkspaceInstructionRuntimeError,
     process_runtime::compact_automatically,
     report_ambiguous_commit,
     usage_limits::{
@@ -33,6 +34,8 @@ use crate::{
     },
 };
 use tracing::Instrument;
+
+const PROVIDER_COUNT_ADMISSION_PERCENT: u64 = 95;
 
 /// Failure while reconciling provider-reported context growth before activation.
 #[derive(Debug)]
@@ -180,7 +183,20 @@ impl ReportedUsageCompaction {
         session: SessionId,
         observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
     ) -> Result<(), ReportedUsageCompactionError> {
-        let Some(candidate) = self.compaction_candidate(session).await? else {
+        self.compact_if_needed_for(session, observe_prepared, false)
+            .await
+    }
+
+    async fn compact_if_needed_for(
+        &self,
+        session: SessionId,
+        observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
+        include_anthropic: bool,
+    ) -> Result<(), ReportedUsageCompactionError> {
+        let Some(candidate) = self
+            .compaction_candidate(session, include_anthropic)
+            .await?
+        else {
             return Ok(());
         };
         let ReportedUsageCompactionCandidate { preview, turn } = candidate;
@@ -260,7 +276,10 @@ impl ReportedUsageCompaction {
             context_compaction_id = %applied.compaction.into_uuid(),
             "provider-reported usage exhausted reserved context headroom; queued turn compacted before activation"
         );
-        let Some(remaining) = self.compaction_candidate(session).await? else {
+        let Some(remaining) = self
+            .compaction_candidate(session, include_anthropic)
+            .await?
+        else {
             return Ok(());
         };
         let remaining_turn = remaining.turn;
@@ -298,6 +317,7 @@ impl ReportedUsageCompaction {
     async fn compaction_candidate(
         &self,
         session: SessionId,
+        include_anthropic: bool,
     ) -> Result<Option<ReportedUsageCompactionCandidate>, ReportedUsageCompactionError> {
         let Some(preview) = self
             .activation
@@ -323,23 +343,35 @@ impl ReportedUsageCompaction {
             .render(self.tools.definitions())
             .map_err(|_| ReportedUsageCompactionError::Render(turn))?;
         let target = operation.request().call().target();
+        let fast_mode = operation.request().model_settings().effective().fast_mode();
         let selected = self
             .runtime_models
             .resolve(target)
             .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
         let definition = self
             .runtime_models
-            .effective_definition(
-                selected,
-                operation.request().model_settings().effective().fast_mode(),
-            )
+            .effective_definition(selected, fast_mode)
             .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
+        if !include_anthropic
+            && self
+                .model_configuration
+                .adapter_for_provider_model(definition.provider_model())
+                == Some(ModelAdapter::Anthropic)
+        {
+            return Ok(None);
+        }
         // The preview's starting frontier is never committed, so it names the
         // model-visible input it would send rather than an identity no durable
         // membership resolves.
         let reported = self
             .model_calls
-            .latest_reported_usage(session, target, prospective.prospective_input())
+            .latest_reported_usage(
+                session,
+                target,
+                fast_mode,
+                definition.provider_compaction_supported(),
+                prospective.prospective_input(),
+            )
             .await
             .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?;
         let reported_requires_compaction = reported.is_some_and(|reported| {
@@ -348,8 +380,14 @@ impl ReportedUsageCompaction {
                 ReportedInputCacheAxes::from_includes_cache_tokens(
                     reported.input_includes_cache_tokens(),
                 ),
-                ReportedInputRetention::from_retained(reported.input_is_retained()),
-                ReportedOutputRetention::from_retained(reported.output_is_retained()),
+                ReportedInputRetention::from_retained(
+                    reported.input_is_retained(),
+                    reported.retained_input_tokens(),
+                ),
+                ReportedOutputRetention::from_retained(
+                    reported.output_is_retained(),
+                    reported.retained_output_tokens(),
+                ),
                 reported.projected_unreported_content_bytes(),
                 u64::from(definition.max_output_tokens()),
                 u64::from(definition.context_window_tokens()),
@@ -377,6 +415,8 @@ impl ReportedUsageCompaction {
 /// Exact-guard failure before activation or during the resulting execution.
 #[derive(Debug)]
 pub enum ContextGuardedTurnPassError<CountError, ExecutionError> {
+    /// Reported-usage preflight for an adapter without provider estimation failed.
+    ReportedUsageCompaction(ReportedUsageCompactionError),
     /// Read-only activation preview or exact guarded commit failed.
     Activation {
         /// Selected turn, absent when preview failed before selection.
@@ -398,7 +438,7 @@ pub enum ContextGuardedTurnPassError<CountError, ExecutionError> {
         /// Typed frontier-rendering failure.
         source: signalbox_application::ModelFrontierRenderingError,
     },
-    /// Provider-native exact counting failed.
+    /// Provider-native token estimation failed.
     Count {
         /// Selected turn.
         turn: TurnId,
@@ -471,6 +511,7 @@ where
 {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
+            Self::ReportedUsageCompaction(error) => error.operator_failure_class(),
             Self::Activation { source, .. } => source.operator_failure_class(),
             Self::Operation { source, .. } => source.operator_failure_class(),
             Self::Render { .. } => OperatorFailureClass::FailClosedCorruption,
@@ -490,6 +531,7 @@ where
 
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
+            Self::ReportedUsageCompaction(error) => error.operator_failure_cause_code(),
             Self::Activation { .. } => "turn_activation_repository",
             Self::Operation { .. } => "model_call_repository",
             Self::Render { .. } => "model_frontier_rendering",
@@ -517,8 +559,10 @@ pub struct ContextGuardedTurnPass<Counter, Catalog, Execution> {
     runtime_models: RuntimeModelCatalog,
     model_configuration: HubModelConfiguration,
     compaction_model: Arc<dyn ContextCompactionModel>,
+    reported_usage_compaction: Option<ReportedUsageCompaction>,
     workspace_instructions: Option<WorkspaceInstructionRuntime>,
     execution: Execution,
+    occupancy_recovery: Option<SchedulerPassOccupancyRecovery>,
 }
 
 impl<Counter, Catalog, Execution> fmt::Debug for ContextGuardedTurnPass<Counter, Catalog, Execution>
@@ -537,8 +581,10 @@ where
             .field("runtime_models", &self.runtime_models)
             .field("model_configuration", &self.model_configuration)
             .field("compaction_model", &"[context compaction model]")
+            .field("reported_usage_compaction", &self.reported_usage_compaction)
             .field("workspace_instructions", &self.workspace_instructions)
             .field("execution", &self.execution)
+            .field("occupancy_recovery", &self.occupancy_recovery)
             .finish()
     }
 }
@@ -564,9 +610,38 @@ impl<Counter, Catalog, Execution> ContextGuardedTurnPass<Counter, Catalog, Execu
             runtime_models,
             model_configuration,
             compaction_model,
+            reported_usage_compaction: None,
             workspace_instructions: None,
             execution,
+            occupancy_recovery: None,
         }
+    }
+
+    /// Keeps the reported-usage preflight for adapters without provider estimation.
+    pub fn with_reported_usage_compaction(mut self, compaction: ReportedUsageCompaction) -> Self {
+        self.reported_usage_compaction = Some(compaction);
+        self
+    }
+
+    /// Installs daemon-owned recovery for passes ended by the occupancy bound.
+    pub fn with_occupancy_recovery(
+        mut self,
+        pool: sqlx::PgPool,
+        eligibility_nudge: InProcessEligibilityNudge,
+        policy: ExpiredPassRecoveryPolicy,
+        persistence_bounds: signalbox_persistence::turn_liveness::TurnLivenessPersistenceBounds,
+    ) -> Self
+    where
+        Execution: ActivatedTurnExecution,
+    {
+        self.occupancy_recovery = Some(SchedulerPassOccupancyRecovery::new(
+            pool,
+            eligibility_nudge,
+            &self.execution,
+            policy,
+            persistence_bounds,
+        ));
+        self
     }
 
     /// Records the empty queued-turn manifest needed by the atomic counted
@@ -595,6 +670,7 @@ where
     }
     fn failure_turn(error: &Self::Error) -> Option<TurnId> {
         match error {
+            ContextGuardedTurnPassError::ReportedUsageCompaction(error) => error.turn(),
             ContextGuardedTurnPassError::Activation { turn, .. }
             | ContextGuardedTurnPassError::Execution { turn, .. } => *turn,
             ContextGuardedTurnPassError::Operation { turn, .. }
@@ -610,6 +686,12 @@ where
         }
     }
 
+    fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>> {
+        self.occupancy_recovery
+            .clone()
+            .map(|recovery| Arc::new(recovery) as _)
+    }
+
     fn run(
         &mut self,
         session: SessionId,
@@ -621,16 +703,43 @@ where
         let runtime_models = self.runtime_models.clone();
         let model_configuration = self.model_configuration.clone();
         let compaction_model = Arc::clone(&self.compaction_model);
+        let reported_usage_compaction = self.reported_usage_compaction.clone();
         let workspace_instructions = self.workspace_instructions.clone();
         let execution = self.execution.clone();
+        let occupancy_recovery = self.occupancy_recovery.clone();
         async move {
-            execution.resume_active(session).await.map_err(|source| {
-                ContextGuardedTurnPassError::Execution {
-                    stage: TurnPassExecutionStage::ActiveTurnRecovery,
-                    turn: Execution::active_resume_failure_turn(&source),
-                    source,
-                }
+            let occupancy_tracking = occupancy_recovery
+                .as_ref()
+                .map(|recovery| recovery.resume_turn_observer(session));
+            let observe_turn = occupancy_tracking
+                .as_ref()
+                .map(|(_, observer)| Arc::clone(observer))
+                .unwrap_or_else(|| Arc::new(|_| {}));
+            let resumed = execution
+                .resume_active_with_observer(session, Arc::clone(&observe_turn))
+                .await;
+            resumed.map_err(|source| ContextGuardedTurnPassError::Execution {
+                stage: TurnPassExecutionStage::ActiveTurnRecovery,
+                turn: Execution::active_resume_failure_turn(&source),
+                source,
             })?;
+            if let Some(compaction) = &reported_usage_compaction {
+                let compaction_window = occupancy_recovery
+                    .as_ref()
+                    .map(|recovery| recovery.compaction_window(session));
+                let observe_prepared = compaction_window
+                    .as_ref()
+                    .map(|(_, observer)| Arc::clone(observer));
+                let compacted = compaction
+                    .compact_if_needed(session, observe_prepared.as_deref())
+                    .await;
+                drop(compaction_window);
+                if let Err(error) = compacted {
+                    let error = ContextGuardedTurnPassError::ReportedUsageCompaction(error);
+                    report_guarded_ambiguity(&execution, &error);
+                    return Err(error);
+                }
+            }
             let outcome: Result<
                 (),
                 ContextGuardedTurnPassError<Counter::Error, Execution::Error>,
@@ -674,9 +783,10 @@ where
                                     execution.report_post_activation_failure();
                                     return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
                                 }
+                                observe_turn(activated.turn());
                                 report_guarded_turn_activation(activated.session(), activated.turn());
+                                let execution = async { execution.execute(activated).await };
                                 return execution
-                                    .execute(activated)
                                     .instrument(guarded_turn_span(session, turn))
                                     .await
                                     .map_err(|source| ContextGuardedTurnPassError::Execution {
@@ -709,11 +819,128 @@ where
                         ModelCallInputTokenCount::Cancelled => {
                             return Err(ContextGuardedTurnPassError::CountCancelled(turn));
                         }
+                        ModelCallInputTokenCount::AttachmentUnavailable => {
+                            // The preview is still uncommitted. Leave the turn
+                            // queued so recovery must verify and recount the
+                            // attachment before any later activation.
+                            return Ok(());
+                        }
+                        ModelCallInputTokenCount::AttachmentFailure(failure) => {
+                            let prepared_instructions = if let Some(workspace_instructions) = &workspace_instructions {
+                                let Some(prepared) = workspace_instructions
+                                    .prepare_counted_activation(session, turn)
+                                    .await
+                                    .map_err(|source| {
+                                        ContextGuardedTurnPassError::WorkspaceInstructions {
+                                            turn,
+                                            source,
+                                        }
+                                    })?
+                                else {
+                                    continue;
+                                };
+                                Some(prepared)
+                            } else {
+                                None
+                            };
+                            let committed = close_counted_attachment_failure(
+                                &activation,
+                                &model_calls,
+                                preview,
+                                prospective,
+                                failure,
+                                prepared_instructions
+                                    .as_ref()
+                                    .map(|prepared| prepared.evidence()),
+                            )
+                                .await
+                                .map_err(|error| match error {
+                                    CommitActivationPreviewError::Activation(error) => {
+                                        ContextGuardedTurnPassError::Activation { turn: Some(turn), source: error }
+                                    }
+                                    CommitActivationPreviewError::ModelCall(error) => {
+                                        ContextGuardedTurnPassError::Operation { turn, source: error }
+                                    }
+                                    CommitActivationPreviewError::WorkspaceInstructions(error) => {
+                                        ContextGuardedTurnPassError::WorkspaceInstructions {
+                                            turn,
+                                            source: WorkspaceInstructionRuntimeError::Persistence(error),
+                                        }
+                                    }
+                                })?;
+                            match committed {
+                                CommitCountedAttachmentFailurePreviewOutcome::Stale => continue,
+                                CommitCountedAttachmentFailurePreviewOutcome::Failed(failed_turn) => {
+                                    observe_turn(failed_turn);
+                                    report_guarded_turn_activation(session, failed_turn);
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        ModelCallInputTokenCount::Unavailable => {
+                            if let Some(compaction) = &reported_usage_compaction
+                                && compaction
+                                    .compaction_candidate(session, true)
+                                    .await
+                                    .map_err(ContextGuardedTurnPassError::ReportedUsageCompaction)?
+                                    .is_some()
+                            {
+                                let compaction_window = occupancy_recovery
+                                    .as_ref()
+                                    .map(|recovery| recovery.compaction_window(session));
+                                let observe_prepared = compaction_window
+                                    .as_ref()
+                                    .map(|(_, observer)| Arc::clone(observer));
+                                let compacted = compaction
+                                    .compact_if_needed_for(
+                                        session,
+                                        observe_prepared.as_deref(),
+                                        true,
+                                    )
+                                    .await;
+                                drop(compaction_window);
+                                compacted.map_err(
+                                    ContextGuardedTurnPassError::ReportedUsageCompaction,
+                                )?;
+                                continue;
+                            }
+                            let committed = activation
+                                .commit_preview(preview)
+                                .await
+                                .map_err(|source| ContextGuardedTurnPassError::Activation {
+                                    turn: Some(turn),
+                                    source,
+                                })?;
+                            match committed {
+                                CommitActivationPreviewOutcome::Stale => continue,
+                                CommitActivationPreviewOutcome::Activated(activated) => {
+                                    if activated.session() != session {
+                                        execution.report_post_activation_failure();
+                                        return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
+                                    }
+                                    observe_turn(activated.turn());
+                                    report_guarded_turn_activation(
+                                        activated.session(),
+                                        activated.turn(),
+                                    );
+                                    let execution = async { execution.execute(activated).await };
+                                    return execution
+                                        .instrument(guarded_turn_span(session, turn))
+                                        .await
+                                        .map_err(|source| ContextGuardedTurnPassError::Execution {
+                                            stage: TurnPassExecutionStage::Execution,
+                                            turn: Some(turn),
+                                            source,
+                                        });
+                                }
+                            }
+                        }
                     };
-                    let requested_tokens = input_tokens
-                        .checked_add(u64::from(model.max_output_tokens()))
-                        .ok_or(ContextGuardedTurnPassError::ContextStillExceeded(turn))?;
-                    if requested_tokens > u64::from(model.context_window_tokens()) {
+                    if !provider_count_admits(
+                        input_tokens,
+                        u64::from(model.max_output_tokens()),
+                        u64::from(model.context_window_tokens()),
+                    ) {
                         if compacted_turn == Some(turn) {
                             match close_failed_compaction_turn(
                                 &activation,
@@ -734,16 +961,23 @@ where
                             }
                             return Err(ContextGuardedTurnPassError::ContextStillExceeded(turn));
                         }
-                        match compact_automatically(
+                        let compaction_window = occupancy_recovery
+                            .as_ref()
+                            .map(|recovery| recovery.compaction_window(session));
+                        let observe_prepared = compaction_window
+                            .as_ref()
+                            .map(|(_, observer)| Arc::clone(observer));
+                        let compaction_result = compact_automatically(
                             &model_calls,
                             &model_configuration,
                             &compaction_model,
                             session,
                             turn,
-                            None,
+                            observe_prepared.as_deref(),
                         )
-                        .await
-                        {
+                        .await;
+                        drop(compaction_window);
+                        match compaction_result {
                             Ok(_) => {}
                             Err(crate::process_runtime::AutomaticContextCompactionError::AlreadyAttempted) => {
                                 match close_failed_compaction_turn(
@@ -847,9 +1081,12 @@ where
                                 execution.report_post_activation_failure();
                                 return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
                             }
+                            observe_turn(activated.turn());
                             report_guarded_turn_activation(activated.session(), activated.turn());
+                            let execution = async {
+                                execution.execute(activated).await
+                            };
                             return execution
-                                .execute(activated)
                                 .instrument(guarded_turn_span(session, turn))
                                 .await
                                 .map_err(|source| ContextGuardedTurnPassError::Execution {
@@ -879,6 +1116,7 @@ fn guarded_failure_stage<CountError, ExecutionError>(
     error: &ContextGuardedTurnPassError<CountError, ExecutionError>,
 ) -> &'static str {
     match error {
+        ContextGuardedTurnPassError::ReportedUsageCompaction(_) => "context_compaction",
         ContextGuardedTurnPassError::Activation { turn: None, .. } => "activation_preview",
         ContextGuardedTurnPassError::Activation { turn: Some(_), .. } => "activation_commit",
         ContextGuardedTurnPassError::Operation { .. } => "model_operation",
@@ -946,6 +1184,18 @@ fn report_guarded_turn_activation(session: SessionId, turn: TurnId) {
     );
 }
 
+fn provider_count_admits(
+    input_tokens: u64,
+    max_output_tokens: u64,
+    context_window_tokens: u64,
+) -> bool {
+    let admission_ceiling =
+        context_window_tokens.saturating_mul(PROVIDER_COUNT_ADMISSION_PERCENT) / 100;
+    input_tokens
+        .checked_add(max_output_tokens)
+        .is_some_and(|requested| requested <= admission_ceiling)
+}
+
 fn activation_identities() -> AcceptedInputTurnActivationIdentities {
     AcceptedInputTurnActivationIdentities::new(
         SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
@@ -991,6 +1241,38 @@ async fn close_failed_compaction_turn(
     }
 }
 
+async fn close_counted_attachment_failure(
+    activation: &StartEligibleTurnRepository,
+    model_calls: &PostgresModelCallRepository,
+    preview: PreparedActivationPreview,
+    prospective: signalbox_persistence::model_execution::ProspectiveModelCall,
+    failure: signalbox_application::AttachmentPreparationFailure,
+    instruction_evidence: Option<
+        signalbox_persistence::workspace_instructions::CountedActivationInstructionEvidence<'_>,
+    >,
+) -> Result<CommitCountedAttachmentFailurePreviewOutcome, CommitActivationPreviewError> {
+    loop {
+        let identities = FailedModelCallTurnIdentities::new(
+            SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+            ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+        );
+        match activation
+            .commit_counted_attachment_failure_preview(
+                preview.clone(),
+                prospective.clone(),
+                model_calls,
+                failure,
+                identities,
+                instruction_evidence,
+            )
+            .await
+        {
+            Err(error) if compaction_failure_closure_collision_is_retryable(&error) => {}
+            outcome => return outcome,
+        }
+    }
+}
+
 fn compaction_recovery_cause(
     error: &crate::process_runtime::AutomaticContextCompactionError,
 ) -> Option<GoalExecutionFailureRecoveryCause> {
@@ -1003,7 +1285,7 @@ fn compaction_recovery_cause(
 
 /// Classifies the turn-terminal cause a failed automatic compaction records.
 ///
-/// An input the compactor cannot fit is the §11 wall and keeps its own
+/// An input the compactor cannot fit is the compaction wall and keeps its own
 /// spelling; every other compaction failure is recorded as such rather than
 /// borrowed from the wall.
 const fn compaction_terminal_cause(
@@ -1049,7 +1331,7 @@ mod tests {
     use super::{
         ContextGuardedTurnPassError, compaction_failure_closure_collision_is_retryable,
         compaction_recovery_cause, guarded_failure_stage, persisted_preflight_prefix,
-        report_guarded_ambiguity,
+        provider_count_admits, report_guarded_ambiguity,
     };
 
     #[test]
@@ -1058,6 +1340,13 @@ mod tests {
             compaction_recovery_cause(&AutomaticContextCompactionError::InputDoesNotFit),
             Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit)
         );
+    }
+
+    #[test]
+    fn provider_count_retains_conservative_headroom_for_admission() {
+        assert!(provider_count_admits(79, 16, 100));
+        assert!(!provider_count_admits(80, 16, 100));
+        assert!(!provider_count_admits(u64::MAX, 1, u64::MAX));
     }
 
     #[test]
@@ -1184,11 +1473,11 @@ mod tests {
         }
     }
 
-    /// S03 / INV-034: the production guarded pass replaced the activated pass,
+    /// the production guarded pass replaced the activated pass,
     /// so an unprovable guarded activation commit must still raise the fatal
     /// recovery signal — every turn depends on it, not only compacted ones.
     #[test]
-    fn s03_inv034_ambiguous_guarded_activation_commit_reports_post_activation_failure() {
+    fn ambiguous_guarded_activation_commit_reports_post_activation_failure() {
         let (execution, signal) = supervised();
 
         report_guarded_ambiguity(&execution, &ambiguous_activation());
@@ -1196,11 +1485,11 @@ mod tests {
         assert!(signal.is_triggered());
     }
 
-    /// S03 / INV-034: an automatic compaction whose durable preparation cannot
+    /// an automatic compaction whose durable preparation cannot
     /// be proven committed reports the same outcome as an ambiguous activation
     /// commit, rather than failing silently on the compaction path.
     #[test]
-    fn s03_inv034_ambiguous_compaction_preparation_reports_post_activation_failure() {
+    fn ambiguous_compaction_preparation_reports_post_activation_failure() {
         let (execution, signal) = supervised();
 
         let error = ambiguous_compaction();
@@ -1213,10 +1502,10 @@ mod tests {
         assert!(signal.is_triggered());
     }
 
-    /// S03 / INV-034: a database failure before any commit boundary is ordinary
+    /// a database failure before any commit boundary is ordinary
     /// scheduler retry work and raises no recovery signal.
     #[test]
-    fn s03_inv034_activation_failure_before_the_commit_boundary_reports_nothing() {
+    fn activation_failure_before_the_commit_boundary_reports_nothing() {
         let (execution, signal) = supervised();
 
         let error: GuardedFailure = ContextGuardedTurnPassError::Activation {
@@ -1232,10 +1521,10 @@ mod tests {
         assert!(!signal.is_triggered());
     }
 
-    /// S03 / INV-034: execution failures keep their own supervision rule, so
+    /// execution failures keep their own supervision rule, so
     /// the guarded pass adds no second reaction to them.
     #[test]
-    fn s03_inv034_execution_failure_keeps_its_own_supervision_rule() {
+    fn execution_failure_keeps_its_own_supervision_rule() {
         let (execution, signal) = supervised();
 
         let error: GuardedFailure = ContextGuardedTurnPassError::Execution {

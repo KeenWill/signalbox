@@ -1,6 +1,6 @@
-//! Durable session lifecycle: eight states, their typed detail, the closed
-//! terminal-outcome vocabulary, ownership, and the actor classification every
-//! transition records.
+//! Durable session lifecycle (docs/spec/session-lifecycle.md): eight states,
+//! their typed detail, the closed terminal-outcome vocabulary, ownership, and
+//! the actor classification every transition records.
 //!
 //! The turn machine persists unchanged beneath this one. The session state is
 //! authoritative and moves in the same transaction as every turn or goal
@@ -14,7 +14,7 @@ use crate::{
 /// A module that dispatches sessions.
 ///
 /// The set is closed and holds only modules with a producing dispatch path, so
-/// no spelling here is a placeholder. §6's `module{name}` reads this value.
+/// no spelling here is a placeholder. The `module{name}` actor reads this value.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DispatchingModule {
     /// Repository watch dispatched the session from a matched rule.
@@ -73,7 +73,7 @@ pub enum CoreAgency {
     },
 }
 
-/// The §6 classification recorded with every lifecycle transition.
+/// The actor classification recorded with every lifecycle transition.
 ///
 /// This classifies the domain [`Actor`] rather than replacing it: the domain
 /// algebra, its wire projection, and its replay-equality contract are
@@ -149,7 +149,7 @@ impl SessionOwnership {
     }
 }
 
-/// The closed §1 waiting-kind vocabulary.
+/// The closed waiting-kind vocabulary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionWaitKind {
     /// A tool-approval decision is outstanding.
@@ -168,7 +168,7 @@ pub enum SessionWaitKind {
 
 /// The machinery that ends one wait.
 ///
-/// §1 requires a waiting session to designate its waker. Each wait kind has
+/// A waiting session designates its waker. Each wait kind has
 /// exactly one, so the designation is total rather than a free choice a caller
 /// could get wrong.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -187,9 +187,9 @@ pub enum SessionWaker {
     SchedulerSweep,
 }
 
-/// §1's typed waiting detail.
+/// The typed waiting detail.
 ///
-/// The deadline member §1 names is the session's armed deadline record and is
+/// The waiting state's deadline member is the session's armed deadline record and is
 /// not repeated here: a second copy could only disagree with the record the
 /// invariant is defined over.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -240,8 +240,8 @@ impl SessionWait {
 /// Which recovery a session is waiting out.
 ///
 /// The three variants are exactly the three `awaiting_*_recovery` turn phases
-/// §1 maps onto `recovering`. The bound member §1 names is the armed deadline
-/// record, for the same reason a wait's deadline is.
+/// the lifecycle maps onto `recovering`. The recovering state's bound member is
+/// the armed deadline record, for the same reason a wait's deadline is.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionRecoveryOperation {
     /// A model call is being reconciled.
@@ -276,7 +276,7 @@ pub enum SessionParkCause {
 impl SessionParkCause {
     /// Whether the standing evidence a park carries is what its cause names.
     ///
-    /// A closure reads the standing evidence to classify the outcome (§2), so
+    /// A closure reads the standing evidence to classify the outcome, so
     /// a park holding evidence its own cause contradicts closes under a
     /// classification the park never supported -- and an exhaustion holding no
     /// evidence at all cannot say what it exhausted retries or structure on.
@@ -293,7 +293,7 @@ impl SessionParkCause {
 
 /// Who must act on one park.
 ///
-/// §1's park carries a third member beside its cause and its instant: who is
+/// A park carries a third member beside its cause and its instant: who is
 /// being waited on. That is the operator queue, or the module whose dispatch
 /// the session serves — and nothing else, because a park nobody answers is the
 /// stuck session this state exists to make visible.
@@ -363,7 +363,7 @@ pub enum StopStickiness {
     Redispatchable,
 }
 
-/// The closed §2 terminal-outcome vocabulary.
+/// The closed terminal-outcome vocabulary.
 ///
 /// `stopped{actor}`'s actor member is the transition's recorded
 /// [`LifecycleActor`], which the same row carries: the stop is the transition,
@@ -573,7 +573,7 @@ impl SessionLifecycleState {
         }
     }
 
-    /// Whether a transition to `next` is admitted by §1's algebra.
+    /// Whether a transition to `next` is admitted by the lifecycle algebra.
     ///
     /// The four mapped states move freely between one another because the turn
     /// and goal machines below decide them: the session state follows the
@@ -605,7 +605,7 @@ impl SessionLifecycleState {
     /// `retired` says the session never did the work, so only the two
     /// admission states reach it, with either their shared admission expiry or
     /// a dispatched queued-turn retirement. Every other outcome closes from
-    /// any non-terminal state, and the parked-only closures are commands (§7)
+    /// any non-terminal state, and the parked-only closures are commands
     /// rather than shapes this algebra can distinguish.
     const fn admits_outcome(&self, outcome: &SessionTerminalOutcome) -> bool {
         match outcome {
@@ -650,7 +650,7 @@ impl SessionLifecycleState {
     }
 }
 
-/// A transition §1's algebra does not admit.
+/// A transition the lifecycle algebra does not admit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionLifecycleTransitionError {
     from: SessionLifecycleState,

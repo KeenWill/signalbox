@@ -1,7 +1,5 @@
 //! Append-only PostgreSQL storage for workspace instruction snapshots.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use signalbox_application::{
     ClassifyOperatorFailure, InstructionDiscoverySnapshot, OperatorFailureClass,
@@ -59,7 +57,7 @@ impl WorkspaceInstructionPlacementObservation {
 }
 
 /// One complete queued-turn snapshot prepared for the activation transaction.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct CountedActivationInstructionEvidence<'a> {
     discovery: InstructionDiscoveryId,
     manifest: &'a TurnInstructionManifest,
@@ -88,39 +86,20 @@ impl<'a> CountedActivationInstructionEvidence<'a> {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Storage or authentication failure at the instruction boundary.
 #[derive(Debug)]
 pub enum WorkspaceInstructionRepositoryError {
+    #[error(transparent)]
     Database {
+        #[source]
         source: sqlx::Error,
         commit_ambiguous: bool,
     },
+    #[error("runner placement changed during workspace discovery")]
     PlacementChanged,
+    #[error("workspace instruction corruption: {field_0}")]
     Corruption(&'static str),
-}
-
-impl fmt::Display for WorkspaceInstructionRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => source.fmt(formatter),
-            Self::PlacementChanged => {
-                formatter.write_str("runner placement changed during workspace discovery")
-            }
-            Self::Corruption(reason) => {
-                write!(formatter, "workspace instruction corruption: {reason}")
-            }
-        }
-    }
-}
-
-impl Error for WorkspaceInstructionRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::PlacementChanged => None,
-            Self::Corruption(_) => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for WorkspaceInstructionRepositoryError {

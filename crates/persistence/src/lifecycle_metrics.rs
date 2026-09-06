@@ -1,11 +1,10 @@
-//! PostgreSQL adapter for the §12 lifecycle metrics.
+//! PostgreSQL adapter for the lifecycle metrics
+//! (docs/spec/session-lifecycle.md).
 //!
 //! Nothing here computes a metric: the definitions are the views the
 //! `202609020003_lifecycle_metrics.sql` migration installs. The operator
 //! status surface and the Prometheus gauges read the same statements, so they
 //! cannot report two different numbers for one metric.
-
-use std::{error::Error, fmt};
 
 use signalbox_domain::SessionId;
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid, types::time::PrimitiveDateTime};
@@ -25,47 +24,24 @@ pub(crate) const MAX_REPORTED_WEEKS: i64 = 104;
 // numeric-bound: not-a-bound - fixed-point scale for exact rate arithmetic
 const PARTS_PER_MILLION: u128 = 1_000_000;
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable metric shape this module cannot read.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LifecycleMetricsCorruption {
+    #[error("missing lifecycle metric {field_0}")]
     Missing(&'static str),
+    #[error("invalid lifecycle metric {field_0}")]
     Invalid(&'static str),
 }
 
-impl fmt::Display for LifecycleMetricsCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing lifecycle metric {field}"),
-            Self::Invalid(field) => write!(formatter, "invalid lifecycle metric {field}"),
-        }
-    }
-}
-
-impl Error for LifecycleMetricsCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Why one lifecycle metric read produced no report.
 #[derive(Debug)]
 pub enum LifecycleMetricsError {
-    Database(sqlx::Error),
-    Corruption(LifecycleMetricsCorruption),
-}
-
-impl fmt::Display for LifecycleMetricsError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "lifecycle metric read failed: {error}"),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for LifecycleMetricsError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    #[error("lifecycle metric read failed: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
+    Corruption(#[source] LifecycleMetricsCorruption),
 }
 
 impl From<sqlx::Error> for LifecycleMetricsError {
@@ -80,12 +56,17 @@ impl From<LifecycleMetricsCorruption> for LifecycleMetricsError {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One metric's exact numerator and denominator.
 ///
 /// The rate is derived, so a week with no members reports no rate at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LifecycleRate {
+    /// Returns the counted members.
+    #[get(copy)]
     numerator: u64,
+    /// Returns the population the count is over.
+    #[get(copy)]
     denominator: u64,
 }
 
@@ -95,16 +76,6 @@ impl LifecycleRate {
             numerator,
             denominator,
         }
-    }
-
-    /// Returns the counted members.
-    pub const fn numerator(self) -> u64 {
-        self.numerator
-    }
-
-    /// Returns the population the count is over.
-    pub const fn denominator(self) -> u64 {
-        self.denominator
     }
 
     /// Returns the rate in parts per million, absent for an empty population.
@@ -119,7 +90,7 @@ impl LifecycleRate {
     }
 }
 
-/// One calendar week's §12 report.
+/// One calendar week's metrics report.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LifecycleWeeklyMetrics {
     week_start: PrimitiveDateTime,
@@ -150,7 +121,7 @@ impl LifecycleWeeklyMetrics {
         )
     }
 
-    /// Returns the headline: the §12 completion-failure rate for this week.
+    /// Returns the headline: the completion-failure rate for this week.
     pub const fn completion_failure(&self) -> LifecycleRate {
         self.completion_failure
     }
@@ -205,7 +176,7 @@ pub enum LifecycleNonTerminalState {
     Parked,
 }
 
-/// One owned non-terminal session violating §1's armed-deadline invariant.
+/// One owned non-terminal session violating the armed-deadline invariant.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LifecycleDeadlineViolation {
     session: SessionId,
@@ -236,7 +207,8 @@ impl LifecycleDeadlineViolation {
     }
 }
 
-/// One coherent §12 report.
+#[derive(signalbox_derive::Accessors)]
+/// One coherent metrics report.
 ///
 /// Carries the deadline violations as a count, not as rows: a widespread
 /// incident is exactly when a periodic reader must not build one object per
@@ -244,17 +216,14 @@ impl LifecycleDeadlineViolation {
 /// cursor instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LifecycleMetricsReport {
+    /// Returns the weekly cohorts, oldest first.
+    #[get(slice)]
     weeks: Vec<LifecycleWeeklyMetrics>,
     current_week: PrimitiveDateTime,
     nonterminal_past_deadline: u64,
 }
 
 impl LifecycleMetricsReport {
-    /// Returns the weekly cohorts, oldest first.
-    pub fn weeks(&self) -> &[LifecycleWeeklyMetrics] {
-        &self.weeks
-    }
-
     /// Returns the `nonterminal_past_deadline` count, target zero.
     pub const fn nonterminal_past_deadline(&self) -> u64 {
         self.nonterminal_past_deadline
@@ -279,7 +248,7 @@ impl LifecycleMetricsReport {
     }
 }
 
-/// PostgreSQL-backed §12 metric read boundary.
+/// PostgreSQL-backed lifecycle-metric read boundary.
 #[derive(Clone, Debug)]
 pub struct LifecycleMetricsRepository {
     pool: PgPool,
@@ -354,7 +323,7 @@ impl LifecycleMetricsRepository {
         Self { pool }
     }
 
-    /// Reads one coherent report over every §12 definition.
+    /// Reads one coherent report over every metric definition.
     ///
     /// One repeatable-read snapshot, so a cohort and the count beside it
     /// describe the same instant.

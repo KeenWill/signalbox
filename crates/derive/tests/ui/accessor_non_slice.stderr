@@ -1,0 +1,5 @@
+error: slice requires a slice, array, Vec, Box<[T]>, or Arc<[T]> field
+ --> tests/ui/accessor_non_slice.rs:6:12
+  |
+6 |     value: u64,
+  |            ^^^

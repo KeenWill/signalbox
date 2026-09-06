@@ -1344,11 +1344,11 @@ mod tests {
         )
     }
 
-    /// S37 / INV-051: each knob resolves independently through per-call,
+    /// S37: each knob resolves independently through per-call,
     /// session, profile, then global precedence, and an explicit provider
     /// default stops lower-layer inheritance.
     #[test]
-    fn s37_inv051_resolves_the_fixed_precedence_chain_with_explicit_clearing() {
+    fn s37_resolves_the_fixed_precedence_chain_with_explicit_clearing() {
         let per_call = ModelSettingsOverlay::new(
             SettingOverlay::ProviderDefault,
             FastModeOverlay::Inherit,
@@ -1392,10 +1392,10 @@ mod tests {
         );
     }
 
-    /// INV-003 / INV-053: stored settings reconstitute from self-contained
+    /// stored settings reconstitute from self-contained
     /// structural facts without consulting a mutable capability catalog.
     #[test]
-    fn inv003_inv053_validated_settings_reconstitute_from_exact_stored_facts() {
+    fn validated_settings_reconstitute_from_exact_stored_facts() {
         let selected = direct(1);
         let supported = capabilities([ReasoningLevel::Medium], FastModeSupport::Unsupported, []);
         let precedence = ModelSettingsPrecedence::new(
@@ -1425,10 +1425,10 @@ mod tests {
         assert_eq!(reconstituted, Some(stored));
     }
 
-    /// INV-003: a stored effective value that disagrees with its precedence
+    /// a stored effective value that disagrees with its precedence
     /// chain cannot claim validated settings provenance.
     #[test]
-    fn inv003_inconsistent_stored_settings_fail_reconstitution() {
+    fn inconsistent_stored_settings_fail_reconstitution() {
         let precedence = ModelSettingsPrecedence::provider_defaults();
 
         let reconstituted = super::ValidatedModelSettings::reconstitute(
@@ -1443,10 +1443,10 @@ mod tests {
         assert_eq!(reconstituted, None);
     }
 
-    /// INV-003 / INV-053: only exact provider defaults may omit the direct
+    /// only exact provider defaults may omit the direct
     /// selection that validated stored settings.
     #[test]
-    fn inv003_inv053_non_default_stored_settings_require_a_validation_selection() {
+    fn non_default_stored_settings_require_a_validation_selection() {
         let precedence = ModelSettingsPrecedence::new(
             ModelSettingsOverlay::inherit_all(),
             ModelSettingsOverlay::new(
@@ -1471,10 +1471,10 @@ mod tests {
         assert_eq!(reconstituted, None);
     }
 
-    /// INV-003 / INV-053: validating the exact all-inherit chain preserves the
+    /// validating the exact all-inherit chain preserves the
     /// canonical model-independent provider-default snapshot.
     #[test]
-    fn inv003_inv053_exact_provider_defaults_remain_model_independent() {
+    fn exact_provider_defaults_remain_model_independent() {
         let selected = direct(1);
         let supported = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, []);
 
@@ -1486,10 +1486,10 @@ mod tests {
         assert_eq!(settings.validated_for(), None);
     }
 
-    /// S37 / INV-051: an explicit unsupported level is a typed error rather
+    /// S37: an explicit unsupported level is a typed error rather
     /// than delegated to an open provider enum or silent clamp.
     #[test]
-    fn s37_inv051_explicit_unsupported_reasoning_is_rejected() {
+    fn s37_explicit_unsupported_reasoning_is_rejected() {
         let selected = direct(1);
         let supported = capabilities(
             [ReasoningLevel::Low, ReasoningLevel::Medium],
@@ -1515,10 +1515,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-052: model-change incompatibility clamps reasoning downward,
+    /// S37: model-change incompatibility clamps reasoning downward,
     /// disables fast mode, clears an unordered tier, and records each change.
     #[test]
-    fn s37_inv052_model_change_adjusts_downward_off_and_default() {
+    fn s37_model_change_adjusts_downward_off_and_default() {
         let supported = capabilities(
             [ReasoningLevel::Low, ReasoningLevel::High],
             FastModeSupport::Unsupported,
@@ -1551,10 +1551,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-052: when no supported level lies below the requested level,
+    /// S37: when no supported level lies below the requested level,
     /// the model change chooses the lowest supported level.
     #[test]
-    fn s37_inv052_model_change_uses_lowest_only_when_nothing_is_below() {
+    fn s37_model_change_uses_lowest_only_when_nothing_is_below() {
         let supported = capabilities(
             [ReasoningLevel::Medium, ReasoningLevel::High],
             FastModeSupport::Unsupported,
@@ -1578,10 +1578,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-052: inherited incompatibility rewrites the inherited source
+    /// S37: inherited incompatibility rewrites the inherited source
     /// in the validated snapshot while preserving ordered adjustment evidence.
     #[test]
-    fn s37_inv052_model_change_installs_a_self_consistent_adjusted_snapshot() {
+    fn s37_model_change_installs_a_self_consistent_adjusted_snapshot() {
         let selected = direct(1);
         let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
         let session = ModelSettingsOverlay::new(
@@ -1617,10 +1617,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-051: the same unsupported value remains an error when the
+    /// S37: the same unsupported value remains an error when the
     /// model-change caller explicitly supplies it.
     #[test]
-    fn s37_inv051_model_change_does_not_adjust_an_explicit_unsupported_value() {
+    fn s37_model_change_does_not_adjust_an_explicit_unsupported_value() {
         let selected = direct(1);
         let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
         let caller = ModelSettingsOverlay::new(
@@ -1648,10 +1648,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-054: an alternate fast target is selected only from the
+    /// S37: an alternate fast target is selected only from the
     /// declared capability record.
     #[test]
-    fn s37_inv054_fast_mode_uses_only_the_declared_alternate_target() {
+    fn s37_fast_mode_uses_only_the_declared_alternate_target() {
         let selected = ResolvedProviderTarget::naming(provider_model_identity(1));
         let fast = ResolvedProviderTarget::naming(provider_model_identity(2));
         let supported = capabilities([], FastModeSupport::AlternateTarget(fast), []);
@@ -1666,20 +1666,20 @@ mod tests {
         );
     }
 
-    /// S37 / INV-054: the alternate-target variant cannot silently authorize
+    /// S37: the alternate-target variant cannot silently authorize
     /// ordinary serving through a self-map.
     #[test]
-    fn s37_inv054_fast_mode_rejects_a_self_mapped_alternate_target() {
+    fn s37_fast_mode_rejects_a_self_mapped_alternate_target() {
         let selected = ResolvedProviderTarget::naming(provider_model_identity(1));
         let supported = capabilities([], FastModeSupport::AlternateTarget(selected), []);
 
         assert_eq!(supported.serving_target(selected, FastMode::Enabled), None);
     }
 
-    /// S37 / INV-053: an automatic adjustment is a durable event field and
+    /// S37: an automatic adjustment is a durable event field and
     /// cannot disappear after settings preparation.
     #[test]
-    fn s37_inv053_defaults_event_retains_ordered_automatic_adjustments() {
+    fn s37_defaults_event_retains_ordered_automatic_adjustments() {
         let selection = direct(1);
         let prior_selection = direct(2);
         let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
@@ -1740,10 +1740,10 @@ mod tests {
         assert_eq!(event.installed_settings(), installed);
     }
 
-    /// S37 / INV-053: an explicit caller value is rejected as unsupported and
+    /// S37: an explicit caller value is rejected as unsupported and
     /// cannot be rewritten by automatic model-change adjustment evidence.
     #[test]
-    fn s37_inv053_defaults_event_rejects_adjustment_of_explicit_caller_value() {
+    fn s37_defaults_event_rejects_adjustment_of_explicit_caller_value() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let prior = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, [])
@@ -1805,10 +1805,10 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// S37 / INV-053: retaining the same alias spelling can still record an
+    /// S37: retaining the same alias spelling can still record an
     /// adjustment when its validated direct selection changed.
     #[test]
-    fn s37_inv053_defaults_event_detects_alias_retarget_from_validation_identity() {
+    fn s37_defaults_event_detects_alias_retarget_from_validation_identity() {
         let alias = crate::ModelAlias::from_uuid(Uuid::from_u128(3));
         let prior_selection = direct(1);
         let installed_selection = direct(2);
@@ -1866,10 +1866,10 @@ mod tests {
         assert!(event.is_some());
     }
 
-    /// INV-053: changing only the alias request spelling cannot justify an
+    /// changing only the alias request spelling cannot justify an
     /// automatic compatibility adjustment when the direct selection stayed fixed.
     #[test]
-    fn inv053_defaults_event_rejects_adjustment_for_alias_spelling_change() {
+    fn defaults_event_rejects_adjustment_for_alias_spelling_change() {
         let selection = direct(1);
         let prior = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, [])
             .validate_precedence(
@@ -1925,10 +1925,10 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// S37 / INV-053: a replacement model contributes its newly copied
+    /// S37: a replacement model contributes its newly copied
     /// profile and global layers to settings-change provenance.
     #[test]
-    fn s37_inv053_defaults_event_uses_replacement_model_lower_layers() {
+    fn s37_defaults_event_uses_replacement_model_lower_layers() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let prior = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, [])
@@ -1982,10 +1982,10 @@ mod tests {
         assert!(event.is_some());
     }
 
-    /// S37 / INV-053: every successor epoch records its newly copied profile
+    /// S37: every successor epoch records its newly copied profile
     /// and global layers even when its direct model is unchanged.
     #[test]
-    fn s37_inv053_defaults_event_uses_same_model_successor_lower_layers() {
+    fn s37_defaults_event_uses_same_model_successor_lower_layers() {
         let selection = direct(1);
         let supported = capabilities(
             [ReasoningLevel::Low, ReasoningLevel::High],
@@ -2043,10 +2043,10 @@ mod tests {
         assert!(event.is_some());
     }
 
-    /// INV-003 / INV-053: durable defaults snapshots cannot contain a
+    /// durable defaults snapshots cannot contain a
     /// request-scoped settings contribution.
     #[test]
-    fn inv003_inv053_defaults_event_rejects_per_call_layers() {
+    fn defaults_event_rejects_per_call_layers() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let precedence = ModelSettingsPrecedence::new(
@@ -2087,10 +2087,10 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// INV-003 / INV-053: alias adjustment evidence names the distinct prior
+    /// alias adjustment evidence names the distinct prior
     /// direct selection whose capability change caused it.
     #[test]
-    fn inv003_inv053_turn_event_accepts_distinct_alias_adjustment_source() {
+    fn turn_event_accepts_distinct_alias_adjustment_source() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let alias = crate::ModelAlias::from_uuid(Uuid::from_u128(3));
@@ -2135,10 +2135,10 @@ mod tests {
         );
     }
 
-    /// INV-003 / INV-053: an alias spelling cannot authenticate an adjustment
+    /// an alias spelling cannot authenticate an adjustment
     /// when its prior validation identity equals its selected direct model.
     #[test]
-    fn inv003_inv053_turn_event_rejects_unchanged_alias_adjustment_source() {
+    fn turn_event_rejects_unchanged_alias_adjustment_source() {
         let selection = direct(1);
         let alias = crate::ModelAlias::from_uuid(Uuid::from_u128(2));
         let settings = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, [])
@@ -2177,10 +2177,10 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// INV-003 / INV-053: a turn settings event cannot contradict the
+    /// a turn settings event cannot contradict the
     /// per-call contribution sealed into its complete precedence chain.
     #[test]
-    fn inv003_inv053_turn_event_rejects_mismatched_per_call_provenance() {
+    fn turn_event_rejects_mismatched_per_call_provenance() {
         let selection = direct(1);
         let settings = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, [])
             .validate_precedence(selection, ModelSettingsPrecedence::provider_defaults())
@@ -2205,10 +2205,10 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// INV-003 / INV-053: a turn event cannot attach automatic adjustment
+    /// a turn event cannot attach automatic adjustment
     /// evidence that does not derive its sealed settings snapshot.
     #[test]
-    fn inv003_inv053_turn_event_rejects_contradictory_adjustment_evidence() {
+    fn turn_event_rejects_contradictory_adjustment_evidence() {
         let selection = direct(1);
         let settings = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, [])
             .validate_precedence(selection, ModelSettingsPrecedence::provider_defaults())
@@ -2231,10 +2231,10 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// INV-003 / INV-053: adjustment evidence requires a changed direct model,
+    /// adjustment evidence requires a changed direct model,
     /// regardless of whether the frozen selection is direct or aliased.
     #[test]
-    fn inv003_inv053_turn_event_rejects_adjustments_without_direct_model_change() {
+    fn turn_event_rejects_adjustments_without_direct_model_change() {
         let selection = direct(1);
         let settings = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, [])
             .validate_precedence(
@@ -2269,10 +2269,10 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// INV-003 / INV-053: a defaults event cannot claim a caller override
+    /// a defaults event cannot claim a caller override
     /// that does not derive its installed settings snapshot.
     #[test]
-    fn inv003_inv053_defaults_event_rejects_contradictory_caller_provenance() {
+    fn defaults_event_rejects_contradictory_caller_provenance() {
         let selection = direct(1);
         let supported = capabilities(
             [ReasoningLevel::Low, ReasoningLevel::High],
