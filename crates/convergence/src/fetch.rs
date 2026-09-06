@@ -386,7 +386,7 @@ pub async fn record_with(
     }
     for thread in array(&node["reviewThreads"]["nodes"]) {
         for comment in array(&thread["comments"]["nodes"]) {
-            if let Some(oid) = crate::evidence::fixing_commit(text(&comment["body"]))? {
+            if let Some(oid) = crate::evidence::fixing_commit(text(&comment["body"]), policy)? {
                 candidates.push(oid);
             }
         }
@@ -457,9 +457,9 @@ pub async fn record_with(
         let mut responses = Vec::new();
         let data = query(send, &mut responses,"query($owner:String!,$name:String!,$head:String!,$base:String!) { repository(owner:$owner,name:$name) { head:object(expression:$head) { ... on Blob { text } } base:object(expression:$base) { ... on Blob { text } } } }".into(),json!({"owner":owner,"name":name,"head":format!("{head}:{path}"),"base":format!("{base}:{previous}")})).await?;
         blobs.insert(path.into(), serde_json::to_value(responses)?);
-        if !crate::evidence::planning_blob(&data["repository"]["head"])
+        if !crate::evidence::planning_blob(&data["repository"]["head"], policy)
             || (file["changeType"] != "ADDED"
-                && !crate::evidence::planning_blob(&data["repository"]["base"]))
+                && !crate::evidence::planning_blob(&data["repository"]["base"], policy))
         {
             break;
         }

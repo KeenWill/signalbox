@@ -17,10 +17,6 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "crates/convergence/fixtures"
 POLICY = ROOT / "crates/convergence/examples/repository.toml"
 
-# The active contract exempts rename-only changes and clean base forwards.
-reference.comment_only_patch = lambda _file: False
-
-
 def append_page(connection, page):
     if connection["totalCount"] != page["totalCount"]:
         raise ValueError("connection totalCount changed while paging")

@@ -12,7 +12,7 @@ pub enum Reason {
     UnresolvedReviewThreads { count: usize },
     UndispositionedReviewThreads { count: usize },
     QuietReviewNotCompletedForCurrentHead,
-    DescriptionExceeds350Words,
+    DescriptionWordLimitExceeded { limit: usize },
     ChecksNotForCurrentHead,
     CheckRollupMissing,
     GatingChecksMissing,
@@ -35,7 +35,9 @@ impl Reason {
             Self::QuietReviewNotCompletedForCurrentHead => {
                 "quiet-review-not-completed-for-current-head".into()
             }
-            Self::DescriptionExceeds350Words => "description-exceeds-350-words".into(),
+            Self::DescriptionWordLimitExceeded { limit } => {
+                format!("description-exceeds-{limit}-words")
+            }
             Self::ChecksNotForCurrentHead => "checks-not-for-current-head".into(),
             Self::CheckRollupMissing => "check-rollup-missing".into(),
             Self::GatingChecksMissing => "gating-checks-missing".into(),
@@ -149,7 +151,7 @@ pub(crate) fn checks(node: &Value) -> &[Value] {
 
 pub fn evaluate_facts(facts: &Facts, policy: &ConvergencePolicy) -> Verdict {
     let mut reasons = Vec::new();
-    if facts.is_draft {
+    if policy.reject_drafts && facts.is_draft {
         reasons.push(Reason::PullRequestIsDraft);
     }
     if facts.review_decision.as_deref() == Some("CHANGES_REQUESTED") {
@@ -182,8 +184,10 @@ pub fn evaluate_facts(facts: &Facts, policy: &ConvergencePolicy) -> Verdict {
     {
         reasons.push(Reason::QuietReviewNotCompletedForCurrentHead);
     }
-    if word_count(&facts.body) > 350 {
-        reasons.push(Reason::DescriptionExceeds350Words);
+    if let Some(limit) = policy.description_word_limit
+        && word_count(&facts.body) > limit
+    {
+        reasons.push(Reason::DescriptionWordLimitExceeded { limit });
     }
     if facts.checked_head_oid.as_ref() != Some(&facts.head_oid) {
         reasons.push(Reason::ChecksNotForCurrentHead);

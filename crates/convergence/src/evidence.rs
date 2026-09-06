@@ -3,7 +3,7 @@ use crate::predicate::{
 };
 use crate::{
     ConvergencePolicy, Error, ReviewerPolicy, Snapshot, Verdict, array, effective_at, login, text,
-    trusted, yes,
+    timestamp, trusted, yes,
 };
 use regex::Regex;
 use serde::Serialize;
@@ -25,8 +25,11 @@ pub struct Evaluation {
     pub non_gating_checks: Vec<Value>,
 }
 
-pub(crate) fn fixing_commit(body: &str) -> Result<Option<String>, Error> {
-    let grammar = Regex::new(r"(?i)^fixed in commits?\s+`?([0-9a-f]{7,40})`?")?;
+pub(crate) fn fixing_commit(
+    body: &str,
+    policy: &ConvergencePolicy,
+) -> Result<Option<String>, Error> {
+    let grammar = Regex::new(&policy.fixed_in_commit_pattern)?;
     Ok(grammar
         .captures(body.trim())
         .and_then(|captures| captures.get(1))
@@ -34,10 +37,15 @@ pub(crate) fn fixing_commit(body: &str) -> Result<Option<String>, Error> {
 }
 fn disposition(body: &str, policy: &ConvergencePolicy) -> Result<Option<&'static str>, Error> {
     let body = body.trim();
-    if fixing_commit(body)?.is_some() {
+    if fixing_commit(body, policy)?.is_some() {
         return Ok(Some("fixed"));
     }
-    if body.to_lowercase().starts_with("declined:") && !body[9..].trim().is_empty() {
+    if !policy.declined_prefix.is_empty()
+        && body
+            .get(..policy.declined_prefix.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&policy.declined_prefix))
+        && !body[policy.declined_prefix.len()..].trim().is_empty()
+    {
         return Ok(Some("declined"));
     }
     if policy
@@ -57,7 +65,15 @@ fn owned_time(value: &str) -> Option<String> {
     }
 }
 fn normalize_threads(node: &Value, policy: &ConvergencePolicy) -> Result<Vec<Thread>, Error> {
-    let informational = Regex::new(r"(?i)^(?:question|informational|note)\b")?;
+    let informational = Regex::new(&format!(
+        "(?i)^(?:{})\\b",
+        policy
+            .informational_classes
+            .iter()
+            .map(|class| regex::escape(class))
+            .collect::<Vec<_>>()
+            .join("|")
+    ))?;
     let mut result = Vec::new();
     for raw in array(&node["reviewThreads"]["nodes"]) {
         let comments = array(&raw["comments"]["nodes"]);
@@ -79,13 +95,15 @@ fn normalize_threads(node: &Value, policy: &ConvergencePolicy) -> Result<Vec<Thr
             .iter()
             .take(boundary + 1)
             .map(effective_at)
-            .max()
+            .max_by_key(|at| timestamp(at))
             .unwrap_or_default();
         let replies: Vec<_> = comments.iter().skip(boundary + 1).collect();
         let authors: Vec<_> = replies
             .iter()
             .copied()
-            .filter(|c| trusted(c) && (latest.is_empty() || effective_at(c) > latest))
+            .filter(|c| {
+                trusted(c) && (latest.is_empty() || timestamp(effective_at(c)) > timestamp(latest))
+            })
             .collect();
         let kinds = authors
             .iter()
@@ -110,34 +128,28 @@ fn normalize_threads(node: &Value, policy: &ConvergencePolicy) -> Result<Vec<Thr
             .zip(&kinds)
             .filter(|(_, kind)| kind.is_some())
             .map(|(c, _)| effective_at(c))
-            .max()
+            .max_by_key(|at| timestamp(at))
             .unwrap_or_default();
-        let is_informational = comments
-            .first()
-            .is_some_and(|c| informational.is_match(text(&c["body"]).trim()));
+        let is_informational = comments.first().is_some_and(|c| {
+            !policy.informational_classes.is_empty()
+                && informational.is_match(text(&c["body"]).trim())
+        });
         let answers: Vec<_> = authors
             .iter()
             .filter(|c| {
                 let body = text(&c["body"]).trim().to_lowercase();
                 !body.is_empty()
-                    && !matches!(
-                        body.as_str(),
-                        "ack"
-                            | "acknowledged"
-                            | "done"
-                            | "noted"
-                            | "ok"
-                            | "okay"
-                            | "thanks"
-                            | "thank you"
-                    )
+                    && !policy
+                        .acknowledgement_words
+                        .iter()
+                        .any(|word| body.eq_ignore_ascii_case(word))
             })
             .collect();
         if is_informational && !answers.is_empty() {
             disposition_at = answers
                 .iter()
                 .map(|c| effective_at(c))
-                .max()
+                .max_by_key(|at| timestamp(at))
                 .unwrap_or_default();
         }
         let mut review_ids: Vec<_> = comments
@@ -148,7 +160,7 @@ fn normalize_threads(node: &Value, policy: &ConvergencePolicy) -> Result<Vec<Thr
         review_ids.dedup();
         let mut fixing = None;
         for author in &authors {
-            if let Some(commit) = fixing_commit(text(&author["body"]))? {
+            if let Some(commit) = fixing_commit(text(&author["body"]), policy)? {
                 fixing = Some(commit);
             }
         }
@@ -210,17 +222,17 @@ fn prior_threads_dispositioned(threads: &[Thread], requested: &str) -> bool {
         thread
             .latest_reviewer_at
             .as_deref()
-            .is_none_or(|at| at >= requested)
+            .is_none_or(|at| timestamp_not_after(requested, at))
             || (thread.is_resolved
                 && thread.is_dispositioned
                 && thread
                     .disposition_at
                     .as_deref()
-                    .is_some_and(|at| at <= requested)
+                    .is_some_and(|at| timestamp_not_after(at, requested))
                 && thread
                     .resolution_observed_at
                     .as_deref()
-                    .is_some_and(|at| at <= requested))
+                    .is_some_and(|at| timestamp_not_after(at, requested)))
     })
 }
 fn qualifying_request(
@@ -230,7 +242,6 @@ fn qualifying_request(
     reviewer: &ReviewerPolicy,
     facts: &Facts,
     policy: &ConvergencePolicy,
-    parsed_time: bool,
 ) -> Result<Option<Value>, Error> {
     let mut best: Option<(&str, Value)> = None;
     for comment in comments {
@@ -241,11 +252,8 @@ fn qualifying_request(
         let Some(signature) = request_signature(comment) else {
             continue;
         };
-        if (if parsed_time {
-            !timestamp_not_after(at, completed)
-        } else {
-            at > completed
-        }) || !prior_threads_dispositioned(&facts.review_threads, at)
+        if !timestamp_not_after(at, completed)
+            || !prior_threads_dispositioned(&facts.review_threads, at)
         {
             continue;
         }
@@ -261,12 +269,15 @@ fn qualifying_request(
                         } else {
                             text(&c["createdAt"])
                         };
-                        check_green(c) && !checked_at.is_empty() && checked_at <= at
+                        check_green(c) && timestamp_not_after(checked_at, at)
                     }))
         {
             continue;
         }
-        if best.as_ref().is_none_or(|(before, _)| at > *before) {
+        if best
+            .as_ref()
+            .is_none_or(|(before, _)| timestamp(at) > timestamp(before))
+        {
             best = Some((at, signature));
         }
     }
@@ -349,10 +360,12 @@ fn exempt_change(snapshot: &Snapshot, reviewed: &str, head: &str, base: &str) ->
     false
 }
 
-pub(crate) fn planning_blob(blob: &Value) -> bool {
-    text(&blob["text"]).lines().take(10).any(|line| {
-        line == "> **Non-authoritative planning scratchpad — do not review for consistency.**"
-    })
+pub(crate) fn planning_blob(blob: &Value, policy: &ConvergencePolicy) -> bool {
+    !policy.scratchpad_marker_line.is_empty()
+        && text(&blob["text"])
+            .lines()
+            .take(10)
+            .any(|line| line == policy.scratchpad_marker_line)
 }
 
 pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evaluation, Error> {
@@ -447,11 +460,12 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
             if oid.is_empty()
                 || at.is_empty()
                 || review["state"] == "DISMISSED"
-                || text(&node["lastEditedAt"]) > at
+                || (!text(&node["lastEditedAt"]).is_empty()
+                    && !timestamp_not_after(text(&node["lastEditedAt"]), at))
             {
                 continue;
             }
-            let request = qualifying_request(comments, oid, at, reviewer, &facts, policy, false)?;
+            let request = qualifying_request(comments, oid, at, reviewer, &facts, policy)?;
             let live = reviewer_matches(review, reviewer) && !id.is_empty();
             if live && request.is_some() && !current_ids.contains(&id.to_owned()) {
                 current_ids.push(id.to_owned());
@@ -517,7 +531,7 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
                 }
                 live_quiet.insert(id.into(), oid.into());
                 if let Some(request) =
-                    qualifying_request(comments, oid, at, reviewer, &facts, policy, true)?
+                    qualifying_request(comments, oid, at, reviewer, &facts, policy)?
                 {
                     quiet_oids.push(oid.to_owned());
                     authenticated_ids.insert(oid.to_owned(), id.to_owned());
@@ -649,8 +663,8 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
                 .and_then(|v| array(v).first())
                 .map(|r| &r["response"]["data"]["repository"])
                 .unwrap_or(&Value::Null);
-            planning_blob(&data["head"])
-                && (file["changeType"] == "ADDED" || planning_blob(&data["base"]))
+            planning_blob(&data["head"], policy)
+                && (file["changeType"] == "ADDED" || planning_blob(&data["base"], policy))
         });
     let identity_changed = current["state"] != "OPEN"
         || [
