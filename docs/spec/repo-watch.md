@@ -1,10 +1,10 @@
 # Repository watch
 
 Repository watch has a checked domain vocabulary and a compiled-in v2 ownership
-module. The module is not dispatched: the daemon starts no repository-watch
-poller, webhook listener, convergence sweep, command worker, lease-expiry task,
-or operator projection route. Enabling dispatch requires an owner-approved code
-change that composes a worker; there is no latent runtime switch.
+module. The v2 module is not dispatched: the daemon starts no module poller,
+webhook listener, command worker, lease-expiry task, or operator projection
+route. Enabling dispatch requires an owner-approved code change that composes a
+worker; there is no latent runtime switch.
 
 ## Domain vocabulary
 
@@ -160,9 +160,9 @@ is a replay; different content is a conflict. Settlement changes a pending
 disposition exactly once. A frontier release supplies its observed generation
 and is stale after any intervening frontier commit.
 
-Repository watch has no dedicated runtime, webhook listener, convergence task,
-operator routes, or public-schema persistence surface. Its durable state is the
-module-owned projection and command ledger described above.
+The v2 module has no poller, webhook listener, command worker, lease-expiry
+task, operator routes, or public-schema persistence surface. Its durable state
+is the module-owned projection and command ledger described above.
 
 Contracts this page relies on but does not own: module-state pruning and outbox
 retention permission in [persistence protocol](persistence-protocol.md), session

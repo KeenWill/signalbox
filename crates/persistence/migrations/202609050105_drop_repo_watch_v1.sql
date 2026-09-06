@@ -71,6 +71,7 @@ BEGIN
          WHERE namespace.nspname = 'public'
            AND procedure.proname LIKE '%repo_watch%'
            AND procedure.proname NOT IN (
+                'reject_repo_watch_table_truncate',
                 'repo_watch_branch_is_valid',
                 'repo_watch_repository_is_valid'
            )

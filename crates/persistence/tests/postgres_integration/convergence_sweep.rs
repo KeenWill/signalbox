@@ -907,7 +907,7 @@ async fn pull_request_dispatch_census_has_its_target_ordering_index() -> Result<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn repository_watch_dispatch_census_tables_are_retired() -> Result<(), Box<dyn Error>> {
+async fn v1_retirement_preserves_shared_sweep_guard() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let tables: Vec<Option<String>> = sqlx::query_scalar(
         "SELECT to_regclass(name)::text
@@ -921,6 +921,19 @@ async fn repository_watch_dispatch_census_tables_are_retired() -> Result<(), Box
     .await?;
 
     assert_eq!(tables, vec![None, None, None]);
+
+    let truncate_error = sqlx::query("TRUNCATE convergence_sweep_event")
+        .execute(&pool)
+        .await
+        .expect_err("the shared convergence event log must reject truncation");
+    let database_error = truncate_error
+        .as_database_error()
+        .expect("the truncate guard returns a database error");
+    assert_eq!(database_error.code().as_deref(), Some("23514"));
+    assert_eq!(
+        database_error.message(),
+        "convergence_sweep_event cannot be truncated"
+    );
     Ok(())
 }
 
