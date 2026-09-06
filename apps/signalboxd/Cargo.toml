@@ -13,6 +13,7 @@ test-support = [
     "signalbox-blob-store-s3/test-support",
     "signalbox-persistence/postgres-integration",
     "signalbox-persistence/test-support",
+    "signalbox-module-repo-watch-v2/test-support",
 ]
 
 [dependencies]

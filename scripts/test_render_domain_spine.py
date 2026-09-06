@@ -364,7 +364,7 @@ pub struct Token;
         }}
         self.assertEqual(renderer.type(reference), '&mut (impl fmt::Debug + marker::Send)')
 
-    def test_module_at_800_lines_splits_by_kind_and_links_every_part(self):
+    def test_module_at_line_limit_splits_by_kind_and_links_every_part(self):
         document = fixture()
         renderer = Renderer(document)
         original_lines = len(renderer.files('sample')['example.md'].splitlines())
