@@ -8,10 +8,7 @@ use signalbox_model_runtime::{
     ReasoningLevel, ServiceTier, ToolChoice,
 };
 
-use crate::wire::{
-    ChatRequest, StreamOptions, WireChatMessage, WireFunctionDefinition, WireFunctionTool,
-    WireRequestFunction, WireRequestToolCall,
-};
+use crate::wire::{CreateResponse, WireFunctionTool, WireInputItem, WireReasoning};
 
 /// Builds the wire request for one operation.
 ///
@@ -22,34 +19,33 @@ use crate::wire::{
 /// A structured-output contract is realized as a forced function call — the
 /// same mechanism the Anthropic adapter uses — so the provider-independent
 /// decode in the core crate applies unchanged. (The provider's native
-/// `response_format` mechanism would return the value as content text and
+/// `text.format` mechanism would return the value as content text and
 /// require strict-mode schema transformation; a forced function keeps the
 /// contract uniform across adapters.) The contract joins the declared tools
 /// under its reserved name — [`ModelOperation::validate`] rejects
 /// collisions — and is forced with parallel tool calling disabled.
 ///
-/// Streamed delivery always requests `stream_options.include_usage`, so the
-/// stream carries a usage record before its terminal marker.
+/// Streamed delivery reports usage in the terminal response event.
 #[cfg(test)]
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
-) -> Result<ChatRequest, PreparationFailure> {
+) -> Result<CreateResponse, PreparationFailure> {
     build_request_with_fast_mode(operation, operation.settings.fast_mode)
 }
 
 pub(crate) fn build_request_with_fast_mode<C>(
     operation: &ModelOperation<C>,
     request_fast_mode: FastMode,
-) -> Result<ChatRequest, PreparationFailure> {
+) -> Result<CreateResponse, PreparationFailure> {
     if let Err(error) = operation.validate() {
         return Err(PreparationFailure::UnsupportedOperation {
             detail: error.to_string(),
         });
     }
     validate_function_names(operation)?;
-    if operation.settings.max_output_tokens == 0 {
+    if operation.settings.max_output_tokens < 16 {
         return Err(PreparationFailure::UnsupportedOperation {
-            detail: "max_output_tokens must be at least 1".to_string(),
+            detail: "max_output_tokens must be at least 16".to_string(),
         });
     }
     if let Some(value) = operation.settings.temperature
@@ -66,19 +62,17 @@ pub(crate) fn build_request_with_fast_mode<C>(
             detail: "top_p must be a finite number from 0 through 1".to_string(),
         });
     }
-    if operation.settings.stop_sequences.len() > 4 {
+    if !operation.settings.stop_sequences.is_empty() {
         return Err(PreparationFailure::UnsupportedOperation {
-            detail: "Chat Completions accepts at most four stop sequences".to_string(),
+            detail: "Responses does not support stop sequences".to_string(),
         });
     }
     let (tools, tool_choice, parallel_tool_calls) = tools_and_choice(operation)?;
     let mut messages = Vec::new();
     if let Some(system) = &operation.system {
-        messages.push(WireChatMessage {
+        messages.push(WireInputItem::Message {
             role: "system",
-            content: Some(system.clone()),
-            tool_calls: None,
-            tool_call_id: None,
+            content: system.clone(),
         });
     }
     for message in &operation.messages {
@@ -86,7 +80,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
     }
     if messages.is_empty() {
         return Err(PreparationFailure::UnsupportedOperation {
-            detail: "Chat Completions requires at least one message".to_string(),
+            detail: "Responses requires at least one message".to_string(),
         });
     }
     validate_tool_history(&operation.messages)?;
@@ -97,22 +91,20 @@ pub(crate) fn build_request_with_fast_mode<C>(
         .map(openai_reasoning_effort)
         .transpose()?;
     let service_tier = openai_service_tier(&operation.settings, request_fast_mode)?;
-    Ok(ChatRequest {
+    Ok(CreateResponse {
         model: operation.resolved_target.as_str().to_string(),
-        messages,
-        max_completion_tokens: operation.settings.max_output_tokens,
-        reasoning_effort,
+        input: messages,
+        max_output_tokens: operation.settings.max_output_tokens,
+        reasoning: reasoning_effort.map(|effort| WireReasoning { effort }),
+        store: false,
+        include: ["reasoning.encrypted_content"],
         service_tier,
         temperature: operation.settings.temperature,
         top_p: operation.settings.top_p,
-        stop: operation.settings.stop_sequences.clone(),
         tools,
         tool_choice,
         parallel_tool_calls,
         stream: streamed,
-        stream_options: streamed.then_some(StreamOptions {
-            include_usage: true,
-        }),
     })
 }
 
@@ -139,7 +131,7 @@ fn openai_reasoning_effort(level: ReasoningLevel) -> Result<&'static str, Prepar
         ReasoningLevel::XHigh => Ok("xhigh"),
         ReasoningLevel::Max => Ok("max"),
         ReasoningLevel::Ultra => Err(PreparationFailure::UnsupportedOperation {
-            detail: "OpenAI Chat Completions cannot enforce ultra reasoning".to_string(),
+            detail: "OpenAI Responses cannot enforce ultra reasoning".to_string(),
         }),
     }
 }
@@ -240,7 +232,7 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
         if let Some(mut expected) = pending_calls.take() {
             if message.role != ConversationRole::User || results.is_empty() {
                 return Err(PreparationFailure::UnsupportedOperation {
-                    detail: "Chat Completions requires consecutive user tool-result messages \
+                    detail: "Responses requires consecutive user tool-result messages \
                              until every pending tool call is answered"
                         .to_string(),
                 });
@@ -248,7 +240,7 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
             if let Some(unexpected) = results.iter().find(|id| !expected.contains(**id)) {
                 return Err(PreparationFailure::UnsupportedOperation {
                     detail: format!(
-                        "tool result {unexpected} does not answer a pending Chat Completions \
+                        "tool result {unexpected} does not answer a pending Responses \
                          tool call"
                     ),
                 });
@@ -263,7 +255,7 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
                     .any(|part| !matches!(part, MessagePart::ToolResult(_)))
                 {
                     return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "Chat Completions requires every pending tool result before \
+                        detail: "Responses requires every pending tool result before \
                                  intervening user content"
                             .to_string(),
                     });
@@ -273,7 +265,7 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
             }
         } else if !results.is_empty() {
             return Err(PreparationFailure::UnsupportedOperation {
-                detail: "Chat Completions tool results must answer calls from the immediately \
+                detail: "Responses tool results must answer calls from the immediately \
                          preceding assistant message"
                     .to_string(),
             });
@@ -297,8 +289,7 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
     }
     if pending_calls.is_some() {
         return Err(PreparationFailure::UnsupportedOperation {
-            detail: "Chat Completions requires tool calls to be followed by matching results"
-                .to_string(),
+            detail: "Responses requires tool calls to be followed by matching results".to_string(),
         });
     }
     Ok(())
@@ -317,7 +308,7 @@ fn tools_and_choice<C>(
         if !raw_json_is_object(&tool.input_schema) {
             return Err(PreparationFailure::UnsupportedOperation {
                 detail: format!(
-                    "Chat Completions requires function {} to carry a JSON Schema object",
+                    "Responses requires function {} to carry a JSON Schema object",
                     tool.name.as_str()
                 ),
             });
@@ -328,7 +319,7 @@ fn tools_and_choice<C>(
     {
         return Err(PreparationFailure::UnsupportedOperation {
             detail: format!(
-                "Chat Completions requires output contract {} to carry a JSON Schema object",
+                "Responses requires output contract {} to carry a JSON Schema object",
                 contract.name.as_str()
             ),
         });
@@ -336,7 +327,7 @@ fn tools_and_choice<C>(
     let function_count = operation.tools.len() + usize::from(operation.output_contract.is_some());
     if function_count > 128 {
         return Err(PreparationFailure::UnsupportedOperation {
-            detail: "Chat Completions accepts at most 128 functions in one request".to_string(),
+            detail: "Responses accepts at most 128 functions in one request".to_string(),
         });
     }
     let mut tools: Vec<WireFunctionTool> = operation
@@ -344,27 +335,27 @@ fn tools_and_choice<C>(
         .iter()
         .map(|tool| WireFunctionTool {
             kind: "function",
-            function: WireFunctionDefinition {
-                name: tool.name.as_str().to_string(),
-                description: tool.description.clone(),
-                parameters: tool.input_schema.clone(),
-            },
+
+            name: tool.name.as_str().to_string(),
+            description: tool.description.clone(),
+            parameters: tool.input_schema.clone(),
+            strict: false,
         })
         .collect();
     if let Some(contract) = &operation.output_contract {
         tools.push(WireFunctionTool {
             kind: "function",
-            function: WireFunctionDefinition {
-                name: contract.name.as_str().to_string(),
-                description: contract.description.clone(),
-                parameters: contract.schema.clone(),
-            },
+
+            name: contract.name.as_str().to_string(),
+            description: contract.description.clone(),
+            parameters: contract.schema.clone(),
+            strict: false,
         });
         return Ok((
             Some(tools),
             Some(serde_json::json!({
                 "type": "function",
-                "function": { "name": contract.name.as_str() }
+                "name": contract.name.as_str()
             })),
             // The contract promises exactly one value; parallel tool
             // calling could return several calls to the forced function.
@@ -379,161 +370,75 @@ fn tools_and_choice<C>(
         ToolChoice::AnyTool => serde_json::json!("required"),
         ToolChoice::Named(name) => serde_json::json!({
             "type": "function",
-            "function": { "name": name.as_str() }
+            "name": name.as_str()
         }),
     };
     Ok((Some(tools), Some(choice), None))
 }
 
-/// Translates one conversation message into wire messages, in part order.
-///
-/// Chat Completions carries tool results as separate `tool`-role messages
-/// rather than content parts, so one conversation message can produce
-/// several wire messages: consecutive text parts group into one message,
-/// assistant tool calls attach to preceding assistant text (or form their own
-/// message), and each tool result becomes its own message. Assistant text after
-/// a tool call is rejected because this wire cannot preserve that part order.
+/// Translates parts in their original order into Responses input items.
 fn wire_messages(
     message: &ConversationMessage,
-    out: &mut Vec<WireChatMessage>,
+    out: &mut Vec<WireInputItem>,
 ) -> Result<(), PreparationFailure> {
+    let unsupported = |detail: &str| PreparationFailure::UnsupportedOperation {
+        detail: detail.to_string(),
+    };
     if message.parts.is_empty() {
-        return Err(PreparationFailure::UnsupportedOperation {
-            detail: "the Chat Completions wire contract cannot preserve an empty conversation \
-                     message"
-                .to_string(),
-        });
+        return Err(unsupported(
+            "Responses cannot preserve an empty conversation message",
+        ));
     }
     let role = match message.role {
         ConversationRole::User => "user",
         ConversationRole::Assistant => "assistant",
     };
-    let mut pending_text: Option<String> = None;
-    let mut pending_tool_calls: Vec<WireRequestToolCall> = Vec::new();
-    let mut user_text_seen = false;
     for part in &message.parts {
         match part {
-            MessagePart::Text(text) => {
-                if role == "assistant" && !pending_tool_calls.is_empty() {
-                    return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "the Chat Completions wire contract cannot preserve assistant \
-                                 text after a replayed tool call"
-                            .to_string(),
-                    });
-                }
-                match &mut pending_text {
-                    Some(pending) => pending.push_str(text),
-                    None => pending_text = Some(text.clone()),
-                }
-                if role == "user" {
-                    user_text_seen = true;
-                }
-            }
-            MessagePart::ToolCall(proposal) => {
-                if role != "assistant" {
-                    // Chat Completions permits tool_calls only on assistant
-                    // messages; sending them elsewhere is a locally knowable
-                    // declaration error.
-                    return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "the Chat Completions wire contract permits tool calls only \
-                                 in assistant history"
-                            .to_string(),
-                    });
+            MessagePart::Text(text) => out.push(WireInputItem::Message {
+                role,
+                content: text.clone(),
+            }),
+            MessagePart::ToolCall(call) => {
+                if message.role != ConversationRole::Assistant {
+                    return Err(unsupported("tool calls require assistant history"));
                 }
                 let arguments =
-                    serde_json::value::RawValue::from_string(proposal.arguments_json.clone())
-                        .map_err(|error| PreparationFailure::UnsupportedOperation {
-                            detail: format!(
-                                "replayed tool call {} carries arguments that are not valid JSON: \
-                                 {error}",
-                                proposal.id.as_str()
-                            ),
-                        })?;
+                    serde_json::value::RawValue::from_string(call.arguments_json.clone())
+                        .map_err(|_| unsupported("replayed tool arguments must be JSON"))?;
                 if !raw_json_is_object(&arguments) {
-                    return Err(PreparationFailure::UnsupportedOperation {
-                        detail: format!(
-                            "replayed tool call {} carries arguments that are not a JSON object",
-                            proposal.id.as_str()
-                        ),
-                    });
+                    return Err(unsupported("replayed tool arguments must be an object"));
                 }
-                pending_tool_calls.push(WireRequestToolCall {
-                    id: proposal.id.as_str().to_string(),
-                    kind: "function",
-                    function: WireRequestFunction {
-                        name: proposal.name.as_str().to_string(),
-                        arguments: proposal.arguments_json.clone(),
-                    },
+                out.push(WireInputItem::FunctionCall {
+                    call_id: call.id.as_str().to_string(),
+                    name: call.name.as_str().to_string(),
+                    arguments: call.arguments_json.clone(),
                 });
             }
             MessagePart::ToolResult(result) => {
-                if role != "user" {
-                    return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "the Chat Completions wire contract permits tool results only \
-                                 in user history"
-                            .to_string(),
-                    });
+                if message.role != ConversationRole::User {
+                    return Err(unsupported("tool results require user history"));
                 }
-                if user_text_seen {
-                    return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "Chat Completions requires replayed tool results before user text"
-                            .to_string(),
-                    });
-                }
-                flush(role, &mut pending_text, &mut pending_tool_calls, out);
-                out.push(WireChatMessage {
-                    role: "tool",
-                    content: Some(result.content.clone()),
-                    tool_calls: None,
-                    tool_call_id: Some(result.tool_call_id.as_str().to_string()),
+                out.push(WireInputItem::FunctionCallOutput {
+                    call_id: result.tool_call_id.as_str().to_string(),
+                    output: result.content.clone(),
                 });
             }
-            // Chat Completions has no representation for replayed reasoning;
-            // dropping caller-stated history silently would misstate the
-            // conversation, so it is a preparation failure the caller can
-            // act on (strip the parts or route to a reasoning-capable
-            // provider).
             MessagePart::Thinking { .. } | MessagePart::RedactedThinking { .. } => {
-                return Err(PreparationFailure::UnsupportedOperation {
-                    detail: "the Chat Completions wire contract cannot represent replayed \
-                             reasoning history"
-                        .to_string(),
-                });
+                return Err(unsupported(
+                    "OpenAI cannot replay another provider's thinking",
+                ));
             }
             MessagePart::ProviderCompaction { .. } => {
-                return Err(PreparationFailure::UnsupportedOperation {
-                    detail:
-                        "provider compaction blocks can only be replayed by their provider adapter"
-                            .to_string(),
-                });
+                return Err(unsupported("OpenAI provider compaction is unsupported"));
             }
         }
     }
-    flush(role, &mut pending_text, &mut pending_tool_calls, out);
     Ok(())
 }
 
 fn raw_json_is_object(raw: &serde_json::value::RawValue) -> bool {
     raw.get().bytes().find(|byte| !byte.is_ascii_whitespace()) == Some(b'{')
-}
-
-fn flush(
-    role: &'static str,
-    pending_text: &mut Option<String>,
-    pending_tool_calls: &mut Vec<WireRequestToolCall>,
-    out: &mut Vec<WireChatMessage>,
-) {
-    let content = pending_text.take();
-    let tool_calls = std::mem::take(pending_tool_calls);
-    if content.is_none() && tool_calls.is_empty() {
-        return;
-    }
-    out.push(WireChatMessage {
-        role,
-        content,
-        tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
-        tool_call_id: None,
-    });
 }
 
 #[cfg(test)]
@@ -570,7 +475,7 @@ mod tests {
         let request = build_request(&operation).expect("supported reasoning translates");
         let value = serde_json::to_value(request).expect("wire request serializes");
 
-        assert_eq!(value["reasoning_effort"], "minimal");
+        assert_eq!(value["reasoning"]["effort"], "minimal");
     }
 
     #[test]
@@ -683,7 +588,6 @@ mod tests {
         operation.system = Some("Answer briefly.".to_string());
         operation.settings.temperature = Some(0.5);
         operation.settings.top_p = Some(0.9);
-        operation.settings.stop_sequences = vec!["END".to_string()];
         operation.messages = vec![
             ConversationMessage::user_text("look up Oslo"),
             ConversationMessage {
@@ -718,61 +622,59 @@ mod tests {
 
         expect![[r#"
             {
-              "max_completion_tokens": 64,
-              "messages": [
+              "include": [
+                "reasoning.encrypted_content"
+              ],
+              "input": [
                 {
                   "content": "Answer briefly.",
-                  "role": "system"
+                  "role": "system",
+                  "type": "message"
                 },
                 {
                   "content": "look up Oslo",
-                  "role": "user"
+                  "role": "user",
+                  "type": "message"
                 },
                 {
                   "content": "Looking it up.",
                   "role": "assistant",
-                  "tool_calls": [
-                    {
-                      "function": {
-                        "arguments": "{\"city\":\"Oslo\"}",
-                        "name": "lookup"
-                      },
-                      "id": "call_a1",
-                      "type": "function"
-                    }
-                  ]
+                  "type": "message"
                 },
                 {
-                  "content": "population 700000",
-                  "role": "tool",
-                  "tool_call_id": "call_a1"
+                  "arguments": "{\"city\":\"Oslo\"}",
+                  "call_id": "call_a1",
+                  "name": "lookup",
+                  "type": "function_call"
+                },
+                {
+                  "call_id": "call_a1",
+                  "output": "population 700000",
+                  "type": "function_call_output"
                 },
                 {
                   "content": "thanks",
-                  "role": "user"
+                  "role": "user",
+                  "type": "message"
                 }
               ],
+              "max_output_tokens": 64,
               "model": "model-exact-1",
-              "stop": [
-                "END"
-              ],
+              "store": false,
               "stream": false,
               "temperature": 0.5,
               "tool_choice": {
-                "function": {
-                  "name": "lookup"
-                },
+                "name": "lookup",
                 "type": "function"
               },
               "tools": [
                 {
-                  "function": {
-                    "description": "Looks up a city.",
-                    "name": "lookup",
-                    "parameters": {
-                      "type": "object"
-                    }
+                  "description": "Looks up a city.",
+                  "name": "lookup",
+                  "parameters": {
+                    "type": "object"
                   },
+                  "strict": false,
                   "type": "function"
                 }
               ],
@@ -791,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn streamed_delivery_sets_the_stream_flag_and_requests_usage() {
+    fn streamed_delivery_sets_stream_and_disables_storage() {
         let mut operation = operation("call-3");
         operation.delivery = DeliveryMode::Streamed;
 
@@ -799,24 +701,26 @@ mod tests {
         let value = serde_json::to_value(&request).expect("wire request serializes");
 
         assert_eq!(value["stream"], serde_json::json!(true));
-        assert_eq!(
-            value["stream_options"],
-            serde_json::json!({"include_usage": true})
-        );
+        assert_eq!(value["store"], serde_json::json!(false));
     }
 
     #[test]
     fn minimal_operation_omits_every_unset_optional_field() {
         expect![[r#"
             {
-              "max_completion_tokens": 64,
-              "messages": [
+              "include": [
+                "reasoning.encrypted_content"
+              ],
+              "input": [
                 {
                   "content": "hello",
-                  "role": "user"
+                  "role": "user",
+                  "type": "message"
                 }
               ],
+              "max_output_tokens": 64,
               "model": "model-exact-1",
+              "store": false,
               "stream": false
             }"#]]
         .assert_eq(&request_json(&operation("call-4")));
@@ -840,7 +744,7 @@ mod tests {
         operation.system = Some("System only.".to_string());
 
         let request = build_request(&operation).expect("one system message is representable");
-        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.input.len(), 1);
     }
 
     #[test]
@@ -874,12 +778,9 @@ mod tests {
 
         assert_eq!(
             value["tool_choice"],
-            serde_json::json!({"type": "function", "function": {"name": "verdict"}})
+            serde_json::json!({"type": "function", "name": "verdict"})
         );
-        assert_eq!(
-            value["tools"][0]["function"]["name"],
-            serde_json::json!("verdict")
-        );
+        assert_eq!(value["tools"][0]["name"], serde_json::json!("verdict"));
     }
 
     #[test]
@@ -900,17 +801,11 @@ mod tests {
         let request = build_request(&operation).expect("distinct names translate");
         let value = serde_json::to_value(&request).expect("wire request serializes");
 
-        assert_eq!(
-            value["tools"][0]["function"]["name"],
-            serde_json::json!("lookup")
-        );
-        assert_eq!(
-            value["tools"][1]["function"]["name"],
-            serde_json::json!("verdict")
-        );
+        assert_eq!(value["tools"][0]["name"], serde_json::json!("lookup"));
+        assert_eq!(value["tools"][1]["name"], serde_json::json!("verdict"));
         assert_eq!(
             value["tool_choice"],
-            serde_json::json!({"type": "function", "function": {"name": "verdict"}})
+            serde_json::json!({"type": "function", "name": "verdict"})
         );
         assert_eq!(value["parallel_tool_calls"], serde_json::json!(false));
     }
@@ -1086,10 +981,10 @@ mod tests {
         ];
 
         let request = build_request(&operation)
-            .expect("explicit error content is valid Chat Completions tool history");
+            .expect("explicit error content is valid Responses tool history");
         assert_eq!(
-            request.messages[1].content.as_deref(),
-            Some(r#"{"error":{"kind":"execution_failed"}}"#)
+            serde_json::to_value(&request).unwrap()["input"][1]["output"],
+            serde_json::json!(r#"{"error":{"kind":"execution_failed"}}"#)
         );
     }
 
@@ -1114,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn text_after_a_tool_call_is_rejected_before_any_send() {
+    fn text_after_a_tool_call_keeps_its_position() {
         let mut operation = operation("call-9");
         operation.messages = vec![
             ConversationMessage {
@@ -1138,14 +1033,15 @@ mod tests {
             },
         ];
 
-        assert!(matches!(
-            build_request(&operation),
-            Err(PreparationFailure::UnsupportedOperation { .. })
-        ));
+        let value = serde_json::to_value(build_request(&operation).unwrap()).unwrap();
+        assert_eq!(
+            value["input"][operation.messages[0].parts.len() - 1]["content"],
+            "after the call"
+        );
     }
 
     #[test]
-    fn text_segments_separated_by_a_tool_call_are_rejected_before_any_send() {
+    fn text_segments_separated_by_a_tool_call_keep_their_positions() {
         let mut operation = operation("call-separated-text");
         operation.messages = vec![
             ConversationMessage {
@@ -1170,10 +1066,11 @@ mod tests {
             },
         ];
 
-        assert!(matches!(
-            build_request(&operation),
-            Err(PreparationFailure::UnsupportedOperation { .. })
-        ));
+        let value = serde_json::to_value(build_request(&operation).unwrap()).unwrap();
+        assert_eq!(
+            value["input"][operation.messages[0].parts.len() - 1]["content"],
+            "after the call"
+        );
     }
 
     #[test]
@@ -1205,9 +1102,9 @@ mod tests {
     }
 
     #[test]
-    fn zero_output_token_limit_is_rejected_before_send() {
+    fn output_token_limit_below_sixteen_is_rejected_before_send() {
         let mut candidate = operation("call-zero-tokens");
-        candidate.settings.max_output_tokens = 0;
+        candidate.settings.max_output_tokens = 15;
         assert!(matches!(
             build_request(&candidate),
             Err(PreparationFailure::UnsupportedOperation { .. })
@@ -1302,10 +1199,10 @@ mod tests {
             .expect("consecutive tool messages preserve representable parallel results");
         let value = serde_json::to_value(request).expect("wire request serializes");
 
-        assert_eq!(value["messages"][1]["role"], "tool");
-        assert_eq!(value["messages"][1]["tool_call_id"], "call_a");
-        assert_eq!(value["messages"][2]["role"], "tool");
-        assert_eq!(value["messages"][2]["tool_call_id"], "call_b");
+        assert_eq!(value["input"][2]["type"], "function_call_output");
+        assert_eq!(value["input"][2]["call_id"], "call_a");
+        assert_eq!(value["input"][3]["type"], "function_call_output");
+        assert_eq!(value["input"][3]["call_id"], "call_b");
     }
 
     #[test]
@@ -1369,9 +1266,9 @@ mod tests {
     }
 
     #[test]
-    fn more_than_four_stop_sequences_are_rejected_before_any_send() {
+    fn a_nonempty_stop_sequence_is_rejected_before_any_send() {
         let mut operation = operation("call-too-many-stops");
-        operation.settings.stop_sequences = (0..5).map(|index| format!("stop-{index}")).collect();
+        operation.settings.stop_sequences = vec!["END".to_string()];
 
         let failure = build_request(&operation)
             .expect_err("the provider accepts no more than four stop sequences");

@@ -30,16 +30,16 @@ use signalbox_model_runtime::ModelCapabilityCatalog;
 use signalbox_model_runtime::{CredentialAccess, CredentialValue, redact_evidence};
 
 use crate::config::OpenAiConfig;
-use crate::response::{StopSequences, decode_buffered_response};
+use crate::response::decode_buffered_response;
 use crate::status::{classify_error, classify_error_envelope_with_proof};
 use crate::stream::{LaterRecords, StreamDecoder, StreamStep};
 use crate::translate::build_request_with_fast_mode;
 use crate::wire::ErrorEnvelope;
 
-/// The OpenAI Chat Completions adapter.
+/// The OpenAI Responses adapter.
 ///
 /// Implements [`ModelRuntime`]: executes exactly one authorized operation as
-/// at most one `POST /v1/chat/completions` request and reports typed
+/// at most one `POST /v1/responses` request and reports typed
 /// evidence. It holds no state between operations, retries nothing, and
 /// never issues a second request for one operation.
 pub struct OpenAiRuntime<A> {
@@ -74,7 +74,6 @@ struct PreparedTransport {
 struct ExecutionSettings {
     delivery: DeliveryMode,
     sse_record_limit: usize,
-    stop_sequences: StopSequences,
 }
 
 impl<A> std::fmt::Debug for OpenAiRuntime<A> {
@@ -228,7 +227,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 detail: "base URL cannot carry path segments".to_string(),
             })?
             .pop_if_empty()
-            .extend(["v1", "chat", "completions"]);
+            .extend(["v1", "responses"]);
         // The workspace graph selects only ring; installation may already
         // have occurred through SQLx in the composed process.
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -346,11 +345,6 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             };
         };
         let delivery = operation.delivery;
-        let stop_sequences = if operation.settings.stop_sequences.is_empty() {
-            StopSequences::NotDeclared
-        } else {
-            StopSequences::Declared
-        };
         let request = match build_http_request(
             self.client
                 .post(self.completions_url.clone())
@@ -373,7 +367,6 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 settings: ExecutionSettings {
                     delivery,
                     sse_record_limit: self.sse_record_limit,
-                    stop_sequences,
                 },
             },
             correlation,
@@ -411,20 +404,13 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             sink,
             ObservationFact::ExchangeEstablished(exchange.clone()),
         );
-        // The Chat Completions success contract is specifically HTTP 200;
+        // The Responses success contract is specifically HTTP 200;
         // another 2xx is not recognized terminal-success evidence.
         if status.as_u16() == 200 {
             match settings.delivery {
                 DeliveryMode::Buffered => {
-                    self.finish_buffered(
-                        response,
-                        exchange,
-                        correlation,
-                        sink,
-                        cancellation,
-                        settings.stop_sequences,
-                    )
-                    .await
+                    self.finish_buffered(response, exchange, correlation, sink, cancellation)
+                        .await
                 }
                 DeliveryMode::Streamed => {
                     self.finish_streamed(
@@ -465,14 +451,13 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
-        stop_sequences: StopSequences,
     ) -> TerminalEvidence {
         let body = match collect_response_body(response, cancellation).await {
             None => return exchange_loss(LossCause::CancellationRequested, exchange),
             Some(Err(cause)) => return exchange_loss(cause, exchange),
             Some(Ok(bytes)) => bytes,
         };
-        decode_buffered_response(&body, exchange, correlation, sink, stop_sequences)
+        decode_buffered_response(&body, exchange, correlation, sink)
     }
 
     async fn finish_streamed<C: Clone + Send + Sync>(
@@ -485,7 +470,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         settings: &ExecutionSettings,
     ) -> TerminalEvidence {
         let mut framing = SseFraming::new(settings.sse_record_limit);
-        let mut decoder = StreamDecoder::new(exchange, settings.stop_sequences);
+        let mut decoder = StreamDecoder::new(exchange);
         let mut body = response.bytes_stream();
         let mut streamed_bytes = 0usize;
         loop {
@@ -499,7 +484,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 Some(chunk) => chunk,
             };
             match chunk {
-                // End of transport without `[DONE]`: the explicit
+                // End of transport without a terminal response event: the explicit
                 // incomplete-stream fact, never silent success.
                 None => {
                     return match framing.finish() {
@@ -680,7 +665,7 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
                 kind: ProviderErrorKind::Unrecognized,
                 non_acceptance_proven: false,
                 native: NativeErrorFacts {
-                    // Refusal came from `finish_reason` or `message.refusal`,
+                    // Refusal came from incomplete reason or refusal content,
                     // not from a native error-envelope token.
                     error_token: None,
                     error_code: None,
@@ -715,7 +700,7 @@ async fn finish_error(
         );
         return TerminalEvidence::ProviderError(ProviderErrorEvidence {
             exchange,
-            // The Chat Completions error envelope reports no model identity.
+            // The Responses error envelope reports no model identity.
             reported_model: None,
             kind,
             non_acceptance_proven,
@@ -840,7 +825,6 @@ mod tests {
         MAX_STREAMED_RESPONSE_BYTES, build_http_request, process_streamed_chunk,
         without_unproven_refusal,
     };
-    use crate::response::StopSequences;
     use crate::stream::StreamDecoder;
 
     #[test]
@@ -924,7 +908,7 @@ mod tests {
     fn streamed_response_overflow_is_typed_protocol_loss() {
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -949,18 +933,17 @@ mod tests {
 
     #[test]
     fn terminal_record_in_budget_wins_over_coalesced_trailing_bytes() {
-        let mut bytes = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-            \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\
-            \"finish_reason\":\"stop\"}]}\n\n\
-            data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[],\
-            \"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n\
-            data: [DONE]\n\n"
+        let mut bytes = br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl_1","model":"model-exact-1","status":"in_progress","output":[]}}
+
+data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl_1","model":"model-exact-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
             .to_vec();
         let terminal_len = bytes.len();
         bytes.extend_from_slice(b"coalesced trailing bytes");
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - terminal_len;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -986,16 +969,19 @@ mod tests {
     /// could have carried the tool call.
     #[test]
     fn a_violation_before_an_over_budget_suffix_withholds_the_tool_fact() {
-        let mut bytes = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-            \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n\
-            data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_2\",\
-            \"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n"
+        let mut bytes = br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl_1","model":"model-exact-1","status":"in_progress","output":[]}}
+
+data: {"type":"response.created","response":{"object":"response","id":"chatcmpl_2","model":"model-exact-1","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"x"}
+
+"#
             .to_vec();
         let in_budget_len = bytes.len();
         bytes.extend_from_slice(b"data: coalesced suffix past the adapter limit\n\n");
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - in_budget_len;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -1037,18 +1023,18 @@ mod tests {
 
     #[test]
     fn cancellation_is_rechecked_between_coalesced_sse_records() {
-        let bytes = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-            \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\
-            \"delta\":{\"role\":\"assistant\"}}]}\n\n\
-            data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-            \"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"}}]}\n\n";
+        let bytes = br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl_1","model":"model-exact-1","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"late"}
+
+"#;
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let mut cancellation = CancellationSignal::when(async move {
             let _ = receiver.await;
         });
         let mut streamed_bytes = 0;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
         let mut sink = CancelOnModel {
             observations: Vec::new(),
             sender: Some(sender),

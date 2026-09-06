@@ -1,98 +1,45 @@
-//! Buffered-response decoding and shared response-fact mapping.
+//! Buffered Responses decoding and shared terminal and item conversion.
 
 use std::collections::BTreeSet;
 
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
-    LossCause, Observation, ObservationFact, ObservationSink, ProviderReportedModel,
-    RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolCallsAtLoss,
-    ToolName, validate_provider_json_nesting,
+    LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+    ProviderErrorEvidence, ProviderMessageId, ProviderReportedModel, RefusalEvidence,
+    TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName,
+    validate_provider_json_nesting,
 };
 
 use crate::{
+    status::classify_error,
     translate::is_valid_function_name,
-    wire::{ChatCompletion, WireResponseToolCall, WireUsage},
+    wire::{Response, ResponseError, WireContent, WireOutputItem, WireUsage},
 };
 
-/// Whether the request declared caller stop sequences, which decides how a
-/// provider `stop` token is read (see [`map_finish`]). If the decoders ever
-/// need the declared sequences themselves, they belong in [`Self::Declared`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StopSequences {
-    Declared,
-    NotDeclared,
-}
-
-/// Maps the provider's `finish_reason` token to the normalized vocabulary.
-///
-/// `content_filter` maps to [`FinishReason::Refusal`]: the provider filtered
-/// the output, which is its refusal outcome, and the response's `refusal`
-/// payload (when present) is carried as refusal evidence. The provider does
-/// not distinguish a natural stop from a caller stop-sequence hit — both
-/// arrive as `stop` — so a `stop` is normalized to [`FinishReason::EndTurn`]
-/// only when the request declared no stop sequences. Otherwise its native
-/// token is preserved as unrecognized boundary loss. `length` is also left unrecognized because OpenAI uses the same
-/// token for either the requested output ceiling or the model context limit;
-/// collapsing those distinct dispositions would invent evidence. The legacy
-/// `function_call` token is unrecognized because this adapter never requests
-/// legacy functions.
-pub(crate) fn map_finish(token: &str, stop_sequences: StopSequences) -> FinishReason {
-    match token {
-        "stop" if stop_sequences == StopSequences::NotDeclared => FinishReason::EndTurn,
-        "tool_calls" => FinishReason::ToolUse,
-        "content_filter" => FinishReason::Refusal,
-        other => FinishReason::Unrecognized {
-            provider_token: other.to_string(),
-        },
-    }
-}
-
-/// Converts wire usage to the neutral usage record.
-///
-/// `prompt_tokens_details.cached_tokens` is the provider's cache-read count;
-/// Chat Completions reports no cache-creation count, so that fact stays
-/// unreported rather than being fabricated as zero.
 pub(crate) fn convert_usage(wire: &WireUsage) -> TokenUsage {
     TokenUsage {
-        input_tokens: wire.prompt_tokens,
-        output_tokens: wire.completion_tokens,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: wire
-            .prompt_tokens_details
+        input_tokens: wire.input_tokens,
+        output_tokens: wire.output_tokens,
+        cache_creation_input_tokens: wire
+            .input_tokens_details
             .as_ref()
-            .and_then(|details| details.cached_tokens),
+            .and_then(|d| d.cache_write_tokens),
+        cache_read_input_tokens: wire
+            .input_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens),
     }
 }
 
-/// Converts one response tool call into a typed proposal, or reports why it
-/// is not recognizable completion material.
-pub(crate) fn convert_tool_call(call: &WireResponseToolCall) -> Result<ToolCallProposal, String> {
-    if call.kind.as_deref() != Some("function") {
-        return Err(format!(
-            "tool call carries unrecognized type {:?}",
-            call.kind.as_deref().unwrap_or("<absent>")
-        ));
-    }
-    let (Some(id), Some(function)) = (&call.id, &call.function) else {
-        return Err("tool call is missing its id or function".to_string());
+pub(crate) fn convert_tool_call(item: &WireOutputItem) -> Result<ToolCallProposal, String> {
+    let (Some(id), Some(name), Some(arguments)) = (&item.call_id, &item.name, &item.arguments)
+    else {
+        return Err("function call lacks call_id, name, or arguments".to_string());
     };
-    let Some(name) = &function.name else {
-        return Err("tool call is missing its function name".to_string());
-    };
-    if !is_valid_function_name(name) {
-        return Err(format!("tool call carries invalid function name {name:?}"));
+    if id.is_empty() || !is_valid_function_name(name) {
+        return Err("function call has an empty call_id or invalid name".to_string());
     }
-    let Some(arguments) = &function.arguments else {
-        // The documented function payload always carries arguments;
-        // fabricating bytes the provider never produced could turn a
-        // malformed call into an executable zero-argument one.
-        return Err("tool call is missing its arguments".to_string());
-    };
-    if let Err(error) = validate_provider_json_nesting(arguments.as_bytes()) {
-        return Err(format!(
-            "tool call arguments exceed the provider JSON bound: {error}"
-        ));
-    }
+    validate_provider_json_nesting(arguments.as_bytes()).map_err(|e| e.to_string())?;
     Ok(ToolCallProposal {
         id: ToolCallId::new(id.clone()),
         name: ToolName::new(name.clone()),
@@ -100,251 +47,239 @@ pub(crate) fn convert_tool_call(call: &WireResponseToolCall) -> Result<ToolCallP
     })
 }
 
-/// Decodes a complete success-status response body into terminal evidence,
-/// emitting the facts it learns as observations along the way.
-///
-/// A body that is not the documented completion material — unparseable, not
-/// exactly one choice, missing its finish reason, or carrying an
-/// unrecognizable tool call — is boundary-loss evidence (per
-/// `docs/spec/runtime-substrate.md`, a success status without valid
-/// completion material is not definitive), with the facts observed before
-/// the defect retained. A non-empty `refusal` payload or a `content_filter`
-/// finish is refusal evidence, never completion.
+struct ConvertedItem {
+    parts: Vec<AssistantPart>,
+    refused: bool,
+}
+
+/// Converts one complete output item; reasoning has no durable producer here.
+fn convert_item(item: &WireOutputItem) -> Result<ConvertedItem, String> {
+    match item.kind.as_str() {
+        "reasoning" => Ok(ConvertedItem {
+            parts: Vec::new(),
+            refused: false,
+        }),
+        "function_call" => Ok(ConvertedItem {
+            parts: vec![AssistantPart::ToolCall(convert_tool_call(item)?)],
+            refused: false,
+        }),
+        "message" => {
+            if item.role.as_deref() != Some("assistant") {
+                return Err("output message must have assistant role".to_string());
+            }
+            let Some(parts) = &item.content else {
+                return Err("output message lacks content".to_string());
+            };
+            let mut content = Vec::new();
+            let mut refused = false;
+            for part in parts {
+                let text = match part {
+                    WireContent::OutputText { text } => text,
+                    WireContent::Refusal { refusal } => {
+                        refused = true;
+                        refusal
+                    }
+                    WireContent::Unknown => {
+                        return Err("unrecognized output content type".to_string());
+                    }
+                };
+                if !text.is_empty() {
+                    content.push(AssistantPart::Text(text.clone()));
+                }
+            }
+            Ok(ConvertedItem {
+                parts: content,
+                refused,
+            })
+        }
+        other => Err(format!("unrecognized output item type {other:?}")),
+    }
+}
+
+pub(crate) fn map_terminal(
+    status: &str,
+    reason: Option<&str>,
+    tool_calls: ToolCallsAtLoss,
+) -> FinishReason {
+    match (status, reason) {
+        ("completed", _) if tool_calls == ToolCallsAtLoss::Opened => FinishReason::ToolUse,
+        ("completed", _) => FinishReason::EndTurn,
+        ("incomplete", Some("max_output_tokens")) => FinishReason::MaxOutputTokens,
+        ("incomplete", Some("content_filter")) => FinishReason::Refusal,
+        ("incomplete", Some(other)) => FinishReason::Unrecognized {
+            provider_token: other.to_string(),
+        },
+        (other, _) => FinishReason::Unrecognized {
+            provider_token: other.to_string(),
+        },
+    }
+}
+
+pub(crate) fn provider_error(
+    error: ResponseError,
+    exchange: ExchangeFacts,
+    reported_model: Option<ProviderReportedModel>,
+    usage: TokenUsage,
+) -> TerminalEvidence {
+    TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        kind: classify_error(0, error.code.as_deref()),
+        non_acceptance_proven: false,
+        native: NativeErrorFacts {
+            error_token: None,
+            error_code: error.code,
+            message: error.message,
+        },
+        exchange,
+        reported_model,
+        usage,
+    })
+}
+
 pub(crate) fn decode_buffered_response<C: Clone>(
     body: &[u8],
     exchange: ExchangeFacts,
     correlation: &C,
     sink: &mut (dyn ObservationSink<C> + Send),
-    stop_sequences: StopSequences,
 ) -> TerminalEvidence {
-    if let Err(error) = validate_provider_json_nesting(body) {
-        return unintelligible(
-            format!("success response body exceeds the provider JSON bound: {error}"),
+    let response = validate_provider_json_nesting(body)
+        .map_err(|e| e.to_string())
+        .and_then(|()| serde_json::from_slice::<Response>(body).map_err(|e| e.to_string()));
+    match response {
+        Ok(response) => decode_response(response, exchange, correlation, sink),
+        Err(detail) => TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::ResponseUnintelligible { detail },
             exchange,
-            None,
-            // The body never deserialized, so nothing is known about the tool
-            // material it may carry.
-            ToolCallsAtLoss::Unobserved,
-            TokenUsage::unreported(),
-        );
+            reported_model: None,
+            finish_reported: None,
+            tool_calls: ToolCallsAtLoss::Unobserved,
+            usage: TokenUsage::unreported(),
+        }),
     }
-    let completion: ChatCompletion = match serde_json::from_slice(body) {
-        Ok(completion) => completion,
-        Err(error) => {
-            return unintelligible(
-                format!("success response body is not a chat completion: {error}"),
-                exchange,
-                None,
-                ToolCallsAtLoss::Unobserved,
-                TokenUsage::unreported(),
-            );
-        }
-    };
-    // Every loss below this point has the provider's own tool announcements in
-    // hand, whether or not the decode reached the conversion loop.
-    let tool_calls = announced_tool_calls(&completion);
-    if completion.object.as_deref() != Some("chat.completion") {
-        return unintelligible(
-            format!(
-                "success response carries object {:?}; chat.completion is required",
-                completion.object.as_deref().unwrap_or("<absent>")
-            ),
-            exchange,
-            completion.model.map(ProviderReportedModel::new),
-            tool_calls,
-            completion
-                .usage
-                .as_ref()
-                .map(convert_usage)
-                .unwrap_or_default(),
-        );
-    }
-    if completion.id.is_none() {
-        return unintelligible(
-            "success response carries no completion id".to_string(),
-            exchange,
-            completion.model.map(ProviderReportedModel::new),
-            tool_calls,
-            completion
-                .usage
-                .as_ref()
-                .map(convert_usage)
-                .unwrap_or_default(),
-        );
-    }
-    let Some(model) = completion.model else {
-        return unintelligible(
-            "success response carries no model identity".to_string(),
-            exchange,
-            None,
-            tool_calls,
-            completion
-                .usage
-                .as_ref()
-                .map(convert_usage)
-                .unwrap_or_default(),
-        );
-    };
-    let model = ProviderReportedModel::new(model);
-    let reported_model = Some(model.clone());
-    sink.observe(Observation {
-        correlation: correlation.clone(),
-        fact: ObservationFact::ProviderModelReported(model),
-    });
-    let usage = completion
+}
+
+pub(crate) fn decode_response<C: Clone>(
+    response: Response,
+    exchange: ExchangeFacts,
+    correlation: &C,
+    sink: &mut (dyn ObservationSink<C> + Send),
+) -> TerminalEvidence {
+    let reported_model = response.model.clone().map(ProviderReportedModel::new);
+    let usage = response
         .usage
         .as_ref()
         .map(convert_usage)
         .unwrap_or_default();
-    let message_id = None;
-    let [choice] = completion.choices.as_slice() else {
-        return unintelligible(
-            format!(
-                "success response carries {} choices; exactly one is requested",
-                completion.choices.len()
-            ),
-            exchange,
-            reported_model,
-            tool_calls,
-            usage,
-        );
+    let items: Result<Vec<WireOutputItem>, _> = response
+        .output
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|raw| serde_json::from_str(raw.get()))
+        .collect();
+    let tool_calls = match &items {
+        Ok(items) if items.iter().any(|item| item.kind == "function_call") => {
+            ToolCallsAtLoss::Opened
+        }
+        Ok(_) if response.output.is_some() => ToolCallsAtLoss::NoneOpened,
+        _ => ToolCallsAtLoss::Unobserved,
     };
-    if choice.index != Some(0) {
-        return unintelligible(
-            format!(
-                "success response carries choice index {:?}; index 0 is requested",
-                choice.index
-            ),
-            exchange,
-            reported_model,
+    let loss = |detail: String, finish_reported: Option<FinishReason>| {
+        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::ResponseUnintelligible { detail },
+            exchange: exchange.clone(),
+            reported_model: reported_model.clone(),
+            finish_reported,
             tool_calls,
             usage,
+        })
+    };
+    if let Some(model) = &reported_model {
+        emit(
+            correlation,
+            sink,
+            ObservationFact::ProviderModelReported(model.clone()),
         );
     }
-    let Some(message) = &choice.message else {
-        return unintelligible(
-            "success response choice carries no message".to_string(),
-            exchange,
-            reported_model,
-            tool_calls,
-            usage,
-        );
-    };
-    if message.role.as_deref() != Some("assistant") {
-        return unintelligible(
-            format!(
-                "success response message carries role {:?}; assistant is required",
-                message.role.as_deref().unwrap_or("<absent>")
-            ),
-            exchange,
-            reported_model,
-            tool_calls,
-            usage,
-        );
+    if response.usage.is_some() {
+        emit(correlation, sink, ObservationFact::UsageReported(usage));
     }
-    let mut content = Vec::new();
-    if let Some(text) = &message.content
-        && !text.is_empty()
+    if response.status.as_deref() == Some("failed") {
+        return match response.error {
+            Some(error) => provider_error(error, exchange, reported_model, usage),
+            None => loss("failed response lacks error".to_string(), None),
+        };
+    }
+    if response.object.as_deref() != Some("response")
+        || response.id.as_deref().is_none_or(str::is_empty)
+        || response.model.as_deref().is_none_or(str::is_empty)
+        || response.output.is_none()
     {
-        content.push(AssistantPart::Text(text.clone()));
+        return loss(
+            "response lacks its object, id, model, or output".to_string(),
+            None,
+        );
     }
-    let mut tool_ids = BTreeSet::new();
-    for call in &message.tool_calls {
-        match convert_tool_call(call) {
-            Ok(proposal) => {
-                if !tool_ids.insert(proposal.id.as_str().to_string()) {
-                    return unintelligible(
-                        format!("response repeats tool-call id {:?}", proposal.id.as_str()),
-                        exchange,
-                        reported_model,
-                        tool_calls,
-                        usage,
-                    );
-                }
-                content.push(AssistantPart::ToolCall(proposal));
-            }
-            Err(detail) => {
-                return unintelligible(detail, exchange, reported_model, tool_calls, usage);
+    let items = match items {
+        Ok(items) => items,
+        Err(e) => return loss(e.to_string(), None),
+    };
+    let mut content = Vec::new();
+    let mut refused = false;
+    let mut ids = BTreeSet::new();
+    for item in &items {
+        let ConvertedItem {
+            parts,
+            refused: item_refused,
+        } = match convert_item(item) {
+            Ok(result) => result,
+            Err(detail) => return loss(detail, None),
+        };
+        for part in &parts {
+            if let AssistantPart::ToolCall(call) = part
+                && !ids.insert(call.id.as_str().to_string())
+            {
+                return loss("response repeats a function call_id".to_string(), None);
             }
         }
+        content.extend(parts);
+        refused |= item_refused;
     }
-    if completion.usage.is_some() {
-        // The observation claims a provider report; an absent usage member
-        // stays unreported rather than being announced as all-none.
-        sink.observe(Observation {
-            correlation: correlation.clone(),
-            fact: ObservationFact::UsageReported(usage),
-        });
-    }
-    let Some(finish_token) = &choice.finish_reason else {
-        return unintelligible(
-            "success response carries no finish_reason".to_string(),
-            exchange,
-            reported_model,
-            tool_calls,
-            usage,
-        );
+    let Some(status) = response.status.as_deref() else {
+        return loss("response lacks status".to_string(), None);
     };
-    let mut finish = map_finish(finish_token, stop_sequences);
+    let mut finish = map_terminal(
+        status,
+        response
+            .incomplete_details
+            .as_ref()
+            .map(|d| d.reason.as_str()),
+        tool_calls,
+    );
     if matches!(finish, FinishReason::Unrecognized { .. }) {
-        return unintelligible_after_finish(
-            "success response carries an unrecognized finish_reason".to_string(),
-            exchange,
-            reported_model,
-            finish,
-            tool_calls,
-            usage,
+        return loss(
+            "unrecognized response terminal status or incomplete reason".to_string(),
+            Some(finish),
         );
     }
-    let refusal_payload = message
-        .refusal
-        .clone()
-        .filter(|refusal| !refusal.is_empty());
-    if refusal_payload.is_some() {
+    if refused {
         finish = FinishReason::Refusal;
     }
-    let has_tool_calls = content
-        .iter()
-        .any(|part| matches!(part, AssistantPart::ToolCall(_)));
-    if (matches!(finish, FinishReason::ToolUse) && !has_tool_calls)
-        || (has_tool_calls && !matches!(finish, FinishReason::ToolUse))
-    {
-        return unintelligible_after_finish(
-            "tool-call content does not match the reported finish_reason".to_string(),
-            exchange,
-            reported_model,
-            finish,
-            tool_calls,
-            usage,
-        );
-    }
     for part in &content {
-        if let AssistantPart::ToolCall(proposal) = part {
-            sink.observe(Observation {
-                correlation: correlation.clone(),
-                fact: ObservationFact::ToolCallProposed(proposal.clone()),
-            });
+        if let AssistantPart::ToolCall(call) = part {
+            emit(
+                correlation,
+                sink,
+                ObservationFact::ToolCallProposed(call.clone()),
+            );
         }
     }
-    sink.observe(Observation {
-        correlation: correlation.clone(),
-        fact: ObservationFact::FinishReported(finish.clone()),
-    });
+    emit(
+        correlation,
+        sink,
+        ObservationFact::FinishReported(finish.clone()),
+    );
+    let message_id = response.id.map(ProviderMessageId::new);
     match finish.completion_finish() {
-        None => {
-            if let Some(refusal) = refusal_payload {
-                content.push(AssistantPart::Text(refusal));
-            }
-            TerminalEvidence::Refused(RefusalEvidence {
-                exchange,
-                message_id,
-                reported_model,
-                content,
-                usage,
-                retained_input_tokens: None,
-                retained_output_tokens: None,
-            })
-        }
         Some(finish) => TerminalEvidence::Completed(CompletionEvidence {
             exchange,
             message_id,
@@ -353,666 +288,278 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             content,
             usage,
         }),
+        None => TerminalEvidence::Refused(RefusalEvidence {
+            exchange,
+            message_id,
+            reported_model,
+            content,
+            usage,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        }),
     }
 }
 
-/// Whether the provider announced any tool call in a deserialized response.
-///
-/// Reads the wire announcement rather than the converted proposals: a call this
-/// adapter cannot convert into a proposal is still a call the provider opened,
-/// and the loss paths below are exactly the ones where conversion did not run
-/// or did not finish.
-fn announced_tool_calls(completion: &ChatCompletion) -> ToolCallsAtLoss {
-    let announced = completion.choices.iter().any(|choice| {
-        choice
-            .message
-            .as_ref()
-            .is_some_and(|message| !message.tool_calls.is_empty())
+pub(crate) fn emit<C: Clone>(
+    correlation: &C,
+    sink: &mut (dyn ObservationSink<C> + Send),
+    fact: ObservationFact,
+) {
+    sink.observe(Observation {
+        correlation: correlation.clone(),
+        fact,
     });
-    if announced {
-        ToolCallsAtLoss::Opened
-    } else {
-        ToolCallsAtLoss::NoneOpened
-    }
-}
-
-fn unintelligible(
-    detail: String,
-    exchange: ExchangeFacts,
-    reported_model: Option<ProviderReportedModel>,
-    tool_calls: ToolCallsAtLoss,
-    usage: TokenUsage,
-) -> TerminalEvidence {
-    TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
-        cause: LossCause::ResponseUnintelligible { detail },
-        exchange,
-        reported_model,
-        finish_reported: None,
-        tool_calls,
-        usage,
-    })
-}
-
-fn unintelligible_after_finish(
-    detail: String,
-    exchange: ExchangeFacts,
-    reported_model: Option<ProviderReportedModel>,
-    finish_reported: FinishReason,
-    tool_calls: ToolCallsAtLoss,
-    usage: TokenUsage,
-) -> TerminalEvidence {
-    TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
-        cause: LossCause::ResponseUnintelligible { detail },
-        exchange,
-        reported_model,
-        finish_reported: Some(finish_reported),
-        tool_calls,
-        usage,
-    })
 }
 
 #[cfg(test)]
 mod tests {
-    use expect_test::expect;
-    use signalbox_expect_table::table;
-    use signalbox_model_runtime::{
-        AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
-        ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderReportedModel, ProviderRequestId,
-        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
-    };
+    use super::*;
+    use serde_json::{Value, json};
+    use signalbox_model_runtime::{CompletionFinish, PROVIDER_JSON_NESTING_LIMIT};
 
-    use super::{StopSequences, decode_buffered_response, map_finish};
-
-    fn exchange() -> ExchangeFacts {
-        ExchangeFacts {
-            provider_request_id: Some(ProviderRequestId::new("req_1")),
-            http_status: Some(200),
-            retry_after: None,
-        }
+    fn response() -> Value {
+        json!({"id":"resp_fixture", "object":"response", "model":"model-fixture", "status":"completed",
+            "output":[{"type":"message","id":"msg_fixture","role":"assistant","content":[{"type":"output_text","text":"ready"}]}],
+            "usage":{"input_tokens":19,"output_tokens":7,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":5}}})
     }
-
-    /// Decodes the body against canonical exchange facts, collecting
-    /// observations correlated to `"call-1"`.
-    fn decode(body: &str) -> (TerminalEvidence, Vec<Observation<String>>) {
-        decode_with_stop_sequences(body, StopSequences::NotDeclared)
-    }
-
-    fn decode_with_stop_sequences(
-        body: &str,
-        stop_sequences: StopSequences,
-    ) -> (TerminalEvidence, Vec<Observation<String>>) {
-        let mut observations: Vec<Observation<String>> = Vec::new();
+    fn decode(value: Value) -> (TerminalEvidence, Vec<Observation<String>>) {
+        let mut observations = Vec::new();
         let evidence = decode_buffered_response(
-            body.as_bytes(),
-            exchange(),
-            &"call-1".to_string(),
+            value.to_string().as_bytes(),
+            ExchangeFacts {
+                http_status: Some(200),
+                ..ExchangeFacts::default()
+            },
+            &"fixture".to_string(),
             &mut observations,
-            stop_sequences,
         );
         (evidence, observations)
     }
 
     #[test]
-    fn completed_response_decodes_every_reported_fact() {
-        let (evidence, observations) = decode(
-            r#"{
-                "id": "chatcmpl_1",
-                "object": "chat.completion",
-                "model": "model-exact-1",
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "Checking.",
-                        "refusal": null,
-                        "tool_calls": [{
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {"name": "lookup", "arguments": "{\"city\":\"Oslo\"}"}
-                        }]
-                    },
-                    "finish_reason": "tool_calls"
-                }],
-                "usage": {
-                    "prompt_tokens": 12,
-                    "completion_tokens": 34,
-                    "prompt_tokens_details": {"cached_tokens": 6}
-                }
-            }"#,
-        );
-
-        let TerminalEvidence::Completed(completion) = evidence else {
-            panic!("a complete success chat completion must decode as completion evidence");
+    fn response_identity_and_all_four_usage_axes_are_retained() {
+        let (TerminalEvidence::Completed(result), _) = decode(response()) else {
+            panic!("complete response decodes");
         };
-        assert_eq!(completion.exchange, exchange());
-        assert_eq!(completion.message_id, None);
         assert_eq!(
-            completion.reported_model,
-            Some(ProviderReportedModel::new("model-exact-1"))
-        );
-        assert_eq!(completion.finish, CompletionFinish::ToolUse);
-        assert_eq!(
-            completion.content,
-            vec![
-                AssistantPart::Text("Checking.".to_string()),
-                AssistantPart::ToolCall(ToolCallProposal {
-                    id: ToolCallId::new("call_1"),
-                    name: ToolName::new("lookup"),
-                    arguments_json: r#"{"city":"Oslo"}"#.to_string(),
-                }),
-            ]
+            result.message_id,
+            Some(ProviderMessageId::new("resp_fixture"))
         );
         assert_eq!(
-            completion.usage,
+            result.usage,
             TokenUsage {
-                input_tokens: Some(12),
-                output_tokens: Some(34),
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: Some(6),
+                input_tokens: Some(19),
+                output_tokens: Some(7),
+                cache_creation_input_tokens: Some(5),
+                cache_read_input_tokens: Some(3)
             }
         );
         assert_eq!(
-            observations.first(),
-            Some(&Observation {
-                correlation: "call-1".to_string(),
-                fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
-                    "model-exact-1"
-                )),
-            })
+            result.content,
+            vec![AssistantPart::Text("ready".to_string())]
         );
     }
 
     #[test]
-    fn refusal_payload_is_refusal_evidence_carrying_the_refusal_text() {
-        let (evidence, _) = decode(
-            r#"{
-                "id": "chatcmpl_1",
-                "object": "chat.completion",
-                "model": "model-exact-1",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": null,
-                                "refusal": "I cannot help with that."},
-                    "finish_reason": "stop"
-                }],
-                "usage": {"prompt_tokens": 9, "completion_tokens": 8}
-            }"#,
-        );
+    fn incomplete_reason_determines_the_terminal_disposition() {
+        for (reason, expected) in [
+            ("max_output_tokens", FinishReason::MaxOutputTokens),
+            ("content_filter", FinishReason::Refusal),
+            (
+                "max_messages",
+                FinishReason::Unrecognized {
+                    provider_token: "max_messages".to_string(),
+                },
+            ),
+            (
+                "steered",
+                FinishReason::Unrecognized {
+                    provider_token: "steered".to_string(),
+                },
+            ),
+            (
+                "future",
+                FinishReason::Unrecognized {
+                    provider_token: "future".to_string(),
+                },
+            ),
+        ] {
+            let mut value = response();
+            value["status"] = json!("incomplete");
+            value["incomplete_details"] = json!({"reason":reason});
+            let (evidence, _) = decode(value);
+            match evidence {
+                TerminalEvidence::Completed(result) => {
+                    assert_eq!(FinishReason::from(result.finish), expected, "{reason}")
+                }
+                TerminalEvidence::Refused(_) => {
+                    assert_eq!(expected, FinishReason::Refusal, "{reason}")
+                }
+                TerminalEvidence::BoundaryLoss(loss) => {
+                    assert_eq!(loss.finish_reported, Some(expected), "{reason}")
+                }
+                other => panic!("unexpected terminal for {reason}: {other:?}"),
+            }
+        }
+    }
 
-        let TerminalEvidence::Refused(refusal) = evidence else {
-            panic!("a refusal payload must decode as refusal evidence, never completion");
+    #[test]
+    fn accepted_failed_response_never_proves_non_acceptance() {
+        let mut value = response();
+        value["status"] = json!("failed");
+        value["error"] = json!({"code":"rate_limit_exceeded","message":"later failure"});
+        let (TerminalEvidence::ProviderError(error), _) = decode(value) else {
+            panic!("accepted failure is definitive provider error");
         };
         assert_eq!(
-            refusal.content,
-            vec![AssistantPart::Text("I cannot help with that.".to_string())]
+            error.kind,
+            signalbox_model_runtime::ProviderErrorKind::RateLimited
         );
+        assert!(!error.non_acceptance_proven);
+        assert_eq!(error.native.error_token, None);
         assert_eq!(
-            refusal.reported_model,
-            Some(ProviderReportedModel::new("model-exact-1"))
+            error.native.error_code.as_deref(),
+            Some("rate_limit_exceeded")
         );
     }
 
     #[test]
-    fn content_filter_finish_is_refusal_evidence() {
-        let (evidence, _) = decode(
-            r#"{
-                "id": "chatcmpl_1",
-                "object": "chat.completion",
-                "model": "model-exact-1",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "partial"},
-                    "finish_reason": "content_filter"
-                }]
-            }"#,
+    fn reasoning_items_are_recognized_and_dropped_without_continuity() {
+        let mut value = response();
+        value["output"].as_array_mut().unwrap().insert(
+            0,
+            json!({"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"opaque"}),
         );
-
-        let TerminalEvidence::Refused(refusal) = evidence else {
-            panic!("a content_filter finish is the provider's refusal outcome");
+        let (TerminalEvidence::Completed(result), observations) = decode(value) else {
+            panic!("reasoning and text response decodes");
         };
         assert_eq!(
-            refusal.content,
-            vec![AssistantPart::Text("partial".to_string())]
+            result.content,
+            vec![AssistantPart::Text("ready".to_string())]
+        );
+        assert!(
+            !observations
+                .iter()
+                .any(|o| matches!(o.fact, ObservationFact::ThinkingDelta { .. }))
         );
     }
 
     #[test]
-    fn missing_finish_reason_is_boundary_loss_with_retained_facts() {
-        let (evidence, _) = decode(
-            r#"{
-                "id": "chatcmpl_1",
-                "object": "chat.completion",
-                "model": "model-exact-1",
-                "choices": [{"message": {"role": "assistant", "content": "partial"}}],
-                "usage": {"prompt_tokens": 3}
-            }"#,
-        );
-
-        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-            panic!("a success body without finish_reason is not definitive completion material");
+    fn interleaved_text_and_function_calls_keep_provider_order() {
+        let mut value = response();
+        value["output"] = json!([
+            {"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"},
+            {"type":"message","id":"msg_fixture","role":"assistant","content":[{"type":"output_text","text":"after"}]}]);
+        let (TerminalEvidence::Completed(result), _) = decode(value) else {
+            panic!("ordered response decodes");
         };
-        assert!(matches!(
-            loss.cause,
-            LossCause::ResponseUnintelligible { .. }
-        ));
-        assert_eq!(
-            loss.reported_model,
-            Some(ProviderReportedModel::new("model-exact-1"))
+        assert_eq!(result.finish, CompletionFinish::ToolUse);
+        assert!(
+            matches!(&result.content[0], AssistantPart::ToolCall(call) if call.id.as_str()=="call_fixture")
         );
-        assert_eq!(loss.usage.input_tokens, Some(3));
+        assert_eq!(result.content[1], AssistantPart::Text("after".to_string()));
     }
 
     #[test]
-    fn zero_choices_is_boundary_loss() {
-        let (evidence, _) = decode(
-            r#"{"id":"chatcmpl_1","object":"chat.completion",
-                "model":"model-exact-1","choices":[]}"#,
-        );
-
-        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-            panic!("a response without the one requested choice is not definitive");
+    fn duplicate_function_call_ids_are_boundary_loss_with_opened_tools() {
+        let mut value = response();
+        let call =
+            json!({"type":"function_call","call_id":"same","name":"lookup","arguments":"{}"});
+        value["output"] = json!([call, call]);
+        let (TerminalEvidence::BoundaryLoss(loss), _) = decode(value) else {
+            panic!("duplicate calls fail closed");
         };
-        assert!(matches!(
-            loss.cause,
-            LossCause::ResponseUnintelligible { .. }
-        ));
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
     }
 
     #[test]
-    fn a_wrong_completion_object_is_boundary_loss() {
-        let (evidence, _) = decode(
-            r#"{"id":"chatcmpl_1","object":"response","model":"model-exact-1",
-                "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},
-                "finish_reason":"stop"}]}"#,
-        );
-
-        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
-    }
-
-    #[test]
-    fn tool_content_and_finish_reason_must_agree() {
-        let (tool_with_stop, _) = decode(
-            r#"{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
-                "choices":[{"index":0,
-                "message":{"role":"assistant","tool_calls":[{"id":"call_1",
-                "type":"function","function":{"name":"ping","arguments":"{}"}}]},
-                "finish_reason":"stop"}]}"#,
-        );
-        let (tool_finish_without_tool, _) = decode(
-            r#"{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
-                "choices":[{"index":0,
-                "message":{"role":"assistant","content":"hi"},
-                "finish_reason":"tool_calls"}]}"#,
-        );
-
-        let TerminalEvidence::BoundaryLoss(tool_with_stop) = tool_with_stop else {
-            panic!("tool content with a stop finish must be boundary loss");
-        };
-        assert_eq!(tool_with_stop.finish_reported, Some(FinishReason::EndTurn));
-
-        let TerminalEvidence::BoundaryLoss(tool_finish_without_tool) = tool_finish_without_tool
-        else {
-            panic!("a tool finish without tool content must be boundary loss");
-        };
-        assert_eq!(
-            tool_finish_without_tool.finish_reported,
-            Some(FinishReason::ToolUse)
-        );
-    }
-
-    #[test]
-    fn ambiguous_length_finish_is_boundary_loss_even_with_partial_tool_material() {
-        let (evidence, _) = decode(
-            r#"{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1","choices":[{
-                "index":0,"message":{"role":"assistant","tool_calls":[{
-                "id":"call_1","type":"function","function":{"name":"lookup",
-                "arguments":"{\"city\":"}}]},"finish_reason":"length"}]}"#,
-        );
-
-        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-            panic!("ambiguous finish must remain boundary-loss evidence");
-        };
-        assert_eq!(
-            loss.finish_reported,
-            Some(FinishReason::Unrecognized {
-                provider_token: "length".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn a_non_assistant_buffered_message_is_boundary_loss() {
-        let (evidence, _) = decode(
-            r#"{"id":"chatcmpl_1","object":"chat.completion",
-                "model":"model-exact-1","choices":[{
-                "index":0,"message":{"role":"user","content":"not assistant output"},
-                "finish_reason":"stop"}]}"#,
-        );
-
-        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-            panic!("a non-assistant response message must not become completion evidence");
-        };
-        assert!(matches!(
-            loss.cause,
-            LossCause::ResponseUnintelligible { .. }
-        ));
-    }
-
-    #[test]
-    fn unrecognized_tool_call_type_is_boundary_loss_not_silent_drop() {
-        let (evidence, _) = decode(
-            r#"{
-                "id": "chatcmpl_1",
-                "object": "chat.completion",
-                "model": "model-exact-1",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant",
-                                "tool_calls": [{"id": "call_1", "type": "custom",
-                                                "custom": {"name": "x", "input": "y"}}]},
-                    "finish_reason": "tool_calls"
-                }]
-            }"#,
-        );
-
-        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-            panic!("an unrecognized tool-call type must surface as evidence, never drop");
-        };
-        assert!(matches!(
-            loss.cause,
-            LossCause::ResponseUnintelligible { .. }
-        ));
-    }
-
-    #[test]
-    fn invalid_response_function_names_are_boundary_loss() {
-        for name in ["", "has space", &"x".repeat(65)] {
-            let body = format!(
-                r#"{{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
-                    "choices":[{{"index":0,"message":{{"role":"assistant","tool_calls":[{{
-                    "id":"call_1","type":"function","function":{{"name":{name:?},
-                    "arguments":"{{}}"}}}}]}},"finish_reason":"tool_calls"}}]}}"#
-            );
-            let (evidence, _) = decode(&body);
-
+    fn malformed_tool_calls_are_not_fabricated_into_proposals() {
+        for field in ["call_id", "name", "arguments"] {
+            let mut call = json!({"type":"function_call","call_id":"call_fixture","name":"lookup","arguments":"{}"});
+            call.as_object_mut().unwrap().remove(field);
+            let mut value = response();
+            value["output"] = json!([call]);
+            let (evidence, observations) = decode(value);
             assert!(
                 matches!(evidence, TerminalEvidence::BoundaryLoss(_)),
-                "invalid name {name:?} must not become a proposal"
+                "{field}"
+            );
+            assert!(
+                !observations
+                    .iter()
+                    .any(|o| matches!(o.fact, ObservationFact::ToolCallProposed(_))),
+                "{field}"
             );
         }
     }
 
     #[test]
-    fn a_choice_with_an_unexpected_index_is_boundary_loss() {
-        let (evidence, _) = decode(
-            r#"{
-                "id": "chatcmpl_1",
-                "object": "chat.completion",
-                "model": "model-exact-1",
-                "choices": [{
-                    "index": 1,
-                    "message": {"role": "assistant", "content": "hi"},
-                    "finish_reason": "stop"
-                }]
-            }"#,
-        );
+    fn malformed_success_envelopes_are_boundary_loss() {
+        for field in ["object", "id", "model", "status", "output"] {
+            let mut value = response();
+            value.as_object_mut().unwrap().remove(field);
+            assert!(
+                matches!(decode(value).0, TerminalEvidence::BoundaryLoss(_)),
+                "{field}"
+            );
+        }
+    }
 
-        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-            panic!("an unrequested choice index must not become definitive completion");
+    #[test]
+    fn unrequested_output_kinds_fail_closed() {
+        let mut value = response();
+        value["output"] =
+            json!([{"type":"compaction","id":"cmp_fixture","encrypted_content":"opaque"}]);
+        assert!(matches!(decode(value).0, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn absent_usage_is_not_announced_or_fabricated() {
+        let mut value = response();
+        value.as_object_mut().unwrap().remove("usage");
+        let (TerminalEvidence::Completed(result), observations) = decode(value) else {
+            panic!("buffered usage may be unreported");
         };
-        assert!(matches!(
-            loss.cause,
-            LossCause::ResponseUnintelligible { .. }
-        ));
-    }
-
-    #[test]
-    fn a_choice_without_an_index_is_boundary_loss() {
-        let (evidence, _) = decode(
-            r#"{"id":"chatcmpl_1","object":"chat.completion",
-                "model":"model-exact-1","choices":[{
-                "message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#,
-        );
-
-        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
-    }
-
-    #[test]
-    fn a_tool_call_without_arguments_is_boundary_loss_not_a_fabricated_call() {
-        let (evidence, _) = decode(
-            r#"{
-                "id": "chatcmpl_1",
-                "object": "chat.completion",
-                "model": "model-exact-1",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant",
-                                "tool_calls": [{"id": "call_1", "type": "function",
-                                                "function": {"name": "ping"}}]},
-                    "finish_reason": "tool_calls"
-                }]
-            }"#,
-        );
-
-        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-            panic!("argument bytes the provider never produced must not be fabricated");
-        };
-        assert!(matches!(
-            loss.cause,
-            LossCause::ResponseUnintelligible { .. }
-        ));
-    }
-
-    #[test]
-    fn an_absent_usage_member_is_never_announced_as_a_usage_report() {
-        let (evidence, observations) = decode(
-            r#"{
-                "id": "chatcmpl_1",
-                "object": "chat.completion",
-                "model": "model-exact-1",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "hi"},
-                    "finish_reason": "stop"
-                }]
-            }"#,
-        );
-
-        assert!(matches!(evidence, TerminalEvidence::Completed(_)));
+        assert_eq!(result.usage, TokenUsage::unreported());
         assert!(
             !observations
                 .iter()
-                .any(|observation| matches!(observation.fact, ObservationFact::UsageReported(_)))
+                .any(|o| matches!(o.fact, ObservationFact::UsageReported(_)))
         );
     }
 
     #[test]
-    fn a_success_response_without_model_identity_is_boundary_loss() {
-        let (evidence, observations) = decode(
-            r#"{
-                "id": "chatcmpl_1",
-                "object": "chat.completion",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "hi"},
-                    "finish_reason": "stop"
-                }]
-            }"#,
-        );
-
-        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
-        assert!(observations.is_empty());
-    }
-
-    #[test]
-    fn unparseable_success_body_is_boundary_loss() {
-        let (evidence, observations) = decode("<html>gateway</html>");
-
-        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-            panic!("an unparseable success body is not definitive completion material");
-        };
-        assert!(matches!(
-            loss.cause,
-            LossCause::ResponseUnintelligible { .. }
-        ));
-        assert_eq!(loss.exchange, exchange());
-        assert_eq!(observations, vec![]);
-    }
-
-    #[test]
-    fn overdeep_unknown_success_material_is_response_unintelligible() {
-        let nested = format!(
-            "{}null{}",
-            "[".repeat(PROVIDER_JSON_NESTING_LIMIT + 1),
-            "]".repeat(PROVIDER_JSON_NESTING_LIMIT + 1)
-        );
-        let body = format!(
-            r#"{{
-                "id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
-                "choices":[{{"index":0,"message":{{"role":"assistant","content":"ok",
-                    "future":{nested}}},"finish_reason":"stop"}}]
-            }}"#
-        );
-
-        let TerminalEvidence::BoundaryLoss(loss) = decode(&body).0 else {
-            panic!("overdeep unknown content must be rejected before typed parsing");
-        };
-        let LossCause::ResponseUnintelligible { detail } = loss.cause else {
-            panic!("deep success JSON must be response-unintelligible evidence");
-        };
-        let expected = format!("{PROVIDER_JSON_NESTING_LIMIT}-container nesting limit");
-        assert!(detail.contains(&expected));
-    }
-
-    #[test]
-    fn overdeep_buffered_tool_arguments_are_response_unintelligible() {
-        let depth = PROVIDER_JSON_NESTING_LIMIT + 1;
-        let arguments = format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
-        let arguments = serde_json::to_string(&arguments).expect("fixture JSON string serializes");
-        let body = format!(
-            r#"{{
-                "id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
-                "choices":[{{"index":0,"message":{{"role":"assistant","tool_calls":[{{
-                    "id":"call_1","type":"function","function":{{
-                        "name":"lookup","arguments":{arguments}
-                    }}
-                }}]}},"finish_reason":"tool_calls"}}]
-            }}"#
-        );
-
-        let TerminalEvidence::BoundaryLoss(loss) = decode(&body).0 else {
-            panic!("overdeep buffered tool arguments must not become a proposal");
-        };
-        let LossCause::ResponseUnintelligible { detail } = loss.cause else {
-            panic!("deep buffered arguments must be response-unintelligible evidence");
-        };
-        let expected = format!("{PROVIDER_JSON_NESTING_LIMIT}-container nesting limit");
-        assert!(detail.contains(&expected));
-    }
-
-    #[test]
-    fn shallow_additive_fields_remain_tolerated() {
-        let (evidence, _) = decode(
-            r#"{
-                "id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
-                "future_envelope":{"enabled":true},
-                "choices":[{"index":0,"message":{"role":"assistant","content":"ok",
-                    "future_message":[1,2]},"finish_reason":"stop"}]
-            }"#,
-        );
-
-        assert!(matches!(evidence, TerminalEvidence::Completed(_)));
-    }
-
-    #[test]
-    fn duplicate_tool_call_ids_are_boundary_loss() {
-        let (evidence, _) = decode(
-            r#"{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
-                "choices":[{"index":0,
-                "message":{"role":"assistant","tool_calls":[
-                    {"id":"call_1","type":"function",
-                     "function":{"name":"first","arguments":"{}"}},
-                    {"id":"call_1","type":"function",
-                     "function":{"name":"second","arguments":"{}"}}]},
-                "finish_reason":"tool_calls"}]}"#,
-        );
-
-        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
-    }
-
-    #[test]
-    fn a_success_response_without_a_completion_id_is_boundary_loss() {
-        let (evidence, _) = decode(
-            r#"{"object":"chat.completion","model":"model-exact-1","choices":[{
-                "index":0,"message":{"role":"assistant","content":"hi"},
-                "finish_reason":"stop"}]}"#,
-        );
-
-        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
-    }
-
-    #[test]
-    fn stop_with_a_declared_sequence_preserves_boundary_ambiguity() {
-        let (evidence, _) = decode_with_stop_sequences(
-            r#"{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
-                "choices":[{"index":0,"message":{"role":"assistant","content":"partial"},
-                "finish_reason":"stop"}]}"#,
-            StopSequences::Declared,
-        );
-
-        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-            panic!("ambiguous finish must remain boundary-loss evidence");
+    fn refusal_content_is_never_success() {
+        let mut value = response();
+        value["output"][0]["content"] = json!([{"type":"refusal","refusal":"declined"}]);
+        let (TerminalEvidence::Refused(result), _) = decode(value) else {
+            panic!("refusal is distinct from completion");
         };
         assert_eq!(
-            loss.finish_reported,
-            Some(FinishReason::Unrecognized {
-                provider_token: "stop".to_string(),
-            })
+            result.content,
+            vec![AssistantPart::Text("declined".to_string())]
         );
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
-    struct FinishRow {
-        token: &'static str,
-        finish: String,
-    }
-
-    /// Renders one mapping row per finish-reason token, in the given order.
-    fn finish_rows(tokens: &[&'static str]) -> Vec<FinishRow> {
-        tokens
-            .iter()
-            .map(|token| FinishRow {
-                token,
-                finish: format!("{:?}", map_finish(token, StopSequences::NotDeclared)),
-            })
-            .collect()
-    }
-
     #[test]
-    fn every_documented_finish_reason_maps_and_unknown_is_retained_verbatim() {
-        let rows = finish_rows(&[
-            "stop",
-            "length",
-            "tool_calls",
-            "content_filter",
-            "function_call",
-        ]);
-
-        expect![[r#"
-            ┌────────────────┬────────────────────────────────────────────────────┐
-            │ token          │ finish                                             │
-            ├────────────────┼────────────────────────────────────────────────────┤
-            │ stop           │ EndTurn                                            │
-            │ length         │ Unrecognized { provider_token: \"length\" }        │
-            │ tool_calls     │ ToolUse                                            │
-            │ content_filter │ Refusal                                            │
-            │ function_call  │ Unrecognized { provider_token: \"function_call\" } │
-            └────────────────┴────────────────────────────────────────────────────┘
-        "#]]
-        .assert_eq(&table(rows));
+    fn overdeep_unknown_material_is_rejected_before_decoding() {
+        let body = format!(
+            "{{\"unknown\":{}0{}}}",
+            "[".repeat(PROVIDER_JSON_NESTING_LIMIT),
+            "]".repeat(PROVIDER_JSON_NESTING_LIMIT)
+        );
+        let evidence = decode_buffered_response(
+            body.as_bytes(),
+            ExchangeFacts::default(),
+            &(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(
+            evidence,
+            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                tool_calls: ToolCallsAtLoss::Unobserved,
+                ..
+            })
+        ));
     }
 }

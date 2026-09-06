@@ -1,31 +1,24 @@
-//! OpenAI Chat Completions API wire types.
-//!
-//! Written from the provider's public Chat Completions documentation:
-//! request and response bodies for `POST /v1/chat/completions`, the error
-//! envelope, and the streaming chunk payloads. Response types tolerate
-//! unknown fields (serde's default) so additive provider changes do not
-//! break deserialization; unknown tool types are handled explicitly where
-//! they are interpreted.
+//! Responses request, response, and SSE payload types for `POST /v1/responses`.
+//! Additive fields are tolerated; item and event kinds are checked by decoders.
 
 use serde::{Deserialize, Serialize};
-
-// --- Request ---
+use serde_json::value::RawValue;
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ChatRequest {
+pub(crate) struct CreateResponse {
     pub model: String,
-    pub messages: Vec<WireChatMessage>,
-    pub max_completion_tokens: u32,
+    pub input: Vec<WireInputItem>,
+    pub max_output_tokens: u32,
+    pub store: bool,
+    pub include: [&'static str; 1],
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<&'static str>,
+    pub reasoning: Option<WireReasoning>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub stop: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<WireFunctionTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,106 +26,101 @@ pub(crate) struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
     pub stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stream_options: Option<StreamOptions>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct StreamOptions {
-    pub include_usage: bool,
+pub(crate) struct WireReasoning {
+    pub effort: &'static str,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct WireChatMessage {
-    pub role: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<WireRequestToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct WireRequestToolCall {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub kind: &'static str,
-    pub function: WireRequestFunction,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct WireRequestFunction {
-    pub name: String,
-    pub arguments: String,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WireInputItem {
+    Message {
+        role: &'static str,
+        content: String,
+    },
+    FunctionCall {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    FunctionCallOutput {
+        call_id: String,
+        output: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct WireFunctionTool {
     #[serde(rename = "type")]
     pub kind: &'static str,
-    pub function: WireFunctionDefinition,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct WireFunctionDefinition {
     pub name: String,
     pub description: String,
-    pub parameters: Box<serde_json::value::RawValue>,
+    pub parameters: Box<RawValue>,
+    pub strict: bool,
 }
 
-// --- Response ---
-
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChatCompletion {
+pub(crate) struct Response {
     pub id: Option<String>,
     pub object: Option<String>,
     pub model: Option<String>,
-    #[serde(default)]
-    pub choices: Vec<ChatChoice>,
+    pub status: Option<String>,
+    pub incomplete_details: Option<IncompleteDetails>,
+    pub output: Option<Vec<Box<RawValue>>>,
     pub usage: Option<WireUsage>,
+    pub error: Option<ResponseError>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChatChoice {
-    pub index: Option<u32>,
-    pub message: Option<ChatResponseMessage>,
-    pub finish_reason: Option<String>,
+pub(crate) struct IncompleteDetails {
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChatResponseMessage {
-    pub role: Option<String>,
-    pub content: Option<String>,
-    pub refusal: Option<String>,
-    #[serde(default)]
-    pub tool_calls: Vec<WireResponseToolCall>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct WireResponseToolCall {
-    pub id: Option<String>,
+pub(crate) struct WireOutputItem {
     #[serde(rename = "type")]
-    pub kind: Option<String>,
-    pub function: Option<WireResponseFunction>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct WireResponseFunction {
+    pub kind: String,
+    pub id: Option<String>,
+    pub role: Option<String>,
+    pub content: Option<Vec<WireContent>>,
+    pub call_id: Option<String>,
     pub name: Option<String>,
     pub arguments: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct WireUsage {
-    pub prompt_tokens: Option<u64>,
-    pub completion_tokens: Option<u64>,
-    pub prompt_tokens_details: Option<PromptTokensDetails>,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WireContent {
+    OutputText {
+        text: String,
+    },
+    Refusal {
+        refusal: String,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct PromptTokensDetails {
+pub(crate) struct WireUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub input_tokens_details: Option<InputTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct InputTokensDetails {
     pub cached_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+}
+
+/// The accepted-response and bare SSE error shape has no HTTP error type.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResponseError {
+    pub code: Option<String>,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,48 +158,15 @@ impl WireError {
     }
 }
 
-// --- Streaming chunk payloads ---
-
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChatChunk {
-    pub id: Option<String>,
-    pub object: Option<String>,
-    pub model: Option<String>,
-    #[serde(default)]
-    pub choices: Vec<ChunkChoice>,
-    pub usage: Option<WireUsage>,
-    /// Some gateways deliver a terminal error as a data record; when
-    /// present, the chunk is a definitive provider error.
-    pub error: Option<WireError>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChunkChoice {
-    pub index: Option<u32>,
-    pub delta: Option<ChunkDelta>,
-    pub finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChunkDelta {
-    pub role: Option<String>,
-    pub content: Option<String>,
-    pub refusal: Option<String>,
-    #[serde(default)]
-    pub tool_calls: Vec<ChunkToolCall>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChunkToolCall {
-    pub index: Option<u32>,
-    pub id: Option<String>,
+pub(crate) struct ResponseEvent {
     #[serde(rename = "type")]
-    pub kind: Option<String>,
-    pub function: Option<ChunkFunction>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChunkFunction {
-    pub name: Option<String>,
-    pub arguments: Option<String>,
+    pub kind: String,
+    pub response: Option<Response>,
+    pub output_index: Option<u32>,
+    pub item_id: Option<String>,
+    pub item: Option<Box<RawValue>>,
+    pub delta: Option<String>,
+    pub code: Option<String>,
+    pub message: Option<String>,
 }

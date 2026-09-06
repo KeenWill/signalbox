@@ -2,7 +2,7 @@
 //!
 //! The runtime-substrate spec requires each real adapter to define an
 //! exhaustive, mutually exclusive mapping of its provider-native terminal
-//! statuses and payloads. Chat Completions carries the specific condition in
+//! statuses and payloads. Responses carries the specific condition in
 //! `error.code` or `error.type` while the HTTP status carries the category,
 //! so envelope classification treats HTTP 401 as credential rejection
 //! outright, then consults a recognized code, then a recognized type, then the
