@@ -665,7 +665,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                     &repository,
                     &[rule.clone(), second_rule.clone(), late_rule.clone()],
                 )],
-                observed_at + Duration::from_secs(1),
+                observed_at,
             )
             .await?,
         RuleReconciliationAdmission::Applied {
@@ -698,40 +698,6 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?,
         DispatchAdmission::InactiveRule
     ));
-    let first_unseen_repository = RepositorySlug::try_new(String::from("unseen/first-repository"))?;
-    let second_unseen_repository =
-        RepositorySlug::try_new(String::from("unseen/second-repository"))?;
-    let first_unseen_configuration = [RepositoryRuleSet::new(
-        &first_unseen_repository,
-        std::slice::from_ref(&rule),
-    )];
-    let second_unseen_configuration = [RepositoryRuleSet::new(
-        &second_unseen_repository,
-        std::slice::from_ref(&rule),
-    )];
-    let (first_unseen, second_unseen) = tokio::join!(
-        store.reconcile_rules(&first_unseen_configuration, observed_at),
-        store.reconcile_rules(&second_unseen_configuration, observed_at)
-    );
-    assert!(matches!(
-        (first_unseen?, second_unseen?),
-        (
-            RuleReconciliationAdmission::Applied { .. },
-            RuleReconciliationAdmission::Applied { .. }
-        )
-    ));
-    let active_unseen_repositories: Vec<String> = sqlx::query_scalar(
-        "SELECT repository FROM rule
-          WHERE active_revision IS NOT NULL AND repository LIKE 'unseen/%'
-          ORDER BY repository",
-    )
-    .fetch_all(&module_pool)
-    .await?;
-    assert_eq!(active_unseen_repositories.len(), 1);
-    assert!(
-        active_unseen_repositories[0] == first_unseen_repository.as_str()
-            || active_unseen_repositories[0] == second_unseen_repository.as_str()
-    );
     let complete_baseline_retained: bool = sqlx::query_scalar(
         "SELECT comparison_baseline @> $2::jsonb
            FROM repository_state WHERE repository = $1",
@@ -1177,8 +1143,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         model: 18,
     };
     let occupied_batches = plan_repository_event(
-        std::slice::from_ref(&collision_rule),
-        &event,
+        std::slice::from_ref(&rule),
+        &earlier_event,
         &mut occupied_ids,
         &mut occupied_factory,
     )?;
@@ -1288,7 +1254,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let recovered_without_rule = store.recover_pending_commands(&mut command_codec).await?;
     let recovered_without_removed_rule = recovered_without_rule
         .iter()
-        .filter(|planned| planned.rule_id() == rule.id())
+        .filter(|planned| planned.rule_id() == rule.id() && planned.event_id() == event.id())
         .collect::<Vec<_>>();
     assert_eq!(
         recovered_without_removed_rule
@@ -1742,6 +1708,41 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 observed_at + Duration::from_secs(2),
             )
             .await?
+    );
+
+    let first_unseen_repository = RepositorySlug::try_new(String::from("unseen/first-repository"))?;
+    let second_unseen_repository =
+        RepositorySlug::try_new(String::from("unseen/second-repository"))?;
+    let first_unseen_configuration = [RepositoryRuleSet::new(
+        &first_unseen_repository,
+        std::slice::from_ref(&rule),
+    )];
+    let second_unseen_configuration = [RepositoryRuleSet::new(
+        &second_unseen_repository,
+        std::slice::from_ref(&rule),
+    )];
+    let (first_unseen, second_unseen) = tokio::join!(
+        store.reconcile_rules(&first_unseen_configuration, observed_at),
+        store.reconcile_rules(&second_unseen_configuration, observed_at)
+    );
+    assert!(matches!(
+        (first_unseen?, second_unseen?),
+        (
+            RuleReconciliationAdmission::Applied { .. },
+            RuleReconciliationAdmission::Applied { .. }
+        )
+    ));
+    let active_unseen_repositories: Vec<String> = sqlx::query_scalar(
+        "SELECT repository FROM rule
+          WHERE active_revision IS NOT NULL AND repository LIKE 'unseen/%'
+          ORDER BY repository",
+    )
+    .fetch_all(&module_pool)
+    .await?;
+    assert_eq!(active_unseen_repositories.len(), 1);
+    assert!(
+        active_unseen_repositories[0] == first_unseen_repository.as_str()
+            || active_unseen_repositories[0] == second_unseen_repository.as_str()
     );
 
     module_pool.close().await;
