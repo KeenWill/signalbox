@@ -5,8 +5,8 @@
 //! handles and the wider core outbox vocabulary do not cross this boundary.
 
 pub use signalbox_application::{
-    RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchEventContentIdentityV1,
+    CreateSessionOutcome, RepoWatchBranchHead, RepoWatchCheckCompletionGeneration,
+    RepoWatchCheckRunObservation, RepoWatchCheckSuiteObservation, RepoWatchEventContentIdentityV1,
     RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierError,
     RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
     RepoWatchMergedCheckRunBaselineV1, RepoWatchMergedCheckSuiteBaselineV1,
@@ -228,6 +228,22 @@ impl LifecycleEvent {
     /// Borrows the closed typed payload.
     pub const fn kind(&self) -> &LifecycleEventKind {
         &self.kind
+    }
+
+    /// Builds a session-created event for persistence-boundary integration tests.
+    #[cfg(feature = "test-support")]
+    pub const fn session_created_for_test(
+        sequence: u64,
+        recorded_at: OffsetDateTime,
+        session: SessionId,
+        created: SessionCreated,
+    ) -> Self {
+        Self {
+            sequence,
+            recorded_at,
+            session: Some(session),
+            kind: LifecycleEventKind::SessionCreated(created),
+        }
     }
 }
 
@@ -451,6 +467,19 @@ pub struct SessionCommand {
     payload: SessionCommandPayload,
 }
 
+/// Stable discriminator stored in a module's dispatch ledger.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionCommandKind {
+    /// Create one session.
+    CreateSession,
+    /// Submit one input.
+    SubmitInput,
+    /// Mutate one goal lineage.
+    Goal,
+    /// Mutate session lifecycle or ownership.
+    Lifecycle,
+}
+
 impl SessionCommand {
     /// Admits a repository-watch-dispatched create-session command.
     pub fn create_session(command: CreateSession) -> Result<Self, CommandOutsideSeam> {
@@ -518,6 +547,26 @@ impl SessionCommand {
     /// Consumes the wrapper and returns the existing typed core command.
     pub fn into_payload(self) -> SessionCommandPayload {
         self.payload
+    }
+
+    /// Returns the durable command identity claimed by the checked payload.
+    pub const fn command_id(&self) -> DurableCommandId {
+        match &self.payload {
+            SessionCommandPayload::CreateSession(command) => command.command_id(),
+            SessionCommandPayload::SubmitInput(command) => command.command_id(),
+            SessionCommandPayload::Goal(command) => command.command_id(),
+            SessionCommandPayload::Lifecycle(command) => command.command_id(),
+        }
+    }
+
+    /// Returns the ledger discriminator for the checked payload family.
+    pub const fn kind(&self) -> SessionCommandKind {
+        match self.payload {
+            SessionCommandPayload::CreateSession(_) => SessionCommandKind::CreateSession,
+            SessionCommandPayload::SubmitInput(_) => SessionCommandKind::SubmitInput,
+            SessionCommandPayload::Goal(_) => SessionCommandKind::Goal,
+            SessionCommandPayload::Lifecycle(_) => SessionCommandKind::Lifecycle,
+        }
     }
 }
 

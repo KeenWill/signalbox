@@ -82,13 +82,21 @@ count of matches it collapsed, the boundary event identities, and that state.
 One event and rule match admits the rule's complete ordered action list as one
 singleton batch. Each dispatch record links the triggering event, rule identity
 and version, singleton key, action ordinal, session-template provenance, and the
-new session. A durable delivery intent records the reserved submit-command,
-accepted-input, turn, and cancellation candidates beside the applied link, so
-equal recovery reuses the committed batch. An obligation records exactly one
-blocker: the occupying repository-watch dispatch or an external commissioned
-session. Every park and release of an obligation appends a journal row naming
-the count at the transition and, for a release, its operator or the causing
-event, under a schema-owned vocabulary. Readiness in
+new session. Initial actions and lifecycle reactions are retained and submitted
+in strictly increasing, unique action-ordinal order. A created session indexes
+its retained rule revision, event, dispatch, and action ordinal, so lifecycle
+reaction planning survives rule removal and process restart. Equal evaluation
+recovery finds that retained batch before considering newly reserved dispatch or
+command identities. A lifecycle reaction targets the session named by its
+trigger. Before submitting a later action, the dispatcher records a synchronous
+create-session command-identity conflict as rejected; an applied creation
+settles from its `SessionCreated` event. A durable delivery intent records the
+reserved submit-command, accepted-input, turn, and cancellation candidates
+beside the applied link, so equal recovery reuses the committed batch. An
+obligation records exactly one blocker: the occupying repository-watch dispatch
+or an external commissioned session. Every park and release of an obligation
+appends a journal row naming the count at the transition and, for a release, its
+operator or the causing event, under a schema-owned vocabulary. Readiness in
 `repo_watch_outstanding_dispatch_obligation` excludes a parked obligation and,
 independently, one whose count has reached the budget.
 
@@ -269,7 +277,8 @@ obligation eventually emits one action using the latest joined event plus the
 delivery member, never one action per joined event. The embedded event is the
 complete triggering durable fact, not reconstructed API state, and the matched
 count and boundary identities summarize collapse without replaying intermediate
-facts into the session.
+facts into the session. One dispatch reference names exactly one rule revision
+and event evaluation, including its complete ordered action batch.
 
 The goal statement is synthesized from the dispatching rule, the resolved
 template, and the typed parameters, and states only the rule, the template, and,
@@ -631,6 +640,17 @@ copy, submits the tagged context as its first accepted JSON input through
 transaction. No dispatched session is visible without its accepted input, its
 queued turn, its dispatch-to-turn audit link, and a statement of the authority
 it was dispatched under.
+
+Before submission, the module ledger retains an opaque core encoding of every
+complete checked command payload. Pending ledger rows remain recoverable without
+the removed or inactive rule, and newly resolved template or configuration
+values cannot replace the committed payload. A repository-watch `SessionCreated`
+event settles the next pending create action for its dispatch and records the
+new session; replaying that event cannot settle another action. Every action and
+every lifecycle reaction in a batch has its own one-based ordinal. A
+release-start or sticky-stop reaction remains admissible after rule deactivation
+when it names a committed dispatch from that rule revision; deactivation
+prevents new matching dispatches, not reactions owed by an existing one.
 
 An operator commission through `commission_session`, and every sweep dispatch,
 commits in one transaction the template session, the append-only
