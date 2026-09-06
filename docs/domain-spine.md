@@ -4582,6 +4582,11 @@ pub enum ModelCallTerminalObservation {
     },
     KnownFailed,
     Refused,
+    RefusedWithProviderCompaction {
+        provider_compaction: Vec<ProviderCompactionBlock>,
+        retained_input_tokens: u64,
+        retained_output_tokens: u64,
+    },
     Cancelled,
     Ambiguous,
 }

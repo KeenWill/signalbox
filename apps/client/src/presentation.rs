@@ -458,6 +458,10 @@ pub(crate) enum SnapshotSelection {
         turn_id: CanonicalUuid,
         terminal_entry_id: CanonicalUuid,
     },
+    Refused {
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+    },
     ToolBatchProposed {
         turn_id: CanonicalUuid,
         model_call_id: CanonicalUuid,
@@ -3215,6 +3219,7 @@ impl SnapshotSelection {
                     requests: terminal_results,
                 })
             }
+            Self::Refused { .. } => Ok(SnapshotSelectionContext::default()),
             Self::ToolReconciliation { .. }
                 if anchor_found
                     && !reconciliation_proposals.is_empty()
@@ -3269,6 +3274,29 @@ impl SnapshotSelection {
                 }),
             ) => turn_id == *entry_turn && model_call_id == *entry_call,
             (
+                Self::Completed {
+                    turn_id,
+                    model_call_id,
+                    ..
+                }
+                | Self::Refused {
+                    turn_id,
+                    model_call_id,
+                }
+                | Self::ToolBatchProposed {
+                    turn_id,
+                    model_call_id,
+                }
+                | Self::ToolBatchResults {
+                    turn_id,
+                    model_call_id,
+                },
+                SnapshotEntryKind::Marker(TranscriptEntry::ProviderCompaction {
+                    turn_id: entry_turn,
+                    model_call_id: entry_call,
+                }),
+            ) => turn_id == *entry_turn && model_call_id == *entry_call,
+            (
                 Self::ToolBatchResults { .. }
                 | Self::ToolReconciliation { .. }
                 | Self::Failed { .. }
@@ -3297,11 +3325,15 @@ impl SnapshotSelection {
                 }),
             ) => context.requests.contains(await_request_id),
             (
-                Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
+                Self::Completed { .. }
+                | Self::Refused { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. },
                 SnapshotEntryKind::Marker(_),
             ) => self.includes_terminal_marker(entry),
             (
                 Self::Completed { .. }
+                | Self::Refused { .. }
                 | Self::Failed { .. }
                 | Self::Cancelled { .. }
                 | Self::ToolBatchProposed { .. }
@@ -3364,6 +3396,7 @@ impl SnapshotSelection {
             (
                 Self::All
                 | Self::Completed { .. }
+                | Self::Refused { .. }
                 | Self::Failed { .. }
                 | Self::Cancelled { .. }
                 | Self::ToolBatchProposed { .. }
@@ -3834,7 +3867,7 @@ mod tests {
     };
     use crate::{
         error::ClientError,
-        transcript::{SnapshotIdentitySet, TranscriptSnapshot},
+        transcript::{SnapshotEntry, SnapshotEntryKind, SnapshotIdentitySet, TranscriptSnapshot},
     };
 
     #[test]
@@ -4978,6 +5011,99 @@ mod tests {
         assert!(rendered.contains("turn_completed"));
         assert!(!rendered.contains("later reply"));
         assert!(!rendered.contains(&later_turn.to_string()));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn terminal_selections_match_provider_compaction_by_turn_and_call() {
+        let selected_turn = wire_uuid(1);
+        let selected_call = wire_uuid(2);
+        let other_turn = wire_uuid(3);
+        let other_call = wire_uuid(4);
+        let compaction = |turn_id, model_call_id| SnapshotEntry {
+            entry_index: 0,
+            source_session_id: wire_uuid(10),
+            entry_id: wire_uuid(11),
+            kind: SnapshotEntryKind::Marker(TranscriptEntry::ProviderCompaction {
+                turn_id,
+                model_call_id,
+            }),
+        };
+        let context = super::SnapshotSelectionContext::default();
+
+        for selection in [
+            SnapshotSelection::Completed {
+                turn_id: selected_turn,
+                model_call_id: selected_call,
+                terminal_entry_id: wire_uuid(12),
+            },
+            SnapshotSelection::Refused {
+                turn_id: selected_turn,
+                model_call_id: selected_call,
+            },
+            SnapshotSelection::ToolBatchProposed {
+                turn_id: selected_turn,
+                model_call_id: selected_call,
+            },
+            SnapshotSelection::ToolBatchResults {
+                turn_id: selected_turn,
+                model_call_id: selected_call,
+            },
+        ] {
+            assert!(selection.includes(&compaction(selected_turn, selected_call), &context));
+            assert!(!selection.includes(&compaction(other_turn, selected_call), &context));
+            assert!(!selection.includes(&compaction(selected_turn, other_call), &context));
+        }
+    }
+
+    #[test]
+    fn refused_terminal_reread_renders_its_provider_compaction_marker() {
+        let selected_turn = wire_uuid(1);
+        let selected_call = wire_uuid(2);
+        let other_call = wire_uuid(3);
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            12,
+            [
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(11),
+                    entry: TranscriptEntry::ProviderCompaction {
+                        turn_id: selected_turn,
+                        model_call_id: selected_call,
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(1),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(12),
+                    entry: TranscriptEntry::ProviderCompaction {
+                        turn_id: selected_turn,
+                        model_call_id: other_call,
+                    },
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut displayed = SnapshotIdentitySet::new().expect("identity spool must open");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .terminal_material(
+                &mut snapshot,
+                &mut displayed,
+                SnapshotSelection::Refused {
+                    turn_id: selected_turn,
+                    model_call_id: selected_call,
+                },
+            )
+            .expect("a refused compaction marker must render without refusal text");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.contains(&format!(
+            "provider_compaction turn={selected_turn} call={selected_call}"
+        )));
+        assert!(!rendered.contains(&format!("call={other_call}")));
         assert!(stderr.is_empty());
     }
 
