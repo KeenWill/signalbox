@@ -203,14 +203,15 @@ baseline remains while the merged pull request's recurring streams remain in the
 frontier, because evicting it alone would make a later refresh look like an
 initial observation. No lifecycle releases a stream: a release is valid only for
 a subject that provably produces no further occurrence, and a merged pull
-request is not one. Exceeding the stream ceiling fails the comparison, and
-sequence exhaustion fails rather than wrapping, because reuse would mint a
-content identity colliding with a durable one. The frontier is never replaced
-with an empty one, because every stream would restart at sequence one and mint
-identities a commit coalesces, silently losing those events and their
-dispatches. The frontier records the pull request owning each recurring stream
-although nothing reads it yet, because a stream identity is a one-way hash no
-later migration can invert.
+request is not one. A release carries the observed frontier generation and is
+stale after any intervening frontier commit. Exceeding the stream ceiling fails
+the comparison, and sequence exhaustion fails rather than wrapping, because
+reuse would mint a content identity colliding with a durable one. The frontier
+is never replaced with an empty one, because every stream would restart at
+sequence one and mint identities a commit coalesces, silently losing those
+events and their dispatches. The frontier records the pull request owning each
+recurring stream although nothing reads it yet, because a stream identity is a
+one-way hash no later migration can invert.
 
 The content identity is a domain-separated SHA-256 digest over the repository,
 event version, canonical target, identifying payload members, a separately
