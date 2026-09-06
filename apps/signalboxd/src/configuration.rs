@@ -9233,6 +9233,24 @@ context_window_tokens = 200000
     }
 
     #[test]
+    fn configuration_rejects_empty_normalized_convergence_reviewers() {
+        let example = include_str!("../../../crates/convergence/examples/repository.toml");
+        for login in ["", " ", "[bot]", "[BOT]"] {
+            let mut policy: toml::Value =
+                toml::from_str(example).expect("the example is valid TOML");
+            policy["reviewers"][0]["login"] = toml::Value::String(login.into());
+            let policy = toml::to_string(&policy)
+                .expect("policy serializes")
+                .replace("[[reviewers]]", "[[convergence.reviewers]]");
+            let configured = format!("{CONFIGURATION}\n[convergence]\n{policy}");
+            assert!(
+                HubModelConfiguration::parse(&configured).is_err(),
+                "a reviewer must have an identity after bot normalization"
+            );
+        }
+    }
+
+    #[test]
     fn configuration_rejects_unknown_convergence_policy_fields() {
         let example = include_str!("../../../crates/convergence/examples/repository.toml");
         let policy = example.replace("[[reviewers]]", "[[convergence.reviewers]]");

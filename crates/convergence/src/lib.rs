@@ -79,6 +79,16 @@ impl ConvergencePolicy {
             ));
         }
         for reviewer in &self.reviewers {
+            if reviewer.login.trim().is_empty()
+                || (reviewer.bot
+                    && reviewer
+                        .login
+                        .to_lowercase()
+                        .trim_end_matches("[bot]")
+                        .is_empty())
+            {
+                return Err(Error::Evidence("reviewer login must not be blank".into()));
+            }
             regex::Regex::new(&reviewer.request_pattern)?;
             regex::Regex::new(&reviewer.verdict_pattern)?;
         }

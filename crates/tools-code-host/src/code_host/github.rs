@@ -186,14 +186,36 @@ query ThreadOwnership($thread: ID!) {
 "#;
 
 type ConvergenceHistoryEntry = std::sync::Arc<tokio::sync::Mutex<serde_json::Value>>;
+type ConvergenceHistory =
+    std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, ConvergenceHistoryEntry>>>;
+
+struct CensusHistory {
+    histories: ConvergenceHistory,
+    key: String,
+}
+
+impl Drop for CensusHistory {
+    fn drop(&mut self) {
+        let mut histories = self
+            .histories
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Waiting censuses share this entry. Only its last user may remove an
+        // empty history, including when cancellation drops the pending future.
+        if histories.get(&self.key).is_some_and(|entry| {
+            std::sync::Arc::strong_count(entry) == 1
+                && entry.try_lock().is_ok_and(|state| state.is_null())
+        }) {
+            histories.remove(&self.key);
+        }
+    }
+}
 
 /// Production GitHub transport with fixed endpoints and deployment-supplied policy.
 #[derive(Clone, Debug)]
 pub struct GitHubCodeHostTransport {
     convergence_policy: Option<signalbox_convergence::ConvergencePolicy>,
-    convergence_history: std::sync::Arc<
-        tokio::sync::Mutex<std::collections::BTreeMap<String, ConvergenceHistoryEntry>>,
-    >,
+    convergence_history: ConvergenceHistory,
     client: Client,
     rest_base: Url,
     graphql_url: Url,
@@ -819,12 +841,20 @@ impl GitHubCodeHostTransport {
             repository.as_str().to_ascii_lowercase(),
             number.get()
         );
+        // Declare the cleanup guard before the entry so the caller's strong
+        // reference drops before cleanup checks for the last census.
+        let census_history = CensusHistory {
+            histories: self.convergence_history.clone(),
+            key,
+        };
         let entry = self
             .convergence_history
             .lock()
-            .await
-            .entry(key)
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(serde_json::json!({}))))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(census_history.key.clone())
+            .or_insert_with(|| {
+                std::sync::Arc::new(tokio::sync::Mutex::new(serde_json::Value::Null))
+            })
             .clone();
         let mut history = entry.lock().await;
         let previous = history.clone();
@@ -882,9 +912,11 @@ impl GitHubCodeHostTransport {
             .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
         let evaluation = signalbox_convergence::evaluate(&snapshot, policy)
             .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
-        *history = evaluation.state.clone();
-        ConvergenceReadResult::try_new(self.bounds, evaluation)
-            .ok_or(CodeHostTransportFailure::InvalidResponse)
+        let next_state = evaluation.state.clone();
+        let result = ConvergenceReadResult::try_new(self.bounds, evaluation)
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        *history = next_state;
+        Ok(result)
     }
 
     async fn thread_inventory(
@@ -2991,6 +3023,14 @@ mod tests {
                     .err(),
                 Some(expected)
             );
+            assert!(
+                transport
+                    .convergence_history
+                    .lock()
+                    .expect("history map locks")
+                    .is_empty(),
+                "failed censuses must not retain empty entries"
+            );
         }
     }
 
@@ -3020,8 +3060,19 @@ mod tests {
             .expect("transport constructs")
             .with_convergence_policy(Some(policy));
         let credential = CredentialValue::new(b"invalid\nheader".to_vec());
+        let key = format!(
+            "{}#{}",
+            recording.repository.to_ascii_lowercase(),
+            recording.number
+        );
+        let entry = std::sync::Arc::new(tokio::sync::Mutex::new(serde_json::Value::Null));
+        transport
+            .convergence_history
+            .lock()
+            .expect("history map locks")
+            .insert(key, entry.clone());
         for review_gate in [false, true] {
-            let history = transport.convergence_history.lock().await;
+            let history = entry.lock().await;
             let release = async move {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 drop(history);
@@ -3175,6 +3226,14 @@ mod tests {
                 .await
                 .expect_err("the pending census is cancelled")
                 .is_cancelled()
+        );
+        assert!(
+            transport
+                .convergence_history
+                .lock()
+                .expect("history map locks")
+                .is_empty(),
+            "cancellation of the last waiter removes its empty history"
         );
     }
 

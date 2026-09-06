@@ -719,6 +719,7 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
         });
     let identity_changed = current["state"] != "OPEN"
         || [
+            "state",
             "baseRefName",
             "baseRefOid",
             "headRefName",

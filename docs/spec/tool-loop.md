@@ -457,13 +457,14 @@ verdict never treats a partial evidence page as complete. The code-host
 convergence-state and review-gate tools return the `signalbox-convergence`
 verdict from one complete snapshot and the daemon's `[convergence]` policy.
 Their repository argument must match that policy's repository without regard to
-case. Census and history updates are serialized per pull request. Stack and
-thread-inventory tools remain separate reads. The authenticated job-log endpoint
-is the sole redirect-shaped exchange: after one 302 the adapter validates the
-location, pins a wholly public destination set, and downloads credential-free. A
-read transport or server failure is an executor infrastructure failure, while a
-mutation transport loss, server failure, or malformed acknowledgement is
-commit-ambiguous. `change_request_thread_reply` and
+case. Census and history updates are serialized per pull request. Failed and
+cancelled censuses release entries without successful history after their last
+waiter exits. Stack and thread-inventory tools remain separate reads. The
+authenticated job-log endpoint is the sole redirect-shaped exchange: after one
+302 the adapter validates the location, pins a wholly public destination set,
+and downloads credential-free. A read transport or server failure is an executor
+infrastructure failure, while a mutation transport loss, server failure, or
+malformed acknowledgement is commit-ambiguous. `change_request_thread_reply` and
 `change_request_thread_resolve` query thread ownership before they mutate, and a
 failure of that query classifies the mutation as not dispatched rather than
 ambiguous. The adapter never returns code-host response bodies as error detail.
