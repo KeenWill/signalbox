@@ -173,7 +173,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
 }
 
 pub(crate) fn decode_response<C: Clone>(
-    response: Response,
+    mut response: Response,
     mut usage: TokenUsage,
     exchange: ExchangeFacts,
     correlation: &C,
@@ -194,18 +194,12 @@ pub(crate) fn decode_response<C: Clone>(
         emit(correlation, sink, ObservationFact::UsageReported(usage));
     }
     if response.status.as_deref() == Some("failed")
-        && let Some(error) = response.error
+        && let Some(error) = response.error.take()
     {
         return provider_error(error, exchange, reported_model, usage);
     }
-    let items: Result<Vec<WireOutputItem>, _> = response
-        .output
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .map(|raw| serde_json::from_str(raw.get()))
-        .collect();
-    let tool_calls = output_tool_calls(response.output.as_deref());
+    let output = response.output_items();
+    let tool_calls = output_tool_calls(output.as_ref().ok().and_then(|items| items.as_deref()));
     let loss = |detail: String, finish_reported: Option<FinishReason>| {
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::ResponseUnintelligible { detail },
@@ -219,6 +213,11 @@ pub(crate) fn decode_response<C: Clone>(
     if response.status.as_deref() == Some("failed") {
         return loss("failed response lacks error".to_string(), None);
     }
+    if matches!(response.status.as_deref(), Some("completed" | "incomplete"))
+        && response.error.is_some()
+    {
+        return loss("non-failed response carries an error".to_string(), None);
+    }
     if response.object.as_deref() != Some("response")
         || response.id.as_deref().is_none_or(str::is_empty)
         || response.model.as_deref().is_none_or(str::is_empty)
@@ -229,6 +228,14 @@ pub(crate) fn decode_response<C: Clone>(
             None,
         );
     }
+    let output = match output {
+        Ok(output) => output.unwrap_or_default(),
+        Err(error) => return loss(error.to_string(), None),
+    };
+    let items: Result<Vec<WireOutputItem>, _> = output
+        .iter()
+        .map(|raw| serde_json::from_str(raw.get()))
+        .collect();
     let items = match items {
         Ok(items) => items,
         Err(e) => return loss(e.to_string(), None),
@@ -455,6 +462,55 @@ mod tests {
             error.native.error_code.as_deref(),
             Some("rate_limit_exceeded")
         );
+    }
+
+    #[test]
+    fn failed_envelope_keeps_provider_error_when_output_is_not_an_array() {
+        for output in [json!({}), json!("invalid"), json!(42)] {
+            let mut value = response();
+            value["status"] = json!("failed");
+            value["error"] = json!({"code":"server_error","message":"generation failed"});
+            value["output"] = output;
+            let (TerminalEvidence::ProviderError(error), observations) = decode(value) else {
+                panic!("malformed output must not erase the failed envelope");
+            };
+            assert_eq!(
+                error.kind,
+                signalbox_model_runtime::ProviderErrorKind::ProviderInternal
+            );
+            assert_eq!(error.native.error_code.as_deref(), Some("server_error"));
+            assert_eq!(error.native.message.as_deref(), Some("generation failed"));
+            assert_eq!(error.exchange.http_status, Some(200));
+            assert!(!error.non_acceptance_proven);
+            assert!(!observations.iter().any(|o| matches!(
+                o.fact,
+                ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+            )));
+        }
+    }
+
+    #[test]
+    fn completed_and_incomplete_envelopes_require_no_error_and_array_output() {
+        for status in ["completed", "incomplete"] {
+            for error in [Value::Null, json!({}), json!({"code":"server_error"})] {
+                let mut value = response();
+                value["status"] = json!(status);
+                value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                value["error"] = error.clone();
+                let (evidence, observations) = decode(value.clone());
+                if error.is_null() {
+                    assert!(matches!(evidence, TerminalEvidence::Completed(_)));
+                } else {
+                    assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+                    assert!(!observations.iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                }
+                value["output"] = json!({});
+                assert!(matches!(decode(value).0, TerminalEvidence::BoundaryLoss(_)));
+            }
+        }
     }
 
     #[test]

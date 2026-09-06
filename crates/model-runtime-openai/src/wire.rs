@@ -67,9 +67,18 @@ pub(crate) struct Response {
     pub model: Option<String>,
     pub status: Option<String>,
     pub incomplete_details: Option<IncompleteDetails>,
-    pub output: Option<Vec<Box<RawValue>>>,
+    pub output: Option<Box<RawValue>>,
     pub usage: Option<WireUsage>,
     pub error: Option<ResponseError>,
+}
+
+impl Response {
+    pub(crate) fn output_items(&self) -> Result<Option<Vec<Box<RawValue>>>, serde_json::Error> {
+        self.output
+            .as_ref()
+            .map(|raw| serde_json::from_str(raw.get()))
+            .transpose()
+    }
 }
 
 #[derive(Debug, Deserialize)]

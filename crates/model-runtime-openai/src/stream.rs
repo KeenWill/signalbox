@@ -145,7 +145,9 @@ impl StreamDecoder {
                 };
                 let failed = event.kind == "response.failed";
                 let terminal_has_tools = !failed
-                    && output_tool_calls(response.output.as_deref()) == ToolCallsAtLoss::Opened;
+                    && response.output_items().is_ok_and(|items| {
+                        output_tool_calls(items.as_deref()) == ToolCallsAtLoss::Opened
+                    });
                 if self.opened_tool_calls
                     && !terminal_has_tools
                     && response.status.as_deref() == Some("completed")
@@ -347,15 +349,26 @@ impl StreamDecoder {
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), String> {
-        if response.output.is_some() {
-            match output_tool_calls(response.output.as_deref()) {
+        let output = response.output_items().map_err(|error| {
+            self.discarded_unexamined_bytes = true;
+            error.to_string()
+        })?;
+        if output.is_some() {
+            match output_tool_calls(output.as_deref()) {
                 ToolCallsAtLoss::Opened => self.opened_tool_calls = true,
                 ToolCallsAtLoss::Unobserved => self.discarded_unexamined_bytes = true,
                 ToolCallsAtLoss::NoneOpened => {}
             }
         }
         self.observe_response_metadata(response, correlation, sink)?;
-        for (index, raw) in response.output.iter().flatten().enumerate() {
+        if matches!(response.status.as_deref(), Some("completed" | "incomplete")) {
+            let length = u32::try_from(output.as_ref().map_or(0, Vec::len))
+                .map_err(|error| error.to_string())?;
+            if self.item_ids.range(length..).next().is_some() {
+                return Err("terminal response omits an observed output index".to_string());
+            }
+        }
+        for (index, raw) in output.iter().flatten().enumerate() {
             let item: WireOutputItem = serde_json::from_str(raw.get()).map_err(|error| {
                 self.discarded_unexamined_bytes = true;
                 error.to_string()
@@ -987,6 +1000,107 @@ mod tests {
     }
 
     #[test]
+    fn failed_terminal_keeps_provider_error_when_output_is_not_an_array() {
+        for output in [json!({}), json!("invalid"), json!(42)] {
+            let mut event = terminal();
+            event["type"] = json!("response.failed");
+            event["response"]["status"] = json!("failed");
+            event["response"]["error"] =
+                json!({"code":"server_error","message":"generation failed"});
+            event["response"]["output"] = output;
+            let TerminalEvidence::ProviderError(error) = decode(event) else {
+                panic!("malformed output must not erase the failed envelope");
+            };
+            assert_eq!(error.kind, ProviderErrorKind::ProviderInternal);
+            assert_eq!(error.native.error_code.as_deref(), Some("server_error"));
+            assert_eq!(error.native.message.as_deref(), Some("generation failed"));
+            assert!(!error.non_acceptance_proven);
+        }
+    }
+
+    #[test]
+    fn completed_and_incomplete_terminals_require_no_error_and_array_output() {
+        for status in ["completed", "incomplete"] {
+            for error in [Value::Null, json!({}), json!({"code":"server_error"})] {
+                let mut event = terminal();
+                event["type"] = json!(format!("response.{status}"));
+                event["response"]["status"] = json!(status);
+                event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                event["response"]["error"] = error.clone();
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                let StreamStep::Terminal(evidence) = apply(&mut decoder, event.clone(), &mut sink)
+                else {
+                    panic!("terminal event must terminate");
+                };
+                if error.is_null() {
+                    assert!(matches!(*evidence, TerminalEvidence::Completed(_)));
+                } else {
+                    assert!(matches!(
+                        *evidence,
+                        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            cause: LossCause::StreamProtocolViolation { .. },
+                            ..
+                        })
+                    ));
+                    assert!(!sink.iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                }
+                event["response"]["output"] = json!({});
+                assert!(matches!(decode(event), TerminalEvidence::BoundaryLoss(_)));
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_output_must_include_every_observed_output_index_before_flushing() {
+        for status in ["completed", "incomplete"] {
+            for index in [0, 1, 7] {
+                for added in [false, true] {
+                    let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                    let mut sink = Vec::new();
+                    let observed = if added {
+                        json!({"type":"response.output_item.added","output_index":index,
+                            "item":{"type":"message","id":"msg_missing","role":"assistant","content":[]}})
+                    } else {
+                        json!({"type":"response.output_text.delta","output_index":index,
+                            "content_index":0,"item_id":"msg_missing","delta":"missing"})
+                    };
+                    assert!(matches!(
+                        apply(&mut decoder, observed, &mut sink),
+                        StreamStep::Continue
+                    ));
+                    let observed_count = sink.len();
+                    let mut event = terminal();
+                    event["type"] = json!(format!("response.{status}"));
+                    event["response"]["status"] = json!(status);
+                    event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                    if index == 0 {
+                        event["response"]["output"] = json!([]);
+                    }
+                    let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink)
+                    else {
+                        panic!("terminal event must terminate");
+                    };
+                    assert!(matches!(
+                        *evidence,
+                        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            cause: LossCause::StreamProtocolViolation { .. },
+                            ..
+                        })
+                    ));
+                    assert!(!sink[observed_count..].iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::TextDelta { .. } | ObservationFact::FinishReported(_)
+                    )));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unknown_snapshot_output_withholds_the_no_tool_claim() {
         for kind in [
             "response.in_progress",
@@ -1070,7 +1184,9 @@ mod tests {
                 event["response"]["status"] = json!(status);
                 event["response"]["usage"] = terminal_usage;
                 event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
-                event["response"]["error"] = json!({"code":"server_error"});
+                if status == "failed" {
+                    event["response"]["error"] = json!({"code":"server_error"});
+                }
                 let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
                     panic!("terminal event must terminate");
                 };
@@ -1250,7 +1366,6 @@ mod tests {
                 event["type"] = json!(format!("response.{status}"));
                 event["response"]["status"] = json!(status);
                 event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
-                event["response"]["error"] = json!({"code":"server_error"});
                 event["response"]["output"]
                     .as_array_mut()
                     .unwrap()
