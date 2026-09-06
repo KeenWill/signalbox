@@ -471,6 +471,24 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         retained_event_source,
         (String::from("poll"), Decimal::from(2_u64))
     );
+    let projected_repository_delete =
+        sqlx::query("DELETE FROM repository_state WHERE repository = $1")
+            .bind(repository.as_str())
+            .execute(&module_pool)
+            .await;
+    assert!(matches!(
+        projected_repository_delete,
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23503")
+    ));
+    let retained_after_projection_delete: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM repository_state WHERE repository = $1),
+            (SELECT count(*) FROM gh_event WHERE repository = $1)",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(retained_after_projection_delete, (1, 2));
     let retention_column_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM information_schema.columns
           WHERE table_schema = 'mod_repo_watch'
