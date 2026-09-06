@@ -21,7 +21,7 @@ use super::{
     SubmitInputRejectedSessionNotFoundReconstitutionInput,
     SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
     SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
-    SubmitInputTurnOriginReconstitutionInput, freeze_origin_configuration,
+    SubmitInputTurnOriginReconstitutionInput, command::freeze_origin_configuration,
     reconstruct_origin_configuration,
 };
 use crate::applied_interrupt::test_applied_interrupt_proof;

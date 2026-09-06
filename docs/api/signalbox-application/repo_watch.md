@@ -669,7 +669,7 @@ impl RepoWatchPreparedDispatchAction {
     ) -> (
         repo_watch::RepoWatchActionV1,
         session::PreparedCreateSession,
-        submit_input::SubmitInput,
+        command::SubmitInput,
         goal_command::GoalUserCommand,
     );
 }
