@@ -236,15 +236,15 @@ completion time, or conclusion. Workflows sharing a display name stay distinct,
 renaming cannot re-emit an observed run attempt, and a new attempt under an
 unchanged run identity does emit.
 
-An unchanged candidate with no events does not advance the cursor, and an
-unchanged candidate carrying events is rejected. Replay detection compares
-against the batch the replayed generation would have stored, so a coalesced
-commit is still recognized as its own replay. Each compact baseline records the
-signal-reviewer filter that produced its reactions, and the cursor binds its
-reaction projection to the exact signal-reviewer set; a changed set replaces
-only the reaction baseline without emitting `ReactionChanged`, because comparing
-projections formed under different filters would manufacture transitions. A
-first observation emits `PullRequestOpened` and the current
+An unchanged complete candidate with no events does not advance the cursor, and
+an unchanged complete candidate carrying events is rejected. Replay detection
+compares against the batch the replayed generation would have stored, so a
+coalesced commit is still recognized as its own replay. Each compact baseline
+records the signal-reviewer filter that produced its reactions, and the cursor
+binds its reaction projection to the exact signal-reviewer set; a changed set
+replaces only the reaction baseline without emitting `ReactionChanged`, because
+comparing projections formed under different filters would manufacture
+transitions. A first observation emits `PullRequestOpened` and the current
 `MergeableStateChanged` fact for each open pull request, then establishes its
 baseline, so an already-conflicting pull request reaches the first rule at once.
 Closing by merge emits `PullRequestMerged`, not both merged and closed. A base

@@ -795,8 +795,8 @@ impl RepoWatchStore {
         .bind(&pull_request_numbers)
         .fetch_one(&mut *transaction)
         .await?;
-        if unchanged {
-            if events.is_empty() && projections_match {
+        if unchanged && projections_match {
+            if events.is_empty() {
                 transaction.rollback().await?;
                 return Ok(FrontierEventAdmission::Unchanged);
             }
