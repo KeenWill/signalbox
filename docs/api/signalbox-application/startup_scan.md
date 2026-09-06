@@ -103,20 +103,15 @@ impl StartupScanOutcome {
 ```rust
 pub struct StartupScanError<RepositoryError> {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<RepositoryError> StartupScanError<RepositoryError> {
-    pub const fn session(&self) -> option::Option<signalbox_domain::SessionId>;
-    pub const fn repository_error(&self) -> &RepositoryError;
-    pub fn into_repository_error(self) -> RepositoryError;
-}
 impl<RepositoryError> fmt::Display for StartupScanError<RepositoryError>
 where
     RepositoryError: fmt::Display,
 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<RepositoryError> error::Error for StartupScanError<RepositoryError>
 where
-    RepositoryError: error::Error + 'static,
+    RepositoryError: error::Error + 'static + fmt::Display,
 {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
@@ -126,6 +121,11 @@ where
 {
     fn operator_failure_class(&self) -> OperatorFailureClass;
     fn operator_failure_cause_code(&self) -> &'static str;
+}
+impl<RepositoryError> StartupScanError<RepositoryError> {
+    pub const fn session(&self) -> option::Option<signalbox_domain::SessionId>;
+    pub const fn repository_error(&self) -> &RepositoryError;
+    pub fn into_repository_error(self) -> RepositoryError;
 }
 ```
 

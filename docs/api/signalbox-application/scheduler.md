@@ -28,9 +28,11 @@ impl SchedulerPassOccupancyBound {
 pub struct InvalidSchedulerPassOccupancyBound;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for InvalidSchedulerPassOccupancyBound {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for InvalidSchedulerPassOccupancyBound {}
+impl error::Error for InvalidSchedulerPassOccupancyBound {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## SchedulerOldestInFlightPass
@@ -80,9 +82,11 @@ impl ReconciliationSweepInterval {
 pub struct InvalidReconciliationSweepInterval;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for InvalidReconciliationSweepInterval {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for InvalidReconciliationSweepInterval {}
+impl error::Error for InvalidReconciliationSweepInterval {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## EligibilityNudgeOutcome
