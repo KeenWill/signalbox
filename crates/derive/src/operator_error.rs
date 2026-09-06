@@ -1,10 +1,13 @@
+mod formatting;
+
 use std::collections::BTreeSet;
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::{format_ident, quote};
 use syn::{
     Attribute, Data, DeriveInput, Expr, Fields, Generics, Ident, Lit, LitStr, Member, Token,
-    TypeParamBound, WhereClause, parse_quote, punctuated::Punctuated, spanned::Spanned,
+    TypeParamBound, WhereClause, ext::IdentExt, parse_quote, punctuated::Punctuated,
+    spanned::Spanned, visit::Visit,
 };
 
 #[derive(Default)]
@@ -188,11 +191,11 @@ fn arm(
     shape: &Fields,
     fields: &[Field<'_>],
     body: TokenStream,
-) -> TokenStream {
-    let mut used = BTreeSet::new();
-    identifiers(body.clone(), &mut used);
-    let pattern = pattern(prefix, shape, fields, &used);
-    quote!(#pattern => #body)
+) -> syn::Result<TokenStream> {
+    let mut references = formatting::References::new(fields);
+    references.visit_expr(&syn::parse2(body.clone())?);
+    let pattern = pattern(prefix, shape, fields, &references.used);
+    Ok(quote!(#pattern => #body))
 }
 
 fn format_literal(
@@ -263,18 +266,18 @@ fn format_literal(
 
 fn capture(key: &str, fields: &[Field<'_>], positional: bool, captures: &mut Vec<Ident>) -> String {
     let field = fields.iter().find(|field| {
-        field.binding == key
+        field.binding.unraw() == key
             || (!positional
                 && match &field.member {
                     Member::Unnamed(index) => key == index.index.to_string(),
-                    Member::Named(name) => name == key,
+                    Member::Named(name) => name.unraw() == key,
                 })
     });
     if let Some(field) = field {
         if !captures.contains(&field.binding) {
             captures.push(field.binding.clone());
         }
-        field.binding.to_string()
+        field.binding.unraw().to_string()
     } else {
         key.to_owned()
     }
@@ -318,27 +321,45 @@ fn display(
             "expected error format string",
         ));
     };
-    let mut arguments = args.map(|arg| quote!(#arg)).collect::<Vec<_>>();
+    let args = args.collect::<Vec<_>>();
+    let supplied = args
+        .iter()
+        .filter_map(|argument| {
+            let Expr::Assign(assignment) = argument else {
+                return None;
+            };
+            let Expr::Path(path) = assignment.left.as_ref() else {
+                return None;
+            };
+            path.path.get_ident().map(|ident| ident.unraw().to_string())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut arguments = args.iter().map(|arg| quote!(#arg)).collect::<Vec<_>>();
     let (literal, captures) = format_literal(&literal, fields, !arguments.is_empty());
-    arguments.extend(captures.iter().map(|binding| quote!(#binding = #binding)));
+    arguments.extend(
+        captures
+            .iter()
+            .filter(|binding| !supplied.contains(&binding.unraw().to_string()))
+            .map(|binding| quote!(#binding = #binding)),
+    );
     Ok(quote!(::std::write!(#formatter, #literal #(, #arguments)*)))
 }
 
-fn boxed_trait_object(ty: &syn::Type) -> bool {
-    let syn::Type::Path(path) = ty else {
-        return false;
-    };
-    let Some(segment) = path.path.segments.last() else {
-        return false;
-    };
-    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return false;
-    };
-    segment.ident == "Box"
-        && matches!(
-            arguments.args.first(),
-            Some(syn::GenericArgument::Type(syn::Type::TraitObject(_)))
-        )
+fn source_coercion() -> TokenStream {
+    quote! {
+        trait __SignalboxSourceRef<'__source> {
+            type Target: ::std::error::Error + ?Sized + 'static;
+            fn __signalbox_source_ref(self) -> &'__source Self::Target;
+        }
+        impl<'__source, __Error: ::std::error::Error + 'static> __SignalboxSourceRef<'__source> for &&'__source __Error {
+            type Target = __Error;
+            fn __signalbox_source_ref(self) -> &'__source Self::Target { *self }
+        }
+        impl<'__source, __Error: ::std::error::Error + ?Sized + 'static> __SignalboxSourceRef<'__source> for &'__source ::std::boxed::Box<__Error> {
+            type Target = __Error;
+            fn __signalbox_source_ref(self) -> &'__source Self::Target { self.as_ref() }
+        }
+    }
 }
 
 fn target<'a>(
@@ -405,6 +426,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             .any(|(attrs, _, _, _)| attrs.iter().any(|a| a.path().is_ident("operator")))
             && matches!(input.data, Data::Enum(_));
     let mut displays = Vec::new();
+    let mut format_bounds = Vec::<syn::WherePredicate>::new();
     let mut names = BTreeSet::new();
     identifiers(quote!(#input), &mut names);
     let mut formatter_name = "__signalbox_formatter".to_owned();
@@ -416,29 +438,45 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     }
     let formatter = Ident::new(&formatter_name, name.span());
     let mut sources = Vec::new();
+    let mut has_sources = false;
     let mut classes = Vec::new();
     let mut codes = Vec::new();
     for (attrs, shape, prefix, owner) in cases {
         let fields = fields(shape);
-        displays.push(arm(
-            &prefix,
-            shape,
-            &fields,
-            display(attrs, &fields, &owner, &formatter)?,
-        ));
+        let body = display(attrs, &fields, &owner, &formatter)?;
+        let mut references = formatting::References::new(&fields);
+        references.visit_expr(&syn::parse2(body.clone())?);
+        for field in &fields {
+            let ty = &field.field.ty;
+            let mut type_names = BTreeSet::new();
+            identifiers(quote!(#ty), &mut type_names);
+            if !input
+                .generics
+                .type_params()
+                .any(|param| type_names.contains(&param.ident.to_string()))
+                || type_names.contains("Self")
+                || type_names.contains(&name.to_string())
+            {
+                continue;
+            }
+            if let Some(modes) = references.formatted.get(&field.binding.to_string()) {
+                for mode in modes {
+                    let mode = Ident::new(mode, field.field.span());
+                    format_bounds.push(parse_quote!(#ty: ::std::fmt::#mode));
+                }
+            }
+        }
+        displays.push(arm(&prefix, shape, &fields, body)?);
         let source_fields = fields
             .iter()
             .filter(|field| field.source)
             .collect::<Vec<_>>();
         let source = match source_fields.as_slice() {
-            [] => quote!(None),
+            [] => quote!(::std::option::Option::None),
             [field] => {
+                has_sources = true;
                 let binding = &field.binding;
-                if boxed_trait_object(&field.field.ty) {
-                    quote!(Some(#binding.as_ref()))
-                } else {
-                    quote!(Some(#binding))
-                }
+                quote!(Some((&#binding).__signalbox_source_ref()))
             }
             _ => {
                 return Err(syn::Error::new_spanned(
@@ -447,7 +485,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 ));
             }
         };
-        sources.push(arm(&prefix, shape, &fields, source));
+        sources.push(arm(&prefix, shape, &fields, source)?);
         if classify {
             let classification = classification(attrs)?;
             let target = target(&classification, &fields, &owner)?;
@@ -471,17 +509,27 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             } else {
                 quote!(#code)
             };
-            classes.push(arm(&prefix, shape, &fields, class));
-            codes.push(arm(&prefix, shape, &fields, code));
+            classes.push(arm(&prefix, shape, &fields, class)?);
+            codes.push(arm(&prefix, shape, &fields, code)?);
         }
     }
     let name = &input.ident;
     let (_, ty_generics, _) = input.generics.split_for_impl();
-    let display_generics = bounded(
-        &input.generics,
-        options.display_bound.as_ref(),
-        parse_quote!(::std::fmt::Display),
-    )?;
+    let mut display_generics = if options.display_bound.is_some() {
+        bounded(
+            &input.generics,
+            options.display_bound.as_ref(),
+            Punctuated::new(),
+        )?
+    } else {
+        input.generics.clone()
+    };
+    if options.display_bound.is_none() && !format_bounds.is_empty() {
+        display_generics
+            .make_where_clause()
+            .predicates
+            .extend(format_bounds.clone());
+    }
     let (display_impl, _, display_where) = display_generics.split_for_impl();
     let mut output = quote! {
         impl #display_impl ::std::fmt::Display for #name #ty_generics #display_where {
@@ -491,15 +539,24 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     };
     {
-        let generics = bounded(
+        let mut generics = bounded(
             &input.generics,
             options.error_bound.as_ref(),
             parse_quote!(::std::error::Error + 'static),
         )?;
+        if options.error_bound.is_none()
+            && let Some(clause) = &display_generics.where_clause
+        {
+            generics
+                .make_where_clause()
+                .predicates
+                .extend(clause.predicates.clone());
+        }
         let (implementation, _, clause) = generics.split_for_impl();
+        let coercion = has_sources.then(source_coercion);
         output.extend(quote! {
             impl #implementation ::std::error::Error for #name #ty_generics #clause {
-                fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> { match self { #(#sources),* } }
+                fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> { #coercion match self { #(#sources),* } }
             }
         });
     }

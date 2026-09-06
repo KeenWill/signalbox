@@ -1,0 +1,94 @@
+{
+  "source": "settled.json",
+  "edge": "later authenticated body finding invalidates an earlier quiet review on the same head",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews",
+      "value": {
+        "totalCount": 2,
+        "nodes": [
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 0
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUiacg",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T12:00:00Z"
+          },
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "A finding remains in this review.",
+            "comments": {
+              "totalCount": 0
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUktNA",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T14:00:00Z"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews",
+      "value": {
+        "totalCount": 2,
+        "nodes": [
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 0
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUiacg",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T12:00:00Z"
+          },
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "A finding remains in this review.",
+            "comments": {
+              "totalCount": 0
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUktNA",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T14:00:00Z"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    }
+  ]
+}

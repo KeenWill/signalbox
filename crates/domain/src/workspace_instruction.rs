@@ -709,9 +709,9 @@ mod tests {
         constructor(uuid::Uuid::from_u128(value))
     }
 
-    /// INV-069: turn instruction provenance authenticates the exact turn boundary.
+    /// turn instruction provenance authenticates the exact turn boundary.
     #[test]
-    fn inv069_manifest_hash_changes_with_the_turn() {
+    fn manifest_hash_changes_with_the_turn() {
         let first = TurnInstructionManifest::empty_turn_start(
             identity(1, TurnInstructionManifestId::from_uuid),
             identity(2, SessionId::from_uuid),

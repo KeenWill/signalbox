@@ -1,0 +1,80 @@
+{
+  "source": "settled.json",
+  "edge": "planning only modified",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/files/nodes",
+      "value": [
+        {
+          "additions": 8,
+          "changeType": "MODIFIED",
+          "deletions": 1,
+          "path": ".github/workflows/rust.yml"
+        }
+      ]
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/files/nodes",
+      "value": [
+        {
+          "additions": 8,
+          "changeType": "MODIFIED",
+          "deletions": 1,
+          "path": ".github/workflows/rust.yml"
+        }
+      ]
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/files/totalCount",
+      "value": 1
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/files/totalCount",
+      "value": 1
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews/nodes",
+      "value": []
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews/nodes",
+      "value": []
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews/totalCount",
+      "value": 0
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews/totalCount",
+      "value": 0
+    },
+    {
+      "path": "/blobs",
+      "value": {
+        ".github/workflows/rust.yml": [
+          {
+            "query": "query($owner:String!,$name:String!,$head:String!,$base:String!) { repository(owner:$owner,name:$name) { head:object(expression:$head) { ... on Blob { text } } base:object(expression:$base) { ... on Blob { text } } } }",
+            "response": {
+              "data": {
+                "repository": {
+                  "head": {
+                    "text": "# Work backlog\n\n> **Non-authoritative planning scratchpad \u2014 do not review for consistency.**\n"
+                  },
+                  "base": {
+                    "text": "# Work backlog\n\n> **Non-authoritative planning scratchpad \u2014 do not review for consistency.**\n"
+                  }
+                }
+              }
+            },
+            "variables": {
+              "base": "113746d23d6c7b398ef34464a071dca532791898:.github/workflows/rust.yml",
+              "head": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2:.github/workflows/rust.yml",
+              "name": "signalbox",
+              "owner": "KeenWill"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -2566,15 +2566,16 @@ mod tests {
     use crate::{RepoWatchEventId, SessionTemplateName};
 
     use super::{
-        BranchName, CheckConclusion, CommitSha, LabelName, MergeableState, PullRequestBody,
-        PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
-        RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextShape, RepoWatchEvent,
-        RepoWatchEventConstructionError, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
-        RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1,
-        RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
-        RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleValidationError,
-        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
-        RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepositorySlug,
+        BranchName, CheckConclusion, CheckRunName, CommitSha, LabelName, MergeableState,
+        PullRequestBody, PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber,
+        PullRequestTitle, ReactionContent, RepoWatchActionV1, RepoWatchAuthorLogin,
+        RepoWatchDispatchContextShape, RepoWatchEvent, RepoWatchEventConstructionError,
+        RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchLabelMatcher,
+        RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
+        RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleIdentityField,
+        RepoWatchRuleValidationError, RepoWatchRuleVersion, RepoWatchSingletonScope,
+        RepoWatchTemplateContextDeclaration, RepoWatchTemplateContextDeclarationError,
+        RepoWatchTextError, RepositorySlug, ReviewThreadId, WorkflowName,
     };
 
     const CONTEXT_HEAD_SHA: &str = "1111111111111111111111111111111111111111";
@@ -2712,6 +2713,46 @@ mod tests {
     fn label_name_admits_valid_multibyte_characters_beyond_one_hundred_bytes() {
         assert!(VALID_MULTIBYTE_LABEL.len() > 100);
         assert!(LabelName::try_new(String::from(VALID_MULTIBYTE_LABEL)).is_ok());
+    }
+
+    #[test]
+    fn descriptive_text_retains_spelling_within_storage_constraints()
+    -> Result<(), RepoWatchTextError> {
+        let text = "  MiXeD é <tag>\n";
+        assert_eq!(CheckRunName::try_new(text.into())?.as_str(), text);
+        assert_eq!(WorkflowName::try_new(text.into())?.as_str(), text);
+        assert_eq!(ReactionContent::try_new(text.into())?.as_str(), text);
+        assert_eq!(ReviewThreadId::try_new(text.into())?.as_str(), text);
+        assert_eq!(PullRequestTitle::try_new(text.into())?.as_str(), text);
+        assert_eq!(PullRequestBody::try_new(text.into())?.as_str(), text);
+        assert_eq!(LabelName::try_new(text.into())?.as_str(), text);
+        Ok(())
+    }
+
+    #[test]
+    fn event_names_reject_values_outside_storage_constraints() {
+        assert_eq!(
+            CheckRunName::try_new(String::new()),
+            Err(RepoWatchTextError::Empty)
+        );
+        assert_eq!(
+            WorkflowName::try_new("nul\0name".into()),
+            Err(RepoWatchTextError::ContainsNull)
+        );
+        assert_eq!(
+            CheckRunName::try_new("x".repeat(257)),
+            Err(RepoWatchTextError::TooLong {
+                bytes: 257,
+                maximum: 256
+            })
+        );
+        assert_eq!(
+            WorkflowName::try_new("x".repeat(257)),
+            Err(RepoWatchTextError::TooLong {
+                bytes: 257,
+                maximum: 256
+            })
+        );
     }
 
     #[test]

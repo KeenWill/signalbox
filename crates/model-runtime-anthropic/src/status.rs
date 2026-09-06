@@ -69,8 +69,10 @@ pub(crate) fn classify_error_with_proof(
     let kind = classify_error(status, token);
     let non_acceptance_proven = matches!(
         (status, token),
-        (429, Some("rate_limit_error")) | (529, Some("overloaded_error"))
-    ) || (status == 500 && token == Some("api_error"));
+        (429, Some("rate_limit_error"))
+            | (500, Some("api_error"))
+            | (529, Some("overloaded_error"))
+    );
     (kind, non_acceptance_proven)
 }
 

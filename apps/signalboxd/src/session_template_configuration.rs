@@ -1129,7 +1129,7 @@ documentation-code-drift = "Find documentation drift."
     }
 
     #[test]
-    fn inv047_inline_template_resolves_a_complete_digest_bound_bundle() {
+    fn inline_template_resolves_a_complete_digest_bound_bundle() {
         let configuration = SessionTemplateConfiguration::parse_at(
             &inline_catalog(""),
             Path::new("deployment/session-templates.toml"),
@@ -1243,10 +1243,10 @@ documentation-code-drift = "Find documentation drift."
         );
     }
 
-    /// INV-047: immutable template provenance binds the copied settings
+    /// immutable template provenance binds the copied settings
     /// snapshot as well as the model, approval posture, and prompt.
     #[test]
-    fn inv047_template_content_digest_commits_copied_model_settings() {
+    fn template_content_digest_commits_copied_model_settings() {
         let reasoning_models = models_with_global_reasoning();
         let provider_defaults = SessionTemplateConfiguration::parse_at(
             &inline_catalog(""),
@@ -1318,7 +1318,7 @@ documentation-code-drift = "Find documentation drift."
     }
 
     #[test]
-    fn inv047_home_prompt_reference_copies_exact_file_content() {
+    fn home_prompt_reference_copies_exact_file_content() {
         let temporary = tempfile::tempdir().expect("temporary deployment root");
         let prompt_directory = temporary.path().join("prompts");
         fs::create_dir(&prompt_directory).expect("prompt directory is created");
@@ -1361,7 +1361,7 @@ dangerous_tool_auto_approval = false
 
     #[cfg(unix)]
     #[test]
-    fn inv047_unix_relative_prompt_file_accepts_backslash_in_component() {
+    fn unix_relative_prompt_file_accepts_backslash_in_component() {
         let temporary = tempfile::tempdir().expect("temporary deployment root");
         let prompt_path = temporary.path().join(r"review\guide.txt");
         fs::write(&prompt_path, INLINE_PROMPT).expect("synthetic prompt is written");
@@ -1574,7 +1574,7 @@ dangerous_tool_auto_approval = false
 
     #[cfg(not(target_vendor = "apple"))]
     #[test]
-    fn inv047_fifo_prompt_source_is_rejected_without_blocking() {
+    fn fifo_prompt_source_is_rejected_without_blocking() {
         let temporary = tempfile::tempdir().expect("temporary deployment root");
         let prompt_path = temporary.path().join("prompt.fifo");
         rustix::fs::mkfifoat(
