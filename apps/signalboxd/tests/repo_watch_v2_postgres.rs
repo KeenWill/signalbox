@@ -14,11 +14,11 @@ use signalbox_domain::{
 };
 use signalbox_module_repo_watch_v2::{
     CreateSessionCommandFactory, DispatchAdmission, DispatchReferenceGenerator, EventAdmission,
-    FrontierEventAdmission, FrontierReleaseAdmission, LifecycleReactionError, PullRequestLifecycle,
-    PullRequestState, RepoWatchStore, RepositoryProjection, RepositoryState, RuleAdmission,
-    SessionCommandCodec, StoreError, WebhookAdmission, WebhookDelivery, WebhookDisposition,
-    matching_rules, plan_lifecycle_reaction_for_test, plan_repository_event,
-    plan_retained_lifecycle_reaction_for_test,
+    EventProducer, FrontierEventAdmission, FrontierReleaseAdmission, LifecycleReactionError,
+    PullRequestLifecycle, PullRequestState, RepoWatchStore, RepositoryProjection, RepositoryState,
+    RuleAdmission, RuleReconciliationAdmission, SessionCommandCodec, StoreError, WebhookAdmission,
+    WebhookDelivery, WebhookDisposition, matching_rules, plan_lifecycle_reaction_for_test,
+    plan_repository_event, plan_retained_lifecycle_reaction_for_test,
 };
 use signalbox_ownership_seam::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, CreateSession,
@@ -397,18 +397,43 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         RepoWatchSingletonScope::Repository,
         Duration::ZERO,
     )?;
+    let second_rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("branch-ci-second"))?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+            repository: Some(repository.clone()),
+            labels: RepoWatchLabelMatcher::default(),
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(String::from("repo-watch"))?,
+        }],
+        RepoWatchSingletonScope::Repository,
+        Duration::ZERO,
+    )?;
     let (first, concurrent) = tokio::join!(
-        store.record_rule(&repository, &rule, observed_at),
-        store.record_rule(&repository, &rule, observed_at)
+        store.reconcile_rules(&repository, std::slice::from_ref(&rule), observed_at),
+        store.reconcile_rules(&repository, std::slice::from_ref(&rule), observed_at)
     );
     assert!(matches!(
         (first?, concurrent?),
-        (RuleAdmission::Inserted, RuleAdmission::Replayed)
-            | (RuleAdmission::Replayed, RuleAdmission::Inserted)
+        (
+            RuleReconciliationAdmission::Applied { rules: first, deactivated: 0 },
+            RuleReconciliationAdmission::Applied { rules: second, deactivated: 0 }
+        ) if (first.as_ref() == [RuleAdmission::Inserted]
+            && second.as_ref() == [RuleAdmission::Replayed])
+            || (first.as_ref() == [RuleAdmission::Replayed]
+                && second.as_ref() == [RuleAdmission::Inserted])
     ));
     assert_eq!(
-        store.record_rule(&repository, &rule, observed_at).await?,
-        RuleAdmission::Replayed
+        store
+            .reconcile_rules(&repository, std::slice::from_ref(&rule), observed_at)
+            .await?,
+        RuleReconciliationAdmission::Applied {
+            rules: Box::new([RuleAdmission::Replayed]),
+            deactivated: 0,
+        }
     );
     let fingerprint_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM rule_field_fingerprint
@@ -425,14 +450,21 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let other_repository = RepositorySlug::try_new(String::from("other/repository"))?;
     assert_eq!(
         store
-            .record_rule(&other_repository, &rule, observed_at)
+            .reconcile_rules(&other_repository, std::slice::from_ref(&rule), observed_at,)
             .await?,
-        RuleAdmission::Inserted
+        RuleReconciliationAdmission::Applied {
+            rules: Box::new([RuleAdmission::Inserted]),
+            deactivated: 0,
+        }
     );
-    assert!(
+    assert_eq!(
         store
-            .deactivate_rule(&other_repository, rule.id().as_str(), observed_at)
-            .await?
+            .reconcile_rules(&other_repository, &[], observed_at)
+            .await?,
+        RuleReconciliationAdmission::Applied {
+            rules: Box::new([]),
+            deactivated: 1,
+        }
     );
     let retained_revisions: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM rule_revision
@@ -443,6 +475,25 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_one(&module_pool)
     .await?;
     assert_eq!(retained_revisions, 1);
+    assert_eq!(
+        store
+            .reconcile_rules(
+                &other_repository,
+                &[second_rule.clone(), rule.clone()],
+                observed_at,
+            )
+            .await?,
+        RuleReconciliationAdmission::Stale
+    );
+    let partially_inserted_rules: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rule_revision
+          WHERE repository = $1 AND rule_id = $2",
+    )
+    .bind(other_repository.as_str())
+    .bind(second_rule.id().as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(partially_inserted_rules, 0);
 
     let event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(14)),
@@ -464,7 +515,6 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let earlier_identity = RepoWatchEventContentIdentityV1::from_bytes([14; 32]);
     let earlier_occurrence =
         RepoWatchEventOccurrenceV1::from_parts(earlier_event.clone(), earlier_identity);
-    let retain_until = observed_at + Duration::from_secs(120);
     assert_eq!(
         store
             .commit_frontier_candidate(
@@ -472,8 +522,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 0,
                 &frontier,
                 &[earlier_occurrence, occurrence],
+                EventProducer::Poll,
                 observed_at,
-                retain_until,
             )
             .await?,
         FrontierEventAdmission::Committed {
@@ -484,11 +534,55 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let evaluation_order = store.event_evaluation_order(&repository).await?;
     assert_eq!(evaluation_order.len(), 2);
     assert_eq!(evaluation_order[0].event(), earlier_event.id());
+    assert_eq!(evaluation_order[0].repository_event_ordinal(), 1);
     assert_eq!(evaluation_order[0].frontier_generation(), 1);
     assert_eq!(evaluation_order[0].event_ordinal(), 1);
     assert_eq!(evaluation_order[1].event(), event.id());
+    assert_eq!(evaluation_order[1].repository_event_ordinal(), 2);
     assert_eq!(evaluation_order[1].frontier_generation(), 1);
     assert_eq!(evaluation_order[1].event_ordinal(), 2);
+    let retained_event_source: (String, Decimal) = sqlx::query_as(
+        "SELECT producer, repository_event_ordinal FROM gh_event WHERE event_id = $1",
+    )
+    .bind(event.id().into_uuid())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(
+        retained_event_source,
+        (String::from("poll"), Decimal::from(2_u64))
+    );
+    let retention_column_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM information_schema.columns
+          WHERE table_schema = 'mod_repo_watch'
+            AND table_name = 'gh_event'
+            AND column_name = 'retain_until'",
+    )
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(retention_column_count, 0);
+    assert_eq!(
+        store
+            .reconcile_rules(
+                &repository,
+                &[rule.clone(), second_rule.clone()],
+                observed_at + Duration::from_secs(1),
+            )
+            .await?,
+        RuleReconciliationAdmission::Applied {
+            rules: Box::new([RuleAdmission::Replayed, RuleAdmission::Inserted]),
+            deactivated: 0,
+        }
+    );
+    let activation_tail: Decimal = sqlx::query_scalar(
+        "SELECT activated_after_event_ordinal FROM rule_revision
+          WHERE repository = $1 AND rule_id = $2 AND revision = 1",
+    )
+    .bind(repository.as_str())
+    .bind(second_rule.id().as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(activation_tail, Decimal::from(2_u64));
+
     let late_rule = RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(String::from("late-branch-ci"))?,
         RepoWatchRuleVersion::V1,
@@ -506,13 +600,20 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     )?;
     assert_eq!(
         store
-            .record_rule(
+            .reconcile_rules(
                 &repository,
-                &late_rule,
+                &[rule.clone(), second_rule.clone(), late_rule.clone()],
                 observed_at + Duration::from_secs(1),
             )
             .await?,
-        RuleAdmission::Inserted
+        RuleReconciliationAdmission::Applied {
+            rules: Box::new([
+                RuleAdmission::Replayed,
+                RuleAdmission::Replayed,
+                RuleAdmission::Inserted,
+            ]),
+            deactivated: 0,
+        }
     );
     let mut late_ids = FixedDispatchIds {
         value: 140,
@@ -584,8 +685,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 0,
                 &frontier,
                 &[replayed_earlier_occurrence, replayed_occurrence],
+                EventProducer::Webhook,
                 observed_at + Duration::from_secs(1),
-                retain_until + Duration::from_secs(1),
             )
             .await?,
         FrontierEventAdmission::Committed {
@@ -611,8 +712,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 1,
                 &frontier,
                 &[],
+                EventProducer::Poll,
                 observed_at + Duration::from_secs(1),
-                retain_until + Duration::from_secs(1),
             )
             .await?,
         FrontierEventAdmission::Unchanged
@@ -642,8 +743,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 1,
                 &frontier,
                 &[],
+                EventProducer::Poll,
                 observed_at + Duration::from_secs(2),
-                retain_until + Duration::from_secs(2),
             )
             .await?,
         FrontierEventAdmission::Committed {
@@ -671,8 +772,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 2,
                 &frontier,
                 &[],
+                EventProducer::Poll,
                 observed_at + Duration::from_secs(3),
-                retain_until + Duration::from_secs(3),
             )
             .await?,
         FrontierEventAdmission::Committed {
@@ -709,8 +810,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 3,
                 &frontier,
                 std::slice::from_ref(&eventful_projection_occurrence),
+                EventProducer::Webhook,
                 observed_at + Duration::from_secs(4),
-                retain_until + Duration::from_secs(4),
             )
             .await?,
         FrontierEventAdmission::Committed {
@@ -734,6 +835,16 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             eventful_projection_default_head.as_str().into(),
             eventful_projection_title.as_str().into()
         )
+    );
+    let eventful_source: (String, Decimal) = sqlx::query_as(
+        "SELECT producer, repository_event_ordinal FROM gh_event WHERE event_id = $1",
+    )
+    .bind(eventful_projection_event.id().into_uuid())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(
+        eventful_source,
+        (String::from("webhook"), Decimal::from(3_u64))
     );
     projection.pull_requests[0].title = &updated_title;
     projection.repository.default_head = &updated_default_head;
@@ -777,8 +888,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 0,
                 &complete_frontier,
                 &[],
+                EventProducer::Poll,
                 observed_at,
-                retain_until,
             )
             .await?,
         FrontierEventAdmission::Committed {
@@ -807,8 +918,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 1,
                 &incomplete_frontier,
                 std::slice::from_ref(&incomplete_occurrence),
+                EventProducer::Poll,
                 observed_at,
-                retain_until,
             )
             .await?,
         FrontierEventAdmission::Stale
@@ -845,8 +956,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 0,
                 &incompatible_frontier,
                 &[],
+                EventProducer::Poll,
                 observed_at,
-                retain_until,
             )
             .await?,
         FrontierEventAdmission::Stale
@@ -868,8 +979,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(plans[0].dispatch(), plans[1].dispatch());
     assert_eq!(plans[0].action_ordinal(), 1);
     assert_eq!(plans[1].action_ordinal(), 2);
-    let second_rule = RepoWatchRule::try_new(
-        RepoWatchRuleId::try_new(String::from("branch-ci-second"))?,
+    let collision_rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("branch-ci-collision"))?,
         RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
@@ -892,7 +1003,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         model: 18,
     };
     let grouped = plan_repository_event(
-        &[rule.clone(), second_rule.clone()],
+        &[rule.clone(), collision_rule.clone()],
         &event,
         &mut grouped_ids,
         &mut grouped_factory,
@@ -920,9 +1031,26 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     ));
     assert_eq!(
         store
-            .record_rule(&repository, &second_rule, observed_at)
+            .reconcile_rules(
+                &repository,
+                &[
+                    rule.clone(),
+                    second_rule.clone(),
+                    late_rule.clone(),
+                    collision_rule.clone(),
+                ],
+                observed_at,
+            )
             .await?,
-        RuleAdmission::Inserted
+        RuleReconciliationAdmission::Applied {
+            rules: Box::new([
+                RuleAdmission::Replayed,
+                RuleAdmission::Replayed,
+                RuleAdmission::Replayed,
+                RuleAdmission::Inserted,
+            ]),
+            deactivated: 0,
+        }
     );
     let mut colliding_ids = FixedDispatchIds {
         value: 16,
@@ -933,7 +1061,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         model: 18,
     };
     let colliding_batches = plan_repository_event(
-        std::slice::from_ref(&second_rule),
+        std::slice::from_ref(&collision_rule),
         &event,
         &mut colliding_ids,
         &mut colliding_factory,
@@ -953,7 +1081,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         model: 18,
     };
     let occupied_batches = plan_repository_event(
-        std::slice::from_ref(&second_rule),
+        std::slice::from_ref(&collision_rule),
         &event,
         &mut occupied_ids,
         &mut occupied_factory,
@@ -1023,10 +1151,26 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_one(&module_pool)
     .await?;
     assert_eq!(retained_commands, 2);
-    assert!(
+    assert_eq!(
         store
-            .deactivate_rule(&repository, rule.id().as_str(), observed_at)
-            .await?
+            .reconcile_rules(
+                &repository,
+                &[
+                    second_rule.clone(),
+                    late_rule.clone(),
+                    collision_rule.clone()
+                ],
+                observed_at,
+            )
+            .await?,
+        RuleReconciliationAdmission::Applied {
+            rules: Box::new([
+                RuleAdmission::Replayed,
+                RuleAdmission::Replayed,
+                RuleAdmission::Replayed,
+            ]),
+            deactivated: 1,
+        }
     );
     let DispatchAdmission::Replayed {
         commands: recovered,
@@ -1181,6 +1325,14 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_all(&module_pool)
     .await?;
     assert_eq!(retained_reaction_ordinals, [Decimal::from(2_u64)]);
+    let retained_reaction_kind: String = sqlx::query_scalar(
+        "SELECT command_kind FROM dispatch_ledger
+          WHERE command_id = $1",
+    )
+    .bind(lifecycle_command_id)
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(retained_reaction_kind, "session_lifecycle");
     let recovered_reaction = store
         .recover_pending_commands(&mut command_codec)
         .await?
@@ -1338,8 +1490,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 4,
                 &next_frontier,
                 &[preceding_occurrence, conflicting_occurrence],
+                EventProducer::Poll,
                 observed_at,
-                retain_until,
             )
             .await?,
         FrontierEventAdmission::ConflictingReuse
@@ -1373,8 +1525,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 4,
                 &stale_frontier,
                 &[],
+                EventProducer::Poll,
                 observed_at,
-                retain_until,
             )
             .await?,
         FrontierEventAdmission::Stale
@@ -1387,7 +1539,14 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     projection.comparison_baseline = &changed_comparison_baseline;
     assert_eq!(
         store
-            .commit_frontier_candidate(&projection, 4, &frontier, &[], observed_at, retain_until,)
+            .commit_frontier_candidate(
+                &projection,
+                4,
+                &frontier,
+                &[],
+                EventProducer::Poll,
+                observed_at,
+            )
             .await?,
         FrontierEventAdmission::Committed {
             generation: 5,
@@ -1429,7 +1588,14 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_ne!(released_digest, committed_digest);
     assert_eq!(
         store
-            .commit_frontier_candidate(&projection, 1, &frontier, &[], observed_at, retain_until,)
+            .commit_frontier_candidate(
+                &projection,
+                1,
+                &frontier,
+                &[],
+                EventProducer::Poll,
+                observed_at,
+            )
             .await?,
         FrontierEventAdmission::Stale
     );

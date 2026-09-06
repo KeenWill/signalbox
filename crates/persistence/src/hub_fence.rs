@@ -24,8 +24,8 @@ const HUB_FENCE_NAMESPACE: u64 = 1_396_852_273;
 ///
 /// This is operational headroom rather than a hard safety boundary. Sixteen
 /// scheduler passes and eight admitted snapshot readers may hold half the pool;
-/// the remaining half lets the process listener, runner, repository watch,
-/// outbox, recovery, and guard checks make database progress under load.
+/// the remaining half lets the process listener, runner, outbox, recovery, and
+/// guard checks make database progress under load.
 pub const FENCED_POOL_MAX_CONNECTIONS: u32 = 48;
 
 /// One positive durable hub-pool generation.

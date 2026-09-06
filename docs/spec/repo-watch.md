@@ -46,7 +46,10 @@ unless that complete input exactly replays the immediately succeeding commit. An
 empty event batch with an unchanged cursor is unchanged only when both stored
 projections also match; a projection-only change advances the generation and
 records the complete commit digest. Projection timestamps use PostgreSQL
-microsecond precision in both the stored comparison and commit identity.
+microsecond precision in both the stored comparison and commit identity. Each
+newly accepted occurrence receives the next positive per-repository event
+ordinal and records its producer, frontier generation, and position within that
+frontier batch.
 
 ## Ownership boundary
 
@@ -81,16 +84,22 @@ The module schema contains twelve tables:
   complete frontier and ordered event batch exactly replay the immediately
   succeeding commit. A candidate equal to the stored frontier advances no
   generation when it carries no events and is rejected when it carries events. A
-  candidate that omits a retained stream is stale and changes nothing.
+  complete candidate replaces the stored frontier, including removing streams it
+  omits.
 - `frontier` holds one mutable occurrence counter per recurring event stream; an
   advance is an UPSERT and a retired pull-request stream is releasable by
   DELETE.
-- `gh_event` retains normalized event identity, target, recording time, and a
-  caller-selected `retain_until`; a row is releasable after that boundary when
-  no pending module command names it.
+- `gh_event` retains the complete immutable matcher payload, content identity,
+  closed producer discriminator, per-repository event ordinal, frontier
+  generation, batch ordinal, and recording time. Accepted facts are never
+  updated or deleted.
 - `rule` holds the active checked revision and content digest, while
   `rule_revision` retains revision history needed by module dispatch records;
-  `rule_field_fingerprint` binds each identity field to its checked digest.
+  `rule_field_fingerprint` binds each identity field to its checked digest. One
+  reconciliation validates a repository's complete configured set and commits
+  every activation and deactivation atomically. An activation records the
+  repository event tail after which that revision may evaluate facts, and
+  deactivation retains its lineage.
 - `dispatch_ledger` records command identity, dispatch reference, rule revision,
   source event, command family, an opaque core encoding of the exact checked
   payload, and settlement.
@@ -105,6 +114,7 @@ selects no retention duration.
 ## Reducer and dispatch ledger
 
 The repository-event reducer evaluates the existing checked rule matcher and
+returns one batch with a fresh dispatch identity for each matching rule. It
 turns each dispatch action into a `create_session` command through a core-owned
 factory. The reducer forces the resulting session to start held and owned with
 an external finish condition. Core supplies the command payload and therefore
@@ -126,7 +136,8 @@ idempotent only when all retained command metadata agrees. One dispatch
 reference names exactly one rule revision and event evaluation, including its
 complete ordered action batch. Pending ledger rows remain recoverable without
 the removed or inactive rule, and newly resolved template or configuration
-values cannot replace the committed payload.
+values cannot replace the committed payload. Command families use the core
+durable discriminators, including `session_lifecycle`.
 
 ## Ingest
 
