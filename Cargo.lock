@@ -4613,9 +4613,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-module-repo-watch-v2"
+version = "0.0.0"
+dependencies = [
+ "rust_decimal",
+ "sha2 0.11.0",
+ "signalbox-ownership-seam",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-ownership-seam"
 version = "0.0.0"
 dependencies = [
+ "signalbox-application",
  "signalbox-domain",
  "signalbox-persistence",
  "sqlx",
@@ -4990,6 +5002,8 @@ dependencies = [
  "signalbox-model-runtime-claude-cli",
  "signalbox-model-runtime-codex-cli",
  "signalbox-model-runtime-openai",
+ "signalbox-module-repo-watch-v2",
+ "signalbox-ownership-seam",
  "signalbox-persistence",
  "signalbox-process-protocol",
  "signalbox-runner-wire",

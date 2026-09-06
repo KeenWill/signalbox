@@ -5,19 +5,20 @@
 //! handles and the wider core outbox vocabulary do not cross this boundary.
 
 pub use signalbox_domain::{
-    ContextFrontierId, CoreAgency, CreateSession, DeliveryRequest, DescendantTerminationScope,
-    DirectModelSelection, DispatchingModule, DurableCommandId, FinishCondition,
-    FinishConditionStatement, GoalBlockedReasonKind, GoalGuidance, GoalStatement, GoalUserAction,
-    GoalUserCommand, LifecycleActor, ModelCallId, ModelSelectionOverride, ModelSelectionRequest,
-    ModuleDispatch, PerInputConfigurationChoices, RepoWatchDispatchId, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionFailureCause, SessionId, SessionLifecycleCommand,
-    SessionLifecycleOperation, SessionLifecycleState, SessionOwnership, SessionOwnershipTransition,
-    SessionParkCause, SessionParkResponder, SessionRecoveryOperation, SessionRetirementCause,
-    SessionRetryableCause, SessionStructuralCause, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, SessionTerminalOutcome, SessionWait, StartGate,
-    StopStickiness, SubmitInput, ToolAttemptId, ToolRequestId, TurnId, UserContent,
-    UserContentPart,
+    BranchName, CommitSha, ContextFrontierId, CoreAgency, CreateSession, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DispatchingModule, DurableCommandId,
+    FinishCondition, FinishConditionStatement, GoalBlockedReasonKind, GoalGuidance, GoalStatement,
+    GoalUserAction, GoalUserCommand, LifecycleActor, ModelCallId, ModelSelectionOverride,
+    ModelSelectionRequest, ModuleDispatch, PerInputConfigurationChoices, PullRequestBody,
+    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchDispatchId, RepositorySlug,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionFailureCause, SessionId,
+    SessionLifecycleCommand, SessionLifecycleOperation, SessionLifecycleState, SessionOwnership,
+    SessionOwnershipTransition, SessionParkCause, SessionParkResponder, SessionRecoveryOperation,
+    SessionRetirementCause, SessionRetryableCause, SessionStructuralCause,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+    SessionTerminalOutcome, SessionWait, StartGate, StopStickiness, SubmitInput, ToolAttemptId,
+    ToolRequestId, TurnId, UserContent, UserContentPart,
 };
 pub use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::outbox::{
@@ -26,7 +27,8 @@ use signalbox_persistence::outbox::{
     DispatchedSessionStateKind, DispatchedTurnTerminalDisposition, OutboxConsumer,
     OutboxConsumerReader,
 };
-use sqlx::{PgPool, types::time::OffsetDateTime};
+use sqlx::PgPool;
+pub use sqlx::types::time::OffsetDateTime;
 
 /// Creation facts visible across the ownership seam.
 #[derive(Clone, Debug, Eq, PartialEq)]

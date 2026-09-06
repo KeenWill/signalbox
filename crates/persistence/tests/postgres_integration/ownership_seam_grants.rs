@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use rust_decimal::Decimal;
 use signalbox_persistence::local_test_connection_options;
 use sqlx::postgres::PgPoolOptions;
 
@@ -63,6 +64,26 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
     .await?;
     assert_eq!(public_table_grants, 0);
 
+    let module_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name
+           FROM information_schema.tables
+          WHERE table_schema = 'mod_repo_watch'
+          ORDER BY table_name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        module_tables,
+        [
+            "core_event_cursor",
+            "pr_state",
+            "repository_state",
+            "webhook_body",
+            "webhook_delivery",
+            "webhook_disposition",
+        ]
+    );
+
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
         .execute(&pool)
         .await?;
@@ -85,6 +106,15 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
         .fetch_one(&mut *connection)
         .await?;
     assert_eq!(reset_identity, "mod_repo_watch");
+
+    sqlx::query("SET search_path = mod_repo_watch, pg_catalog")
+        .execute(&mut *connection)
+        .await?;
+    let cursor: Decimal =
+        sqlx::query_scalar("SELECT applied_through FROM core_event_cursor WHERE singleton")
+            .fetch_one(&mut *connection)
+            .await?;
+    assert_eq!(cursor, Decimal::ZERO);
 
     let effective_function_privilege: bool = sqlx::query_scalar(
         "SELECT has_function_privilege(
