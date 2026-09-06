@@ -32,7 +32,7 @@ CREATE TABLE gh_event (
     normalized_payload bytea NOT NULL,
     recorded_at timestamptz NOT NULL,
     retain_until timestamptz NOT NULL,
-    FOREIGN KEY (repository) REFERENCES repository_state(repository) ON DELETE CASCADE,
+    FOREIGN KEY (repository) REFERENCES repository_state(repository),
     CHECK (octet_length(content_identity) = 32),
     CHECK (event_kind = ANY (ARRAY[
         'pull_request_opened', 'pull_request_closed', 'pull_request_merged',
