@@ -2158,6 +2158,17 @@ fn classify_terminal(
             }
         }
         TerminalEvidence::Refused(refusal) => {
+            if refusal.content.iter().any(|part| {
+                matches!(
+                    part,
+                    AssistantPart::ToolCall(_) | AssistantPart::SuppressedToolCall(_)
+                )
+            }) {
+                return classify(
+                    ModelCallTerminalObservation::KnownFailed,
+                    ModelCallCauseCode::FinishContradictsContent,
+                );
+            }
             let provider_compaction = refusal
                 .content
                 .into_iter()
@@ -3120,6 +3131,44 @@ mod tests {
         assert_eq!(provider_compaction.len(), 1);
         assert_eq!(retained_input_tokens, 37);
         assert_eq!(retained_output_tokens, 8);
+    }
+
+    #[test]
+    fn refused_provider_compaction_with_tool_use_is_a_finish_mismatch() {
+        let classified = classify_terminal(
+            TerminalEvidence::Refused(RefusalEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: Some(ProviderReportedModel::new("model-exact")),
+                content: vec![
+                    AssistantPart::ProviderCompaction {
+                        block_json: String::from(
+                            r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                        ),
+                    },
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("provider-call-opaque"),
+                        name: ToolName::new("current_time"),
+                        arguments_json: String::from("{}"),
+                    }),
+                ],
+                usage: TokenUsage::unreported(),
+                retained_input_tokens: Some(37),
+                retained_output_tokens: Some(8),
+            }),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("refusal and tool-use mismatch is classifiable");
+
+        assert_eq!(
+            classified.observation,
+            ModelCallTerminalObservation::KnownFailed
+        );
+        assert_eq!(
+            classified.cause,
+            ModelCallCauseCode::FinishContradictsContent
+        );
     }
 
     #[test]
