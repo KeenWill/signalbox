@@ -589,3 +589,50 @@ fn equivalent_timestamp_offsets_and_precision_preserve_corpus_verdicts()
     }
     Ok(())
 }
+
+#[test]
+fn later_authenticated_finding_invalidates_quiet_review_and_persisted_authentication()
+-> Result<(), Box<dyn Error>> {
+    let policy = policy()?;
+    let settled = Recording::read(&root().join("fixtures/mutations/settled.json"))?;
+    let prior = evaluate(&settled.snapshot(&policy)?, &policy)?.state;
+    let recording = Recording::read(&root().join("fixtures/mutations/later-body-finding.json"))?;
+    let mut snapshot = recording.snapshot(&policy)?;
+    assert!(!evaluate(&snapshot, &policy)?.converged);
+    snapshot.previous = prior;
+    assert!(
+        !evaluate(&snapshot, &policy)?.converged,
+        "a later finding also revokes retained quiet authentication"
+    );
+    for node in [&mut snapshot.initial, &mut snapshot.current] {
+        node["reviews"]["nodes"][0]["submittedAt"] = json!("2026-09-05T15:00:00Z");
+    }
+    assert!(
+        evaluate(&snapshot, &policy)?.converged,
+        "a quiet review after the finding authenticates the head again"
+    );
+    Ok(())
+}
+
+#[test]
+fn escalation_must_follow_the_latest_reviewer_edit() -> Result<(), Box<dyn Error>> {
+    let policy = policy()?;
+    let recording =
+        Recording::read(&root().join("fixtures/mutations/escalation-before-reviewer-edit.json"))?;
+    let mut snapshot = recording.snapshot(&policy)?;
+    let result = evaluate(&snapshot, &policy)?;
+    assert!(!result.facts.review_threads[0].is_escalated);
+    assert!(!result.facts.review_threads[0].is_dispositioned);
+    for node in [&mut snapshot.initial, &mut snapshot.current] {
+        node["reviewThreads"]["nodes"][0]["comments"]["nodes"][1]["createdAt"] =
+            json!("2026-09-05T15:00:00Z");
+    }
+    let result = evaluate(&snapshot, &policy)?;
+    assert!(result.facts.review_threads[0].is_escalated);
+    assert!(result.facts.review_threads[0].is_dispositioned);
+    assert!(
+        !result.converged,
+        "the provider still shows the thread open"
+    );
+    Ok(())
+}

@@ -9,6 +9,14 @@
     {
       "path": "/observations/1/0/response/data/repository/pullRequest/lastEditedAt",
       "value": "2026-09-05T13:00:00Z"
+    },
+    {
+      "path": "/observations/0/2/response/data/node/lastEditedAt",
+      "value": "2026-09-05T13:00:00Z"
+    },
+    {
+      "path": "/observations/1/2/response/data/node/lastEditedAt",
+      "value": "2026-09-05T13:00:00Z"
     }
   ]
 }

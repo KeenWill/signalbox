@@ -146,6 +146,29 @@
                 }
               }
             }
+          },
+          {
+            "query": "query($id:ID!) { node(id:$id) { ... on PullRequest { id state baseRefName baseRefOid headRefName headRefOid isDraft body lastEditedAt mergeable reviewDecision } } }",
+            "variables": {
+              "id": "PR_kwDOTWhy-88AAAABCVHcjw"
+            },
+            "response": {
+              "data": {
+                "node": {
+                  "id": "PR_kwDOTWhy-88AAAABCVHcjw",
+                  "state": "OPEN",
+                  "baseRefName": "main",
+                  "baseRefOid": "113746d23d6c7b398ef34464a071dca532791898",
+                  "headRefName": "agent/domain-spine-generator",
+                  "headRefOid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+                  "isDraft": false,
+                  "body": "",
+                  "lastEditedAt": null,
+                  "mergeable": "MERGEABLE",
+                  "reviewDecision": null
+                }
+              }
+            }
           }
         ],
         [
@@ -289,6 +312,29 @@
                 }
               }
             }
+          },
+          {
+            "query": "query($id:ID!) { node(id:$id) { ... on PullRequest { id state baseRefName baseRefOid headRefName headRefOid isDraft body lastEditedAt mergeable reviewDecision } } }",
+            "variables": {
+              "id": "PR_kwDOTWhy-88AAAABCVHcjw"
+            },
+            "response": {
+              "data": {
+                "node": {
+                  "id": "PR_kwDOTWhy-88AAAABCVHcjw",
+                  "state": "OPEN",
+                  "baseRefName": "main",
+                  "baseRefOid": "113746d23d6c7b398ef34464a071dca532791898",
+                  "headRefName": "agent/domain-spine-generator",
+                  "headRefOid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+                  "isDraft": false,
+                  "body": "",
+                  "lastEditedAt": null,
+                  "mergeable": "MERGEABLE",
+                  "reviewDecision": null
+                }
+              }
+            }
           }
         ]
       ]
@@ -344,6 +390,2353 @@
           "scratchpad_marker_line": "> **Non-authoritative planning scratchpad — do not review for consistency.**",
           "description_word_limit": 350,
           "reject_drafts": true
+        }
+      }
+    },
+    {
+      "path": "/comparisons",
+      "value": {
+        "113746d23d6c7b398ef34464a071dca532791898...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "ahead_by": 23,
+          "base_commit": {
+            "author": {
+              "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+              "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+              "followers_url": "https://api.github.com/users/KeenWill/followers",
+              "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+              "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+              "gravatar_id": "",
+              "html_url": "https://github.com/KeenWill",
+              "id": 2627736,
+              "login": "KeenWill",
+              "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+              "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+              "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+              "repos_url": "https://api.github.com/users/KeenWill/repos",
+              "site_admin": false,
+              "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+              "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+              "type": "User",
+              "url": "https://api.github.com/users/KeenWill",
+              "user_view_type": "public"
+            },
+            "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/113746d23d6c7b398ef34464a071dca532791898/comments",
+            "commit": {
+              "author": {
+                "date": "2026-09-05T18:09:43Z",
+                "email": "william@williamgoeller.com",
+                "name": "Will Goeller"
+              },
+              "comment_count": 0,
+              "committer": {
+                "date": "2026-09-05T18:09:43Z",
+                "email": "noreply@github.com",
+                "name": "GitHub"
+              },
+              "message": "Merge pull request #1565 from KeenWill/agent/process-runtime-split\n\nSplit process runtime by responsibility",
+              "tree": {
+                "sha": "207e7b5bb5040f28d813e6faae6897b7c898c81b",
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/207e7b5bb5040f28d813e6faae6897b7c898c81b"
+              },
+              "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/113746d23d6c7b398ef34464a071dca532791898",
+              "verification": {
+                "payload": "tree 207e7b5bb5040f28d813e6faae6897b7c898c81b\nparent 5b667d9c1d9a79dc679118fe50a269172c1efc03\nparent 687de4a613adfb6610db1f39a13a5e7a02b663ad\nauthor Will Goeller <william@williamgoeller.com> 1788631783 -0400\ncommitter GitHub <noreply@github.com> 1788631783 -0400\n\nMerge pull request #1565 from KeenWill/agent/process-runtime-split\n\nSplit process runtime by responsibility",
+                "reason": "valid",
+                "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqnFrnCRC1aQ7uu5UhlAAAAQAQAHfl5Mc9kU7Yj1OS8P7fNQe6\nRbblz23hyuEbGfm1W7B/bhQM/kvPFi9pXfwahieSdEybhaUV0nAtZljXf2jXIF2F\ntqJWi9dQAw4RbDlvH+h3Rn0ImiXDKkBYj852+VJLzroGa6Tyl34W0xTGobHfIPCo\niM7CiPpuZ8fQPWKK9X/mxiha0f6mMcF4p9ituztu88enAZ5dqowYCJFKW+K+om3G\nGsI7I0W4esIyIETxuAmSRR75LX+saY2baRB9m0oklVHYGIf2T3r5SeDs2astEVrZ\nC4KrYbUhLeSFT7aJMM9iJ9VS3BjEPLnn6xotOiveOc7RwEcbu40mmccgcgsyitj1\nX5JZ3pRJcKmFGLuKa6noKBFu9TkvHrWplqIjh8qOHoJ5F5tjsv8J9/H1oyIWHyiA\nMl7cS2E/ncOr8e941sN2Gr+907J6TggC2NITlgaC9mgrq3G5hCsV9dgiS4oLkMck\nI7cigezTajfowQDXmeEwXgB+lEtajTWvdbAOEhPNLkEfMgBr1cAQsnP0V6Ve6Sh0\nzoP2xFbZC5PlXXRaZPApj5IsL2aVhl4EtGe40fKkZgzlcNSY5N8LKPVFn5ZYZlto\nCl6XtWHhPPXHevTTPfG3ammtvAU94qEvmH/lpaRLj287aih8IF6l/x9hwhNL9r+o\nhdCgnNsGPCt59ZBEUS8z\n=lmp2\n-----END PGP SIGNATURE-----\n",
+                "verified": true,
+                "verified_at": "2026-09-05T18:09:44Z"
+              }
+            },
+            "committer": {
+              "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+              "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+              "followers_url": "https://api.github.com/users/web-flow/followers",
+              "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+              "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+              "gravatar_id": "",
+              "html_url": "https://github.com/web-flow",
+              "id": 19864447,
+              "login": "web-flow",
+              "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+              "organizations_url": "https://api.github.com/users/web-flow/orgs",
+              "received_events_url": "https://api.github.com/users/web-flow/received_events",
+              "repos_url": "https://api.github.com/users/web-flow/repos",
+              "site_admin": false,
+              "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+              "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+              "type": "User",
+              "url": "https://api.github.com/users/web-flow",
+              "user_view_type": "public"
+            },
+            "html_url": "https://github.com/KeenWill/signalbox/commit/113746d23d6c7b398ef34464a071dca532791898",
+            "node_id": "C_kwDOTWhy-9oAKDExMzc0NmQyM2Q2YzdiMzk4ZWYzNDQ2NGEwNzFkY2E1MzI3OTE4OTg",
+            "parents": [
+              {
+                "html_url": "https://github.com/KeenWill/signalbox/commit/5b667d9c1d9a79dc679118fe50a269172c1efc03",
+                "sha": "5b667d9c1d9a79dc679118fe50a269172c1efc03",
+                "url": "https://api.github.com/repos/KeenWill/signalbox/commits/5b667d9c1d9a79dc679118fe50a269172c1efc03"
+              },
+              {
+                "html_url": "https://github.com/KeenWill/signalbox/commit/687de4a613adfb6610db1f39a13a5e7a02b663ad",
+                "sha": "687de4a613adfb6610db1f39a13a5e7a02b663ad",
+                "url": "https://api.github.com/repos/KeenWill/signalbox/commits/687de4a613adfb6610db1f39a13a5e7a02b663ad"
+              }
+            ],
+            "sha": "113746d23d6c7b398ef34464a071dca532791898",
+            "url": "https://api.github.com/repos/KeenWill/signalbox/commits/113746d23d6c7b398ef34464a071dca532791898"
+          },
+          "behind_by": 0,
+          "commits": [
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/a7d83705ab5dd0b9351b6a23fd3101ee6d6e43e1/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T15:07:59Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T15:07:59Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Generate public API spine snapshots",
+                "tree": {
+                  "sha": "e1fbfd5e7f2c5b2fe159c1520e2aa453d32048a9",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/e1fbfd5e7f2c5b2fe159c1520e2aa453d32048a9"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/a7d83705ab5dd0b9351b6a23fd3101ee6d6e43e1",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/a7d83705ab5dd0b9351b6a23fd3101ee6d6e43e1",
+              "node_id": "C_kwDOTWhy-9oAKGE3ZDgzNzA1YWI1ZGQwYjkzNTFiNmEyM2ZkMzEwMWVlNmQ2ZTQzZTE",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/7fa7b33ee3e3fbccc55467064c9cb1d53056ffd1",
+                  "sha": "7fa7b33ee3e3fbccc55467064c9cb1d53056ffd1",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/7fa7b33ee3e3fbccc55467064c9cb1d53056ffd1"
+                }
+              ],
+              "sha": "a7d83705ab5dd0b9351b6a23fd3101ee6d6e43e1",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/a7d83705ab5dd0b9351b6a23fd3101ee6d6e43e1"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/2a1d0c82c64726069126136f09132cd1b3df6d07/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T15:25:19Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T15:25:19Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Compare committed API snapshot revisions",
+                "tree": {
+                  "sha": "b1e8d48bf71df268d68edbe54d7a2caf928d4faf",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/b1e8d48bf71df268d68edbe54d7a2caf928d4faf"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/2a1d0c82c64726069126136f09132cd1b3df6d07",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/2a1d0c82c64726069126136f09132cd1b3df6d07",
+              "node_id": "C_kwDOTWhy-9oAKDJhMWQwYzgyYzY0NzI2MDY5MTI2MTM2ZjA5MTMyY2QxYjNkZjZkMDc",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/a7d83705ab5dd0b9351b6a23fd3101ee6d6e43e1",
+                  "sha": "a7d83705ab5dd0b9351b6a23fd3101ee6d6e43e1",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/a7d83705ab5dd0b9351b6a23fd3101ee6d6e43e1"
+                }
+              ],
+              "sha": "2a1d0c82c64726069126136f09132cd1b3df6d07",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/2a1d0c82c64726069126136f09132cd1b3df6d07"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/8233a19bfbc925f7650ea9e90396a1724b8e890d/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T15:35:51Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T15:35:51Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Fix API digest change signal",
+                "tree": {
+                  "sha": "5c49b3725bc66f2defc6cd787933a9d5d4b8572a",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/5c49b3725bc66f2defc6cd787933a9d5d4b8572a"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/8233a19bfbc925f7650ea9e90396a1724b8e890d",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/8233a19bfbc925f7650ea9e90396a1724b8e890d",
+              "node_id": "C_kwDOTWhy-9oAKDgyMzNhMTliZmJjOTI1Zjc2NTBlYTllOTAzOTZhMTcyNGI4ZTg5MGQ",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/2a1d0c82c64726069126136f09132cd1b3df6d07",
+                  "sha": "2a1d0c82c64726069126136f09132cd1b3df6d07",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/2a1d0c82c64726069126136f09132cd1b3df6d07"
+                }
+              ],
+              "sha": "8233a19bfbc925f7650ea9e90396a1724b8e890d",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/8233a19bfbc925f7650ea9e90396a1724b8e890d"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/12d766c2e55bffd1b777796d1b7bae80ae9fd2c0/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T15:38:57Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T15:38:57Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Normalize constant names in API digest",
+                "tree": {
+                  "sha": "82d6abb9367c54e224aca1de2c287b1c00cbfc89",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/82d6abb9367c54e224aca1de2c287b1c00cbfc89"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/12d766c2e55bffd1b777796d1b7bae80ae9fd2c0",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/12d766c2e55bffd1b777796d1b7bae80ae9fd2c0",
+              "node_id": "C_kwDOTWhy-9oAKDEyZDc2NmMyZTU1YmZmZDFiNzc3Nzk2ZDFiN2JhZTgwYWU5ZmQyYzA",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/8233a19bfbc925f7650ea9e90396a1724b8e890d",
+                  "sha": "8233a19bfbc925f7650ea9e90396a1724b8e890d",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/8233a19bfbc925f7650ea9e90396a1724b8e890d"
+                }
+              ],
+              "sha": "12d766c2e55bffd1b777796d1b7bae80ae9fd2c0",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/12d766c2e55bffd1b777796d1b7bae80ae9fd2c0"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/25b1dd981da5f719bfbb593780638abd40e7a94a/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T15:41:21Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T15:41:21Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Keep API digest compact",
+                "tree": {
+                  "sha": "aa40698c043312bf0c10c9f25c672b6fd6daab81",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/aa40698c043312bf0c10c9f25c672b6fd6daab81"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/25b1dd981da5f719bfbb593780638abd40e7a94a",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/25b1dd981da5f719bfbb593780638abd40e7a94a",
+              "node_id": "C_kwDOTWhy-9oAKDI1YjFkZDk4MWRhNWY3MTliZmJiNTkzNzgwNjM4YWJkNDBlN2E5NGE",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/12d766c2e55bffd1b777796d1b7bae80ae9fd2c0",
+                  "sha": "12d766c2e55bffd1b777796d1b7bae80ae9fd2c0",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/12d766c2e55bffd1b777796d1b7bae80ae9fd2c0"
+                }
+              ],
+              "sha": "25b1dd981da5f719bfbb593780638abd40e7a94a",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/25b1dd981da5f719bfbb593780638abd40e7a94a"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/9cc86150b28789d7c07443de54e729b059ae7144/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T15:44:34Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T15:44:34Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Merge remote-tracking branch 'origin/main' into agent/domain-spine-generator",
+                "tree": {
+                  "sha": "a839751a4eaa277169e95b7c16cc53607703ebcd",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/a839751a4eaa277169e95b7c16cc53607703ebcd"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/9cc86150b28789d7c07443de54e729b059ae7144",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/9cc86150b28789d7c07443de54e729b059ae7144",
+              "node_id": "C_kwDOTWhy-9oAKDljYzg2MTUwYjI4Nzg5ZDdjMDc0NDNkZTU0ZTcyOWIwNTlhZTcxNDQ",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/25b1dd981da5f719bfbb593780638abd40e7a94a",
+                  "sha": "25b1dd981da5f719bfbb593780638abd40e7a94a",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/25b1dd981da5f719bfbb593780638abd40e7a94a"
+                },
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/1be052d986733f943116b8db0d586041e1509905",
+                  "sha": "1be052d986733f943116b8db0d586041e1509905",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/1be052d986733f943116b8db0d586041e1509905"
+                }
+              ],
+              "sha": "9cc86150b28789d7c07443de54e729b059ae7144",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/9cc86150b28789d7c07443de54e729b059ae7144"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/ec9213ef14abffdab5dfadf436bdb5d508508990/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T15:59:39Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T15:59:39Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Surface public API members in digest",
+                "tree": {
+                  "sha": "63332ebac7b08a158c3bc165192a6348541c98e3",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/63332ebac7b08a158c3bc165192a6348541c98e3"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/ec9213ef14abffdab5dfadf436bdb5d508508990",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/ec9213ef14abffdab5dfadf436bdb5d508508990",
+              "node_id": "C_kwDOTWhy-9oAKGVjOTIxM2VmMTRhYmZmZGFiNWRmYWRmNDM2YmRiNWQ1MDg1MDg5OTA",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/9cc86150b28789d7c07443de54e729b059ae7144",
+                  "sha": "9cc86150b28789d7c07443de54e729b059ae7144",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/9cc86150b28789d7c07443de54e729b059ae7144"
+                }
+              ],
+              "sha": "ec9213ef14abffdab5dfadf436bdb5d508508990",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/ec9213ef14abffdab5dfadf436bdb5d508508990"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/52ce3a43c85aaab6630f7b3971070f2f54605e65/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T16:55:47Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T16:55:47Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Complete public API digest deltas",
+                "tree": {
+                  "sha": "94c0d26cc5e1f2fd89001472511596540e76a359",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/94c0d26cc5e1f2fd89001472511596540e76a359"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/52ce3a43c85aaab6630f7b3971070f2f54605e65",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/52ce3a43c85aaab6630f7b3971070f2f54605e65",
+              "node_id": "C_kwDOTWhy-9oAKDUyY2UzYTQzYzg1YWFhYjY2MzBmN2IzOTcxMDcwZjJmNTQ2MDVlNjU",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/ec9213ef14abffdab5dfadf436bdb5d508508990",
+                  "sha": "ec9213ef14abffdab5dfadf436bdb5d508508990",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/ec9213ef14abffdab5dfadf436bdb5d508508990"
+                }
+              ],
+              "sha": "52ce3a43c85aaab6630f7b3971070f2f54605e65",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/52ce3a43c85aaab6630f7b3971070f2f54605e65"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/b3d9401058e5a33eeb99d7b49bccfc649502251d/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T17:25:50Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T17:25:50Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Filter generic API implementation noise",
+                "tree": {
+                  "sha": "2abc896df5a611892b0c014c9324c8d77bd59162",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/2abc896df5a611892b0c014c9324c8d77bd59162"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/b3d9401058e5a33eeb99d7b49bccfc649502251d",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/b3d9401058e5a33eeb99d7b49bccfc649502251d",
+              "node_id": "C_kwDOTWhy-9oAKGIzZDk0MDEwNThlNWEzM2VlYjk5ZDdiNDliY2NmYzY0OTUwMjI1MWQ",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/52ce3a43c85aaab6630f7b3971070f2f54605e65",
+                  "sha": "52ce3a43c85aaab6630f7b3971070f2f54605e65",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/52ce3a43c85aaab6630f7b3971070f2f54605e65"
+                }
+              ],
+              "sha": "b3d9401058e5a33eeb99d7b49bccfc649502251d",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/b3d9401058e5a33eeb99d7b49bccfc649502251d"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/bcb35c4f59fd5f697de0f59aaeb8f109050da5ff/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T17:51:24Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T17:51:24Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Merge remote-tracking branch 'origin/main' into agent/domain-spine-generator",
+                "tree": {
+                  "sha": "ea0221a3f965942bc786becd71e74ea828fb8a11",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/ea0221a3f965942bc786becd71e74ea828fb8a11"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/bcb35c4f59fd5f697de0f59aaeb8f109050da5ff",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/bcb35c4f59fd5f697de0f59aaeb8f109050da5ff",
+              "node_id": "C_kwDOTWhy-9oAKGJjYjM1YzRmNTlmZDVmNjk3ZGUwZjU5YWFlYjhmMTA5MDUwZGE1ZmY",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/b3d9401058e5a33eeb99d7b49bccfc649502251d",
+                  "sha": "b3d9401058e5a33eeb99d7b49bccfc649502251d",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/b3d9401058e5a33eeb99d7b49bccfc649502251d"
+                },
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/da1100a98ba67c07864bea93156a4097f9a99ea1",
+                  "sha": "da1100a98ba67c07864bea93156a4097f9a99ea1",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/da1100a98ba67c07864bea93156a4097f9a99ea1"
+                }
+              ],
+              "sha": "bcb35c4f59fd5f697de0f59aaeb8f109050da5ff",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/bcb35c4f59fd5f697de0f59aaeb8f109050da5ff"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/489fcede257a26239b2714db610998d275251489/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T17:57:25Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T17:57:25Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Include modules and macros in API digest",
+                "tree": {
+                  "sha": "d08ae35d04a79f3183218d16262ea016f53cd2e2",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/d08ae35d04a79f3183218d16262ea016f53cd2e2"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/489fcede257a26239b2714db610998d275251489",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/489fcede257a26239b2714db610998d275251489",
+              "node_id": "C_kwDOTWhy-9oAKDQ4OWZjZWRlMjU3YTI2MjM5YjI3MTRkYjYxMDk5OGQyNzUyNTE0ODk",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/bcb35c4f59fd5f697de0f59aaeb8f109050da5ff",
+                  "sha": "bcb35c4f59fd5f697de0f59aaeb8f109050da5ff",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/bcb35c4f59fd5f697de0f59aaeb8f109050da5ff"
+                }
+              ],
+              "sha": "489fcede257a26239b2714db610998d275251489",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/489fcede257a26239b2714db610998d275251489"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/f1f75fa4de98bdf1c8b6a44d8a9f71639c481c22/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T18:08:58Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T18:08:58Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Merge remote-tracking branch 'origin/main' into agent/domain-spine-generator",
+                "tree": {
+                  "sha": "1a3f525add92576279e651c59512b7c711a8cc9a",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/1a3f525add92576279e651c59512b7c711a8cc9a"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/f1f75fa4de98bdf1c8b6a44d8a9f71639c481c22",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/f1f75fa4de98bdf1c8b6a44d8a9f71639c481c22",
+              "node_id": "C_kwDOTWhy-9oAKGYxZjc1ZmE0ZGU5OGJkZjFjOGI2YTQ0ZDhhOWY3MTYzOWM0ODFjMjI",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/489fcede257a26239b2714db610998d275251489",
+                  "sha": "489fcede257a26239b2714db610998d275251489",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/489fcede257a26239b2714db610998d275251489"
+                },
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/5b667d9c1d9a79dc679118fe50a269172c1efc03",
+                  "sha": "5b667d9c1d9a79dc679118fe50a269172c1efc03",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/5b667d9c1d9a79dc679118fe50a269172c1efc03"
+                }
+              ],
+              "sha": "f1f75fa4de98bdf1c8b6a44d8a9f71639c481c22",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/f1f75fa4de98bdf1c8b6a44d8a9f71639c481c22"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/5c8634ef11888858e697b1ac7957efc447b973d3/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T18:10:39Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T18:10:39Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Merge remote-tracking branch 'origin/main' into agent/domain-spine-generator",
+                "tree": {
+                  "sha": "707b7afa10ecb88f0cbe6fc4e82446c9a591c294",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/707b7afa10ecb88f0cbe6fc4e82446c9a591c294"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/5c8634ef11888858e697b1ac7957efc447b973d3",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/5c8634ef11888858e697b1ac7957efc447b973d3",
+              "node_id": "C_kwDOTWhy-9oAKDVjODYzNGVmMTE4ODg4NThlNjk3YjFhYzc5NTdlZmM0NDdiOTczZDM",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/f1f75fa4de98bdf1c8b6a44d8a9f71639c481c22",
+                  "sha": "f1f75fa4de98bdf1c8b6a44d8a9f71639c481c22",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/f1f75fa4de98bdf1c8b6a44d8a9f71639c481c22"
+                },
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/113746d23d6c7b398ef34464a071dca532791898",
+                  "sha": "113746d23d6c7b398ef34464a071dca532791898",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/113746d23d6c7b398ef34464a071dca532791898"
+                }
+              ],
+              "sha": "5c8634ef11888858e697b1ac7957efc447b973d3",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/5c8634ef11888858e697b1ac7957efc447b973d3"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/a5b0f2ab0c7b222d741a9e19f35cfa988b39295b/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T18:17:24Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T18:17:24Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Cover remaining API declaration forms",
+                "tree": {
+                  "sha": "50f0936f13b0e5c016a9962e7544847c4a9b13c8",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/50f0936f13b0e5c016a9962e7544847c4a9b13c8"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/a5b0f2ab0c7b222d741a9e19f35cfa988b39295b",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/a5b0f2ab0c7b222d741a9e19f35cfa988b39295b",
+              "node_id": "C_kwDOTWhy-9oAKGE1YjBmMmFiMGM3YjIyMmQ3NDFhOWUxOWYzNWNmYTk4OGIzOTI5NWI",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/5c8634ef11888858e697b1ac7957efc447b973d3",
+                  "sha": "5c8634ef11888858e697b1ac7957efc447b973d3",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/5c8634ef11888858e697b1ac7957efc447b973d3"
+                }
+              ],
+              "sha": "a5b0f2ab0c7b222d741a9e19f35cfa988b39295b",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/a5b0f2ab0c7b222d741a9e19f35cfa988b39295b"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/f59d0b7286683b0e97b449bafbff82a030b47029/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T18:27:26Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T18:27:26Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Test domain API digest regressions",
+                "tree": {
+                  "sha": "0e648811ee156f2a4a3e40d194279b98bd757fe1",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/0e648811ee156f2a4a3e40d194279b98bd757fe1"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/f59d0b7286683b0e97b449bafbff82a030b47029",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/f59d0b7286683b0e97b449bafbff82a030b47029",
+              "node_id": "C_kwDOTWhy-9oAKGY1OWQwYjcyODY2ODNiMGU5N2I0NDliYWZiZmY4MmEwMzBiNDcwMjk",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/a5b0f2ab0c7b222d741a9e19f35cfa988b39295b",
+                  "sha": "a5b0f2ab0c7b222d741a9e19f35cfa988b39295b",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/a5b0f2ab0c7b222d741a9e19f35cfa988b39295b"
+                }
+              ],
+              "sha": "f59d0b7286683b0e97b449bafbff82a030b47029",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/f59d0b7286683b0e97b449bafbff82a030b47029"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/164f011a95012fb73a4ff3c7cd5ceb62f281d47d/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T18:32:45Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T18:32:45Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Test API member and implementation deltas",
+                "tree": {
+                  "sha": "67287abfdb9a783aed1b3958f6bdcbf49346ac16",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/67287abfdb9a783aed1b3958f6bdcbf49346ac16"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/164f011a95012fb73a4ff3c7cd5ceb62f281d47d",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/164f011a95012fb73a4ff3c7cd5ceb62f281d47d",
+              "node_id": "C_kwDOTWhy-9oAKDE2NGYwMTFhOTUwMTJmYjczYTRmZjNjN2NkNWNlYjYyZjI4MWQ0N2Q",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/f59d0b7286683b0e97b449bafbff82a030b47029",
+                  "sha": "f59d0b7286683b0e97b449bafbff82a030b47029",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/f59d0b7286683b0e97b449bafbff82a030b47029"
+                }
+              ],
+              "sha": "164f011a95012fb73a4ff3c7cd5ceb62f281d47d",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/164f011a95012fb73a4ff3c7cd5ceb62f281d47d"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/4b7c4b21a77dce6becec91b4e4c86833641fa4ce/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T18:35:02Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T18:35:02Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Test associated and inherent API deltas",
+                "tree": {
+                  "sha": "c3e2b6d96706b83535c78878625b512a15f41d2f",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/c3e2b6d96706b83535c78878625b512a15f41d2f"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/4b7c4b21a77dce6becec91b4e4c86833641fa4ce",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/4b7c4b21a77dce6becec91b4e4c86833641fa4ce",
+              "node_id": "C_kwDOTWhy-9oAKDRiN2M0YjIxYTc3ZGNlNmJlY2VjOTFiNGU0Yzg2ODMzNjQxZmE0Y2U",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/164f011a95012fb73a4ff3c7cd5ceb62f281d47d",
+                  "sha": "164f011a95012fb73a4ff3c7cd5ceb62f281d47d",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/164f011a95012fb73a4ff3c7cd5ceb62f281d47d"
+                }
+              ],
+              "sha": "4b7c4b21a77dce6becec91b4e4c86833641fa4ce",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/4b7c4b21a77dce6becec91b4e4c86833641fa4ce"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/d2a1ecac4888503bd07eceb70bfddcf8f8afa056/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T18:37:00Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T18:37:00Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Test blanket and static API deltas",
+                "tree": {
+                  "sha": "dd5c205dc499a7c2cf72d0bc03580ddf3a48a8d0",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/dd5c205dc499a7c2cf72d0bc03580ddf3a48a8d0"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/d2a1ecac4888503bd07eceb70bfddcf8f8afa056",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/d2a1ecac4888503bd07eceb70bfddcf8f8afa056",
+              "node_id": "C_kwDOTWhy-9oAKGQyYTFlY2FjNDg4ODUwM2JkMDdlY2ViNzBiZmRkY2Y4ZjhhZmEwNTY",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/4b7c4b21a77dce6becec91b4e4c86833641fa4ce",
+                  "sha": "4b7c4b21a77dce6becec91b4e4c86833641fa4ce",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/4b7c4b21a77dce6becec91b4e4c86833641fa4ce"
+                }
+              ],
+              "sha": "d2a1ecac4888503bd07eceb70bfddcf8f8afa056",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/d2a1ecac4888503bd07eceb70bfddcf8f8afa056"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/7b575a142807ba9fc62f65f97f841ec815922703/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T18:38:49Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T18:38:49Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Test module and macro API deltas",
+                "tree": {
+                  "sha": "caaf3049db74d5b67df54fb8836a3a895714aa17",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/caaf3049db74d5b67df54fb8836a3a895714aa17"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/7b575a142807ba9fc62f65f97f841ec815922703",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/7b575a142807ba9fc62f65f97f841ec815922703",
+              "node_id": "C_kwDOTWhy-9oAKDdiNTc1YTE0MjgwN2JhOWZjNjJmNjVmOTdmODQxZWM4MTU5MjI3MDM",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/d2a1ecac4888503bd07eceb70bfddcf8f8afa056",
+                  "sha": "d2a1ecac4888503bd07eceb70bfddcf8f8afa056",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/d2a1ecac4888503bd07eceb70bfddcf8f8afa056"
+                }
+              ],
+              "sha": "7b575a142807ba9fc62f65f97f841ec815922703",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/7b575a142807ba9fc62f65f97f841ec815922703"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/600b9ae25bb05aa8f99e53cd0dfc94deedb2a552/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T18:41:23Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T18:41:23Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Test remaining implementation declarations",
+                "tree": {
+                  "sha": "a0bc428872537d7ff4bc34ed8d42342c78a09866",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/a0bc428872537d7ff4bc34ed8d42342c78a09866"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/600b9ae25bb05aa8f99e53cd0dfc94deedb2a552",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/600b9ae25bb05aa8f99e53cd0dfc94deedb2a552",
+              "node_id": "C_kwDOTWhy-9oAKDYwMGI5YWUyNWJiMDVhYThmOTllNTNjZDBkZmM5NGRlZWRiMmE1NTI",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/7b575a142807ba9fc62f65f97f841ec815922703",
+                  "sha": "7b575a142807ba9fc62f65f97f841ec815922703",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/7b575a142807ba9fc62f65f97f841ec815922703"
+                }
+              ],
+              "sha": "600b9ae25bb05aa8f99e53cd0dfc94deedb2a552",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/600b9ae25bb05aa8f99e53cd0dfc94deedb2a552"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/9fde6b461922703ffa59069c39811152fd19c085/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T18:57:35Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T18:57:35Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Preserve implementation ownership and identity",
+                "tree": {
+                  "sha": "b57235eb704f0c17a67483165f069b98b827c368",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/b57235eb704f0c17a67483165f069b98b827c368"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/9fde6b461922703ffa59069c39811152fd19c085",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/9fde6b461922703ffa59069c39811152fd19c085",
+              "node_id": "C_kwDOTWhy-9oAKDlmZGU2YjQ2MTkyMjcwM2ZmYTU5MDY5YzM5ODExMTUyZmQxOWMwODU",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/600b9ae25bb05aa8f99e53cd0dfc94deedb2a552",
+                  "sha": "600b9ae25bb05aa8f99e53cd0dfc94deedb2a552",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/600b9ae25bb05aa8f99e53cd0dfc94deedb2a552"
+                }
+              ],
+              "sha": "9fde6b461922703ffa59069c39811152fd19c085",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/9fde6b461922703ffa59069c39811152fd19c085"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/5b9c6778337a997fce26a85f51f722cdddbe056e/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T19:11:10Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T19:11:10Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Cover remaining API digest contracts",
+                "tree": {
+                  "sha": "4a774f90f4e06ce32efa656418bac91a03a4ef19",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/4a774f90f4e06ce32efa656418bac91a03a4ef19"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/5b9c6778337a997fce26a85f51f722cdddbe056e",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/5b9c6778337a997fce26a85f51f722cdddbe056e",
+              "node_id": "C_kwDOTWhy-9oAKDViOWM2Nzc4MzM3YTk5N2ZjZTI2YTg1ZjUxZjcyMmNkZGRiZTA1NmU",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/9fde6b461922703ffa59069c39811152fd19c085",
+                  "sha": "9fde6b461922703ffa59069c39811152fd19c085",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/9fde6b461922703ffa59069c39811152fd19c085"
+                }
+              ],
+              "sha": "5b9c6778337a997fce26a85f51f722cdddbe056e",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/5b9c6778337a997fce26a85f51f722cdddbe056e"
+            },
+            {
+              "author": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/comments",
+              "commit": {
+                "author": {
+                  "date": "2026-09-05T21:46:41Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "comment_count": 0,
+                "committer": {
+                  "date": "2026-09-05T21:46:41Z",
+                  "email": "william@williamgoeller.com",
+                  "name": "William Goeller"
+                },
+                "message": "Handle generic API digest edge cases",
+                "tree": {
+                  "sha": "a6f20cd3a38e8c394e239bdac4f7ca5ef7085a88",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/a6f20cd3a38e8c394e239bdac4f7ca5ef7085a88"
+                },
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+                "verification": {
+                  "payload": null,
+                  "reason": "unsigned",
+                  "signature": null,
+                  "verified": false,
+                  "verified_at": null
+                }
+              },
+              "committer": {
+                "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+                "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+                "followers_url": "https://api.github.com/users/KeenWill/followers",
+                "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+                "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+                "gravatar_id": "",
+                "html_url": "https://github.com/KeenWill",
+                "id": 2627736,
+                "login": "KeenWill",
+                "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+                "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+                "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+                "repos_url": "https://api.github.com/users/KeenWill/repos",
+                "site_admin": false,
+                "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+                "type": "User",
+                "url": "https://api.github.com/users/KeenWill",
+                "user_view_type": "public"
+              },
+              "html_url": "https://github.com/KeenWill/signalbox/commit/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "node_id": "C_kwDOTWhy-9oAKDQxN2E4OGZkNTM0NjRlZjA3ODNlYzM5ZjVjNGRhM2M1MGEzZWY1ZTI",
+              "parents": [
+                {
+                  "html_url": "https://github.com/KeenWill/signalbox/commit/5b9c6778337a997fce26a85f51f722cdddbe056e",
+                  "sha": "5b9c6778337a997fce26a85f51f722cdddbe056e",
+                  "url": "https://api.github.com/repos/KeenWill/signalbox/commits/5b9c6778337a997fce26a85f51f722cdddbe056e"
+                }
+              ],
+              "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "url": "https://api.github.com/repos/KeenWill/signalbox/commits/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            }
+          ],
+          "diff_url": "https://github.com/KeenWill/signalbox/compare/113746d23d6c7b398ef34464a071dca532791898...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2.diff",
+          "files": [
+            {
+              "additions": 8,
+              "blob_url": "https://github.com/KeenWill/signalbox/blob/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/.github%2Fworkflows%2Frust.yml",
+              "changes": 9,
+              "contents_url": "https://api.github.com/repos/KeenWill/signalbox/contents/.github%2Fworkflows%2Frust.yml?ref=417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "deletions": 1,
+              "filename": ".github/workflows/rust.yml",
+              "patch": "@@ -77,7 +77,7 @@ jobs:\n                 # Binding process/specification prose and generated indexes\n                 # run the complete bar even though they are Markdown.\n                 AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \\\n-                  | docs/domain-spine.md | docs/invariants.md \\\n+                  | docs/api/* | docs/domain-spine.md | docs/invariants.md \\\n                   | docs/scenarios.md | docs/style.md)\n                   rust=$((rust + 1))\n                   ;;\n@@ -125,6 +125,11 @@ jobs:\n         run: python3 scripts/generate_invariants.py --check\n       - name: Check domain spine sync\n         run: python3 scripts/check_domain_spine.py\n+      - name: Report domain API digest\n+        continue-on-error: true\n+        env:\n+          DOMAIN_SPINE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}\n+        run: python3 scripts/domain_spine_digest.py\n       - name: Check documentation consistency\n         run: python3 scripts/check_docs_consistency.py\n       - name: Check migration version uniqueness\n@@ -153,6 +158,8 @@ jobs:\n         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n         with:\n           persist-credentials: false\n+      - name: Test domain API digest\n+        run: python3 scripts/test_domain_spine_digest.py\n       - name: Test domain-spine checker\n         run: python3 scripts/test_check_domain_spine.py\n       - name: Test migration version checker",
+              "raw_url": "https://github.com/KeenWill/signalbox/raw/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/.github%2Fworkflows%2Frust.yml",
+              "sha": "d66da6cc8cd9537deab9444e1e2d1643c70b6085",
+              "status": "modified"
+            },
+            {
+              "additions": 4,
+              "blob_url": "https://github.com/KeenWill/signalbox/blob/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/devenv.nix",
+              "changes": 5,
+              "contents_url": "https://api.github.com/repos/KeenWill/signalbox/contents/devenv.nix?ref=417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "deletions": 1,
+              "filename": "devenv.nix",
+              "patch": "@@ -178,7 +178,10 @@ in\n   # keep incremental compilation and are passed through uncached. CI never\n   # enters this environment — its caching is configured in\n   # .github/workflows/rust.yml.\n-  packages = [ pkgs.sccache ];\n+  packages = [\n+    pkgs.cargo-public-api\n+    pkgs.sccache\n+  ];\n   env.RUSTC_WRAPPER = \"sccache\";\n \n   # The terminal client and the managed daemon share one socket without the",
+              "raw_url": "https://github.com/KeenWill/signalbox/raw/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/devenv.nix",
+              "sha": "15c318ee52fda138c095d78b07f17a7119e4fb41",
+              "status": "modified"
+            },
+            {
+              "additions": 22183,
+              "blob_url": "https://github.com/KeenWill/signalbox/blob/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/docs%2Fapi%2Fsignalbox-application.txt",
+              "changes": 22183,
+              "contents_url": "https://api.github.com/repos/KeenWill/signalbox/contents/docs%2Fapi%2Fsignalbox-application.txt?ref=417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "deletions": 0,
+              "filename": "docs/api/signalbox-application.txt",
+              "raw_url": "https://github.com/KeenWill/signalbox/raw/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/docs%2Fapi%2Fsignalbox-application.txt",
+              "sha": "7166c71db95df3a5453d6579609d8df51f76a16f",
+              "status": "added"
+            },
+            {
+              "additions": 43002,
+              "blob_url": "https://github.com/KeenWill/signalbox/blob/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/docs%2Fapi%2Fsignalbox-domain.txt",
+              "changes": 43002,
+              "contents_url": "https://api.github.com/repos/KeenWill/signalbox/contents/docs%2Fapi%2Fsignalbox-domain.txt?ref=417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "deletions": 0,
+              "filename": "docs/api/signalbox-domain.txt",
+              "raw_url": "https://github.com/KeenWill/signalbox/raw/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/docs%2Fapi%2Fsignalbox-domain.txt",
+              "sha": "684dd7ff56854449d5891be07685dcc27f96ca67",
+              "status": "added"
+            },
+            {
+              "additions": 212,
+              "blob_url": "https://github.com/KeenWill/signalbox/blob/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/scripts%2Fdomain_spine_digest.py",
+              "changes": 212,
+              "contents_url": "https://api.github.com/repos/KeenWill/signalbox/contents/scripts%2Fdomain_spine_digest.py?ref=417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "deletions": 0,
+              "filename": "scripts/domain_spine_digest.py",
+              "patch": "@@ -0,0 +1,212 @@\n+#!/usr/bin/env python3\n+\"\"\"Summarize committed cargo-public-api snapshots and their working-tree diff.\"\"\"\n+\n+import os\n+import re\n+import subprocess\n+from collections import Counter, defaultdict, namedtuple\n+from pathlib import Path\n+\n+SNAPSHOTS = {\n+    \"signalbox-domain\": Path(\"docs/api/signalbox-domain.txt\"),\n+    \"signalbox-application\": Path(\"docs/api/signalbox-application.txt\"),\n+}\n+DECLARATION = re.compile(\n+    r'^pub (?:(?:async|const|unsafe)\\s+|extern\\s+\"[^\"]*\"\\s+)*'\n+    r\"(?P<kind>struct|enum|union|type|trait|fn|const|static|macro)\\s+\"\n+)\n+MODULE = re.compile(r\"^pub mod (?P<name>[A-Za-z_][A-Za-z0-9_#:]*)(?:\\b|$)\")\n+AUTO_TRAIT = re.compile(\n+    r\"^core::(?:marker::(?:Freeze|Send|StructuralPartialEq|\"\n+    r\"Sync|Unpin|UnsafeUnpin)|\"\n+    r\"panic::unwind_safe::(?:RefUnwindSafe|UnwindSafe))$\"\n+)\n+BLANKET_TRAIT = re.compile(\n+    r\"^(?:alloc::(?:borrow::ToOwned|string::ToString)|\"\n+    r\"core::(?:any::Any|borrow::Borrow(?:Mut)?|\"\n+    r\"clone::CloneToUninit|convert::(?:From|Into|TryFrom|TryInto))|\"\n+    r\"equivalent::(?:Comparable|Equivalent)|hashbrown::Equivalent|\"\n+    r\"tracing::instrument::(?:Instrument|WithSubscriber)|typenum::type_operators::Same)$\"\n+)\n+Item = namedtuple(\"Item\", \"module category name declaration\")\n+\n+\n+def git_text(revision: str, path: Path) -> str:\n+    result = subprocess.run(\n+        [\"git\", \"show\", f\"{revision}:{path.as_posix()}\"], check=False,\n+        capture_output=True, text=True)\n+    return result.stdout if result.returncode == 0 else \"\"\n+\n+\n+def previous_text(path: Path, current: str) -> str:\n+    if base := os.environ.get(\"DOMAIN_SPINE_BASE\"):\n+        return git_text(base, path) or current\n+    dirty = subprocess.run(\n+        [\"git\", \"diff\", \"--quiet\", \"HEAD\", \"--\", path.as_posix()], check=False)\n+    revision = \"HEAD\" if dirty.returncode == 1 else \"HEAD^\"\n+    return git_text(revision, path) or current\n+\n+\n+def without_generics(text: str) -> str:\n+    result: list[str] = []\n+    depth = 0\n+    for index, char in enumerate(text):\n+        if char == \"<\":\n+            depth += 1\n+        elif char == \">\" and text[index - 1:index] != \"-\":\n+            depth -= 1\n+        elif depth == 0:\n+            result.append(char)\n+    return \"\".join(result)\n+\n+\n+def item_name(line: str, start: int) -> str:\n+    return re.split(r\"[\\s(={]\", without_generics(line[start:]), 1)[0].rstrip(\":\")\n+\n+\n+def implementation_parts(line: str) -> tuple[str, str]:\n+    body = line[4:].lstrip()\n+    parameters = \"\"\n+    if body.startswith(\"<\"):\n+        depth = 0\n+        for index, char in enumerate(body):\n+            depth += char == \"<\"\n+            depth -= char == \">\" and body[index - 1:index] != \"-\"\n+            if depth == 0:\n+                parameters = body[1:index]\n+                body = body[index + 1:].lstrip()\n+                break\n+    return parameters, body.split(\" where \", 1)[0]\n+\n+\n+def owning_modules(text: str, modules: set[str]) -> list[str]:\n+    return [module for module in modules if re.search(\n+        rf\"(?<![\\w:]){re.escape(module)}(?=::|\\b)\", text)]\n+\n+\n+def parameter_names(text: str) -> set[str]:\n+    return set(re.findall(r\"(?:^|,\\s*)(?:const\\s+)?('?\\w+)\", text))\n+\n+\n+def parse(text: str) -> tuple[str, list[Item]]:\n+    lines = text.splitlines()\n+    declared_parameters: dict[str, set[str]] = {}\n+    for line in lines:\n+        match = DECLARATION.match(line)\n+        if match is None or match.group(\"kind\") not in {\"struct\", \"enum\", \"union\"}:\n+            continue\n+        body = line[match.end():]\n+        generic_start = body.find(\"<\")\n+        name_end = re.search(r\"[\\s<(={]\", body)\n+        if generic_start >= 0 and name_end and generic_start == name_end.start():\n+            parameters, _ = implementation_parts(f\"impl{body[generic_start:]}\")\n+            declared_parameters[body[:generic_start]] = parameter_names(parameters)\n+    module_lines = [(match.group(\"name\"), line) for line in lines\n+                    if (match := MODULE.match(line))]\n+    modules = {name for name, _ in module_lines}\n+    root = min(modules, key=lambda name: name.count(\"::\"))\n+    items = [Item(name.rpartition(\"::\")[0] or root, \"module\", name, line)\n+             for name, line in module_lines]\n+    include_nested_functions = include_associated_types = False\n+    for line in lines:\n+        impl_line = line.removeprefix(\"unsafe \")\n+        if impl_line.startswith((\"impl \", \"impl<\")):\n+            include_associated_types = False\n+            target = impl_line.split(\" where \", 1)[0]\n+            include_nested_functions = \" for \" not in target and any(\n+                f\"{module}::\" in target for module in modules)\n+            parameter_text, signature = implementation_parts(impl_line)\n+            normalized = without_generics(signature)\n+            if \" for \" not in normalized:\n+                owners = owning_modules(signature, modules)\n+                if owners:\n+                    module = max(owners, key=len)\n+                    items.append(Item(module, \"implementation\", f\"{signature} (inherent)\", line))\n+            else:\n+                trait, subject = normalized.split(\" for \", 1)\n+                raw_trait, raw_subject = signature.split(\" for \", 1)\n+                subject_owners = owning_modules(raw_subject, modules)\n+                trait_owners = owning_modules(raw_trait, modules)\n+                owners = subject_owners or trait_owners\n+                parameters = parameter_names(parameter_text)\n+                own_parameters = declared_parameters.get(\n+                    without_generics(raw_subject), set())\n+                uses_subject_parameter = any(\n+                    name not in own_parameters\n+                    and re.search(rf\"(?<!\\w){re.escape(name)}(?!\\w)\", raw_subject)\n+                    for name in parameters\n+                )\n+                blanket = (\n+                    impl_line.startswith(\"impl<\") and not uses_subject_parameter\n+                    and BLANKET_TRAIT.match(without_generics(trait))\n+                )\n+                if owners and not AUTO_TRAIT.match(trait.removeprefix(\"!\")) and (\n+                    not blanket or trait_owners\n+                ):\n+                    module = max(owners, key=len)\n+                    name = f\"{raw_subject} as {raw_trait}\"\n+                    items.append(Item(module, \"implementation\", name, line))\n+                    include_associated_types = True\n+        match = DECLARATION.match(line)\n+        if match is None:\n+            if line.startswith(f\"pub {root}::\"):\n+                name = item_name(line, 4)\n+                owners = [module for module in modules if name.startswith(f\"{module}::\")]\n+                module = max(owners, key=len, default=root)\n+                items.append(Item(module, \"member\", name, line))\n+            continue\n+        kind = match.group(\"kind\")\n+        start = match.end() + (4 if kind == \"static\" and line[match.end():].startswith(\"mut \") else 0)\n+        name = item_name(line, start)\n+        owners = [module for module in modules if name.startswith(f\"{module}::\")]\n+        module = max(owners, key=len, default=root)\n+        direct_child = \"::\" not in name.removeprefix(f\"{module}::\")\n+        if kind == \"trait\":\n+            include_nested_functions = direct_child\n+            include_associated_types = direct_child\n+        if kind in {\"struct\", \"enum\", \"union\", \"type\", \"trait\"} and not direct_child:\n+            if kind == \"type\" and include_associated_types:\n+                items.append(Item(module, \"associated type\", name, line))\n+            continue\n+        if kind == \"fn\" and not (direct_child or include_nested_functions):\n+            continue\n+        category = \"type\" if kind in {\"struct\", \"enum\", \"union\"} else {\n+            \"fn\": \"function\", \"const\": \"constant\"\n+        }.get(kind, kind)\n+        items.append(Item(module, category, name, line))\n+    return root, items\n+\n+\n+def render(crate: str, path: Path) -> None:\n+    current_text = path.read_text()\n+    root, current = parse(current_text)\n+    _, previous = parse(previous_text(path, current_text))\n+    current = list(dict.fromkeys(current))\n+    previous = list(dict.fromkeys(previous))\n+    added = Counter(current) - Counter(previous)\n+    removed = Counter(previous) - Counter(current)\n+    by_module: dict[str, list[Item]] = defaultdict(list)\n+    for item in current:\n+        by_module[item.module].append(item)\n+    changed_modules = {item.module for item in added + removed}\n+\n+    print(crate)\n+    for module in sorted(set(by_module) | changed_modules):\n+        counts = Counter(item.category for item in by_module[module])\n+        label = module.removeprefix(root).removeprefix(\"::\") or \"(root)\"\n+        print(\n+            f\"  {label}: types={counts['type']} traits={counts['trait']} \"\n+            f\"functions={counts['function']}\"\n+        )\n+        for heading, changes in ((\"added\", added), (\"removed\", removed)):\n+            names = sorted(\n+                {\n+                    f\"{item.category} {item.name.removeprefix(f'{item.module}::')}\"\n+                    for item, count in changes.items()\n+                    if item.module == module and count\n+                }\n+            )\n+            print(f\"    {heading}: {', '.join(names) if names else 'none'}\")\n+if __name__ == \"__main__\":\n+    for crate, path in SNAPSHOTS.items():\n+        render(crate, path)",
+              "raw_url": "https://github.com/KeenWill/signalbox/raw/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/scripts%2Fdomain_spine_digest.py",
+              "sha": "6c7d163b601c45929f19d7b4c577d87c4f923fe8",
+              "status": "added"
+            },
+            {
+              "additions": 513,
+              "blob_url": "https://github.com/KeenWill/signalbox/blob/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/scripts%2Ftest_domain_spine_digest.py",
+              "changes": 513,
+              "contents_url": "https://api.github.com/repos/KeenWill/signalbox/contents/scripts%2Ftest_domain_spine_digest.py?ref=417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "deletions": 0,
+              "filename": "scripts/test_domain_spine_digest.py",
+              "patch": "@@ -0,0 +1,513 @@\n+#!/usr/bin/env python3\n+\"\"\"Exercise the domain API digest's parser and revision selection.\"\"\"\n+\n+import os\n+import tempfile\n+import unittest\n+from contextlib import redirect_stdout\n+from io import StringIO\n+from pathlib import Path\n+from unittest.mock import patch\n+\n+import domain_spine_digest as digest\n+\n+\n+class DomainSpineDigestTests(unittest.TestCase):\n+    def test_negative_auto_trait_implementation_is_not_a_delta_item(self) -> None:\n+        baseline = \"pub mod sample\\npub struct sample::Packet\\n\"\n+        current = baseline + \"impl !core::marker::Freeze for sample::Packet\\n\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=1 traits=0 functions=0\n+    added: none\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_generic_local_type_parameters_do_not_retain_blanket_impls(self) -> None:\n+        baseline = \"pub mod sample\\npub enum sample::Setting<T>\\n\"\n+        current = baseline + \"\"\"\\\n+impl<T, U> core::convert::Into<U> for sample::Setting<T> where U: core::convert::From<T>\n+impl<T> core::any::Any for sample::Setting<T> where T: 'static\n+impl<T> core::borrow::Borrow<T> for sample::Setting<T> where T: ?core::marker::Sized\n+\"\"\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=1 traits=0 functions=0\n+    added: none\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_callable_bounds_keep_trait_and_subject_identity(self) -> None:\n+        baseline = \"\"\"\\\n+pub mod sample\n+pub struct sample::Handler<F>\n+pub struct sample::Output\n+\"\"\"\n+        current = baseline + \"\"\"\\\n+impl<F: core::ops::Fn() -> sample::Output, Output> external::Callable<fn() -> Output> for sample::Handler<F>\n+pub type sample::Handler<F>::Result = Output\n+\"\"\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=2 traits=0 functions=0\n+    added: associated type Handler::Result, implementation Handler<F> as external::Callable<fn() -> Output>\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_local_trait_for_foreign_type_uses_trait_ownership(self) -> None:\n+        baseline = \"pub mod sample\\npub trait sample::Visible\\n\"\n+        current = baseline + \"\"\"\\\n+impl sample::Visible for alloc::string::String\n+pub type sample::Visible::Output\n+\"\"\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=0 traits=1 functions=0\n+    added: associated type Visible::Output, implementation alloc::string::String as sample::Visible\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_wrapped_local_subjects_use_subject_ownership(self) -> None:\n+        baseline = \"pub mod sample\\npub struct sample::Packet\\n\"\n+        current = baseline + \"\"\"\\\n+impl<'a> core::fmt::Display for &'a sample::Packet\n+impl core::fmt::Display for alloc::boxed::Box<sample::Packet>\n+\"\"\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=1 traits=0 functions=0\n+    added: implementation &'a sample::Packet as core::fmt::Display, implementation alloc::boxed::Box<sample::Packet> as core::fmt::Display\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_implementation_identity_keeps_trait_and_subject_arguments(self) -> None:\n+        shared = \"\"\"\\\n+pub mod sample\n+pub struct sample::ArgumentA\n+pub struct sample::ArgumentB\n+pub struct sample::Target<T>\n+\"\"\"\n+        baseline = shared + (\n+            \"impl core::convert::From<sample::ArgumentA> for \"\n+            \"sample::Target<sample::ArgumentA>\\n\"\n+        )\n+        current = shared + (\n+            \"impl core::convert::From<sample::ArgumentB> for \"\n+            \"sample::Target<sample::ArgumentB>\\n\"\n+        )\n+        expected = \"\"\"\\\n+sample\n+  (root): types=3 traits=0 functions=0\n+    added: implementation Target<sample::ArgumentB> as core::convert::From<sample::ArgumentB>\n+    removed: implementation Target<sample::ArgumentA> as core::convert::From<sample::ArgumentA>\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_generic_external_trait_implementation_is_delta_identity(self) -> None:\n+        baseline = \"pub mod sample\\npub struct sample::Bag\\n\"\n+        current = baseline + (\n+            \"impl<T> core::iter::traits::collect::FromIterator<T> for sample::Bag\\n\"\n+        )\n+        expected = \"\"\"\\\n+sample\n+  (root): types=1 traits=0 functions=0\n+    added: implementation Bag as core::iter::traits::collect::FromIterator<T>\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_unsafe_trait_implementation_is_delta_identity(self) -> None:\n+        baseline = \"pub mod sample\\npub struct sample::Packet\\n\"\n+        current = baseline + \"unsafe impl external::Pod for sample::Packet\\n\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=1 traits=0 functions=0\n+    added: implementation Packet as external::Pod\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_mutable_static_uses_qualified_name_as_delta_identity(self) -> None:\n+        baseline = \"pub mod sample\\n\"\n+        current = baseline + \"pub static mut sample::REGISTRY: usize\\n\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=0 traits=0 functions=0\n+    added: static REGISTRY\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_public_module_is_delta_item_not_top_level_type(self) -> None:\n+        baseline = \"pub mod sample\\n\"\n+        current = baseline + \"pub mod sample::empty\\n\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=0 traits=0 functions=0\n+    added: module empty\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_exported_macro_is_delta_item_not_top_level_function(self) -> None:\n+        baseline = \"pub mod sample\\n\"\n+        current = baseline + \"pub macro sample::exported {}\\n\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=0 traits=0 functions=0\n+    added: macro exported\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_applied_generic_blanket_implementations_are_not_delta_items(self) -> None:\n+        baseline = \"pub mod sample\\npub struct sample::Record\\n\"\n+        current = baseline + \"\"\"\\\n+impl<T, U> core::convert::Into<U> for sample::Record where U: core::convert::From<T>\n+impl<T> core::any::Any for sample::Record where T: 'static\n+impl<T> core::borrow::Borrow<T> for sample::Record where T: ?core::marker::Sized\n+impl<T, U> core::convert::TryInto<U> for sample::Record where U: core::convert::TryFrom<T>\n+impl<T> alloc::string::ToString for sample::Record where T: core::fmt::Display + ?core::marker::Sized\n+\"\"\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=1 traits=0 functions=0\n+    added: none\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_duplicate_declarations_do_not_create_delta_multiplicity(self) -> None:\n+        shared = \"pub mod sample\\npub struct sample::Service\\n\"\n+        implementation = \"impl sample::Service\\n\"\n+        baseline = shared + implementation + implementation\n+        current = shared + implementation\n+        expected = \"\"\"\\\n+sample\n+  (root): types=1 traits=0 functions=0\n+    added: none\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_api_snapshots_are_rust_reaching_paths(self) -> None:\n+        workflow = (\n+            Path(__file__).resolve().parents[1] / \".github/workflows/rust.yml\"\n+        ).read_text()\n+\n+        self.assertIn(\"docs/api/* | docs/domain-spine.md\", workflow)\n+\n+    def test_public_static_is_delta_item(self) -> None:\n+        baseline = \"pub mod sample\\n\"\n+        current = baseline + \"pub static sample::REGISTRY: usize\\n\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=0 traits=0 functions=0\n+    added: static REGISTRY\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_associated_type_is_delta_item_not_top_level_type(self) -> None:\n+        baseline = \"pub mod sample\\npub trait sample::Source\\n\"\n+        current = baseline + \"pub type sample::Source::Output\\n\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=0 traits=1 functions=0\n+    added: associated type Source::Output\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_inherent_implementation_bound_change_is_delta_identity(self) -> None:\n+        shared = \"pub mod sample\\npub struct sample::Service<Handler>\\n\"\n+        baseline = shared + (\n+            \"impl<Handler> sample::Service<Handler> where Handler: sample::OldBound\\n\"\n+        )\n+        current = shared + (\n+            \"impl<Handler> sample::Service<Handler> where Handler: sample::NewBound\\n\"\n+        )\n+        expected = \"\"\"\\\n+sample\n+  (root): types=1 traits=0 functions=0\n+    added: implementation Service<Handler> (inherent)\n+    removed: implementation Service<Handler> (inherent)\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_enum_variants_and_public_fields_are_delta_members_not_types(self) -> None:\n+        baseline = \"pub mod sample\\n\"\n+        current = \"\"\"\\\n+pub mod sample\n+pub enum sample::Status\n+pub sample::Status::Ready\n+pub struct sample::Record\n+pub sample::Record::field: u64\n+\"\"\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=2 traits=0 functions=0\n+    added: member Record::field, member Status::Ready, type Record, type Status\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_nonblanket_trait_implementation_is_delta_identity(self) -> None:\n+        baseline = \"pub mod sample\\npub struct sample::Packet\\n\"\n+        current = baseline + \"impl external::Pod for sample::Packet\\n\"\n+        expected = \"\"\"\\\n+sample\n+  (root): types=1 traits=0 functions=0\n+    added: implementation Packet as external::Pod\n+    removed: none\n+\"\"\"\n+\n+        with tempfile.TemporaryDirectory() as temporary_directory:\n+            snapshot = Path(temporary_directory) / \"sample.txt\"\n+            snapshot.write_text(current)\n+            output = StringIO()\n+            with (\n+                patch.object(digest, \"previous_text\", return_value=baseline),\n+                redirect_stdout(output),\n+            ):\n+                digest.render(\"sample\", snapshot)\n+\n+        self.assertEqual(output.getvalue(), expected)\n+\n+    def test_generic_owner_keeps_qualified_method_name(self) -> None:\n+        snapshot = \"\"\"\\\n+pub mod sample\n+pub struct sample::Service<Generator, Transaction>\n+impl<Generator, Transaction> sample::Service<Generator, Transaction>\n+pub fn sample::Service<Generator, Transaction>::execute(&self)\n+\"\"\"\n+\n+        _, items = digest.parse(snapshot)\n+\n+        functions = [item.name for item in items if item.category == \"function\"]\n+        self.assertEqual(functions, [\"sample::Service::execute\"])\n+\n+    def test_generic_trait_impl_resets_nested_function_state(self) -> None:\n+        snapshot = \"\"\"\\\n+pub mod sample\n+pub trait sample::PublicTrait\n+pub fn sample::PublicTrait::call(&self)\n+impl<Validate> sample::ToolArgumentValidator for Validate\n+pub fn sample::ToolArgumentValidator::preauthorization(&self)\n+pub fn sample::ToolArgumentValidator::validate(&self)\n+\"\"\"\n+\n+        _, items = digest.parse(snapshot)\n+\n+        functions = [item.name for item in items if item.category == \"function\"]\n+        self.assertEqual(functions, [\"sample::PublicTrait::call\"])\n+\n+    def test_event_base_selects_previous_snapshot(self) -> None:\n+        snapshot = Path(\"docs/api/sample.txt\")\n+        committed_at_base = \"pub mod sample\\n\"\n+        current = \"pub mod sample\\npub struct sample::Added\\n\"\n+\n+        with (\n+            patch.dict(os.environ, {\"DOMAIN_SPINE_BASE\": \"event-base\"}, clear=True),\n+            patch.object(digest, \"git_text\", return_value=committed_at_base) as git_text,\n+        ):\n+            previous = digest.previous_text(snapshot, current)\n+\n+        self.assertEqual(previous, committed_at_base)\n+        git_text.assert_called_once_with(\"event-base\", snapshot)\n+\n+\n+if __name__ == \"__main__\":\n+    unittest.main()",
+              "raw_url": "https://github.com/KeenWill/signalbox/raw/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/scripts%2Ftest_domain_spine_digest.py",
+              "sha": "4391c2aef7b4a12740beb5b3ab12b8e9d1e6eda5",
+              "status": "added"
+            }
+          ],
+          "html_url": "https://github.com/KeenWill/signalbox/compare/113746d23d6c7b398ef34464a071dca532791898...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+          "merge_base_commit": {
+            "author": {
+              "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+              "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+              "followers_url": "https://api.github.com/users/KeenWill/followers",
+              "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+              "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+              "gravatar_id": "",
+              "html_url": "https://github.com/KeenWill",
+              "id": 2627736,
+              "login": "KeenWill",
+              "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+              "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+              "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+              "repos_url": "https://api.github.com/users/KeenWill/repos",
+              "site_admin": false,
+              "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+              "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+              "type": "User",
+              "url": "https://api.github.com/users/KeenWill",
+              "user_view_type": "public"
+            },
+            "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/113746d23d6c7b398ef34464a071dca532791898/comments",
+            "commit": {
+              "author": {
+                "date": "2026-09-05T18:09:43Z",
+                "email": "william@williamgoeller.com",
+                "name": "Will Goeller"
+              },
+              "comment_count": 0,
+              "committer": {
+                "date": "2026-09-05T18:09:43Z",
+                "email": "noreply@github.com",
+                "name": "GitHub"
+              },
+              "message": "Merge pull request #1565 from KeenWill/agent/process-runtime-split\n\nSplit process runtime by responsibility",
+              "tree": {
+                "sha": "207e7b5bb5040f28d813e6faae6897b7c898c81b",
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/207e7b5bb5040f28d813e6faae6897b7c898c81b"
+              },
+              "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/113746d23d6c7b398ef34464a071dca532791898",
+              "verification": {
+                "payload": "tree 207e7b5bb5040f28d813e6faae6897b7c898c81b\nparent 5b667d9c1d9a79dc679118fe50a269172c1efc03\nparent 687de4a613adfb6610db1f39a13a5e7a02b663ad\nauthor Will Goeller <william@williamgoeller.com> 1788631783 -0400\ncommitter GitHub <noreply@github.com> 1788631783 -0400\n\nMerge pull request #1565 from KeenWill/agent/process-runtime-split\n\nSplit process runtime by responsibility",
+                "reason": "valid",
+                "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqnFrnCRC1aQ7uu5UhlAAAAQAQAHfl5Mc9kU7Yj1OS8P7fNQe6\nRbblz23hyuEbGfm1W7B/bhQM/kvPFi9pXfwahieSdEybhaUV0nAtZljXf2jXIF2F\ntqJWi9dQAw4RbDlvH+h3Rn0ImiXDKkBYj852+VJLzroGa6Tyl34W0xTGobHfIPCo\niM7CiPpuZ8fQPWKK9X/mxiha0f6mMcF4p9ituztu88enAZ5dqowYCJFKW+K+om3G\nGsI7I0W4esIyIETxuAmSRR75LX+saY2baRB9m0oklVHYGIf2T3r5SeDs2astEVrZ\nC4KrYbUhLeSFT7aJMM9iJ9VS3BjEPLnn6xotOiveOc7RwEcbu40mmccgcgsyitj1\nX5JZ3pRJcKmFGLuKa6noKBFu9TkvHrWplqIjh8qOHoJ5F5tjsv8J9/H1oyIWHyiA\nMl7cS2E/ncOr8e941sN2Gr+907J6TggC2NITlgaC9mgrq3G5hCsV9dgiS4oLkMck\nI7cigezTajfowQDXmeEwXgB+lEtajTWvdbAOEhPNLkEfMgBr1cAQsnP0V6Ve6Sh0\nzoP2xFbZC5PlXXRaZPApj5IsL2aVhl4EtGe40fKkZgzlcNSY5N8LKPVFn5ZYZlto\nCl6XtWHhPPXHevTTPfG3ammtvAU94qEvmH/lpaRLj287aih8IF6l/x9hwhNL9r+o\nhdCgnNsGPCt59ZBEUS8z\n=lmp2\n-----END PGP SIGNATURE-----\n",
+                "verified": true,
+                "verified_at": "2026-09-05T18:09:44Z"
+              }
+            },
+            "committer": {
+              "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+              "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+              "followers_url": "https://api.github.com/users/web-flow/followers",
+              "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+              "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+              "gravatar_id": "",
+              "html_url": "https://github.com/web-flow",
+              "id": 19864447,
+              "login": "web-flow",
+              "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+              "organizations_url": "https://api.github.com/users/web-flow/orgs",
+              "received_events_url": "https://api.github.com/users/web-flow/received_events",
+              "repos_url": "https://api.github.com/users/web-flow/repos",
+              "site_admin": false,
+              "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+              "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+              "type": "User",
+              "url": "https://api.github.com/users/web-flow",
+              "user_view_type": "public"
+            },
+            "html_url": "https://github.com/KeenWill/signalbox/commit/113746d23d6c7b398ef34464a071dca532791898",
+            "node_id": "C_kwDOTWhy-9oAKDExMzc0NmQyM2Q2YzdiMzk4ZWYzNDQ2NGEwNzFkY2E1MzI3OTE4OTg",
+            "parents": [
+              {
+                "html_url": "https://github.com/KeenWill/signalbox/commit/5b667d9c1d9a79dc679118fe50a269172c1efc03",
+                "sha": "5b667d9c1d9a79dc679118fe50a269172c1efc03",
+                "url": "https://api.github.com/repos/KeenWill/signalbox/commits/5b667d9c1d9a79dc679118fe50a269172c1efc03"
+              },
+              {
+                "html_url": "https://github.com/KeenWill/signalbox/commit/687de4a613adfb6610db1f39a13a5e7a02b663ad",
+                "sha": "687de4a613adfb6610db1f39a13a5e7a02b663ad",
+                "url": "https://api.github.com/repos/KeenWill/signalbox/commits/687de4a613adfb6610db1f39a13a5e7a02b663ad"
+              }
+            ],
+            "sha": "113746d23d6c7b398ef34464a071dca532791898",
+            "url": "https://api.github.com/repos/KeenWill/signalbox/commits/113746d23d6c7b398ef34464a071dca532791898"
+          },
+          "patch_url": "https://github.com/KeenWill/signalbox/compare/113746d23d6c7b398ef34464a071dca532791898...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2.patch",
+          "permalink_url": "https://github.com/KeenWill/signalbox/compare/KeenWill:113746d...KeenWill:417a88f",
+          "status": "ahead",
+          "total_commits": 23,
+          "url": "https://api.github.com/repos/KeenWill/signalbox/compare/113746d23d6c7b398ef34464a071dca532791898...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+        },
+        "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "ahead_by": 0,
+          "base_commit": {
+            "author": {
+              "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+              "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+              "followers_url": "https://api.github.com/users/KeenWill/followers",
+              "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+              "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+              "gravatar_id": "",
+              "html_url": "https://github.com/KeenWill",
+              "id": 2627736,
+              "login": "KeenWill",
+              "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+              "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+              "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+              "repos_url": "https://api.github.com/users/KeenWill/repos",
+              "site_admin": false,
+              "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+              "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+              "type": "User",
+              "url": "https://api.github.com/users/KeenWill",
+              "user_view_type": "public"
+            },
+            "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/comments",
+            "commit": {
+              "author": {
+                "date": "2026-09-05T21:46:41Z",
+                "email": "william@williamgoeller.com",
+                "name": "William Goeller"
+              },
+              "comment_count": 0,
+              "committer": {
+                "date": "2026-09-05T21:46:41Z",
+                "email": "william@williamgoeller.com",
+                "name": "William Goeller"
+              },
+              "message": "Handle generic API digest edge cases",
+              "tree": {
+                "sha": "a6f20cd3a38e8c394e239bdac4f7ca5ef7085a88",
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/a6f20cd3a38e8c394e239bdac4f7ca5ef7085a88"
+              },
+              "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "verification": {
+                "payload": null,
+                "reason": "unsigned",
+                "signature": null,
+                "verified": false,
+                "verified_at": null
+              }
+            },
+            "committer": {
+              "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+              "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+              "followers_url": "https://api.github.com/users/KeenWill/followers",
+              "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+              "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+              "gravatar_id": "",
+              "html_url": "https://github.com/KeenWill",
+              "id": 2627736,
+              "login": "KeenWill",
+              "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+              "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+              "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+              "repos_url": "https://api.github.com/users/KeenWill/repos",
+              "site_admin": false,
+              "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+              "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+              "type": "User",
+              "url": "https://api.github.com/users/KeenWill",
+              "user_view_type": "public"
+            },
+            "html_url": "https://github.com/KeenWill/signalbox/commit/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+            "node_id": "C_kwDOTWhy-9oAKDQxN2E4OGZkNTM0NjRlZjA3ODNlYzM5ZjVjNGRhM2M1MGEzZWY1ZTI",
+            "parents": [
+              {
+                "html_url": "https://github.com/KeenWill/signalbox/commit/5b9c6778337a997fce26a85f51f722cdddbe056e",
+                "sha": "5b9c6778337a997fce26a85f51f722cdddbe056e",
+                "url": "https://api.github.com/repos/KeenWill/signalbox/commits/5b9c6778337a997fce26a85f51f722cdddbe056e"
+              }
+            ],
+            "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+            "url": "https://api.github.com/repos/KeenWill/signalbox/commits/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+          },
+          "behind_by": 0,
+          "commits": [],
+          "diff_url": "https://github.com/KeenWill/signalbox/compare/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2.diff",
+          "files": [],
+          "html_url": "https://github.com/KeenWill/signalbox/compare/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+          "merge_base_commit": {
+            "author": {
+              "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+              "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+              "followers_url": "https://api.github.com/users/KeenWill/followers",
+              "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+              "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+              "gravatar_id": "",
+              "html_url": "https://github.com/KeenWill",
+              "id": 2627736,
+              "login": "KeenWill",
+              "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+              "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+              "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+              "repos_url": "https://api.github.com/users/KeenWill/repos",
+              "site_admin": false,
+              "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+              "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+              "type": "User",
+              "url": "https://api.github.com/users/KeenWill",
+              "user_view_type": "public"
+            },
+            "comments_url": "https://api.github.com/repos/KeenWill/signalbox/commits/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/comments",
+            "commit": {
+              "author": {
+                "date": "2026-09-05T21:46:41Z",
+                "email": "william@williamgoeller.com",
+                "name": "William Goeller"
+              },
+              "comment_count": 0,
+              "committer": {
+                "date": "2026-09-05T21:46:41Z",
+                "email": "william@williamgoeller.com",
+                "name": "William Goeller"
+              },
+              "message": "Handle generic API digest edge cases",
+              "tree": {
+                "sha": "a6f20cd3a38e8c394e239bdac4f7ca5ef7085a88",
+                "url": "https://api.github.com/repos/KeenWill/signalbox/git/trees/a6f20cd3a38e8c394e239bdac4f7ca5ef7085a88"
+              },
+              "url": "https://api.github.com/repos/KeenWill/signalbox/git/commits/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "verification": {
+                "payload": null,
+                "reason": "unsigned",
+                "signature": null,
+                "verified": false,
+                "verified_at": null
+              }
+            },
+            "committer": {
+              "avatar_url": "https://avatars.githubusercontent.com/u/2627736?v=4",
+              "events_url": "https://api.github.com/users/KeenWill/events{/privacy}",
+              "followers_url": "https://api.github.com/users/KeenWill/followers",
+              "following_url": "https://api.github.com/users/KeenWill/following{/other_user}",
+              "gists_url": "https://api.github.com/users/KeenWill/gists{/gist_id}",
+              "gravatar_id": "",
+              "html_url": "https://github.com/KeenWill",
+              "id": 2627736,
+              "login": "KeenWill",
+              "node_id": "MDQ6VXNlcjI2Mjc3MzY=",
+              "organizations_url": "https://api.github.com/users/KeenWill/orgs",
+              "received_events_url": "https://api.github.com/users/KeenWill/received_events",
+              "repos_url": "https://api.github.com/users/KeenWill/repos",
+              "site_admin": false,
+              "starred_url": "https://api.github.com/users/KeenWill/starred{/owner}{/repo}",
+              "subscriptions_url": "https://api.github.com/users/KeenWill/subscriptions",
+              "type": "User",
+              "url": "https://api.github.com/users/KeenWill",
+              "user_view_type": "public"
+            },
+            "html_url": "https://github.com/KeenWill/signalbox/commit/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+            "node_id": "C_kwDOTWhy-9oAKDQxN2E4OGZkNTM0NjRlZjA3ODNlYzM5ZjVjNGRhM2M1MGEzZWY1ZTI",
+            "parents": [
+              {
+                "html_url": "https://github.com/KeenWill/signalbox/commit/5b9c6778337a997fce26a85f51f722cdddbe056e",
+                "sha": "5b9c6778337a997fce26a85f51f722cdddbe056e",
+                "url": "https://api.github.com/repos/KeenWill/signalbox/commits/5b9c6778337a997fce26a85f51f722cdddbe056e"
+              }
+            ],
+            "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+            "url": "https://api.github.com/repos/KeenWill/signalbox/commits/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+          },
+          "patch_url": "https://github.com/KeenWill/signalbox/compare/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2.patch",
+          "permalink_url": "https://github.com/KeenWill/signalbox/compare/KeenWill:417a88f...KeenWill:417a88f",
+          "status": "identical",
+          "total_commits": 0,
+          "url": "https://api.github.com/repos/KeenWill/signalbox/compare/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
         }
       }
     },
