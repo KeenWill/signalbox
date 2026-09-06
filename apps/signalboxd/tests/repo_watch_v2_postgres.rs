@@ -212,6 +212,18 @@ impl SessionCommandCodec for FixtureCommandCodec {
     }
 }
 
+struct DecodeOnlyCommandCodec;
+
+impl SessionCommandCodec for DecodeOnlyCommandCodec {
+    fn encode(&mut self, _command: &SessionCommand) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn decode(&mut self, payload: &[u8]) -> Option<SessionCommand> {
+        FixtureCommandCodec.decode(payload)
+    }
+}
+
 async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
@@ -624,24 +636,6 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         retained_event_source,
         (String::from("poll"), Decimal::from(2_u64))
     );
-    let projected_repository_delete =
-        sqlx::query("DELETE FROM repository_state WHERE repository = $1")
-            .bind(repository.as_str())
-            .execute(&module_pool)
-            .await;
-    assert!(matches!(
-        projected_repository_delete,
-        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23503")
-    ));
-    let retained_after_projection_delete: (i64, i64) = sqlx::query_as(
-        "SELECT
-            (SELECT count(*) FROM repository_state WHERE repository = $1),
-            (SELECT count(*) FROM gh_event WHERE repository = $1)",
-    )
-    .bind(repository.as_str())
-    .fetch_one(&module_pool)
-    .await?;
-    assert_eq!(retained_after_projection_delete, (1, 2));
     let retention_column_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM information_schema.columns
           WHERE table_schema = 'mod_repo_watch'
@@ -1202,10 +1196,11 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     )?;
     assert_eq!(replay_batches.len(), 1);
     let replay_plans = &replay_batches[0];
+    let mut decode_only_codec = DecodeOnlyCommandCodec;
     let DispatchAdmission::Replayed {
         commands: recovered,
     } = store
-        .record_commands(replay_plans, observed_at, &mut command_codec)
+        .record_commands(replay_plans, observed_at, &mut decode_only_codec)
         .await?
     else {
         panic!("equal replay must return its retained command batch");
@@ -1776,6 +1771,25 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         active_unseen_repositories[0] == first_unseen_repository.as_str()
             || active_unseen_repositories[0] == second_unseen_repository.as_str()
     );
+    let accepted_event_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE repository = $1")
+            .bind(repository.as_str())
+            .fetch_one(&module_pool)
+            .await?;
+    assert!(accepted_event_count > 0);
+    sqlx::query("DELETE FROM repository_state WHERE repository = $1")
+        .bind(repository.as_str())
+        .execute(&module_pool)
+        .await?;
+    let retained_after_projection_delete: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM repository_state WHERE repository = $1),
+            (SELECT count(*) FROM gh_event WHERE repository = $1)",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(retained_after_projection_delete, (0, accepted_event_count));
 
     module_pool.close().await;
     core_pool.close().await;
