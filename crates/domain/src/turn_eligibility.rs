@@ -5568,9 +5568,24 @@ fn reconstitute_inner(
             .is_some_and(|fact| ended.selection().selected_direct() == fact.selected())
             && !records_by_turn.contains_key(&ended.turn())
             && call_snapshot.is_some();
-        if ended.disposition() != ModelCallDisposition::Completed
-            || (!accepted_turn_matches && !delegated_turn_matches)
-        {
+        let response_matches_disposition = match ended.disposition() {
+            ModelCallDisposition::Completed => true,
+            ModelCallDisposition::Refused => entries.iter().all(|entry| {
+                matches!(
+                    semantic_entries
+                        .get(entry)
+                        .map(SemanticTranscriptEntry::payload),
+                    Some(InitialSemanticTranscriptEntryPayload::ProviderCompaction {
+                        producing_call,
+                        ..
+                    }) if *producing_call == *call
+                )
+            }),
+            ModelCallDisposition::KnownFailed
+            | ModelCallDisposition::Cancelled
+            | ModelCallDisposition::Ambiguous => false,
+        };
+        if !response_matches_disposition || (!accepted_turn_matches && !delegated_turn_matches) {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMismatch {
                     entry: first_entry.entry(),
@@ -6661,8 +6676,18 @@ fn reconstitute_inner(
                 let terminal = snapshots.get(terminal_frontier).cloned().ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
                 )?;
+                let assistant_entries = assistant_by_call
+                    .get(refusing_call)
+                    .cloned()
+                    .unwrap_or_default();
                 if !referenced_snapshots.insert(*terminal_frontier)
-                    || !terminal.same_semantic_content(source)
+                    || !refused_terminal_matches(
+                        source,
+                        &terminal,
+                        *refusing_call,
+                        &assistant_entries,
+                        &semantic_entries,
+                    )
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
@@ -8000,10 +8025,43 @@ fn completed_terminal_matches(
             assistant_entries.contains(&entry)
                 && matches!(
                     semantic_entries.get(&entry).map(SemanticTranscriptEntry::payload),
-                    Some(InitialSemanticTranscriptEntryPayload::AssistantText {
+                    Some(
+                        InitialSemanticTranscriptEntryPayload::AssistantText {
+                            producing_call,
+                            ..
+                        }
+                        | InitialSemanticTranscriptEntryPayload::ProviderCompaction {
+                            producing_call,
+                            ..
+                        }
+                    ) if *producing_call == completing_call
+                )
+        })
+}
+
+fn refused_terminal_matches(
+    source: &ResolvedContextFrontierSnapshot,
+    terminal: &ResolvedContextFrontierSnapshot,
+    refusing_call: crate::ModelCallId,
+    assistant_entries: &BTreeSet<SemanticTranscriptEntryRef>,
+    semantic_entries: &BTreeMap<SemanticTranscriptEntryRef, SemanticTranscriptEntry>,
+) -> bool {
+    let suffix_start = source.entry_count();
+    if !source.is_semantic_prefix_of(terminal)
+        || terminal.entry_count() != suffix_start + assistant_entries.len()
+    {
+        return false;
+    }
+    terminal
+        .ordered_entries_range(suffix_start, terminal.entry_count())
+        .all(|entry| {
+            assistant_entries.contains(&entry)
+                && matches!(
+                    semantic_entries.get(&entry).map(SemanticTranscriptEntry::payload),
+                    Some(InitialSemanticTranscriptEntryPayload::ProviderCompaction {
                         producing_call,
                         ..
-                    }) if *producing_call == completing_call
+                    }) if *producing_call == refusing_call
                 )
         })
 }
@@ -15406,6 +15464,76 @@ mod tests {
                 call: refusing_call,
             }
         );
+    }
+
+    #[test]
+    fn refused_compaction_suffix_reconstitutes_exact_terminal_frontier() {
+        let session = current_session();
+        let origin = accepted_origin(1);
+        let origin_entry = semantic_entry(30);
+        let compaction_entry = semantic_entry(31);
+        let starting_frontier = frontier(40);
+        let terminal_frontier = frontier(41);
+        let refusing_call = model_call_id(50);
+        let refusing_attempt = turn_attempt_id(60);
+        let resolved_starting = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session.id(),
+            starting_frontier.id(),
+            vec![origin_entry.reference(&session)],
+        )
+        .expect("the call frontier has unique membership");
+        let terminal_record = origin.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::TerminalRefused {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: starting_frontier.id(),
+                refusing_attempt,
+                refusing_attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(
+                    UnstoppedAttemptDisposition::TurnRefused,
+                ),
+                refusing_call,
+                terminal_frontier: terminal_frontier.id(),
+            },
+        );
+        let compaction = SemanticTranscriptEntryReconstitutionInput::new(
+            compaction_entry.id(),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::ProviderCompaction {
+                producing_call: refusing_call,
+                block: crate::ProviderCompactionBlock::try_new(String::from(
+                    r#"{"type":"compaction","content":"retained refusal summary"}"#,
+                ))
+                .expect("the fixture compaction block is valid"),
+            },
+        );
+        let call = ModelCallReconstitutionInput::new(
+            refusing_call,
+            origin.turn(),
+            refusing_attempt,
+            FrozenModelSelection::Direct(direct(1)),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            resolved_starting.frontier().snapshot(),
+            ModelCallReconstitutionState::Terminal(ModelCallDisposition::Refused),
+        );
+        AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![terminal_record],
+            vec![origin.entry(&session, origin_entry), compaction],
+            vec![
+                starting_frontier.snapshot(&session, &[origin_entry]),
+                terminal_frontier.snapshot(&session, &[origin_entry, compaction_entry]),
+            ],
+            None,
+        )
+        .with_model_call_facts(
+            vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                call.turn(),
+                call.target(),
+            )],
+            vec![call],
+        )
+        .reconstitute()
+        .expect("a refusal reload accepts its exact provider-compaction suffix");
     }
 
     /// S02 / INV-006 / INV-009: a terminal refusal must be backed by the

@@ -132,6 +132,46 @@ BEGIN
     IF revised_definition = definition THEN
         RAISE EXCEPTION 'steering final-state definition has no assistant response predicate';
     END IF;
+    definition := revised_definition;
+    revised_definition := replace(
+        definition,
+        $needle$           OR checked_terminal_frontier = checked_call_frontier
+           OR terminal_member_count IS DISTINCT FROM call_member_count
+           OR failure_entry_count <> 0
+           OR completion_entry_count <> 0
+           OR assistant_entry_count <> 0$needle$,
+        $replacement$           OR checked_terminal_frontier = checked_call_frontier
+           OR terminal_member_count IS DISTINCT FROM call_member_count + assistant_entry_count
+           OR failure_entry_count <> 0
+           OR completion_entry_count <> 0
+           OR assistant_entry_count IS DISTINCT FROM (
+                SELECT count(*)
+                  FROM semantic_transcript_entry
+                 WHERE source_session_id = checked_session
+                   AND payload_kind = 'provider_compaction'
+                   AND producing_model_call_id = checked_terminal_call
+           )
+           OR EXISTS (
+                SELECT 1
+                  FROM semantic_transcript_entry AS entry
+                 WHERE entry.source_session_id = checked_session
+                   AND entry.payload_kind = 'provider_compaction'
+                   AND entry.producing_model_call_id = checked_terminal_call
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM context_frontier_member AS member
+                         WHERE member.owning_session_id = checked_session
+                           AND member.context_frontier_id = checked_terminal_frontier
+                           AND member.member_position = call_member_count
+                                + entry.assistant_response_part_ordinal + 1
+                           AND member.source_session_id = entry.source_session_id
+                           AND member.semantic_entry_id = entry.semantic_entry_id
+                   )
+           )$replacement$
+    );
+    IF revised_definition = definition THEN
+        RAISE EXCEPTION 'steering final-state definition has no refusal frontier predicate';
+    END IF;
     EXECUTE revised_definition;
 
     SELECT pg_get_functiondef(

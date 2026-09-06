@@ -700,12 +700,15 @@ impl PostgresModelCallRepository {
     /// The prospective input names the model-visible entries the next request
     /// would carry. Membership is compared against the reported call's own
     /// frontier, so the allowance covers exactly the content appended after the
-    /// provider counted its input.
+    /// provider counted its input. `replays_provider_compaction` states whether
+    /// the effective target includes opaque provider-compaction members in that
+    /// request projection.
     pub async fn latest_reported_usage<'a>(
         &self,
         session: SessionId,
         target: ResolvedProviderTarget,
         fast_mode: FastMode,
+        replays_provider_compaction: bool,
         prospective: impl Into<ProspectiveModelInput<'a>>,
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
         let (projected_members, uncommitted_content_bytes) = match prospective.into() {
@@ -770,8 +773,7 @@ impl PostgresModelCallRepository {
                        true AS input_is_retained,
                        model_call.retained_input_tokens,
                        model_call.retained_output_tokens,
-                       (model_call.terminal_disposition_kind = 'completed'
-                        OR model_call.retained_output_tokens IS NOT NULL) AS output_is_retained,
+                       (model_call.terminal_disposition_kind = 'completed') AS output_is_retained,
                        model_call.usage_input_tokens,
                        model_call.usage_output_tokens,
                        model_call.usage_cache_creation_input_tokens,
@@ -948,7 +950,9 @@ impl PostgresModelCallRepository {
                                     WHEN 'assistant_text' THEN
                                         COALESCE(octet_length(entry.assistant_text_value), 0)
                                     WHEN 'provider_compaction' THEN
-                                        COALESCE(octet_length(entry.assistant_text_value), 0)
+                                        CASE WHEN $7::boolean THEN
+                                            COALESCE(octet_length(entry.assistant_text_value), 0)
+                                        ELSE 0 END
                                     WHEN 'assistant_tool_use' THEN
                                         COALESCE(octet_length(request.tool_name), 0)
                                         + COALESCE(octet_length(request.arguments_text), 0)
@@ -1036,6 +1040,7 @@ impl PostgresModelCallRepository {
             FastMode::Disabled => "disabled",
             FastMode::Enabled => "enabled",
         })
+        .bind(replays_provider_compaction)
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {

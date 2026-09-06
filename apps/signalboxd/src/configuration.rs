@@ -1805,6 +1805,13 @@ impl HubModelConfiguration {
         self.anthropic_provider_compaction_targets.clone()
     }
 
+    /// Returns whether one exact effective provider target replays Anthropic
+    /// provider-compaction blocks.
+    pub fn replays_anthropic_provider_compaction(&self, provider_model: &str) -> bool {
+        self.anthropic_provider_compaction_targets
+            .contains(provider_model)
+    }
+
     /// Returns the copied profile and global layers for a direct selection.
     pub fn model_settings_lower_layers(
         &self,
@@ -9385,6 +9392,8 @@ extra = true"#,
         let targets = enabled.anthropic_provider_compaction_targets();
         assert_eq!(targets.len(), 1);
         assert!(targets.contains("claude-example"));
+        assert!(enabled.replays_anthropic_provider_compaction("claude-example"));
+        assert!(!enabled.replays_anthropic_provider_compaction("claude-other"));
 
         let malformed = CONFIGURATION.replace(
             "provider_model = \"claude-example\"",

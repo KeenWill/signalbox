@@ -212,6 +212,7 @@ async fn ambiguous_model_call_usage_is_available_to_pre_activation_compaction()
             fixture.session,
             correlation.target(),
             FastMode::Disabled,
+            false,
             correlation.frontier(),
         )
         .await?
@@ -307,6 +308,7 @@ async fn refused_response_commits_prior_provider_compaction() -> Result<(), Box<
             fixture.session,
             correlation.target(),
             FastMode::Disabled,
+            true,
             terminal_frontier,
         )
         .await?
@@ -314,7 +316,92 @@ async fn refused_response_commits_prior_provider_compaction() -> Result<(), Box<
     assert_eq!(retained.usage(), reported_usage);
     assert_eq!(retained.retained_input_tokens(), Some(23));
     assert_eq!(retained.retained_output_tokens(), Some(4));
-    assert!(retained.output_is_retained());
+    assert!(
+        !retained.output_is_retained(),
+        "refusal output never enters the next request"
+    );
+    let (eligible, dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(eligible.is_empty());
+    assert!(dispatch_starts.is_empty());
+    assert!(!continuation);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn steered_refusal_commits_ordered_provider_compaction_suffix() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d7a;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 30));
+    let recorded = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 29)),
+                fixture.session,
+                UserContent::try_text(String::from("steer before compacting refusal"))
+                    .expect("fixture steering is valid"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.turn,
+                },
+            ),
+            steering_input,
+            None,
+        )
+        .await?;
+    assert!(matches!(
+        recorded,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+
+    let correlation = authorized.observation_correlation();
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"steered retained summary"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 32));
+    let observation = correlation.bind_terminal_observation_with_usage(
+        ModelCallTerminalObservation::RefusedWithProviderCompaction {
+            provider_compaction: vec![compaction],
+            retained_input_tokens: 31,
+            retained_output_tokens: 2,
+        },
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(44))
+            .with_output_tokens(Some(2)),
+    );
+    let outcome = repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Refused(
+                RefusedModelCallTurnIdentities::new(ContextFrontierId::from_uuid(Uuid::from_u128(
+                    seed + 21,
+                )))
+                .with_provider_compaction_entries(vec![
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 20)),
+                ]),
+            ),
+            |accepted| {
+                assert_eq!(accepted, steering_input);
+                successor
+            },
+        )
+        .await?;
+    let ModelCallTerminalOutcome::Refused(refused) = outcome else {
+        panic!("the steered compacting response must remain refused");
+    };
+    assert_eq!(refused.reclassified_pending_steering().len(), 1);
+    assert_eq!(refused.reclassified_pending_steering()[0].turn(), successor);
 
     pool.close().await;
     drop(container);
@@ -368,6 +455,7 @@ async fn latest_reported_usage_does_not_cross_effective_fast_mode_targets()
                 fixture.session,
                 correlation.target(),
                 FastMode::Disabled,
+                true,
                 terminal_frontier,
             )
             .await?
@@ -379,11 +467,174 @@ async fn latest_reported_usage_does_not_cross_effective_fast_mode_targets()
                 fixture.session,
                 correlation.target(),
                 FastMode::Enabled,
+                true,
                 terminal_frontier,
             )
             .await?
             .is_none(),
         "the fast-target fallback must not reuse base-target retained counts"
+    );
+    let (eligible, dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(eligible.is_empty());
+    assert!(dispatch_starts.is_empty());
+    assert!(!continuation);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn latest_reported_usage_excludes_unreplayed_provider_compaction_bytes()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d7b;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let correlation = authorized.observation_correlation();
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            correlation.bind_terminal_observation_with_usage(
+                ModelCallTerminalObservation::Completed {
+                    assistant_text: vec![
+                        AssistantText::try_new(String::from("reported baseline reply"))
+                            .expect("fixture assistant text is valid"),
+                    ],
+                },
+                ProviderReportedTokenUsage::unreported()
+                    .with_input_tokens(Some(80))
+                    .with_output_tokens(Some(3)),
+            ),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let second_turn = TurnId::from_uuid(Uuid::from_u128(seed + 42));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 40,
+                seed + 1,
+                "request after another target compacted",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 41)),
+            Some(second_turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 43),
+            starting_frontier: Uuid::from_u128(seed + 44),
+            initial_attempt: Uuid::from_u128(seed + 45),
+        },
+    )
+    .await?;
+    let second_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 46));
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                fixture.session,
+                second_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 47)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 48)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 49)),
+                |_| panic!("the fixture has no pending steering to reclassify"),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == second_call
+    ));
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                fixture.session,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 50)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 51)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 52)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 53)),
+                |_| panic!("the fixture has no pending steering to reclassify"),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Ready { .. }
+    ));
+    let AuthorizeModelCallOutcome::Authorized(second_authorized) = repository
+        .authorize_send(fixture.session, second_call)
+        .await?
+    else {
+        panic!("the retained second call authorizes");
+    };
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"opaque bytes omitted after target switch","encrypted_content":"ciphertext"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let compaction_bytes = u64::try_from(compaction.as_json().len())?;
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 56));
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            second_authorized
+                .observation_correlation()
+                .bind_terminal_observation(
+                    ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                        response: vec![AssistantResponsePart::ProviderCompaction(compaction)],
+                        retained_input_tokens: 15,
+                        retained_output_tokens: 2,
+                    },
+                ),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 54,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 55)),
+                terminal_frontier,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let replayed = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            FastMode::Disabled,
+            true,
+            terminal_frontier,
+        )
+        .await?
+        .expect("the earlier reported call remains the baseline");
+    let omitted = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            FastMode::Disabled,
+            false,
+            terminal_frontier,
+        )
+        .await?
+        .expect("the earlier reported call remains the baseline");
+    assert_eq!(
+        replayed.projected_unreported_content_bytes(),
+        omitted
+            .projected_unreported_content_bytes()
+            .saturating_add(compaction_bytes)
     );
 
     pool.close().await;
@@ -501,6 +752,7 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
             fixture.session,
             target,
             FastMode::Disabled,
+            false,
             ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
         )
         .await?
@@ -639,6 +891,7 @@ async fn queued_turn_activation_preview_scores_its_own_input() -> Result<(), Box
             fixture.session,
             correlation.target(),
             FastMode::Disabled,
+            false,
             prospective.prospective_input(),
         )
         .await?
@@ -782,6 +1035,7 @@ async fn successor_compaction_coverage_follows_projected_order() -> Result<(), B
             fixture.session,
             target,
             FastMode::Disabled,
+            false,
             ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
         )
         .await?

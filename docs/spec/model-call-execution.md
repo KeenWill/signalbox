@@ -423,10 +423,13 @@ text. The context guard uses those retained-iteration measures as its
 post-compaction baseline; it never treats billed iteration input or aggregate
 multi-iteration output as model-visible retained usage. A retained baseline is
 eligible only when its call used the same effective target the next request will
-use after applying fast-mode target mapping. The dedicated compaction call
-rejects every tool and suppressed-tool part and accepts a summary only from a
-completion that ended by end turn or stop sequence, because its completion must
-be whole summary text. Classification is an adapter contract consuming the
+use after applying fast-mode target mapping. Refusal output remains discarded
+from that baseline even when its final-iteration count is retained as evidence,
+and projected-content headroom excludes opaque compaction bytes when the
+effective target will omit the block. The dedicated compaction call rejects
+every tool and suppressed-tool part and accepts a summary only from a completion
+that ended by end turn or stop sequence, because its completion must be whole
+summary text. Classification is an adapter contract consuming the
 full-request-send boundary; the daemon never reinterprets SDK errors by
 retryability or exception type. The identity relation applies to every identity
 the exchange reported, early observations and terminal evidence alike, because

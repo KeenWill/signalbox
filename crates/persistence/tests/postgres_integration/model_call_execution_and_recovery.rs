@@ -1360,6 +1360,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
             session,
             resolved_target,
             FastMode::Disabled,
+            false,
             terminal_frontier,
         )
         .await?
