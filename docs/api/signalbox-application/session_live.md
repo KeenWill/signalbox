@@ -5,6 +5,7 @@
 ## max_session_live_queued_turns
 
 ```rust
+#[must_use]
 pub const fn max_session_live_queued_turns() -> u8;
 ```
 
@@ -137,6 +138,7 @@ pub trait SessionLiveReader {
 pub struct ReadSessionLiveService<Reader> {/* private */}
 // derives: fmt::Debug
 impl<Reader> ReadSessionLiveService<Reader> {
+    #[must_use]
     pub const fn new(reader: Reader) -> Self;
 }
 impl<Reader: SessionLiveReader> ReadSessionLiveService<Reader> {

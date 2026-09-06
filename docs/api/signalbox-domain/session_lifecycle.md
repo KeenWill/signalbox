@@ -136,6 +136,7 @@ pub enum SessionParkCause {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl SessionParkCause {
+    #[must_use]
     pub const fn admits_standing(self, standing: option::Option<SessionFailureCause>) -> bool;
 }
 ```

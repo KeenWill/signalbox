@@ -57,10 +57,15 @@ impl CommissionDispatchRequest {
         statement: goal::GoalStatement,
         context: user_content::UserContent,
     ) -> result::Result<Self, InvalidDurableCommandId>;
+    #[must_use]
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
+    #[must_use]
     pub const fn template(&self) -> &session_template::SessionTemplateName;
+    #[must_use]
     pub const fn fence(&self) -> &CommissionedDispatchFence;
+    #[must_use]
     pub const fn statement(&self) -> &goal::GoalStatement;
+    #[must_use]
     pub fn initial_content_digest(&self) -> [u8; 32];
     pub fn prepare(
         self,
@@ -77,11 +82,17 @@ impl CommissionDispatchRequest {
 pub struct PreparedCommissionedDispatch {/* private */}
 // derives: fmt::Debug
 impl PreparedCommissionedDispatch {
+    #[must_use]
     pub const fn dispatch_id(&self) -> signalbox_domain::CommissionedDispatchId;
+    #[must_use]
     pub const fn fence(&self) -> &CommissionedDispatchFence;
+    #[must_use]
     pub const fn prepared_session(&self) -> &session::PreparedCreateSession;
+    #[must_use]
     pub const fn goal(&self) -> &goal_command::GoalUserCommand;
+    #[must_use]
     pub fn initial_content_digest(&self) -> [u8; 32];
+    #[must_use]
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub fn into_parts(
         self,

@@ -5,42 +5,49 @@
 ## max_timeline_window_items
 
 ```rust
+#[must_use]
 pub const fn max_timeline_window_items() -> u16;
 ```
 
 ## max_timeline_window_bytes
 
 ```rust
+#[must_use]
 pub const fn max_timeline_window_bytes() -> u32;
 ```
 
 ## min_timeline_window_bytes
 
 ```rust
+#[must_use]
 pub const fn min_timeline_window_bytes() -> u32;
 ```
 
 ## max_timeline_detail_items
 
 ```rust
+#[must_use]
 pub const fn max_timeline_detail_items() -> u16;
 ```
 
 ## max_timeline_detail_bytes
 
 ```rust
+#[must_use]
 pub const fn max_timeline_detail_bytes() -> u32;
 ```
 
 ## min_timeline_detail_bytes
 
 ```rust
+#[must_use]
 pub const fn min_timeline_detail_bytes() -> u32;
 ```
 
 ## timeline_detail_envelope_bytes
 
 ```rust
+#[must_use]
 pub const fn timeline_detail_envelope_bytes() -> u32;
 ```
 
@@ -50,7 +57,9 @@ pub const fn timeline_detail_envelope_bytes() -> u32;
 pub struct TimelineAddress(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl TimelineAddress {
+    #[must_use]
     pub const fn new(sequence: nonzero::NonZeroU64) -> Self;
+    #[must_use]
     pub const fn sequence(self) -> nonzero::NonZeroU64;
 }
 ```
@@ -92,7 +101,9 @@ impl TimelineWindowLimits {
         max_items: u16,
         max_projected_bytes: u32,
     ) -> result::Result<Self, TimelineWindowLimitError>;
+    #[must_use]
     pub const fn max_items(self) -> u16;
+    #[must_use]
     pub const fn max_projected_bytes(self) -> u32;
 }
 ```
@@ -233,7 +244,9 @@ impl TimelineDetailLimits {
         max_items: u16,
         max_projected_bytes: u32,
     ) -> result::Result<Self, TimelineDetailLimitError>;
+    #[must_use]
     pub const fn max_items(self) -> u16;
+    #[must_use]
     pub const fn max_projected_bytes(self) -> u32;
 }
 ```
@@ -478,6 +491,7 @@ pub trait SessionTimelineReader {
 pub struct ReadSessionTimelineService<Reader> {/* private */}
 // derives: fmt::Debug
 impl<Reader> ReadSessionTimelineService<Reader> {
+    #[must_use]
     pub const fn new(reader: Reader) -> Self;
 }
 impl<Reader: SessionTimelineReader> ReadSessionTimelineService<Reader> {

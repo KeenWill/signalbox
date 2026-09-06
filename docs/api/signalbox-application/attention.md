@@ -5,36 +5,42 @@
 ## max_attention_snapshot_items
 
 ```rust
+#[must_use]
 pub const fn max_attention_snapshot_items() -> u16;
 ```
 
 ## max_attention_goal_summary_characters
 
 ```rust
+#[must_use]
 pub const fn max_attention_goal_summary_characters() -> u16;
 ```
 
 ## max_attention_change_items
 
 ```rust
+#[must_use]
 pub const fn max_attention_change_items() -> u16;
 ```
 
 ## max_attention_title_characters
 
 ```rust
+#[must_use]
 pub const fn max_attention_title_characters() -> u16;
 ```
 
 ## max_attention_filter_tags
 
 ```rust
+#[must_use]
 pub const fn max_attention_filter_tags() -> u8;
 ```
 
 ## max_attention_filter_utf8_bytes
 
 ```rust
+#[must_use]
 pub const fn max_attention_filter_utf8_bytes() -> u16;
 ```
 
@@ -44,7 +50,9 @@ pub const fn max_attention_filter_utf8_bytes() -> u16;
 pub struct AttentionCursor(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl AttentionCursor {
+    #[must_use]
     pub const fn new(value: u64) -> Self;
+    #[must_use]
     pub const fn value(self) -> u64;
 }
 ```
@@ -112,7 +120,9 @@ pub enum AttentionContinuation {
 pub struct AttentionQuery {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl AttentionQuery {
+    #[must_use]
     pub fn hot_page() -> Self;
+    #[must_use]
     pub fn identity_page(after: option::Option<signalbox_domain::SessionId>) -> Self;
     pub fn try_new(
         search: option::Option<string::String>,

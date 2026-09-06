@@ -11,6 +11,7 @@ pub enum ApprovalJudgeDispatchProvenance {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ApprovalJudgeDispatchProvenance {
+    #[must_use]
     pub const fn into_uuid(self) -> uuid::Uuid;
 }
 ```
@@ -24,6 +25,7 @@ pub enum ApprovalJudgeDispatchAuthority {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ApprovalJudgeDispatchAuthority {
+    #[must_use]
     pub const fn dispatch(&self) -> ApprovalJudgeDispatchProvenance;
 }
 ```
@@ -49,13 +51,21 @@ pub struct ApprovalJudgePullRequestAuthorityInput {
 pub struct ApprovalJudgePullRequestAuthority {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ApprovalJudgePullRequestAuthority {
+    #[must_use]
     pub const fn new(input: ApprovalJudgePullRequestAuthorityInput) -> Self;
+    #[must_use]
     pub const fn dispatch(&self) -> ApprovalJudgeDispatchProvenance;
+    #[must_use]
     pub const fn repository(&self) -> &repo_watch::RepositorySlug;
+    #[must_use]
     pub const fn pull_request(&self) -> repo_watch::PullRequestNumber;
+    #[must_use]
     pub const fn head_sha(&self) -> &repo_watch::CommitSha;
+    #[must_use]
     pub const fn head_repository(&self) -> &repo_watch::RepositorySlug;
+    #[must_use]
     pub const fn head_branch(&self) -> &repo_watch::BranchName;
+    #[must_use]
     pub const fn base_branch(&self) -> &repo_watch::BranchName;
 }
 ```
@@ -77,9 +87,13 @@ pub struct ApprovalJudgeBranchAuthorityInput {
 pub struct ApprovalJudgeBranchAuthority {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ApprovalJudgeBranchAuthority {
+    #[must_use]
     pub const fn new(input: ApprovalJudgeBranchAuthorityInput) -> Self;
+    #[must_use]
     pub const fn dispatch(&self) -> ApprovalJudgeDispatchProvenance;
+    #[must_use]
     pub const fn repository(&self) -> &repo_watch::RepositorySlug;
+    #[must_use]
     pub const fn branch(&self) -> &repo_watch::BranchName;
 }
 ```
@@ -90,13 +104,17 @@ impl ApprovalJudgeBranchAuthority {
 pub struct ApprovalJudgeCompletionIdentities {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ApprovalJudgeCompletionIdentities {
+    #[must_use]
     pub const fn new(
         continuation_attempt: signalbox_domain::TurnAttemptId,
         failure_entry: context_frontier::SemanticTranscriptEntryId,
         terminal_frontier: context_frontier::ContextFrontierId,
     ) -> Self;
+    #[must_use]
     pub const fn continuation_attempt(self) -> signalbox_domain::TurnAttemptId;
+    #[must_use]
     pub const fn failure_entry(self) -> context_frontier::SemanticTranscriptEntryId;
+    #[must_use]
     pub const fn terminal_frontier(self) -> context_frontier::ContextFrontierId;
 }
 ```

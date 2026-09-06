@@ -5,12 +5,14 @@
 ## max_repo_watch_operations_page_items
 
 ```rust
+#[must_use]
 pub const fn max_repo_watch_operations_page_items() -> u16;
 ```
 
 ## max_repo_watch_activity_page_items
 
 ```rust
+#[must_use]
 pub const fn max_repo_watch_activity_page_items() -> u16;
 ```
 
@@ -227,6 +229,7 @@ pub struct RepoWatchPullRequestOperations {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RepoWatchPullRequestOperations {
+    #[must_use]
     pub fn from_state(
         state: &RepoWatchPullRequestState,
         facts: RepoWatchPullRequestOperationsFacts,
@@ -299,7 +302,9 @@ pub enum RepoWatchObligationReadiness {
 pub struct RepoWatchObligationId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl RepoWatchObligationId {
+    #[must_use]
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
+    #[must_use]
     pub const fn into_uuid(self) -> uuid::Uuid;
 }
 ```

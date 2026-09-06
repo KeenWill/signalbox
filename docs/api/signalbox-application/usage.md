@@ -5,24 +5,28 @@
 ## max_usage_call_page_items
 
 ```rust
+#[must_use]
 pub const fn max_usage_call_page_items() -> u16;
 ```
 
 ## max_usage_aggregate_groups
 
 ```rust
+#[must_use]
 pub const fn max_usage_aggregate_groups() -> u16;
 ```
 
 ## max_usage_aggregate_calls
 
 ```rust
+#[must_use]
 pub const fn max_usage_aggregate_calls() -> u16;
 ```
 
 ## max_usage_credential_profile_utf8_bytes
 
 ```rust
+#[must_use]
 pub const fn max_usage_credential_profile_utf8_bytes() -> u16;
 ```
 
@@ -48,7 +52,9 @@ pub struct UsageCredentialProfileLabel(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl UsageCredentialProfileLabel {
     pub fn new(label: string::String) -> result::Result<Self, UsageCredentialProfileLabelError>;
+    #[must_use]
     pub fn as_str(&self) -> &str;
+    #[must_use]
     pub fn into_string(self) -> string::String;
 }
 ```
@@ -73,6 +79,7 @@ pub struct UsageTimestampMicros(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl UsageTimestampMicros {
     pub const fn new(value: u64) -> result::Result<Self, UsageTimestampError>;
+    #[must_use]
     pub const fn get(self) -> u64;
 }
 ```
@@ -111,12 +118,15 @@ pub struct UsageTimeToExclusive(pub UsageTimestampMicros);
 pub struct UsageTimeRange {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl UsageTimeRange {
+    #[must_use]
     pub const fn all() -> Self;
     pub const fn new(
         from_inclusive: option::Option<UsageTimeFromInclusive>,
         to_exclusive: option::Option<UsageTimeToExclusive>,
     ) -> result::Result<Self, UsageTimeRangeError>;
+    #[must_use]
     pub const fn from_inclusive(self) -> option::Option<UsageTimestampMicros>;
+    #[must_use]
     pub const fn to_exclusive(self) -> option::Option<UsageTimestampMicros>;
 }
 ```
@@ -142,7 +152,9 @@ pub enum UsageCallScope {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl UsageCallScope {
+    #[must_use]
     pub const fn call_kind(self) -> UsageCallKind;
+    #[must_use]
     pub const fn turn(self) -> option::Option<signalbox_domain::TurnId>;
 }
 ```
@@ -201,6 +213,7 @@ pub struct UsageTokenAxes {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl UsageTokenAxes {
+    #[must_use]
     pub const fn coverage(self) -> UsageTokenCoverage;
 }
 ```
@@ -229,6 +242,7 @@ pub struct UsageSelection {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl UsageSelection {
+    #[must_use]
     pub const fn all() -> Self;
 }
 ```
@@ -263,6 +277,7 @@ pub struct UsageCallPageLimit(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl UsageCallPageLimit {
     pub const fn new(value: u16) -> result::Result<Self, UsageCallPageLimitError>;
+    #[must_use]
     pub const fn get(self) -> u16;
 }
 ```
@@ -357,7 +372,9 @@ impl UsageCallPage {
         continuation: UsageCallPageContinuation,
         limit: UsageCallPageLimit,
     ) -> result::Result<Self, UsageCallPageError>;
+    #[must_use]
     pub fn calls(&self) -> &[UsageCallEvidence];
+    #[must_use]
     pub const fn next(&self) -> option::Option<UsageCallCursor>;
 }
 ```
@@ -409,9 +426,13 @@ impl UsageAggregateGroup {
         tokens: UsageAggregateTokenAxes,
         cache_normalization: UsageCacheNormalization,
     ) -> result::Result<Self, UsageAggregateGroupError>;
+    #[must_use]
     pub const fn key(&self) -> &UsageAggregateKey;
+    #[must_use]
     pub const fn call_count(&self) -> u64;
+    #[must_use]
     pub const fn tokens(&self) -> UsageAggregateTokenAxes;
+    #[must_use]
     pub const fn cache_normalization(&self) -> UsageCacheNormalization;
 }
 ```
@@ -472,7 +493,9 @@ impl UsageAggregateReport {
         groups: vec::Vec<UsageAggregateGroup>,
         completeness: UsageAggregateCompleteness,
     ) -> result::Result<Self, UsageAggregateReportError>;
+    #[must_use]
     pub fn groups(&self) -> &[UsageAggregateGroup];
+    #[must_use]
     pub const fn completeness(&self) -> UsageAggregateCompleteness;
 }
 ```
@@ -502,6 +525,7 @@ pub trait UsageReader {
 pub struct UsageService<Reader> {/* private */}
 // derives: fmt::Debug
 impl<Reader> UsageService<Reader> {
+    #[must_use]
     pub const fn new(reader: Reader) -> Self;
 }
 impl<Reader: UsageReader> UsageService<Reader> {

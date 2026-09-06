@@ -255,6 +255,7 @@ pub enum RepoWatchEventKindNameV1 {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl RepoWatchEventKindNameV1 {
+    #[must_use]
     pub fn all() -> vec::Vec<Self>;
 }
 ```

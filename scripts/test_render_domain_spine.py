@@ -62,7 +62,7 @@ def fixture():
     item(6, None, 'impl', {**impl, 'trait': path('Read', 15), 'items': [5, 7]}, line=6)
     item(7, 'Output', 'assoc_type', {'generics': EMPTY_GENERICS, 'bounds': [], 'type': generic_t}, line=7)
     item(8, None, 'impl', {**impl, 'trait': path('Debug', 100), 'items': []}, line=2,
-         attrs=[{'other': '#[automatically_derived]'}])
+         attrs=['automatically_derived'])
     item(10, 'Event', 'enum', {'generics': EMPTY_GENERICS, 'variants': [11, 12, 14], 'impls': []}, line=10)
     item(11, 'Idle', 'variant', {'kind': 'plain', 'discriminant': None}, line=11)
     item(12, 'Value', 'variant', {'kind': {'tuple': [13]}, 'discriminant': None}, line=12)
@@ -78,7 +78,7 @@ def fixture():
     item(40, 'Token', 'struct', {'kind': 'unit', 'generics': EMPTY_GENERICS, 'impls': [41, 42, 43]}, line=40)
     token_impl = {**impl, 'for': {'resolved_path': path('Token', 40)}, 'items': []}
     item(41, None, 'impl', {**token_impl, 'trait': path('Clone', 101)}, line=40,
-         attrs=[{'other': '#[automatically_derived]'}])
+         attrs=['automatically_derived'])
     item(42, None, 'impl', {**token_impl, 'trait': path('Send', 102), 'is_synthetic': True}, line=40)
     item(43, None, 'impl', {**token_impl, 'trait': path('Borrow', 103), 'blanket_impl': {'generic': 'T'}}, line=40)
     paths = {
@@ -96,6 +96,51 @@ def fixture():
 
 
 class RenderDomainSpineTests(unittest.TestCase):
+    def test_caller_attributes_stay_above_types_variants_and_methods(self):
+        document = fixture()
+        document['index']['1']['attrs'] = [
+            {'must_use': {'reason': None}},
+            {'repr': {'kind': 'c', 'align': 8, 'packed': None, 'int': None}},
+            {'other': '#[allow(dead_code)]'},
+            {'other': '#[attr = Inline(Hint)]'},
+        ]
+        document['index']['3']['attrs'] = [{'must_use': {'reason': 'keep "value"\\bytes\n\x00'}}]
+        document['index']['2']['deprecation'] = {'since': None, 'note': 'use read'}
+        document['index']['10']['attrs'] = ['non_exhaustive']
+        document['index']['11']['attrs'] = ['non_exhaustive']
+        document['index']['17']['deprecation'] = {'since': '1.0', 'note': 'use fetch'}
+        renderer = Renderer(document)
+        record = renderer.block(renderer.item(1))
+        self.assertIn('#[must_use]\n#[repr(C, align(8))]\npub struct Record', record)
+        self.assertIn('    #[deprecated(note = "use read")]\n    pub value: T,', record)
+        self.assertIn('    #[must_use = "keep \\"value\\"\\\\bytes\\n\\u{0}"]\n    pub fn new', record)
+        self.assertNotIn('allow(dead_code)', record)
+        self.assertNotIn('Inline(Hint)', record)
+        self.assertIn('#[non_exhaustive]\npub enum Event', renderer.block(renderer.item(10)))
+        self.assertIn('    #[non_exhaustive]\n    Idle,', renderer.block(renderer.item(10)))
+        self.assertIn('    #[deprecated(since = "1.0", note = "use fetch")]\n    fn read',
+                      renderer.block(renderer.item(15)))
+
+    def test_handwritten_blanket_impl_keeps_generics_bounds_and_associated_items(self):
+        document = fixture()
+        implementation = document['index']['6']['inner']['impl']
+        implementation['blanket_impl'] = {'generic': 'T'}
+        implementation['for'] = {'generic': 'T'}
+        implementation['generics'] = {
+            'params': [{'name': 'T', 'kind': {'type': {
+                'bounds': [], 'default': None, 'is_synthetic': False}}}],
+            'where_predicates': [{'bound_predicate': {
+                'type': {'generic': 'T'}, 'generic_params': [], 'bounds': [{'trait_bound': {
+                    'trait': path('Debug', 100), 'generic_params': [], 'modifier': 'none'}}]}}],
+        }
+        renderer = Renderer(document)
+        block = renderer.block(renderer.item(15))
+        self.assertIn('impl<T> Read for T\nwhere\n    T: fmt::Debug,\n{', block)
+        self.assertIn('    fn read(&self) -> T;\n    type Output = T;', block)
+        self.assertNotIn('// derives: Read', block)
+        self.assertIn('// derives: fmt::Debug', renderer.block(renderer.item(1)))
+        self.assertNotIn('Borrow', renderer.block(renderer.item(40)))
+
     def test_struct_fields_and_impls_are_bare_declarations(self):
         renderer = Renderer(fixture())
         self.assertEqual(renderer.block(renderer.item(1)), '''## Record

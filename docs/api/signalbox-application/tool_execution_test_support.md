@@ -44,6 +44,7 @@ pub enum PreparedAttemptApproval {
 ## prepared_single_attempt_batch
 
 ```rust
+#[must_use]
 pub fn prepared_single_attempt_batch(
     identities: PreparedAttemptIdentities,
     proposal: PreparedAttemptProposal,
@@ -66,10 +67,12 @@ pub struct FixtureTransactionFailures<Error> {
 pub struct FixtureToolExecutionTransaction<Error> {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl<Error> FixtureToolExecutionTransaction<Error> {
+    #[must_use]
     pub const fn new(
         batch: tool_execution::ToolBatch,
         failures: FixtureTransactionFailures<Error>,
     ) -> Self;
+    #[must_use]
     pub const fn batch(&self) -> &tool_execution::ToolBatch;
 }
 impl<Error> ToolExecutionTransaction for FixtureToolExecutionTransaction<Error>
@@ -178,6 +181,7 @@ where
 pub struct RecordingToolExecutor<Executor> {/* private */}
 // derives: fmt::Debug
 impl<Executor> RecordingToolExecutor<Executor> {
+    #[must_use]
     pub fn new(inner: Executor) -> (Self, RecordedEvidence);
 }
 impl<Executor> ToolExecutor for RecordingToolExecutor<Executor>
@@ -204,6 +208,7 @@ where
 pub struct RecordedEvidence {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl RecordedEvidence {
+    #[must_use]
     pub fn take(&self) -> option::Option<ToolExecutorEvidence>;
 }
 ```

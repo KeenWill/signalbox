@@ -43,6 +43,33 @@ def fits(text):
     return len(text.splitlines()) < MAX_LINES and len(text.encode()) < MAX_BYTES
 
 
+def rust_string(value):
+    escapes = {'"': '\\"', '\\': '\\\\', '\n': '\\n', '\r': '\\r', '\t': '\\t'}
+    return '"' + ''.join(escapes.get(char, f'\\u{{{ord(char):x}}}' if ord(char) < 32 else char)
+                         for char in value) + '"'
+
+
+def attributes(item):
+    result = []
+    for attribute in item['attrs']:
+        if attribute == 'non_exhaustive':
+            result.append('#[non_exhaustive]')
+        elif isinstance(attribute, dict) and 'must_use' in attribute:
+            reason = attribute['must_use']['reason']
+            result.append('#[must_use' + (' = ' + rust_string(reason) if reason is not None else '') + ']')
+        elif isinstance(attribute, dict) and 'repr' in attribute:
+            value = attribute['repr']
+            parts = [{'rust': 'Rust', 'c': 'C'}.get(value['kind'], value['kind'])]
+            parts += [f'{key}({value[key]})' for key in ('align', 'packed') if value[key] is not None]
+            if value['int']:
+                parts.append(value['int'])
+            result.append('#[repr(' + ', '.join(parts) + ')]')
+    if item.get('deprecation'):
+        parts = [key + ' = ' + rust_string(value) for key, value in item['deprecation'].items() if value is not None]
+        result.append('#[deprecated' + ('(' + ', '.join(parts) + ')' if parts else '') + ']')
+    return ''.join(value + '\n' for value in result)
+
+
 def format_rust(code):
     fallback = []
     for line in code.splitlines():
@@ -245,7 +272,7 @@ class Renderer:
             return '/* private */'
         item = self.item(identity)
         prefix = ('pub ' if public else '') + item['name'] + ': ' if named else ('pub ' if public else '')
-        return prefix + self.type(item['inner']['struct_field'])
+        return attributes(item) + prefix + self.type(item['inner']['struct_field'])
 
     def shape(self, kind, *, public=False):
         if kind == 'unit':
@@ -258,7 +285,7 @@ class Renderer:
         body = kind.get('plain', kind.get('struct'))
         fields = [self.field(i, named=True, public=public) for i in body['fields']]
         if public:
-            lines = ['    ' + field + ',' for field in fields]
+            lines = [textwrap.indent(field + ',', '    ') for field in fields]
             if body['has_stripped_fields']:
                 lines.append('    /* private */')
             return ' {\n' + '\n'.join(lines) + '\n}'
@@ -267,6 +294,9 @@ class Renderer:
         return ' { ' + ', '.join(fields) + ' }'
 
     def declaration(self, item, *, associated=False):
+        return attributes(item) + self.declaration_body(item, associated=associated)
+
+    def declaration_body(self, item, *, associated=False):
         kind, body = next(iter(item['inner'].items()))
         name = item['name']
         generics = body.get('generics', {'params': [], 'where_predicates': []})
@@ -288,14 +318,14 @@ class Renderer:
                 line = variant['name'] + self.shape(value['kind'])
                 if value['discriminant']:
                     line += ' = ' + value['discriminant']['expr']
-                variants.append('    ' + line + ',')
+                variants.append(textwrap.indent(attributes(variant) + line + ',', '    '))
             return 'pub enum ' + generic_name + where + ' {\n' + '\n'.join(variants) + '\n}'
         if kind == 'trait':
             bounds = self.bounds(body['bounds'])
             header = 'pub ' + ('unsafe ' if body['is_unsafe'] else '') + ('auto ' if body['is_auto'] else '') + 'trait ' + generic_name
             header += ': ' + bounds if bounds else ''
             methods = [self.declaration(self.item(i), associated=True) for i in body['items']]
-            return header + where + ' {\n' + '\n'.join('    ' + m for m in methods) + '\n}'
+            return header + where + ' {\n' + '\n'.join(textwrap.indent(m, '    ') for m in methods) + '\n}'
         if kind in {'type_alias', 'assoc_type'}:
             bounds = self.bounds(body.get('bounds', []))
             return prefix + 'type ' + generic_name + (': ' + bounds if bounds else '') + where + (' = ' + self.type(body['type']) if body.get('type') else '') + ';'
@@ -320,7 +350,7 @@ class Renderer:
         header += self.type(body['for']) + self.where(generics)
         methods = [self.declaration(self.item(i), associated=bool(trait)) for i in body['items']
                    if trait or self.item(i)['visibility'] == 'public']
-        return header + ' {\n' + '\n'.join('    ' + m for m in methods) + '\n}' if methods else header + ' {}'
+        return header + ' {\n' + '\n'.join(textwrap.indent(m, '    ') for m in methods) + '\n}' if methods else header + ' {}'
 
     def block(self, item):
         kind, body = next(iter(item['inner'].items()))
@@ -348,7 +378,7 @@ class Renderer:
                 continue
             if value['blanket_impl'] and BLANKET_TRAIT.fullmatch(full):
                 continue
-            if 'automatically_derived' in json.dumps(implementation['attrs']) or value['blanket_impl']:
+            if 'automatically_derived' in implementation['attrs']:
                 derives.append(self.path(trait))
             else:
                 declarations.append(self.impl_block(implementation))

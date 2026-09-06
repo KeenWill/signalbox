@@ -5,18 +5,21 @@
 ## max_search_query_bytes
 
 ```rust
+#[must_use]
 pub const fn max_search_query_bytes() -> usize;
 ```
 
 ## max_search_page_items
 
 ```rust
+#[must_use]
 pub const fn max_search_page_items() -> u16;
 ```
 
 ## max_search_snippet_bytes
 
 ```rust
+#[must_use]
 pub const fn max_search_snippet_bytes() -> usize;
 ```
 
@@ -29,12 +32,14 @@ pub const MAX_SEARCH_HIGHLIGHTS_PER_RESULT: usize;
 ## max_search_highlights_per_result
 
 ```rust
+#[must_use]
 pub const fn max_search_highlights_per_result() -> usize;
 ```
 
 ## max_search_projection_text_bytes
 
 ```rust
+#[must_use]
 pub const fn max_search_projection_text_bytes() -> usize;
 ```
 
@@ -60,6 +65,7 @@ pub struct SearchText(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl SearchText {
     pub fn try_new(value: string::String) -> result::Result<Self, SearchTextError>;
+    #[must_use]
     pub fn as_str(&self) -> &str;
 }
 ```
@@ -101,6 +107,7 @@ pub struct SearchPageLimit(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl SearchPageLimit {
     pub const fn new(value: u16) -> result::Result<Self, SearchPageLimitError>;
+    #[must_use]
     pub const fn get(self) -> u16;
 }
 ```
@@ -111,8 +118,11 @@ impl SearchPageLimit {
 pub struct SearchCursor {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl SearchCursor {
+    #[must_use]
     pub const fn new(address: TimelineAddress, projection: nonzero::NonZeroU64) -> Self;
+    #[must_use]
     pub const fn address(self) -> TimelineAddress;
+    #[must_use]
     pub const fn projection(self) -> nonzero::NonZeroU64;
 }
 ```
@@ -152,7 +162,9 @@ pub enum SearchContentClass {
 pub struct SearchArtifactId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl SearchArtifactId {
+    #[must_use]
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
+    #[must_use]
     pub const fn into_uuid(self) -> uuid::Uuid;
 }
 ```
@@ -179,6 +191,7 @@ pub struct SearchProjectionText(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl SearchProjectionText {
     pub fn try_new(value: string::String) -> result::Result<Self, SearchProjectionTextError>;
+    #[must_use]
     pub fn as_str(&self) -> &str;
 }
 ```
@@ -312,6 +325,7 @@ pub trait SearchReader {
 pub struct SearchService<Reader> {/* private */}
 // derives: fmt::Debug
 impl<Reader> SearchService<Reader> {
+    #[must_use]
     pub const fn new(reader: Reader) -> Self;
 }
 impl<Reader: SearchReader> SearchService<Reader> {

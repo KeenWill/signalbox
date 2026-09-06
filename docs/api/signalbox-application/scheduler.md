@@ -132,6 +132,7 @@ impl EligibilitySweepBatch {
         dispatch_starts: set::HashSet<signalbox_domain::SessionId>,
         continuation: bool,
     ) -> Self;
+    #[must_use]
     pub fn with_unmonitored(self, unmonitored: set::HashSet<signalbox_domain::SessionId>) -> Self;
     pub fn into_parts(
         self,
