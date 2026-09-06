@@ -1196,52 +1196,6 @@ impl GoalRepository {
     }
 }
 
-/// Applies scheduler failure authority inside a transaction that already owns
-/// the session lock and has terminalized the exact failed turn.
-///
-/// Approval-judge headless closeout uses this boundary so its turn failure,
-/// blocked goal event, repository-watch requeue, and singleton release share
-/// one commit. The ordinary public method remains the entry point for
-/// independent scheduler passes.
-pub(crate) async fn block_execution_failure_locked(
-    connection: &mut PgConnection,
-    session: SessionId,
-    need: GoalNeed,
-    provenance: GoalSchedulerProvenance,
-) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
-    let Some(goal) = load_goal_from_connection(connection, session).await? else {
-        return Ok(GoalTransitionOutcome::GoalNotAttached);
-    };
-    if let Some(event) = recorded_scheduler_failure(&goal, provenance.turn()) {
-        return Ok(GoalTransitionOutcome::Applied(event.clone()));
-    }
-    let generation = goal_turn_generation(connection, session, provenance.turn()).await?;
-    if generation != Some(goal.current().generation()) {
-        return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-    }
-    if current_goal_turn(connection, session, goal.current().generation()).await?
-        != Some(provenance.turn())
-    {
-        return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-    }
-    if goal_turn_terminal_state(connection, session, provenance.turn()).await?
-        != GoalTurnTerminalState::Unsuccessful
-    {
-        return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-    }
-    let transitioned = match goal.block_execution_failure(need, provenance) {
-        Ok(goal) => goal,
-        Err(error) => return Ok(GoalTransitionOutcome::Rejected(error)),
-    };
-    let event = latest_event(&transitioned)?;
-    insert_event(connection, session, &event).await?;
-    // Same monitor-visibility requirement as `handle_system_transition`: a
-    // blocked transition that retires a queued turn from the live projection
-    // must surface as a durable outbox event.
-    retire_ineligible_queued_goal_turn(connection, session).await?;
-    Ok(GoalTransitionOutcome::Applied(event))
-}
-
 /// Records an operator-required recovery cause inside the transaction that
 /// terminalizes the exact failed turn.
 pub(crate) async fn record_execution_failure_recovery_cause(

@@ -13,18 +13,17 @@ use signalbox_application::{
 use signalbox_domain::{
     ActiveTurnPhase, BranchName, CommissionedDispatchId, CommitSha, ContextFrontierId,
     DelegateApprovalRecommendation, DelegateToolApproval, DirectModelSelection,
-    FrozenModelSelection, GoalGeneration, GoalGenerationSnapshot, GoalNeed,
-    GoalSchedulerProvenance, GoalStatement, ModelCallId, ModelTargetCatalog, ProviderModelIdentity,
-    ProviderReportedTokenUsage, PullRequestNumber, RepositorySlug, ResolvedProviderTarget,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, SessionSystemPrompt,
-    SessionTemplateName, ToolApprovalPosture, ToolDecisionRationale, ToolRequest, ToolRequestId,
-    TurnAttemptId, TurnId, TurnTerminalCause,
+    FrozenModelSelection, GoalGeneration, GoalGenerationSnapshot, GoalStatement, ModelCallId,
+    ModelTargetCatalog, ProviderModelIdentity, ProviderReportedTokenUsage, PullRequestNumber,
+    RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
+    SessionId, SessionSystemPrompt, SessionTemplateName, ToolApprovalPosture,
+    ToolDecisionRationale, ToolRequest, ToolRequestId, TurnAttemptId, TurnId, TurnTerminalCause,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
     ModelCredentialFamilyCatalog, commit_failure_is_ambiguous,
-    goal::{self, GoalRepositoryError, GoalTransitionOutcome, load_goal_from_connection},
+    goal::{self, GoalRepositoryError, load_goal_from_connection},
     mapping::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         ToolApprovalDecisionSourceStorageKind, approval_judge_recommendation_from_str,
@@ -596,15 +595,16 @@ impl PostgresApprovalJudgeRepository {
                 CompleteApprovalJudgeOutcome::Decided
             }
             None => {
-                if unattended_escalation_applies(&mut transaction, prepared, authority_stands)
-                    .await?
+                if let Some(dispatch) =
+                    unattended_escalation_dispatch(&mut transaction, prepared, authority_stands)
+                        .await?
                 {
                     persist_headless_escalation(
                         &mut transaction,
                         prepared,
                         decision.batch(),
                         identities,
-                        authority_stands,
+                        dispatch,
                         &mut next_closed_result_entry,
                     )
                     .await?;
@@ -711,9 +711,6 @@ impl PostgresApprovalJudgeRepository {
     }
 }
 
-/// Need text for the execution-failure block an unattended escalation appends.
-const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. No automatic resumption is scheduled. Resume this goal only to continue this session by hand: a further escalation on work you resumed waits for you instead of failing the turn again.";
-
 /// The generation a repository-watch dispatch commissions in the session it
 /// creates, which is the only generation its authority describes.
 ///
@@ -722,44 +719,32 @@ const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated
 /// watch identifies the commission it owns through the same provenance.
 const DISPATCH_COMMISSIONED_GENERATION: GoalGeneration = GoalGeneration::new(NonZeroU64::MIN);
 
-/// Whether this escalation takes the unattended path rather than parking.
+/// Returns the commissioned dispatch for an unattended escalation closeout.
 ///
 /// Three conditions, each answering a different question about whether a user
 /// is there and whether the path has anything left to do.
 ///
-/// Without dispatch authority the session is an ordinary one, and the ordinary
-/// park is what its escalation gets. A steer accepted while this turn awaited
-/// its judge is a user attending the session, and is also the one shape the
-/// unattended path cannot durably take: terminalizing a turn a
+/// Without commissioned dispatch authority the session takes the ordinary
+/// park. A steer accepted while this turn awaited its judge is a user attending
+/// the session, and is also the one shape the unattended path cannot durably
+/// take: terminalizing a turn a
 /// `pending_steering` input still names violates
 /// `turn_lifecycle_pending_steering_closed` and would fail the whole
-/// completion, leaving the request parked and the judge call in flight, while
-/// reclassifying the steer into a queued successor would start fresh work in a
-/// session whose dispatch is being released for redispatch.
+/// completion, leaving the request parked and the judge call in flight.
 ///
-/// Work a repository-watch session has already escalated once is the third.
-/// Its exceptional block is never resumed automatically, so a later turn in
-/// that session is work an operator resumed and waits for them. An
-/// operator-commissioned session is attended by the commissioning operator:
-/// its completed delegate escalation is the bounded automatic decision's
-/// exhaustion point and parks the exact request for that operator instead of
-/// spending a goal retry on the same undecided action.
-///
-/// Standing authority is the last word on it. Withdrawn authority means the
-/// goal ended while this judge was in flight, so nobody is behind the work
-/// after all and it is terminalized rather than parked for a user who will
-/// never come. A turn no escalation preceded is the dispatched work itself,
-/// including one an ordinary execution failure had automatically resumed, and
-/// stays unattended.
+/// An operator-commissioned session is attended by the commissioning operator,
+/// so its completed delegate escalation parks while authority stands. Withdrawn
+/// authority means the goal ended while this judge was in flight, so nobody is
+/// behind the work and the turn is terminalized.
 ///
 /// [`goal mode`]: ../../../docs/spec/goal-mode.md
-async fn unattended_escalation_applies(
+async fn unattended_escalation_dispatch(
     connection: &mut PgConnection,
     prepared: &PreparedApprovalJudge,
     authority_stands: bool,
-) -> Result<bool, ApprovalJudgeRepositoryError> {
+) -> Result<Option<CommissionedDispatchId>, ApprovalJudgeRepositoryError> {
     let Some(dispatch) = prepared.session_context.dispatch() else {
-        return Ok(false);
+        return Ok(None);
     };
     if turn_awaits_pending_steering(
         connection,
@@ -768,11 +753,13 @@ async fn unattended_escalation_applies(
     )
     .await?
     {
-        return Ok(false);
+        return Ok(None);
     }
     match dispatch.dispatch() {
-        ApprovalJudgeDispatchProvenance::Commissioned(_) => Ok(!authority_stands),
-        ApprovalJudgeDispatchProvenance::RepoWatch(_) => Ok(false),
+        ApprovalJudgeDispatchProvenance::Commissioned(dispatch) if !authority_stands => {
+            Ok(Some(dispatch))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -807,18 +794,11 @@ async fn persist_headless_escalation(
     prepared: &PreparedApprovalJudge,
     batch: &signalbox_domain::ToolBatch,
     identities: ApprovalJudgeCompletionIdentities,
-    authority_stands: bool,
+    dispatch: CommissionedDispatchId,
     next_closed_result_entry: &mut impl FnMut(ToolRequestId) -> SemanticTranscriptEntryId,
 ) -> Result<(), ApprovalJudgeRepositoryError> {
     let session = prepared.request.session();
     let turn = prepared.request.turn();
-    let dispatch = prepared
-        .session_context
-        .dispatch()
-        .map(ApprovalJudgeDispatchAuthority::dispatch)
-        .ok_or(ApprovalJudgeCorruption::Missing(
-            "headless dispatch authority",
-        ))?;
     let predecessor_attempt: Uuid = sqlx::query_scalar(
         "SELECT turn_attempt_id FROM model_call
           WHERE model_call_id = $1 AND session_id = $2 AND turn_id = $3",
@@ -1003,69 +983,25 @@ async fn persist_headless_escalation(
         },
     )
     .await?;
-    let audited = match dispatch {
-        ApprovalJudgeDispatchProvenance::RepoWatch(_) => {
-            return Err(ApprovalJudgeCorruption::Inconsistent(
-                "retired repository-watch dispatch authority",
-            )
-            .into());
-        }
-        ApprovalJudgeDispatchProvenance::Commissioned(dispatch) => sqlx::query(
-            "INSERT INTO commissioned_dispatch_headless_approval_escalation
-                    (model_call_id, request_id, dispatch_id, session_id, turn_id,
-                     terminal_attempt_id, failure_entry_id, terminal_frontier_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        )
-        .bind(prepared.call.into_uuid())
-        .bind(tool_request_id_to_uuid(prepared.request.id()))
-        .bind(dispatch.as_uuid())
-        .bind(session_id_to_uuid(session))
-        .bind(turn_id_to_uuid(turn))
-        .bind(attempt)
-        .bind(failure_entry.into_uuid())
-        .bind(identities.terminal_frontier().into_uuid())
-        .execute(&mut *connection)
-        .await
-        .map_err(classify_insert)?
-        .rows_affected(),
-    };
+    let audited = sqlx::query(
+        "INSERT INTO commissioned_dispatch_headless_approval_escalation
+                (model_call_id, request_id, dispatch_id, session_id, turn_id,
+                 terminal_attempt_id, failure_entry_id, terminal_frontier_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(prepared.call.into_uuid())
+    .bind(tool_request_id_to_uuid(prepared.request.id()))
+    .bind(dispatch.as_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(attempt)
+    .bind(failure_entry.into_uuid())
+    .bind(identities.terminal_frontier().into_uuid())
+    .execute(&mut *connection)
+    .await
+    .map_err(classify_insert)?
+    .rows_affected();
     require_single(audited, "headless escalation audit")?;
-
-    if authority_stands && matches!(dispatch, ApprovalJudgeDispatchProvenance::RepoWatch(_)) {
-        // Deliberately not routed through `PostgresGoalPassDisposition`, which
-        // owns the bounded automatic resumption every other execution-failure
-        // block receives (`docs/spec/goal-mode.md`). Two reasons, both stated
-        // by that page's repository-watch exception. It must commit inside this
-        // transaction, atomically with the terminalization, the audit row, and
-        // the release attempt below; and the retry this failure is owed already
-        // exists and is a different one — repository watch redispatches the
-        // work under a fresh dispatch, so resuming the goal here would re-run
-        // the same escalating turn against a request no user is attending, up
-        // to the resumption budget, beside that redispatch. Where that
-        // redispatch is withheld, because the rule was deactivated or the pull
-        // request closed, the work is not wanted at all and resuming it is
-        // worse still. The need text above therefore names the repair itself
-        // rather than promising resumption. A commissioned dispatch owns no
-        // redispatch, so its terminal turn is left pursuing for the ordinary
-        // goal disposition adapter and durable eligibility sweep to reconcile
-        // into a bounded execution-failure resumption.
-        let need = GoalNeed::try_new(String::from(HEADLESS_ESCALATION_GOAL_NEED))
-            .map_err(|_| ApprovalJudgeCorruption::Inconsistent("headless escalation goal need"))?;
-        let outcome = goal::block_execution_failure_locked(
-            connection,
-            session,
-            need,
-            GoalSchedulerProvenance::new(turn),
-        )
-        .await
-        .map_err(map_goal_error)?;
-        if !matches!(outcome, GoalTransitionOutcome::Applied(_)) {
-            return Err(ApprovalJudgeCorruption::Inconsistent(
-                "headless escalation goal transition",
-            )
-            .into());
-        }
-    }
     Ok(())
 }
 
