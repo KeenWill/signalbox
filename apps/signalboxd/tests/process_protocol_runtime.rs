@@ -734,7 +734,7 @@ where
         let witness = self.witness.clone();
         async move {
             let batch = self.inner.find_sessions().await?;
-            let (sessions, _dispatch_starts, continuation) = batch.clone().into_parts();
+            let (sessions, continuation) = batch.clone().into_parts();
             witness.record_batch(&sessions, continuation);
             Ok(batch)
         }
@@ -766,10 +766,7 @@ where
         Pass::failure_turn(error)
     }
 
-    // The decorator must forward every boundary the inner pass overrides.
-    // Inheriting the trait defaults here silently drops the composed pass's
-    // occupancy-expiry handoff and its reserved dispatch-start lane, which the
-    // fleet-soak scenarios below depend on.
+    // The decorator must forward the inner pass's occupancy-expiry handoff.
     fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>> {
         self.inner.occupancy_expiry_handler()
     }
@@ -779,19 +776,6 @@ where
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.inner.run(session);
-        let witness = self.witness.clone();
-        async move {
-            let outcome = execution.await;
-            witness.record_processed_session(session);
-            outcome
-        }
-    }
-
-    fn run_dispatch_start(
-        &mut self,
-        session: SessionId,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        let execution = self.inner.run_dispatch_start(session);
         let witness = self.witness.clone();
         async move {
             let outcome = execution.await;

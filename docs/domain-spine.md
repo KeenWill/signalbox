@@ -10234,7 +10234,6 @@ pub enum EligibilityNudgeOutcome {
 
 pub trait EligibilityNudge {
     fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome;
-    fn nudge_dispatch_start(&self, session: SessionId) -> EligibilityNudgeOutcome;
 }
 
 pub trait EligibilitySweep {
@@ -10248,14 +10247,9 @@ pub trait EligibilitySweep {
 pub struct EligibilitySweepBatch { /* private */ }
 impl EligibilitySweepBatch {
     pub fn new(sessions: Vec<SessionId>, continuation: bool) -> Self;
-    pub fn with_dispatch_starts(
-        sessions: Vec<SessionId>,
-        dispatch_starts: HashSet<SessionId>,
-        continuation: bool,
-    ) -> Self;
     #[must_use]
     pub fn with_unmonitored(self, unmonitored: HashSet<SessionId>) -> Self;
-    pub fn into_parts(self) -> (Vec<SessionId>, HashSet<SessionId>, bool);
+    pub fn into_parts(self) -> (Vec<SessionId>, bool);
     // accessors: unmonitored()
 }
 
@@ -10263,12 +10257,7 @@ pub trait EligibilityWorkSource {
     type Error;
 
     fn next(&mut self) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
-    fn take_returned_dispatch_start(&mut self, _session: SessionId) -> bool;
     fn take_returned_unmonitored(&mut self, _session: SessionId) -> bool;
-    fn take_pending_dispatch_start(&mut self) -> Option<SessionId>;
-    fn next_pending_dispatch_start(
-        &mut self,
-    ) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
 }
 
 pub trait EligibilityPass {
@@ -10278,10 +10267,6 @@ pub trait EligibilityPass {
     fn failure_turn(_error: &Self::Error) -> Option<TurnId>;
     fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>>;
     fn run(
-        &mut self,
-        session: SessionId,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
-    fn run_dispatch_start(
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;

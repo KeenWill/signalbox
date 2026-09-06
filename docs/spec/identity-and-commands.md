@@ -65,10 +65,8 @@ nothing measures the effect.
 
 When the number of identities a transition needs is known only under the
 repository lock, orchestration passes a generator closure into the transaction
-port, except the repository-watch dispatch obligation, whose identity the
-recording statement mints. Why: the domain transition receives a typed identity,
-the domain stays generation-free and deterministic, and no inventory read
-precedes the lock.
+port. Why: the domain transition receives a typed identity, the domain stays
+generation-free and deterministic, and no inventory read precedes the lock.
 
 Each command's comparison payload and result live in typed relational records,
 so they stay reviewable and constraint-checked; there is no universal JSONB or
@@ -115,9 +113,8 @@ request construction and again at persistence decoding. Why: they are common
 accidental defaults and would otherwise become permanent user-global claims.
 
 Orchestration generates each fresh identity candidate immediately before the
-domain transition that creates the fact, except the repository-watch dispatch
-obligation, whose identifier Postgres generates in the statement that records
-it. No Postgres column has an identity-generating default.
+domain transition that creates the fact. No Postgres column has an
+identity-generating default.
 
 Recovery reconstitutes committed facts under their stored identities; the
 startup scan mints identities only for the new facts it records.

@@ -425,7 +425,7 @@ enum CliCommand {
     Session(SessionDelegationArguments),
     /// Commission, inspect, or transition one session goal.
     Goal(GoalArguments),
-    /// Show what repository-watch automation is working on now.
+    /// Show lifecycle health metrics and current deadline violations.
     Status,
     /// List current sessions.
     List,

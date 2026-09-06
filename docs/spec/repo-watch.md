@@ -58,7 +58,8 @@ The module schema contains twelve tables:
   repository row fences complete frontier commits with a generation and the
   digest of the last candidate; a generation mismatch is stale unless the
   complete frontier and ordered event batch exactly replay the immediately
-  succeeding commit.
+  succeeding commit. A candidate equal to the stored frontier advances no
+  generation when it carries no events and is rejected when it carries events.
 - `frontier` holds one mutable occurrence counter per recurring event stream; an
   advance is an UPSERT and a retired pull-request stream is releasable by
   DELETE.
@@ -69,7 +70,8 @@ The module schema contains twelve tables:
   `rule_revision` retains revision history needed by module dispatch records;
   `rule_field_fingerprint` binds each identity field to its checked digest.
 - `dispatch_ledger` records command identity, dispatch reference, rule revision,
-  source event, command family, and settlement.
+  source event, command family, an opaque core encoding of the exact checked
+  payload, and settlement.
 - `webhook_delivery`, `webhook_body`, and `webhook_disposition` retain one
   authenticated delivery under its caller-selected expiry.
 - `core_event_cursor` records module application progress.
@@ -89,13 +91,18 @@ mints core identities.
 Lifecycle reactions accept only `session_terminal` or `goal_changed` inputs and
 only `release_start` or sticky-stop lifecycle commands. These are the command
 forms used for convergence release and stale-work termination; no module lease
-table or scheduler join exists.
+table or scheduler join exists. Each reaction in a multi-action batch has its
+own one-based ordinal. A reaction naming a committed dispatch remains admissible
+after its rule is deactivated; deactivation prevents only new matched
+dispatches.
 
 The module records a command in `dispatch_ledger` before submission and applies
 `command_settled` events to pending ledger rows. Identity reuse is idempotent
 only when all retained command metadata agrees. One dispatch reference names
 exactly one rule revision and event evaluation, including its complete ordered
-action batch.
+action batch. Recovery replans only to rediscover that evaluation, then core
+decodes and resubmits the exact retained payload rather than newly resolved
+template or configuration values.
 
 ## Ingest
 
