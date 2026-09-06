@@ -652,38 +652,75 @@ fn provider_compaction_suffix_completes_durable_prefix(
 }
 
 fn preceding_durable_parts_end_with(parts: &[AssistantPart], expected: &str) -> bool {
-    parts.iter().any(|part| match part {
-        AssistantPart::Text(text) => text.ends_with(expected),
-        AssistantPart::Thinking { text, signature } => {
-            text.ends_with(expected)
-                || signature
-                    .as_deref()
-                    .is_some_and(|signature| signature.ends_with(expected))
+    // Prefix lengths are the bounded rolling tails of every viable ordered
+    // field path. Retaining earlier lengths lets unrelated structured fields
+    // be skipped without retaining their provider-controlled contents.
+    let mut matched_prefix_lengths = vec![0];
+    parts.iter().any(|part| {
+        let mut inspect = |fragment: &str| {
+            let prior_matches = matched_prefix_lengths.clone();
+            for prior_length in prior_matches {
+                let next_length =
+                    longest_prefix_suffix(&expected[..prior_length], fragment, expected);
+                if next_length == expected.len() {
+                    return true;
+                }
+                if !matched_prefix_lengths.contains(&next_length) {
+                    matched_prefix_lengths.push(next_length);
+                }
+            }
+            false
+        };
+
+        match part {
+            AssistantPart::Text(text) => inspect(text),
+            AssistantPart::Thinking { text, signature } => {
+                inspect(text) || signature.as_deref().is_some_and(&mut inspect)
+            }
+            AssistantPart::RedactedThinking { data } => inspect(data),
+            AssistantPart::ProviderCompaction { block_json } => {
+                serde_json::from_str::<serde_json::Value>(block_json)
+                    .is_ok_and(|block| inspect_json_strings(&block, &mut inspect))
+            }
+            AssistantPart::ToolCall(proposal) => {
+                inspect(proposal.id.as_str())
+                    || inspect(proposal.name.as_str())
+                    || serde_json::from_str::<serde_json::Value>(&proposal.arguments_json)
+                        .is_ok_and(|arguments| inspect_json_strings(&arguments, &mut inspect))
+            }
+            AssistantPart::SuppressedToolCall(name) => inspect(name.as_str()),
         }
-        AssistantPart::RedactedThinking { data } => data.ends_with(expected),
-        AssistantPart::ProviderCompaction { block_json } => {
-            serde_json::from_str::<serde_json::Value>(block_json)
-                .is_ok_and(|block| json_strings_end_with(&block, expected))
-        }
-        AssistantPart::ToolCall(proposal) => {
-            proposal.id.as_str().ends_with(expected)
-                || proposal.name.as_str().ends_with(expected)
-                || serde_json::from_str::<serde_json::Value>(&proposal.arguments_json)
-                    .is_ok_and(|arguments| json_strings_end_with(&arguments, expected))
-        }
-        AssistantPart::SuppressedToolCall(name) => name.as_str().ends_with(expected),
     })
 }
 
-fn json_strings_end_with(value: &serde_json::Value, expected: &str) -> bool {
+fn longest_prefix_suffix(prefix: &str, fragment: &str, expected: &str) -> usize {
+    let mut fragment_start = fragment.len().saturating_sub(expected.len());
+    while !fragment.is_char_boundary(fragment_start) {
+        fragment_start += 1;
+    }
+    let fragment_tail = &fragment[fragment_start..];
+    let mut candidate = String::with_capacity(prefix.len() + fragment_tail.len());
+    candidate.push_str(prefix);
+    candidate.push_str(fragment_tail);
+
+    expected
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(expected.len()))
+        .rev()
+        .find(|length| candidate.ends_with(&expected[..*length]))
+        .unwrap_or(0)
+}
+
+fn inspect_json_strings(value: &serde_json::Value, inspect: &mut impl FnMut(&str) -> bool) -> bool {
     match value {
-        serde_json::Value::String(value) => value.ends_with(expected),
+        serde_json::Value::String(value) => inspect(value),
         serde_json::Value::Array(values) => values
             .iter()
-            .any(|value| json_strings_end_with(value, expected)),
-        serde_json::Value::Object(fields) => fields.iter().any(|(name, value)| {
-            name.ends_with(expected) || json_strings_end_with(value, expected)
-        }),
+            .any(|value| inspect_json_strings(value, inspect)),
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            .any(|(name, value)| inspect(name) || inspect_json_strings(value, inspect)),
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
             false
         }
@@ -1924,6 +1961,45 @@ mod tests {
                 Some("credential_in_provider_compaction")
             );
         }
+    }
+
+    #[test]
+    fn credential_prefix_spanning_multiple_tool_parts_and_compaction_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::ToolUse,
+                content: vec![
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call-1"),
+                        name: ToolName::new("key"),
+                        arguments_json: r#"{"value":"safe"}"#.to_string(),
+                    }),
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call-2"),
+                        name: ToolName::new("_"),
+                        arguments_json: r#"{"value":"safe"}"#.to_string(),
+                    }),
+                    AssistantPart::ProviderCompaction {
+                        block_json: r#"{"type":"compaction","content":"loop summary","encrypted_content":"opaque"}"#.to_string(),
+                    },
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential spanning multiple durable parts is rejected");
+        };
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
     }
 
     #[test]
