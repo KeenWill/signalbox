@@ -115,12 +115,12 @@ pub enum ModelConversationMessage {
     ImportedUser {
         source: context_frontier::SemanticTranscriptEntryRef,
         imported_entry: signalbox_domain::ImportedTranscriptEntryId,
-        content: imported_conversation::ImportedText,
+        content: structured_value::ImportedText,
     },
     ImportedAssistant {
         source: context_frontier::SemanticTranscriptEntryRef,
         imported_entry: signalbox_domain::ImportedTranscriptEntryId,
-        content: imported_conversation::ImportedText,
+        content: structured_value::ImportedText,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
