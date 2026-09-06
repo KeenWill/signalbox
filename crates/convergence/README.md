@@ -31,6 +31,8 @@ The [policy example](examples/repository.toml) supplies reviewer identities,
 request and summary grammars, root completion reaction, check exemptions,
 pagination bounds, and escalation wave caps. Check patterns use case-insensitive
 `*` and `?` matching. TOML and JSON policy files carry the same fields.
+`--repo owner/name` selects the live repository instead of the policy's
+repository.
 
 The unmodified differential reference is
 [reference.py](../../tooling/convergence-reconciler/reference.py) from
@@ -40,7 +42,9 @@ configuration shape follows
 the evidence rules; it is not a consumer of this crate. The harness additionally
 applies the [repository-watch contract](../../docs/spec/repo-watch.md) requiring
 at least one gating check. An empty or entirely exempt inventory cannot
-converge.
+converge. The harness also applies the
+[review-workflow identity contract](../../docs/spec/review-workflows.md): a
+change of open or closed state between observations invalidates the snapshot.
 
 Run `python3 tooling/convergence-reconciler/differential.py` after building the
 CLI. The harness compares convergence and the complete reason set for every

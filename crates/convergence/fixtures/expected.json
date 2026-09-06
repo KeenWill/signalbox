@@ -58,6 +58,9 @@
       "check-inventory-unsettled"
     ]
   },
+  "mutations/closed-then-reopened.json": {
+    "error": "pull request changed after its convergence snapshot"
+  },
   "mutations/comment-only-head.json": {
     "converged": false,
     "reasons": [

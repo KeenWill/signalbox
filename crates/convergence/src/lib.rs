@@ -78,7 +78,12 @@ impl ConvergencePolicy {
         }
         for reviewer in &self.reviewers {
             regex::Regex::new(&reviewer.request_pattern)?;
-            regex::Regex::new(&reviewer.verdict_pattern)?;
+            if regex::Regex::new(&reviewer.verdict_pattern)?.captures_len() < 3 {
+                return Err(Error::Evidence(
+                    "verdict_pattern must capture completion timestamp and reviewed revision"
+                        .into(),
+                ));
+            }
         }
         Ok(())
     }

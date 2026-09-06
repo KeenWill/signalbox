@@ -485,7 +485,7 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
         checked_head_oid: node["headRef"]["target"]["oid"].as_str().map(str::to_owned),
         is_draft: yes(&node["isDraft"]),
         review_decision: node["reviewDecision"].as_str().map(str::to_owned),
-        check_inventory_stable: Some(stable),
+        check_inventory_stable: stable,
         review_threads: threads,
         quiet_review_head_oids: Vec::new(),
         planning_only: false,
@@ -719,6 +719,7 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
         });
     let identity_changed = current["state"] != "OPEN"
         || [
+            "state",
             "baseRefName",
             "baseRefOid",
             "headRefName",

@@ -18,6 +18,12 @@ fn run() -> Result<u8, Error> {
     let command = arguments.next().ok_or_else(|| Error::Evidence("usage: signalbox-converge record|evaluate --pr N|--fixture file --policy file [--out file]".into()))?;
     let mut options = BTreeMap::new();
     while let Some(key) = arguments.next() {
+        if !matches!(
+            key.as_str(),
+            "--policy" | "--state" | "--fixture" | "--pr" | "--out" | "--repo"
+        ) {
+            return Err(Error::Evidence(format!("unknown option {key}")));
+        }
         let value = arguments
             .next()
             .ok_or_else(|| Error::Evidence(format!("missing value for {key}")))?;
@@ -44,7 +50,10 @@ fn run() -> Result<u8, Error> {
             .and_then(|number| number.parse().ok())
             .ok_or_else(|| Error::Evidence("--pr requires a pull request number".into()))?;
         fetch::record(
-            &policy.repository,
+            options
+                .get("--repo")
+                .map(String::as_str)
+                .unwrap_or(&policy.repository),
             number,
             &policy,
             previous.clone().unwrap_or_else(|| serde_json::json!({})),

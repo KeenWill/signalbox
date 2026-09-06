@@ -99,6 +99,8 @@ class RecordedGitHub(reference.GitHubGraphQL):
 def reference_evaluation(recording):
     initial = assemble(recording["observations"][0])
     current = assemble(recording["observations"][-1])
+    if initial["state"] != current["state"]:
+        raise RuntimeError("pull request changed after its convergence snapshot")
     client = RecordedGitHub(recording, current)
     pr = reference.normalize_pull_request(initial)
     pr["_persisted_record"] = copy.deepcopy(recording.get("previous", {}))

@@ -103,6 +103,61 @@ fn advancing_head_during_pagination_invalidates_the_snapshot() -> Result<(), Box
 }
 
 #[test]
+fn inventory_stability_requires_an_explicit_boolean() -> Result<(), Box<dyn Error>> {
+    let policy = policy()?;
+    let recording = Recording::read(&root().join("fixtures/mutations/settled.json"))?;
+    let mut facts = evaluate(&recording.snapshot(&policy)?, &policy)?.facts;
+    assert!(evaluate_facts(&facts, &policy).is_converged());
+    facts.check_inventory_stable = false;
+    assert!(!evaluate_facts(&facts, &policy).is_converged());
+    let mut value = serde_json::to_value(facts)?;
+    value["check_inventory_stable"] = Value::Null;
+    assert!(serde_json::from_value::<signalbox_convergence::Facts>(value.clone()).is_err());
+    value
+        .as_object_mut()
+        .ok_or("facts must be an object")?
+        .remove("check_inventory_stable");
+    assert!(serde_json::from_value::<signalbox_convergence::Facts>(value).is_err());
+    Ok(())
+}
+
+#[test]
+fn unknown_cli_options_fail_before_policy_or_evidence_io() -> Result<(), Box<dyn Error>> {
+    let repository = policy()?.repository;
+    for command in ["record", "evaluate"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-converge"))
+            .args([
+                command,
+                "--policy",
+                "/does-not-exist/policy.toml",
+                "--repo",
+                &repository,
+                "--polciy",
+                "alternate.toml",
+            ])
+            .output()?;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8(output.stderr)?.contains("unknown option --polciy"));
+    }
+    Ok(())
+}
+
+#[test]
+fn policy_load_rejects_verdict_patterns_without_both_captures() -> Result<(), Box<dyn Error>> {
+    let path = std::env::temp_dir().join(format!("convergence-policy-{}.json", std::process::id()));
+    let mut policy = policy()?;
+    for pattern in ["complete", "(complete)"] {
+        policy.reviewers[0].verdict_pattern = pattern.into();
+        std::fs::write(&path, serde_json::to_vec(&policy)?)?;
+        let error = ConvergencePolicy::read(&path).expect_err("both verdict captures are required");
+        assert!(error.to_string().contains("verdict_pattern must capture"));
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
 fn refreshed_checks_determine_both_verdict_and_projection() -> Result<(), Box<dyn Error>> {
     let policy = policy()?;
     for (fixture, green) in [
