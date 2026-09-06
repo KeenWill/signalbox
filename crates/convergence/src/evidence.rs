@@ -480,7 +480,7 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
             if reviewer_matches(review, reviewer)
                 && !text(&review["id"]).is_empty()
                 && !oid.is_empty()
-                && review["state"] == "COMMENTED"
+                && matches!(text(&review["state"]), "COMMENTED" | "CHANGES_REQUESTED")
                 && !text(&review["body"]).trim().is_empty()
                 && (text(&node["lastEditedAt"]).is_empty()
                     || timestamp_not_after(text(&node["lastEditedAt"]), at))
