@@ -35,8 +35,8 @@ attribution is available.
 The persisted cache never holds raw provider JSON, credential values, or
 reactions from actors outside the configured signal-reviewer set. Rules and
 durable events cannot inspect it. The present cursor persists no validator and
-no accepted transport snapshot; the warm-restart schedule keeps the full
-re-fetch on the configured cadence until this store exists.
+no accepted transport snapshot. Polling begins only when a repository-watch
+worker is composed.
 
 ## Acceptance criteria
 

@@ -8,10 +8,9 @@ use signalbox_domain::{
 
 /// The append-only dispatch record that supplied one immutable fence.
 ///
-/// The judge consumes both sources through one authority rendering — the fence
-/// semantics are identical — while the unattended-escalation closeout audits
-/// each source in its own record family, which is why the provenance is typed
-/// rather than collapsed into one identity space.
+/// The judge consumes both sources through one authority rendering because the
+/// fence semantics are identical. The provenance remains typed because the
+/// source records occupy separate identity spaces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApprovalJudgeDispatchProvenance {
     /// A repository-watch rule dispatched the session.

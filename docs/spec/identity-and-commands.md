@@ -47,11 +47,13 @@ and returned as a replay outcome, not as a registry error.
 the user, daemon core, the model output of one turn, the startup recovery scan,
 or the execution of one tool request. Only submit-input and metadata-replacement
 commands carry an actor in their durable payload. Repository watch and
-commissioned dispatch stamp a module issuer principal on the registry row and
-compose their initial input, the one automated action attributed to the user,
-under the user actor. Actor answers who issued one command; a session's creation
-cause, owned by [sessions-and-transcript](sessions-and-transcript.md), answers
-why the session exists, and neither fact substitutes for the other.
+commissioned dispatch stamp a module issuer principal on the registry row.
+Commissioned dispatch composes its initial input, the one automated action
+attributed to the user, under the user actor. Repository watch emits a held
+create-session command and does not submit an initial input. Actor answers who
+issued one command; a session's creation cause, owned by
+[sessions-and-transcript](sessions-and-transcript.md), answers why the session
+exists, and neither fact substitutes for the other.
 
 ## Design decisions
 
