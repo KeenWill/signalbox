@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use signalbox_ownership_seam::{
     BranchName, CheckConclusion, ChecksOutcome, CommitSha, MergeableState, OffsetDateTime,
     PullRequestBody, PullRequestNumber, PullRequestTitle, ReactionChange, ReactionSubject,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventOccurrenceV1,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventContentIdentityV1, RepoWatchEventId,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
     RepoWatchEventTarget, RepoWatchRule, RepositorySlug, ReviewState,
 };
 use sqlx::{PgPool, Postgres, Transaction};
@@ -155,6 +155,15 @@ pub enum EventAdmission {
     Inserted,
     /// The exact fact was already retained.
     Replayed,
+}
+
+/// One normalized fact supplied with its content identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EventCandidate<'a> {
+    /// Complete normalized fact.
+    pub event: &'a RepoWatchEvent,
+    /// Source-independent identity assigned to the fact.
+    pub content_identity: RepoWatchEventContentIdentityV1,
 }
 
 /// Closed producer recorded with every durable repository-watch fact.
@@ -551,8 +560,8 @@ impl RepoWatchStore {
         &self,
         projection: &RepositoryProjection<'_>,
         expected_generation: u64,
-        frontier: &RepoWatchEventIdentityFrontierV1,
-        events: &[RepoWatchEventOccurrenceV1],
+        frontier: &[RepoWatchEventIdentityFrontierEntryV1],
+        events: &[EventCandidate<'_>],
         producer: EventProducer,
         recorded_at: OffsetDateTime,
     ) -> Result<FrontierEventAdmission, StoreError> {
@@ -582,12 +591,11 @@ impl RepoWatchStore {
         .await?;
         upsert_repository(&mut transaction, repository_state, &comparison_baseline).await?;
         replace_pull_requests(&mut transaction, repository, pull_request_states).await?;
-        let frontier = frontier.entries().collect::<Vec<_>>();
         let candidate_identity = frontier_candidate_identity(
             repository_state,
             pull_request_states,
             comparison_baseline.as_bytes(),
-            &frontier,
+            frontier,
             events,
         );
         let current_generation: Decimal = sqlx::query_scalar(
@@ -700,8 +708,8 @@ impl RepoWatchStore {
         .to_u64()
         .ok_or(StoreError::InvalidEventEvaluationPosition)?;
         let mut admissions = Vec::with_capacity(events.len());
-        for (event_ordinal, occurrence) in (1_u64..).zip(events) {
-            if occurrence.event().repository() != repository {
+        for (event_ordinal, candidate) in (1_u64..).zip(events) {
+            if candidate.event.repository() != repository {
                 return Err(StoreError::EventRepositoryMismatch);
             }
             let candidate_repository_ordinal = repository_event_ordinal
@@ -709,7 +717,7 @@ impl RepoWatchStore {
                 .ok_or(StoreError::InvalidEventOrdinal)?;
             match append_event(
                 &mut transaction,
-                occurrence,
+                candidate,
                 producer,
                 candidate_repository_ordinal,
                 next_generation,
@@ -1235,8 +1243,8 @@ fn frontier_candidate_identity(
     repository_state: &RepositoryState<'_>,
     pull_request_states: &[PullRequestState<'_>],
     comparison_baseline: &[u8],
-    frontier: &[signalbox_ownership_seam::RepoWatchEventIdentityFrontierEntryV1],
-    events: &[RepoWatchEventOccurrenceV1],
+    frontier: &[RepoWatchEventIdentityFrontierEntryV1],
+    events: &[EventCandidate<'_>],
 ) -> Vec<u8> {
     let mut identity = b"signalbox-repo-watch-frontier-commit-v1".to_vec();
     push_identity_field(
@@ -1289,8 +1297,8 @@ fn frontier_candidate_identity(
         }
     }
     identity.push(b'E');
-    for occurrence in events {
-        identity.extend_from_slice(occurrence.content_identity().as_bytes());
+    for candidate in events {
+        identity.extend_from_slice(candidate.content_identity.as_bytes());
     }
     identity
 }
@@ -1308,14 +1316,14 @@ fn frontier_release_identity(stream_identity: &[u8; 32]) -> Vec<u8> {
 
 async fn append_event(
     transaction: &mut Transaction<'_, Postgres>,
-    occurrence: &RepoWatchEventOccurrenceV1,
+    candidate: &EventCandidate<'_>,
     producer: EventProducer,
     repository_event_ordinal: u64,
     frontier_generation: u64,
     event_ordinal: u64,
     recorded_at: OffsetDateTime,
 ) -> Result<Option<EventAdmission>, StoreError> {
-    let event = occurrence.event();
+    let event = candidate.event;
     let (target_kind, pull_request_number) = match event.target() {
         RepoWatchEventTarget::PullRequest(context) => {
             ("pull_request", Some(Decimal::from(context.number().get())))
@@ -1334,7 +1342,7 @@ async fn append_event(
          ON CONFLICT DO NOTHING",
     )
     .bind(event.id().into_uuid())
-    .bind(occurrence.content_identity().as_bytes().as_slice())
+    .bind(candidate.content_identity.as_bytes().as_slice())
     .bind(event.repository().as_str())
     .bind(event_kind_storage(event.kind().name()))
     .bind(target_kind)
@@ -1362,7 +1370,7 @@ async fn append_event(
                    AND (content_identity <> $2 OR normalized_payload <> $3))",
     )
     .bind(event.id().into_uuid())
-    .bind(occurrence.content_identity().as_bytes().as_slice())
+    .bind(candidate.content_identity.as_bytes().as_slice())
     .bind(payload.as_slice())
     .fetch_one(&mut **transaction)
     .await?;
