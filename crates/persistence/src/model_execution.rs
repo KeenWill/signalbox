@@ -1764,13 +1764,39 @@ impl PostgresModelCallRepository {
                     }
                     Err(error) => return Err(error),
                 };
-            if !matches!(
-                execution.current_call(),
-                Some(current)
-                    if current.id() == call
-                        && current.state()
-                            == signalbox_domain::CurrentModelCallState::Prepared
-            ) {
+            let Some(current) = execution.current_call() else {
+                return Ok((false, AuthorizeModelCallOutcome::NoSend));
+            };
+            if current.id() != call
+                || current.state() != signalbox_domain::CurrentModelCallState::Prepared
+            {
+                return Ok((false, AuthorizeModelCallOutcome::NoSend));
+            }
+            let fast_mode = execution
+                .configuration()
+                .effective()
+                .model_settings()
+                .effective()
+                .fast_mode();
+            let current_effective_target = serving_pool_target(
+                self.credential_families.as_ref(),
+                current.target(),
+                fast_mode,
+            );
+            let stored_effective_target = sqlx::query_scalar::<_, Uuid>(
+                "SELECT effective_provider_model_identity_id
+                   FROM model_call
+                  WHERE session_id = $1
+                    AND model_call_id = $2",
+            )
+            .bind(session_id_to_uuid(session))
+            .bind(call.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(ModelCallCorruption::Missing(
+                "current model call effective target",
+            ))?;
+            if stored_effective_target != current_effective_target.identity().into_uuid() {
                 return Ok((false, AuthorizeModelCallOutcome::NoSend));
             }
             let authorized = execution.authorize_send().map_err(|_| {
