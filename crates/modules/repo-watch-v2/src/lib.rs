@@ -2022,7 +2022,8 @@ impl RepoWatchStore {
                    JOIN gh_event AS event
                      ON event.event_id = $3
                   WHERE active.repository = $1 AND active.rule_id = $2
-                    AND event.recorded_at >= revision.activated_at
+                    AND event.repository_event_ordinal
+                        > revision.activated_after_event_ordinal
                   FOR UPDATE OF active",
             )
             .bind(first.repository().as_str())
