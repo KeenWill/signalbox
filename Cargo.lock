@@ -4177,6 +4177,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.11.0",
+ "signalbox-derive",
  "signalbox-domain",
  "tempfile",
  "tokio",
@@ -4304,6 +4305,17 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-domain",
+]
+
+[[package]]
+name = "signalbox-derive"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
+ "trybuild",
 ]
 
 [[package]]

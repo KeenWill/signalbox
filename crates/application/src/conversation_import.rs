@@ -4,7 +4,7 @@
 //! adapters implement [`ImportedConversationStore`]. The application supplies
 //! hub identities and performs one complete resolve-or-insert operation.
 
-use std::{error::Error, fmt, future::Future};
+use std::future::Future;
 
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -222,11 +222,16 @@ pub enum ImportConversationReport<Failure> {
     },
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Conversation-ingestion orchestration failure.
 #[derive(Debug, Eq, PartialEq)]
 pub enum ImportConversationError<ConverterError, StoreError> {
+    #[error("conversation conversion failed: {field_0}")]
     /// The source converter rejected the complete input.
     Conversion(ConverterError),
+    #[error(
+        "conversation converter identity mismatch: supplied {supplied:?}, converted {converted:?}"
+    )]
     /// The converter returned an aggregate under another hub identity.
     ConverterIdentityMismatch {
         /// The hub identity supplied to the converter.
@@ -234,6 +239,9 @@ pub enum ImportConversationError<ConverterError, StoreError> {
         /// The identity carried by the converted aggregate.
         converted: ImportedConversationId,
     },
+    #[error(
+        "conversation converter format mismatch: declared {declared:?}, converted {converted:?}"
+    )]
     /// The converter returned a format other than the one it declares.
     ConverterFormatMismatch {
         /// The converter's declared format.
@@ -241,8 +249,10 @@ pub enum ImportConversationError<ConverterError, StoreError> {
         /// The format carried by the converted aggregate.
         converted: ImportedConversationFormat,
     },
+    #[error("conversation converter entry identities did not match callback issuance")]
     /// Emitted entry identities did not exactly match callback issuance order.
     ConverterEntryIdentitySequenceMismatch,
+    #[error("conversation store source-digest mismatch: expected {expected:?}, actual {actual:?}")]
     /// The store reported a digest other than the converted exact source.
     StoreSourceDigestMismatch {
         /// The converted aggregate digest.
@@ -250,6 +260,9 @@ pub enum ImportConversationError<ConverterError, StoreError> {
         /// The store-reported digest.
         actual: ImportedConversationSourceDigest,
     },
+    #[error(
+        "conversation store inserted-identity mismatch: expected {expected:?}, actual {actual:?}"
+    )]
     /// A newly inserted store result named another aggregate identity.
     StoreInsertedIdentityMismatch {
         /// Candidate identity carried by the converted aggregate.
@@ -257,54 +270,9 @@ pub enum ImportConversationError<ConverterError, StoreError> {
         /// Store-reported inserted identity.
         actual: ImportedConversationId,
     },
+    #[error("conversation import store failed: {field_0}")]
     /// The append-only store could not resolve or insert the aggregate.
     Store(StoreError),
-}
-
-impl<ConverterError, StoreError> fmt::Display
-    for ImportConversationError<ConverterError, StoreError>
-where
-    ConverterError: fmt::Display,
-    StoreError: fmt::Display,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Conversion(error) => write!(formatter, "conversation conversion failed: {error}"),
-            Self::ConverterIdentityMismatch {
-                supplied,
-                converted,
-            } => write!(
-                formatter,
-                "conversation converter identity mismatch: supplied {supplied:?}, converted {converted:?}"
-            ),
-            Self::ConverterFormatMismatch {
-                declared,
-                converted,
-            } => write!(
-                formatter,
-                "conversation converter format mismatch: declared {declared:?}, converted {converted:?}"
-            ),
-            Self::ConverterEntryIdentitySequenceMismatch => formatter.write_str(
-                "conversation converter entry identities did not match callback issuance",
-            ),
-            Self::StoreSourceDigestMismatch { expected, actual } => write!(
-                formatter,
-                "conversation store source-digest mismatch: expected {expected:?}, actual {actual:?}"
-            ),
-            Self::StoreInsertedIdentityMismatch { expected, actual } => write!(
-                formatter,
-                "conversation store inserted-identity mismatch: expected {expected:?}, actual {actual:?}"
-            ),
-            Self::Store(error) => write!(formatter, "conversation import store failed: {error}"),
-        }
-    }
-}
-
-impl<ConverterError, StoreError> Error for ImportConversationError<ConverterError, StoreError>
-where
-    ConverterError: Error + 'static,
-    StoreError: Error + 'static,
-{
 }
 
 /// Coordinates one conversion and idempotent append-only ingestion.

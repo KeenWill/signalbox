@@ -4,7 +4,7 @@
 //! catalog policy, mints every durable identity candidate, keeps executor work
 //! outside transactions, and submits only correlated evidence to persistence.
 
-use std::{collections::BTreeMap, error::Error, fmt, future::Future, num::NonZeroU64, sync::Arc};
+use std::{collections::BTreeMap, fmt, future::Future, num::NonZeroU64, sync::Arc};
 
 use crate::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
@@ -869,53 +869,99 @@ fn emit_contained_executor_failure(
     );
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Failure annotated with the exact tool orchestration stage.
 #[derive(Debug)]
 pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
+    #[error("tool batch load failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_batch_load")]
     /// Loading current batch state failed.
-    Load(TransactionError),
+    Load(#[source] TransactionError),
+    #[error("tool attempt prepare failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_attempt_prepare")]
     /// Preparing a durable physical attempt failed.
-    Prepare(TransactionError),
+    Prepare(#[source] TransactionError),
+    #[error("tool attempt authorization failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_attempt_authorization")]
     /// Authorizing a prepared attempt failed.
-    Authorize(TransactionError),
+    Authorize(#[source] TransactionError),
+    #[error("tool attempt authorization reread failed: {reread_error}")]
+    #[operator(delegate = reread_error, code = "tool_attempt_authorization_reread")]
     /// A commit-ambiguous authorization and its immediate reread both failed.
     AuthorizationReread {
         /// Original commit-ambiguous authorization failure.
         authorization_error: TransactionError,
+        #[source]
         /// Failure to establish whether authorization committed.
         reread_error: TransactionError,
     },
+    #[error("tool attempt authorization reconciliation failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_attempt_authorization_reconciliation")]
     /// A later pass could not reconcile retained non-consumption evidence.
-    AuthorizationReconciliation(TransactionError),
+    AuthorizationReconciliation(#[source] TransactionError),
+    #[error("tool preflight evidence commit failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_preflight_commit")]
     /// A local preflight error could not commit.
-    PreflightCommit(TransactionError),
+    PreflightCommit(#[source] TransactionError),
+    #[error("tool executor failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_executor")]
     /// Executor work produced no trustworthy evidence.
-    Executor(ExecutorError),
+    Executor(#[source] ExecutorError),
+    #[error(
+        "tool executor failed ({executor_error}) and crash classification failed: {classification_error}"
+    )]
+    #[operator(delegate = classification_error, code = "tool_executor_crash_classification")]
     /// Executor work failed and its required crash classification also failed.
     ExecutorCrashClassification {
         /// Original executor failure.
         executor_error: ExecutorError,
+        #[source]
         /// Failure to durably classify the in-flight attempt.
         classification_error: TransactionError,
     },
+    #[error("tool executor evidence carried a different dispatch fence")]
+    #[operator(class = CallerOrHubBug, code = "tool_executor_correlation_mismatch")]
     /// Executor evidence named a dispatch fence other than the invocation.
     ExecutorCorrelationMismatch,
+    #[error(
+        "tool executor evidence carried a different dispatch fence and crash classification failed: {field_0}"
+    )]
+    #[operator(
+        delegate = 0,
+        code = "tool_executor_correlation_mismatch_crash_classification"
+    )]
     /// Cross-wired executor evidence and its required crash classification both failed.
-    ExecutorCorrelationMismatchCrashClassification(TransactionError),
+    ExecutorCorrelationMismatchCrashClassification(#[source] TransactionError),
+    #[error("tool observation commit failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_observation_commit")]
     /// Executor evidence could not commit.
-    ObservationCommit(TransactionError),
+    ObservationCommit(#[source] TransactionError),
+    #[error("tool observation reconciliation failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_observation_reconciliation")]
     /// Retained executor evidence could not be reconciled with durable state.
-    ObservationReconciliation(TransactionError),
+    ObservationReconciliation(#[source] TransactionError),
+    #[error("durable tool completion reconciliation failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_durable_completion_reconciliation")]
     /// An executor-reported durable completion could not be reread from storage.
-    DurableCompletionReconciliation(TransactionError),
+    DurableCompletionReconciliation(#[source] TransactionError),
+    #[error("executor durable completion did not match storage")]
+    #[operator(class = CallerOrHubBug, code = "tool_durable_completion_mismatch")]
     /// An executor-reported durable completion was absent or cross-wired.
     DurableCompletionMismatch,
+    #[error("durable child wait reconciliation failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_child_wait_reconciliation")]
     /// A reported durable child wait could not be reread from storage.
-    ChildWaitReconciliation(TransactionError),
+    ChildWaitReconciliation(#[source] TransactionError),
+    #[error("executor durable child wait did not match storage")]
+    #[operator(class = CallerOrHubBug, code = "tool_child_wait_mismatch")]
     /// A reported durable child wait was absent or cross-wired.
     ChildWaitMismatch,
+    #[error("tool crash classification failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_crash_classification")]
     /// Crash classification failed.
-    CrashClassification(TransactionError),
+    CrashClassification(#[source] TransactionError),
+    #[error("fatal tool executor failure remained fatal after crash classification recovery")]
+    #[operator(class = failure_class, code = cause_code)]
     /// A retained fatal executor failure was durably classified on retry.
     RecoveredFatalExecutorFailure {
         /// Original fatal operator classification.
@@ -923,188 +969,14 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
         /// Original safe executor cause token.
         cause_code: &'static str,
     },
+    #[error("tool continuation failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_continuation")]
     /// Atomic continuation preparation failed.
-    Continuation(TransactionError),
+    Continuation(#[source] TransactionError),
+    #[error("tool catalog metadata changed after attempt preparation")]
+    #[operator(class = CallerOrHubBug, code = "tool_catalog_drift")]
     /// Catalog metadata no longer matches durable attempt authorization.
     CatalogDrift,
-}
-
-impl<TransactionError, ExecutorError> fmt::Display
-    for ToolExecutionServiceError<TransactionError, ExecutorError>
-where
-    TransactionError: fmt::Display,
-    ExecutorError: fmt::Display,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Load(error) => write!(formatter, "tool batch load failed: {error}"),
-            Self::Prepare(error) => write!(formatter, "tool attempt prepare failed: {error}"),
-            Self::Authorize(error) => {
-                write!(formatter, "tool attempt authorization failed: {error}")
-            }
-            Self::AuthorizationReread { reread_error, .. } => {
-                write!(
-                    formatter,
-                    "tool attempt authorization reread failed: {reread_error}"
-                )
-            }
-            Self::AuthorizationReconciliation(error) => {
-                write!(
-                    formatter,
-                    "tool attempt authorization reconciliation failed: {error}"
-                )
-            }
-            Self::PreflightCommit(error) => {
-                write!(formatter, "tool preflight evidence commit failed: {error}")
-            }
-            Self::Executor(error) => write!(formatter, "tool executor failed: {error}"),
-            Self::ExecutorCrashClassification {
-                executor_error,
-                classification_error,
-            } => write!(
-                formatter,
-                "tool executor failed ({executor_error}) and crash classification failed: \
-                 {classification_error}"
-            ),
-            Self::ExecutorCorrelationMismatch => {
-                formatter.write_str("tool executor evidence carried a different dispatch fence")
-            }
-            Self::ExecutorCorrelationMismatchCrashClassification(error) => write!(
-                formatter,
-                "tool executor evidence carried a different dispatch fence and crash \
-                 classification failed: {error}"
-            ),
-            Self::ObservationCommit(error) => {
-                write!(formatter, "tool observation commit failed: {error}")
-            }
-            Self::ObservationReconciliation(error) => {
-                write!(formatter, "tool observation reconciliation failed: {error}")
-            }
-            Self::DurableCompletionReconciliation(error) => write!(
-                formatter,
-                "durable tool completion reconciliation failed: {error}"
-            ),
-            Self::DurableCompletionMismatch => {
-                formatter.write_str("executor durable completion did not match storage")
-            }
-            Self::ChildWaitReconciliation(error) => {
-                write!(
-                    formatter,
-                    "durable child wait reconciliation failed: {error}"
-                )
-            }
-            Self::ChildWaitMismatch => {
-                formatter.write_str("executor durable child wait did not match storage")
-            }
-            Self::CrashClassification(error) => {
-                write!(formatter, "tool crash classification failed: {error}")
-            }
-            Self::RecoveredFatalExecutorFailure { .. } => formatter.write_str(
-                "fatal tool executor failure remained fatal after crash classification recovery",
-            ),
-            Self::Continuation(error) => write!(formatter, "tool continuation failed: {error}"),
-            Self::CatalogDrift => {
-                formatter.write_str("tool catalog metadata changed after attempt preparation")
-            }
-        }
-    }
-}
-
-impl<TransactionError, ExecutorError> Error
-    for ToolExecutionServiceError<TransactionError, ExecutorError>
-where
-    TransactionError: Error + 'static,
-    ExecutorError: Error + 'static,
-{
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Load(error)
-            | Self::Prepare(error)
-            | Self::Authorize(error)
-            | Self::AuthorizationReconciliation(error)
-            | Self::PreflightCommit(error)
-            | Self::ExecutorCorrelationMismatchCrashClassification(error)
-            | Self::ObservationCommit(error)
-            | Self::ObservationReconciliation(error)
-            | Self::DurableCompletionReconciliation(error)
-            | Self::ChildWaitReconciliation(error)
-            | Self::CrashClassification(error)
-            | Self::Continuation(error) => Some(error),
-            Self::AuthorizationReread { reread_error, .. } => Some(reread_error),
-            Self::Executor(error) => Some(error),
-            Self::ExecutorCrashClassification {
-                classification_error,
-                ..
-            } => Some(classification_error),
-            Self::ExecutorCorrelationMismatch
-            | Self::DurableCompletionMismatch
-            | Self::ChildWaitMismatch
-            | Self::RecoveredFatalExecutorFailure { .. }
-            | Self::CatalogDrift => None,
-        }
-    }
-}
-
-impl<TransactionError, ExecutorError> ClassifyOperatorFailure
-    for ToolExecutionServiceError<TransactionError, ExecutorError>
-where
-    TransactionError: ClassifyOperatorFailure,
-    ExecutorError: ClassifyOperatorFailure,
-{
-    fn operator_failure_class(&self) -> OperatorFailureClass {
-        match self {
-            Self::Load(error)
-            | Self::Prepare(error)
-            | Self::Authorize(error)
-            | Self::AuthorizationReconciliation(error)
-            | Self::PreflightCommit(error)
-            | Self::ObservationCommit(error)
-            | Self::ObservationReconciliation(error)
-            | Self::DurableCompletionReconciliation(error)
-            | Self::ChildWaitReconciliation(error)
-            | Self::CrashClassification(error)
-            | Self::ExecutorCorrelationMismatchCrashClassification(error)
-            | Self::Continuation(error) => error.operator_failure_class(),
-            Self::AuthorizationReread { reread_error, .. } => reread_error.operator_failure_class(),
-            Self::Executor(error) => error.operator_failure_class(),
-            Self::ExecutorCrashClassification {
-                classification_error,
-                ..
-            } => classification_error.operator_failure_class(),
-            Self::RecoveredFatalExecutorFailure { failure_class, .. } => *failure_class,
-            Self::ExecutorCorrelationMismatch
-            | Self::DurableCompletionMismatch
-            | Self::ChildWaitMismatch
-            | Self::CatalogDrift => OperatorFailureClass::CallerOrHubBug,
-        }
-    }
-
-    fn operator_failure_cause_code(&self) -> &'static str {
-        match self {
-            Self::Load(_) => "tool_batch_load",
-            Self::Prepare(_) => "tool_attempt_prepare",
-            Self::Authorize(_) => "tool_attempt_authorization",
-            Self::AuthorizationReread { .. } => "tool_attempt_authorization_reread",
-            Self::AuthorizationReconciliation(_) => "tool_attempt_authorization_reconciliation",
-            Self::PreflightCommit(_) => "tool_preflight_commit",
-            Self::Executor(_) => "tool_executor",
-            Self::ExecutorCrashClassification { .. } => "tool_executor_crash_classification",
-            Self::ExecutorCorrelationMismatch => "tool_executor_correlation_mismatch",
-            Self::ExecutorCorrelationMismatchCrashClassification(_) => {
-                "tool_executor_correlation_mismatch_crash_classification"
-            }
-            Self::ObservationCommit(_) => "tool_observation_commit",
-            Self::ObservationReconciliation(_) => "tool_observation_reconciliation",
-            Self::DurableCompletionReconciliation(_) => "tool_durable_completion_reconciliation",
-            Self::DurableCompletionMismatch => "tool_durable_completion_mismatch",
-            Self::ChildWaitReconciliation(_) => "tool_child_wait_reconciliation",
-            Self::ChildWaitMismatch => "tool_child_wait_mismatch",
-            Self::CrashClassification(_) => "tool_crash_classification",
-            Self::RecoveredFatalExecutorFailure { cause_code, .. } => cause_code,
-            Self::Continuation(_) => "tool_continuation",
-            Self::CatalogDrift => "tool_catalog_drift",
-        }
-    }
 }
 
 /// Coordinates one serialized tool-loop stage.
@@ -2194,6 +2066,7 @@ pub(crate) fn initial_tool_approval(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     use std::{
         collections::VecDeque,
         num::NonZeroU64,

@@ -7,7 +7,7 @@
 //! allocation, preparation, and recording remain inside one atomic
 //! transaction port.
 
-use std::{error::Error, fmt, future::Future};
+use std::future::Future;
 
 use signalbox_domain::{
     AcceptedInputId, CancelledModelCallTurnIdentities, ContextFrontierId, DeliveryRequest,
@@ -21,11 +21,16 @@ use crate::{
     OperatorFailureClass,
 };
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why caller input cannot enter canonical `SubmitInput` construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubmitInputRequestError {
+    #[error(transparent)]
     /// The user-global command identity is a reserved sentinel.
     InvalidCommandId(InvalidDurableCommandId),
+    #[error(
+        "accepted-input content is {utf8_byte_length} UTF-8 bytes; the configured maximum is {max_utf8_bytes}"
+    )]
     /// The accepted-input text exceeds the deployment's admission bound.
     ///
     /// The domain already refuses content above `UserContent::MAX_TEXT_BYTES`;
@@ -37,23 +42,6 @@ pub enum SubmitInputRequestError {
         max_utf8_bytes: usize,
     },
 }
-
-impl fmt::Display for SubmitInputRequestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidCommandId(error) => error.fmt(formatter),
-            Self::OversizedContent {
-                utf8_byte_length,
-                max_utf8_bytes,
-            } => write!(
-                formatter,
-                "accepted-input content is {utf8_byte_length} UTF-8 bytes; the configured maximum is {max_utf8_bytes}",
-            ),
-        }
-    }
-}
-
-impl Error for SubmitInputRequestError {}
 
 /// The complete admitted application request for durable input submission.
 ///
