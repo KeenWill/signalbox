@@ -1,3 +1,5 @@
+mod formatting;
+
 use std::collections::BTreeSet;
 
 use proc_macro2::{TokenStream, TokenTree};
@@ -184,67 +186,15 @@ fn pattern(
     }
 }
 
-#[derive(Default)]
-struct References(BTreeSet<String>);
-
-impl References {
-    fn callee(&mut self, expression: &Expr) {
-        match expression {
-            Expr::Path(_) => {}
-            Expr::Paren(expression) => self.callee(&expression.expr),
-            Expr::Group(expression) => self.callee(&expression.expr),
-            expression => self.visit_expr(expression),
-        }
-    }
-}
-
-impl<'ast> Visit<'ast> for References {
-    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
-        if let Some(ident) = expression.path.get_ident() {
-            self.0.insert(ident.to_string());
-        }
-    }
-
-    fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
-        self.callee(&expression.func);
-        for argument in &expression.args {
-            self.visit_expr(argument);
-        }
-    }
-
-    fn visit_expr_assign(&mut self, expression: &'ast syn::ExprAssign) {
-        self.visit_expr(&expression.right);
-    }
-
-    fn visit_macro(&mut self, expression: &'ast syn::Macro) {
-        use syn::parse::Parser;
-
-        if let Ok(arguments) =
-            Punctuated::<Expr, Token![,]>::parse_terminated.parse2(expression.tokens.clone())
-        {
-            for argument in &arguments {
-                self.visit_expr(argument);
-            }
-        } else {
-            let tokens = &expression.tokens;
-            if let Ok(repeat) = syn::parse2::<syn::ExprRepeat>(quote!([#tokens])) {
-                self.visit_expr_repeat(&repeat);
-            } else {
-                identifiers(tokens.clone(), &mut self.0);
-            }
-        }
-    }
-}
-
 fn arm(
     prefix: &TokenStream,
     shape: &Fields,
     fields: &[Field<'_>],
     body: TokenStream,
 ) -> syn::Result<TokenStream> {
-    let mut references = References::default();
+    let mut references = formatting::References::new(fields);
     references.visit_expr(&syn::parse2(body.clone())?);
-    let pattern = pattern(prefix, shape, fields, &references.0);
+    let pattern = pattern(prefix, shape, fields, &references.used);
     Ok(quote!(#pattern => #body))
 }
 
@@ -390,21 +340,29 @@ fn display(
     Ok(quote!(::std::write!(#formatter, #literal #(, #arguments)*)))
 }
 
-fn boxed_trait_object(ty: &syn::Type) -> bool {
-    let syn::Type::Path(path) = ty else {
-        return false;
-    };
-    let Some(segment) = path.path.segments.last() else {
-        return false;
-    };
-    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return false;
-    };
-    segment.ident == "Box"
-        && matches!(
-            arguments.args.first(),
-            Some(syn::GenericArgument::Type(syn::Type::TraitObject(_)))
-        )
+fn source_coercion() -> TokenStream {
+    let auto_traits = [
+        quote!(),
+        quote!(+ ::std::marker::Send),
+        quote!(+ ::std::marker::Sync),
+        quote!(+ ::std::marker::Send + ::std::marker::Sync),
+    ];
+    let erased = auto_traits.iter().map(|traits| {
+        quote! {
+            impl __SignalboxAsDynError for (dyn ::std::error::Error #traits + 'static) {
+                fn __signalbox_as_dyn_error(&self) -> &(dyn ::std::error::Error + 'static) { self }
+            }
+        }
+    });
+    quote! {
+        trait __SignalboxAsDynError {
+            fn __signalbox_as_dyn_error(&self) -> &(dyn ::std::error::Error + 'static);
+        }
+        impl<__Error: ::std::error::Error + 'static> __SignalboxAsDynError for __Error {
+            fn __signalbox_as_dyn_error(&self) -> &(dyn ::std::error::Error + 'static) { self }
+        }
+        #(#erased)*
+    }
 }
 
 fn target<'a>(
@@ -471,6 +429,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             .any(|(attrs, _, _, _)| attrs.iter().any(|a| a.path().is_ident("operator")))
             && matches!(input.data, Data::Enum(_));
     let mut displays = Vec::new();
+    let mut format_bounds = Vec::<syn::WherePredicate>::new();
     let mut names = BTreeSet::new();
     identifiers(quote!(#input), &mut names);
     let mut formatter_name = "__signalbox_formatter".to_owned();
@@ -482,16 +441,35 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     }
     let formatter = Ident::new(&formatter_name, name.span());
     let mut sources = Vec::new();
+    let mut has_sources = false;
     let mut classes = Vec::new();
     let mut codes = Vec::new();
     for (attrs, shape, prefix, owner) in cases {
         let fields = fields(shape);
-        displays.push(arm(
-            &prefix,
-            shape,
-            &fields,
-            display(attrs, &fields, &owner, &formatter)?,
-        )?);
+        let body = display(attrs, &fields, &owner, &formatter)?;
+        let mut references = formatting::References::new(&fields);
+        references.visit_expr(&syn::parse2(body.clone())?);
+        for field in &fields {
+            let ty = &field.field.ty;
+            let mut type_names = BTreeSet::new();
+            identifiers(quote!(#ty), &mut type_names);
+            if !input
+                .generics
+                .type_params()
+                .any(|param| type_names.contains(&param.ident.to_string()))
+                || type_names.contains("Self")
+                || type_names.contains(&name.to_string())
+            {
+                continue;
+            }
+            if let Some(modes) = references.formatted.get(&field.binding.to_string()) {
+                for mode in modes {
+                    let mode = Ident::new(mode, field.field.span());
+                    format_bounds.push(parse_quote!(#ty: ::std::fmt::#mode));
+                }
+            }
+        }
+        displays.push(arm(&prefix, shape, &fields, body)?);
         let source_fields = fields
             .iter()
             .filter(|field| field.source)
@@ -499,12 +477,9 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         let source = match source_fields.as_slice() {
             [] => quote!(::std::option::Option::None),
             [field] => {
+                has_sources = true;
                 let binding = &field.binding;
-                if boxed_trait_object(&field.field.ty) {
-                    quote!(Some(#binding.as_ref()))
-                } else {
-                    quote!(Some(#binding))
-                }
+                quote!(Some(#binding.__signalbox_as_dyn_error()))
             }
             _ => {
                 return Err(syn::Error::new_spanned(
@@ -543,11 +518,21 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     }
     let name = &input.ident;
     let (_, ty_generics, _) = input.generics.split_for_impl();
-    let display_generics = bounded(
-        &input.generics,
-        options.display_bound.as_ref(),
-        parse_quote!(::std::fmt::Display),
-    )?;
+    let mut display_generics = if options.display_bound.is_some() {
+        bounded(
+            &input.generics,
+            options.display_bound.as_ref(),
+            Punctuated::new(),
+        )?
+    } else {
+        input.generics.clone()
+    };
+    if options.display_bound.is_none() && !format_bounds.is_empty() {
+        display_generics
+            .make_where_clause()
+            .predicates
+            .extend(format_bounds.clone());
+    }
     let (display_impl, _, display_where) = display_generics.split_for_impl();
     let mut output = quote! {
         impl #display_impl ::std::fmt::Display for #name #ty_generics #display_where {
@@ -557,15 +542,25 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     };
     {
-        let generics = bounded(
+        let mut generics = bounded(
             &input.generics,
             options.error_bound.as_ref(),
             parse_quote!(::std::error::Error + 'static),
         )?;
+        if options.error_bound.is_none()
+            && options.display_bound.is_none()
+            && !format_bounds.is_empty()
+        {
+            generics
+                .make_where_clause()
+                .predicates
+                .extend(format_bounds);
+        }
         let (implementation, _, clause) = generics.split_for_impl();
+        let coercion = has_sources.then(source_coercion);
         output.extend(quote! {
             impl #implementation ::std::error::Error for #name #ty_generics #clause {
-                fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> { match self { #(#sources),* } }
+                fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> { #coercion match self { #(#sources),* } }
             }
         });
     }
