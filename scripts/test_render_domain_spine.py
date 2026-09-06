@@ -96,6 +96,16 @@ def fixture():
 
 
 class RenderDomainSpineTests(unittest.TestCase):
+    def test_primitive_representation_does_not_add_a_conflicting_rust_hint(self):
+        document = fixture()
+        document['index']['10']['attrs'] = [
+            {'repr': {'kind': 'rust', 'align': None, 'packed': None, 'int': 'u8'}},
+        ]
+        renderer = Renderer(document)
+        block = renderer.block(renderer.item(10))
+        self.assertIn('#[repr(u8)]\npub enum Event', block)
+        self.assertNotIn('repr(Rust,', block)
+
     def test_provided_trait_methods_differ_from_required_methods(self):
         document = fixture()
         provided = copy.deepcopy(document['index']['17'])

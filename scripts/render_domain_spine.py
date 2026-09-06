@@ -59,11 +59,11 @@ def attributes(item):
             result.append('#[must_use' + (' = ' + rust_string(reason) if reason is not None else '') + ']')
         elif isinstance(attribute, dict) and 'repr' in attribute:
             value = attribute['repr']
-            parts = [{'rust': 'Rust', 'c': 'C'}.get(value['kind'], value['kind'])]
+            parts = [] if value['kind'] == 'rust' else [{'c': 'C'}.get(value['kind'], value['kind'])]
             parts += [f'{key}({value[key]})' for key in ('align', 'packed') if value[key] is not None]
             if value['int']:
                 parts.append(value['int'])
-            result.append('#[repr(' + ', '.join(parts) + ')]')
+            result.append('#[repr(' + ', '.join(parts or ['Rust']) + ')]')
     if item.get('deprecation'):
         parts = [key + ' = ' + rust_string(value) for key, value in item['deprecation'].items() if value is not None]
         result.append('#[deprecated' + ('(' + ', '.join(parts) + ')' if parts else '') + ']')
