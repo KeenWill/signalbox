@@ -60,6 +60,7 @@ mod error;
 mod presentation;
 mod runner;
 mod transcript;
+mod workspace;
 
 const MAX_INPUT_CONTENT_FRAME_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 const MAX_SYSTEM_PROMPT_FRAME_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
@@ -283,6 +284,7 @@ async fn execute(
         | Command::BlobRead { .. }
         | Command::Create { .. }
         | Command::Place { .. }
+        | Command::Workspace(_)
         | Command::Runner(_)
         | Command::Continue { .. }
         | Command::Compact { .. }
@@ -311,6 +313,7 @@ async fn execute(
         Command::BlobUpload { source } => Some(open_blob_source(source)?),
         Command::Create { .. }
         | Command::Place { .. }
+        | Command::Workspace(_)
         | Command::Runner(_)
         | Command::Continue { .. }
         | Command::Compact { .. }
@@ -349,6 +352,7 @@ async fn execute(
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
         | Command::Place { .. }
+        | Command::Workspace(_)
         | Command::Runner(_)
         | Command::Compact { .. }
         | Command::Session(_)
@@ -400,6 +404,7 @@ async fn execute(
     }
 
     match arguments.command {
+        Command::Workspace(command) => workspace::run(&mut client, &mut output, command).await,
         Command::Runner(command) => runner::run(&mut client, &mut output, command).await,
         Command::Create {
             selection,

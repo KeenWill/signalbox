@@ -119,6 +119,10 @@ Orchestration generates each fresh identity candidate immediately before the
 domain transition that creates the fact. No Postgres column has an
 identity-generating default.
 
+Workspace registration, Git remote minting, and withdrawal write their existing
+typed registry records with application-supplied UUIDv7 identities. Equal replay
+returns the original fact identity, including replay of a withdrawn mint.
+
 Recovery reconstitutes committed facts under their stored identities; the
 startup scan mints identities only for the new facts it records.
 
@@ -212,8 +216,6 @@ receipt.
   [design](../design/identity-and-commands.md).
 - A production generator for `ProviderTargetEvidenceId`:
   [design](../design/identity-and-commands.md).
-- Writers and generators for `WorkspaceId`, `GitRemoteMintId`, and
-  `GitRemoteWithdrawalId`: [design](../design/identity-and-commands.md).
 - The optional runner placement in the imported-creation and create-session
   payloads: [design](../design/identity-and-commands.md).
 - Imported-creation storage version 4 and create-session storage version 5,

@@ -53,6 +53,7 @@ pub(crate) enum SendDeliveryArgument {
 
 #[derive(Debug)]
 pub(crate) enum Command {
+    Workspace(WorkspaceCommand),
     Runner(RunnerCommand),
 
     Credential(CredentialCommand),
@@ -441,6 +442,8 @@ pub(crate) struct CredentialTarget {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Register workspaces and administer their Git remote destinations.
+    Workspace(WorkspaceArguments),
     /// Recover a lost runner placement or promote its pending successor.
     Runner(RunnerArguments),
 
@@ -1885,6 +1888,7 @@ pub(crate) fn parse(
         Err(error) => return Err(UsageError(error)),
     };
     let command = match parsed.command {
+        CliCommand::Workspace(arguments) => Command::Workspace(arguments.command),
         CliCommand::Runner(arguments) => Command::Runner(arguments.command),
         CliCommand::Create(arguments) => Command::Create {
             selection: match (arguments.model, arguments.alias) {
@@ -4771,4 +4775,44 @@ mod tests {
         assert!(help.contains("Usage: signalbox"));
         assert!(help.contains("Commands:"));
     }
+}
+
+#[derive(Debug, ClapArgs)]
+struct WorkspaceArguments {
+    #[command(subcommand)]
+    command: WorkspaceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum WorkspaceCommand {
+    /// Register a directory after the daemon resolves its canonical root.
+    Register {
+        /// Directory path in the daemon filesystem.
+        root: String,
+        /// Durable identity; omission generates and prints one for retry.
+        #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
+    /// Mint an HTTPS destination under one registered workspace.
+    MintRemote {
+        /// Workspace that owns the destination.
+        #[arg(value_parser = canonical_uuid)]
+        workspace: CanonicalUuid,
+        /// Remote name, at most 255 ASCII bytes.
+        name: String,
+        /// HTTPS destination, at most 4096 ASCII bytes.
+        url: String,
+        /// Durable identity; omission generates and prints one for retry.
+        #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
+    /// Withdraw exactly one destination and release its remote name.
+    WithdrawRemote {
+        /// Mint to withdraw.
+        #[arg(value_parser = canonical_uuid)]
+        mint: CanonicalUuid,
+        /// Durable identity; omission generates and prints one for retry.
+        #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
 }

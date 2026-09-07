@@ -147,6 +147,21 @@ pub fn validate_oauth_authorization(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
+    /// Immutable workspace registration receipt.
+    WorkspaceRegistered {
+        command_id: crate::CommandId,
+        workspace_id: CanonicalUuid,
+    },
+    /// Immutable configured Git remote receipt.
+    GitRemoteMinted {
+        command_id: crate::CommandId,
+        mint_id: CanonicalUuid,
+    },
+    /// Immutable Git remote withdrawal receipt.
+    GitRemoteWithdrawn {
+        command_id: crate::CommandId,
+        withdrawal_id: CanonicalUuid,
+    },
     /// Durable replacement receipt.
     RunnerReplacementReceipt {
         /// Command whose terminal result committed.

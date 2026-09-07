@@ -6,12 +6,11 @@ This design is not built; it extends
 ## Goal
 
 Build the items the identity and command subsystem has committed to but lacks:
-registry kinds and typed records for runner recovery and configuration reload,
-production generators for the four identity types that lack one, and the
-optional runner placement the two creation payloads lack. `Actor` gains a
-program arm that submit-input records, and create-session adoption stays an
-explicit maintainer choice, so a program-driven turn is never recorded as
-user-issued.
+registry kinds and typed records for runner recovery and configuration reload, a
+production generator for provider-target evidence, and the optional runner
+placement the two creation payloads lack. `Actor` gains a program arm that
+submit-input records, and create-session adoption stays an explicit maintainer
+choice, so a program-driven turn is never recorded as user-issued.
 
 ## Design
 
@@ -26,11 +25,7 @@ retires at the [turn-lifecycle boundary](turn-lifecycle-and-scheduling.md).
 `ProviderTargetEvidenceId` gains a UUIDv7 generator with the durable
 provider-target evidence that
 [model-call-execution](../spec/model-call-execution.md) defers; no slice writes
-that evidence today. `WorkspaceId`, `GitRemoteMintId`, and
-`GitRemoteWithdrawalId` gain write paths and generators in the workspace store
-and its operator verbs; their registry kinds and tables already exist. Each
-generator mints immediately before the domain transition that creates the fact,
-as the spec page requires of every generator.
+that evidence today.
 
 The optional runner placement enters the imported-creation and create-session
 payloads at a new storage version above each kind's current maximum, and every
@@ -85,9 +80,6 @@ that adds the field states how each earlier version reconstitutes.
   the pending disposition; after the result row commits it returns that result.
 - A runner replacement claimed but unterminated at process exit is resumed at
   startup before clients are admitted, and terminates under its own identifier.
-- The workspace store and its operator verbs write `WorkspaceId`,
-  `GitRemoteMintId`, and `GitRemoteWithdrawalId` rows from production
-  generators, and no Postgres column gained an identity-generating default.
 - `ProviderTargetEvidenceId` has a production generator once durable
   provider-target evidence lands.
 - The new imported-creation and create-session versions decode a placement, and
