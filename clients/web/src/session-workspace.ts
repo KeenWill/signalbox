@@ -32,18 +32,23 @@ export async function extendSessionWorkspace(
   if (!held || signal.aborted || BigInt(observed) <= BigInt(held.descriptor.observed_through))
     return
   let descriptor = await held.history.describe(signal)
+  const anchor: SessionWindowAnchor =
+    held.anchor.kind === 'around' &&
+    (descriptor.work.active_turn_count !== '0' || descriptor.work.queued_turn_count !== '0')
+      ? { kind: 'latest' }
+      : held.anchor
   let window = held.window
   const last = window.items.at(-1)?.address.event_sequence
   if (
     last &&
-    held.anchor.kind !== 'latest' &&
+    anchor.kind !== 'latest' &&
     BigInt(descriptor.latest_address.event_sequence) > BigInt(last)
   ) {
     window = { ...window, continuation_after: { event_sequence: last } }
   }
   if (
     last &&
-    window.continuation_after === null &&
+    anchor.kind === 'latest' &&
     BigInt(descriptor.latest_address.event_sequence) > BigInt(last)
   ) {
     const extension = await held.history.load(
@@ -84,6 +89,7 @@ export async function extendSessionWorkspace(
     current === held
       ? {
           ...held,
+          anchor,
           descriptor,
           active:
             descriptor.work.active_turn_count !== '0' || descriptor.work.queued_turn_count !== '0',

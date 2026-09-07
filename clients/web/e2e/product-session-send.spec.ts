@@ -15,6 +15,7 @@ const excerpt = (text: string) => ({
 
 async function sessionApi(page: Page, busy = false, selectedSessionId = sessionId) {
   const state = {
+    active: busy,
     grown: false,
     observed: false,
     historyReads: [] as string[],
@@ -28,7 +29,9 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
   const snapshot = () => ({
     session_id: selectedSessionId,
     observed_through: state.grown || state.observed ? '44' : '43',
-    active: busy ? { turn_id: turnId, state: { kind: 'running', model_call_id: null } } : null,
+    active: state.active
+      ? { turn_id: turnId, state: { kind: 'running', model_call_id: null } }
+      : null,
     queued_turn_count: '0',
     queued_turn_ids: [],
     reconciliation: null,
@@ -157,7 +160,7 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
         first_address: { event_sequence: '41' },
         latest_address: { event_sequence: latest },
         observed_through: state.observed ? '44' : latest,
-        work: { active_turn_count: busy ? '1' : '0', queued_turn_count: '0' },
+        work: { active_turn_count: state.active ? '1' : '0', queued_turn_count: '0' },
       },
     })
   })
@@ -197,6 +200,28 @@ test('reads durable transcript growth and sends a message by keyboard', async ({
   expect(api.state.submissions).toHaveLength(1)
   expect(api.state.submissions[0]?.message).toBe('Continue with the next step.')
   await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveValue('')
+})
+
+test('follows new active work after restoring an inactive session position', async ({ page }) => {
+  const api = await sessionApi(page)
+  await openSession(page)
+  await page.getByRole('option', { name: /41 input accepted/ }).click()
+  await expect
+    .poll(() =>
+      page.evaluate((id) => {
+        const stored = JSON.parse(localStorage.getItem('signalbox.web.preferences.v1') ?? '{}')
+        return stored.lastLogicalPositions?.[id]
+      }, sessionId),
+    )
+    .toBe('41')
+  await page.reload()
+  await expect(page.getByText('Inactive · restored logical position')).toBeVisible()
+  expect(api.state.historyReads.at(-1)).toBe('around')
+  api.state.active = true
+  api.grow()
+  await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
+  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  expect(api.state.historyReads).toEqual(['latest', 'around', 'after'])
 })
 
 test('retries an unconfirmed acceptance with the same command and text', async ({ page }) => {
