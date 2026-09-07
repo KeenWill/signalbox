@@ -125,6 +125,33 @@ impl<'a> Output<'a> {
         serde_json::to_writer(&mut self.stdout, receipt).map_err(io::Error::other)?;
         writeln!(self.stdout)
     }
+
+    pub(crate) fn oauth_credential(
+        &mut self,
+        message: &signalbox_process_protocol::ServerMessage,
+    ) -> io::Result<()> {
+        match message {
+            signalbox_process_protocol::ServerMessage::OauthCredentialAuthorization {
+                user_code,
+                verification_uri,
+                ..
+            } => {
+                self.text_field("user_code", user_code)?;
+                self.text_field("verification_uri", verification_uri)
+            }
+            signalbox_process_protocol::ServerMessage::OauthCredentialReceipt {
+                command_id,
+                profile,
+                outcome,
+            } => {
+                self.text_field("command_id", &command_id.into_uuid().to_string())?;
+                self.text_field("profile", profile)?;
+                let value = serde_json::to_string(outcome).map_err(io::Error::other)?;
+                self.text_field("outcome", &value)
+            }
+            _ => Err(io::Error::other("unexpected OAuth message")),
+        }
+    }
     pub(crate) fn new(stdout: &'a mut dyn Write, stderr: &'a mut dyn Write, raw: bool) -> Self {
         Self {
             stdout,

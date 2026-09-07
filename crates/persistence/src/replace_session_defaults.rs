@@ -259,7 +259,10 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::SessionLifecycle
                 | CommandKind::ReplaceLostRunner
                 | CommandKind::AbandonLostRunner
-                | CommandKind::PromotePendingRunner,
+                | CommandKind::PromotePendingRunner
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential,
             ) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
@@ -316,7 +319,10 @@ impl ReplaceSessionDefaultsRepository {
                     | CommandKind::SessionLifecycle
                     | CommandKind::ReplaceLostRunner
                     | CommandKind::AbandonLostRunner
-                    | CommandKind::PromotePendingRunner,
+                    | CommandKind::PromotePendingRunner
+                    | CommandKind::ProvisionOauthCredential
+                    | CommandKind::ReprovisionOauthCredential
+                    | CommandKind::DeleteOauthCredential,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -432,7 +438,10 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::SessionLifecycle
                 | CommandKind::ReplaceLostRunner
                 | CommandKind::AbandonLostRunner
-                | CommandKind::PromotePendingRunner,
+                | CommandKind::PromotePendingRunner
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential,
             ) => Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id }),
         }
     }

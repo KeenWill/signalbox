@@ -336,7 +336,9 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::DeploymentLimits { .. }
         | ServerMessage::RunnerReplacementReceipt { .. }
         | ServerMessage::RunnerAbandonmentReceipt { .. }
-        | ServerMessage::RunnerPromotionReceipt { .. } => DelegationResponse::Unexpected,
+        | ServerMessage::RunnerPromotionReceipt { .. }
+        | ServerMessage::OauthCredentialAuthorization { .. }
+        | ServerMessage::OauthCredentialReceipt { .. } => DelegationResponse::Unexpected,
     }
 }
 

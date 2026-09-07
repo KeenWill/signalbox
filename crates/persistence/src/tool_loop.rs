@@ -533,6 +533,9 @@ impl PostgresToolLoopRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential
                 | CommandKind::SessionLifecycle
                 | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReplaceLostRunner
@@ -708,7 +711,10 @@ impl PostgresToolLoopRepository {
                 | CommandKind::SessionLifecycle
                 | CommandKind::ReplaceLostRunner
                 | CommandKind::AbandonLostRunner
-                | CommandKind::PromotePendingRunner,
+                | CommandKind::PromotePendingRunner
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }
