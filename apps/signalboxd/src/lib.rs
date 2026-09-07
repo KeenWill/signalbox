@@ -205,7 +205,7 @@ pub use signalbox_tools_workspace::{
     WORKSPACE_READ_TOOL_NAMES, WRITE_FILE_NAME, WorkspaceFileSystem, WorkspaceMutationExecutor,
     WorkspaceMutationFileSystem, WorkspaceMutationTools, WorkspaceReadExecutor, WorkspaceReadTools,
 };
-pub use single_hub::{SingleHubGuard, SingleHubGuardError};
+pub use single_hub::{GUARD_CHECK_INTERVAL, SingleHubGuard, SingleHubGuardError};
 pub use telemetry::{
     OTLP_ENDPOINT_ENVIRONMENT, OTLP_HEADERS_FILE_ENVIRONMENT, OTLP_MAX_EXPORT_BATCH,
     OTLP_MAX_QUEUED_SPANS, OTLP_PROTOCOL_ENVIRONMENT, OTLP_SAMPLING_RATIO_ENVIRONMENT,
