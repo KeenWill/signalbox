@@ -69,7 +69,35 @@ struct CommandKindDefinition {
     maximum_version: i16,
 }
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 16] = [
+pub(crate) const PROVISION_OAUTH_CREDENTIAL_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ProvisionOauthCredential);
+pub(crate) const REPROVISION_OAUTH_CREDENTIAL_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReprovisionOauthCredential);
+pub(crate) const DELETE_OAUTH_CREDENTIAL_KIND: &str =
+    durable_command_kind_to_str(CommandKind::DeleteOauthCredential);
+
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 19] = [
+    CommandKindDefinition {
+        kind: CommandKind::ProvisionOauthCredential,
+        spelling: PROVISION_OAUTH_CREDENTIAL_KIND,
+        typed_table: "provision_oauth_credential_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::ReprovisionOauthCredential,
+        spelling: REPROVISION_OAUTH_CREDENTIAL_KIND,
+        typed_table: "reprovision_oauth_credential_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::DeleteOauthCredential,
+        spelling: DELETE_OAUTH_CREDENTIAL_KIND,
+        typed_table: "delete_oauth_credential_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
     CommandKindDefinition {
         kind: CommandKind::CreateSession,
         spelling: CREATE_SESSION_KIND,
@@ -367,6 +395,32 @@ mod tests {
             database_admitted_command_kinds(),
             registry_admitted_command_kinds()
         );
+    }
+
+    #[test]
+    fn oauth_administration_kinds_have_distinct_typed_record_families() {
+        for (kind, table) in [
+            (
+                CommandKind::ProvisionOauthCredential,
+                "provision_oauth_credential_command",
+            ),
+            (
+                CommandKind::ReprovisionOauthCredential,
+                "reprovision_oauth_credential_command",
+            ),
+            (
+                CommandKind::DeleteOauthCredential,
+                "delete_oauth_credential_command",
+            ),
+        ] {
+            let definition = COMMAND_KIND_DEFINITIONS
+                .iter()
+                .find(|definition| definition.kind == kind)
+                .expect("OAuth kind is registered");
+            assert_eq!(definition.typed_table, table);
+            assert_eq!(sole_typed_record(kind, &[kind]), Ok(kind));
+            assert!(sole_typed_record(kind, &[]).is_err());
+        }
     }
 
     #[test]

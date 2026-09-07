@@ -188,10 +188,15 @@ content-derived identifier, reader identity, bytes, extracted text, filename,
 declared type, parser message, stderr, path, or credential. The general rule for
 what errors and logs may contain is in [process-protocol](process-protocol.md).
 
+OAuth provisioning, re-provisioning, and deletion have distinct registry kinds
+and typed relational request and result families keyed by command identifier.
+The deferred typed-record trigger requires each claim's request, both record
+families are append-only, and structural replay equality compares the operation
+and profile while excluding the command identifier. A no-exchange rejection
+claims and commits its terminal receipt in one transaction.
+
 ## Planned
 
-- Registry kinds and typed request/result records for OAuth provisioning,
-  re-provisioning, and deletion: [design](../design/identity-and-commands.md).
 - Registry kind and typed request/result records for configuration reload:
   [design](../design/identity-and-commands.md).
 - Registry kinds and typed records for the runner recovery commands (replace,

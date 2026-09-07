@@ -98,6 +98,7 @@ use session::{
     placement_update_receipt_matches, placement_update_rejection_matches,
     replacement_receipt_settings_match,
 };
+mod credential;
 mod goal;
 use goal::goal;
 #[cfg(test)]
@@ -285,6 +286,7 @@ async fn execute(
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Credential(_)
         | Command::Imported { .. }
         | Command::Status
         | Command::List
@@ -311,6 +313,7 @@ async fn execute(
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Credential(_)
         | Command::Imported { .. }
         | Command::Status
         | Command::List
@@ -346,6 +349,7 @@ async fn execute(
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Credential(_)
         | Command::Status
         | Command::List
         | Command::Templates
@@ -470,6 +474,9 @@ async fn execute(
             imported_conversation_id,
         } => imported(&mut client, &mut output, imported_conversation_id).await,
         Command::Session(command) => session_delegation(&mut client, &mut output, command).await,
+        Command::Credential(command) => {
+            credential::credential(&mut client, &mut output, command).await
+        }
         Command::Goal(command) => goal(&mut client, &mut output, command).await,
         Command::Status => status(&mut client, &mut output).await,
         Command::List => list(&mut client, &mut output).await,

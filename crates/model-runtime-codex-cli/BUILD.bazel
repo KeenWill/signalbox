@@ -34,7 +34,7 @@ rust_library(
 rust_binary(
     name = "signalbox-fake-codex-cli",
     srcs = glob(["tests/support/**/*.rs"]),
-    crate_root = "tests/support/fake_codex_cli.rs",
+    crate_root = "tests/support/fake_codex_app_server.rs",
     deps = [
         ":build_script",
         ":signalbox_model_runtime_codex_cli",
@@ -44,7 +44,7 @@ rust_binary(
 
 rust_unit_test(
     name = "unit_tests",
-    compile_data = ["tests/support/fake_codex_app_server.rs"],
+    compile_data = ["tests/support/protocol_peer.rs"],
     crate = ":signalbox_model_runtime_codex_cli",
     # These tests execute host shell or process utilities.
     tags = ["external"],
