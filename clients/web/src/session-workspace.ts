@@ -23,7 +23,11 @@ export async function extendSessionWorkspace(
   signal: AbortSignal,
 ) {
   const queryKey = ['production', 'session-workspace', sessionId] as const
-  await queries.getQueryCache().find({ queryKey, exact: true })?.promise
+  try {
+    await queries.getQueryCache().find({ queryKey, exact: true })?.promise
+  } catch {
+    return
+  }
   const held = queries.getQueryData<SessionWorkspace>(queryKey)
   if (!held || signal.aborted || BigInt(observed) <= BigInt(held.descriptor.observed_through))
     return

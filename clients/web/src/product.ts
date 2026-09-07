@@ -1227,6 +1227,10 @@ export async function readExtendedSessionTranscript(
 ): Promise<HeldSessionTranscript> {
   const append =
     held !== null &&
+    held.page.items.length <=
+      Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items) &&
+    held.page.projected_body_bytes <=
+      Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes) &&
     held.sessionId === window.sessionId &&
     BigInt(window.first) >= BigInt(held.first) &&
     BigInt(window.first) <= BigInt(held.through) &&

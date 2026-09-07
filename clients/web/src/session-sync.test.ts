@@ -151,3 +151,33 @@ it('preserves held history across ordinary and resynchronization snapshots', asy
   stop()
   queries.clear()
 })
+
+it('continues processing live snapshots when an in-flight historical read fails', async () => {
+  const sessionId = '00000000-0000-0000-0000-000000000991'
+  const queries = new QueryClient()
+  let failHistory = () => {}
+  const historyRead = queries.fetchQuery({
+    queryKey: ['production', 'session-workspace', sessionId],
+    queryFn: () =>
+      new Promise((_, reject) => {
+        failHistory = () => reject(new Error('history unavailable'))
+      }),
+    retry: false,
+  })
+  void historyRead.catch(() => undefined)
+  vi.mocked(followSession).mockImplementation(async function* () {
+    yield { kind: 'snapshot', snapshot: snapshot(sessionId) }
+    yield { kind: 'snapshot', snapshot: { ...snapshot(sessionId), observed_through: '42' } }
+  })
+  const store = createAppStore()
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(sessionId))
+  await vi.waitFor(() => expect(selectSessionSync(store.getState()).phase).toBe('live'))
+  failHistory()
+  await expect(historyRead).rejects.toThrow('history unavailable')
+  await vi.waitFor(() =>
+    expect(selectSessionSync(store.getState())).toMatchObject({ phase: 'live', cursor: '42' }),
+  )
+  stop()
+  queries.clear()
+})

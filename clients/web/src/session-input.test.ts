@@ -499,3 +499,24 @@ it('bounds appended transcript bytes even when the item count is small', async (
   expect(extended.page.items[0]?.address.event_sequence).toBe('2')
   expect(extended.page.projected_body_bytes).toBe(10_128)
 })
+
+it.each([
+  { bound: 'items', reduced: { ...limits, max_timeline_detail_items: 1 } },
+  { bound: 'bytes', reduced: { ...limits, max_timeline_detail_bytes: 1024 } },
+])(
+  'replaces held transcript text when the current $bound limit becomes smaller',
+  async ({ reduced }) => {
+    const textBytes = 512
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(inputPage(2, textBytes)))
+      .mockResolvedValueOnce(Response.json(inputPage(1, textBytes)))
+    vi.stubGlobal('fetch', fetch)
+    const window = { sessionId, first: '1', through: '2' }
+    const held = await readExtendedSessionTranscript(window, null, limits, null)
+    const bounded = await readExtendedSessionTranscript(window, null, reduced, held)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(bounded.page.items).toHaveLength(1)
+    expect(bounded.page.projected_body_bytes).toBeLessThanOrEqual(reduced.max_timeline_detail_bytes)
+  },
+)
