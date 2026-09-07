@@ -3135,3 +3135,24 @@ kbd {
     grid-column: 1 / -1;
   }
 }
+
+.session-live-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.provider-drafts {
+  border-left: 2px solid var(--border);
+  padding: 8px 12px;
+}
+
+.provider-drafts > span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.provider-drafts p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

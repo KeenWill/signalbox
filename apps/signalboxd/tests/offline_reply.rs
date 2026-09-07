@@ -1006,3 +1006,143 @@ async fn adopting_a_blocked_goal_persists_its_scheduled_need() -> Result<(), Box
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn goal_successor_uses_the_reloaded_alias_definition() -> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::reload_configuration::{
+        ReloadConfiguration, ReloadLookup, ReloadResult,
+    };
+    use signalboxd::configuration_reload::ConfigurationReload;
+    let (_container, pool, _) = migrated_postgres().await?;
+    // Distinct fixture selections expose reuse of the startup alias definition.
+    let alias = signalbox_domain::ModelAlias::from_uuid(Uuid::from_u128(0x2003));
+    let next_selection = Uuid::from_u128(0x2002);
+    let mut source = GOAL_MODEL_CONFIGURATION.parse::<toml_edit::DocumentMut>()?;
+    let example = include_str!("../../../config/signalboxd.example.toml")
+        .parse::<toml_edit::DocumentMut>()?;
+    source.insert("numeric_bounds", example["numeric_bounds"].clone());
+    let models = source["models"].as_array_of_tables_mut().expect("models");
+    let mut next_model = models.get(0).expect("first model").clone();
+    next_model.insert("selection_id", toml_edit::value(next_selection.to_string()));
+    next_model.insert(
+        "target_id",
+        toml_edit::value(Uuid::from_u128(0x2005).to_string()),
+    );
+    models.push(next_model);
+    let mut aliases = toml_edit::ArrayOfTables::new();
+    let mut definition = toml_edit::Table::new();
+    definition.insert("alias_id", toml_edit::value(alias.as_uuid().to_string()));
+    definition.insert(
+        "selection_id",
+        toml_edit::value(Uuid::from_u128(0x2001).to_string()),
+    );
+    aliases.push(definition);
+    source.insert("aliases", toml_edit::Item::ArrayOfTables(aliases));
+    let configuration = signalboxd::HubModelConfiguration::parse(&source.to_string())?;
+    let files = tempfile::tempdir()?;
+    let model_path = files.path().join("models.toml");
+    let template_path = files.path().join("templates.toml");
+    std::fs::write(&template_path, "version = 1\n")?;
+    let reload = ConfigurationReload::new(
+        pool.clone(),
+        configuration.clone(),
+        signalboxd::SessionTemplateConfiguration::default(),
+        model_path.clone(),
+        template_path,
+        None,
+    )
+    .map_err(|error| std::io::Error::other(format!("reload fixture: {error:?}")))?;
+    let mut create = CreateSessionService::new(
+        UuidV7SessionIdGenerator,
+        CreateSessionRepository::new(pool.clone(), configuration.session_credential_pin()),
+    );
+    let CreateSessionOutcome::Applied(created) = create
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Alias(alias)),
+        )?)
+        .await?
+    else {
+        panic!("fixture session is created")
+    };
+    let session = created.session();
+    let first = goal_turn_candidates(0x2201);
+    let repository = GoalRepository::new(pool.clone());
+    assert_goal_command_applied(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    session,
+                    GoalUserAction::Attach(goal_statement("continue through the updated alias")),
+                ),
+                Some(first),
+                |alias| configuration.resolve_alias(alias),
+            )
+            .await?,
+    );
+    let (nudge, _work) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    let disposition = PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration.clone(),
+        nudge,
+        GoalModeNumericBounds::new(None, None, None, None, None),
+    )
+    .with_configuration_reload(reload.clone());
+    let provider = RuntimeModelCallProvider::new(
+        ScriptedModel::following([goal_completion_script()]),
+        configuration.runtime_model_catalog(),
+        None,
+    );
+    let execution = PostgresProviderModelExecution::new(
+        PostgresModelCallRepository::new(
+            pool.clone(),
+            configuration.target_catalog(),
+            ModelCallCredentialReference::new("goal-reload-fixture"),
+        ),
+        InProcessAttemptDispatchGate::default(),
+        provider,
+        None,
+    )
+    .with_tool_loop(
+        InProcessToolDispatchGate::default(),
+        NoToolCatalog,
+        UnexpectedToolExecutor,
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        pool.clone(),
+        None,
+        Vec::new(),
+    ));
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) = activation.execute(session).await? else {
+        panic!("first goal turn activates")
+    };
+    execution.execute(activated).await?;
+    source["aliases"]
+        .as_array_of_tables_mut()
+        .expect("aliases")
+        .get_mut(0)
+        .expect("alias")
+        .insert("selection_id", toml_edit::value(next_selection.to_string()));
+    std::fs::write(model_path, source.to_string())?;
+    assert_eq!(
+        reload
+            .reload(ReloadConfiguration {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7())
+            })
+            .await?,
+        ReloadLookup::Recorded(ReloadResult::Reloaded)
+    );
+    disposition.reconcile_success(session).await?;
+    let selected: Uuid = sqlx::query_scalar("SELECT frozen_alias_selected_direct_id FROM queued_input_origin WHERE session_id = $1 AND turn_id <> $2")
+        .bind(session.into_uuid()).bind(first.turn().into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(selected, next_selection);
+    pool.close().await;
+    Ok(())
+}

@@ -61,17 +61,16 @@ use signalboxd::runner_protocol_runtime::{
 use signalboxd::{
     AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs, BlobStoreRegistry, BlobTools,
     CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds, ConfiguredApprovalPostureError,
-    ContextGuardedTurnPass, ConvergenceSweepNumericBounds, DaemonToolCatalog,
-    DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, ExpiredPassRecoveryPolicy,
-    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
-    FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
-    GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError,
-    LifecycleDeadlineRuntime, LifecycleMetricsRuntime, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, OtlpRuntime, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    ReportedUsageCompaction, SessionTemplateConfiguration, SessionTemplateConfigurationError,
-    SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
-    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    ContextGuardedTurnPass, ConvergenceSweepNumericBounds, DaemonTools,
+    DaemonToolsConstructionError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FencedPoolFloorReconciliation, FileCredentialAccess,
+    GitHubCodeHostTransport, GoalModeNumericBounds, HubModelConfiguration,
+    HubModelConfigurationError, LifecycleDeadlineRuntime, LifecycleMetricsRuntime,
+    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, OtlpRuntime,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
     TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
     reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
@@ -432,35 +431,6 @@ fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) ->
         "daemon startup construction failed"
     );
     error
-}
-
-/// Converts Anthropic construction evidence to a closed classification.
-///
-/// The adapter's dynamic parser/client detail is deliberately excluded because
-/// an adapter-owned string is not admitted to operator telemetry.
-#[cfg(test)]
-const fn anthropic_construction_cause(error: &AnthropicConstructionError) -> &'static str {
-    match error {
-        AnthropicConstructionError::InvalidBaseUrl { .. } => "anthropic_invalid_base_url",
-        AnthropicConstructionError::InvalidVersion => "anthropic_invalid_version",
-        AnthropicConstructionError::InvalidExchangeTimeout => "anthropic_invalid_timeout",
-        AnthropicConstructionError::InvalidSseRecordLimit => "anthropic_invalid_record_limit",
-        AnthropicConstructionError::ClientConstruction { .. } => "anthropic_client_construction",
-    }
-}
-
-/// Converts OpenAI construction evidence to a closed classification.
-///
-/// The adapter's dynamic parser/client detail is deliberately excluded because
-/// an adapter-owned string is not admitted to operator telemetry.
-#[cfg(test)]
-const fn openai_construction_cause(error: &OpenAiConstructionError) -> &'static str {
-    match error {
-        OpenAiConstructionError::InvalidBaseUrl { .. } => "openai_invalid_base_url",
-        OpenAiConstructionError::InvalidExchangeTimeout => "openai_invalid_timeout",
-        OpenAiConstructionError::InvalidSseRecordLimit => "openai_invalid_record_limit",
-        OpenAiConstructionError::ClientConstruction { .. } => "openai_client_construction",
-    }
 }
 
 const fn configured_approval_posture_cause(error: &ConfiguredApprovalPostureError) -> &'static str {
@@ -1145,88 +1115,7 @@ async fn run_hub(
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
-    let bootstrap_min_connections = bootstrap_bounds
-        .integer("fenced_pool_min_connections")
-        .flatten()
-        .map(u32::try_from)
-        .transpose()
-        .ok()
-        .and_then(validate_fenced_pool_min_connections)
-        .ok_or_else(|| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("invalid_fenced_pool_min_connections"),
-            )
-        })?;
-    let mut database = FencedHubDatabase::connect_production(
-        configuration.database_url(),
-        bootstrap_min_connections,
-    )
-    .await
-    .map_err(|error| {
-        let phase = match &error {
-            FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
-            FencedHubDatabaseError::ParseOptions(_)
-            | FencedHubDatabaseError::ConnectBootstrap(_)
-            | FencedHubDatabaseError::AcquireGuard(_)
-            | FencedHubDatabaseError::AdvanceFence(_)
-            | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
-        };
-        erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
-    })?;
-    let pool = database.pool().clone();
-    let fenced_pool_floor_pool = pool.clone();
-    migrate(&pool).await.map_err(|error| {
-        tracing::error!(
-            migration_detail = %error,
-            "database migration rejected"
-        );
-        erase_startup_cause(
-            RuntimePhase::Migration,
-            SanitizedStartupCause::Static("database_migration_failed"),
-        )
-    })?;
-    tracing::info!(
-        phase = ?RuntimePhase::Migration,
-        "daemon startup phase completed"
-    );
-    let pending_reload =
-        signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
-            pool.clone(),
-        )
-        .pending()
-        .await
-        .map_err(|_| {
-            erase_startup_cause(
-                RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static("configuration_reload_intent_read_failed"),
-            )
-        })?;
-    let retained_startup = pending_reload
-        .first()
-        .map(|(_, intent)| {
-            signalboxd::configuration_reload::ConfigurationReload::startup_snapshot(
-                &on_disk,
-                &intent.replacement_snapshot,
-            )
-        })
-        .transpose()
-        .map_err(|_| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("configuration_reload_snapshot_incompatible"),
-            )
-        })?;
-    let model_configuration = match &retained_startup {
-        Some(catalogs) => (*catalogs.models).clone(),
-        None => HubModelConfiguration::parse(&on_disk).map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::ModelConfiguration(&error),
-            )
-        })?,
-    };
-    let numeric_bounds = model_configuration.numeric_bounds();
+    let numeric_bounds = &bootstrap_bounds;
     let configured_duration = |field| numeric_bounds.duration(field).flatten();
     let configured_usize = |field| {
         numeric_bounds
@@ -1263,16 +1152,6 @@ async fn run_hub(
                 SanitizedStartupCause::Static("invalid_codex_cli_version_probe_bound"),
             )
         })?;
-    if let Some(codex_cli) = model_configuration.codex_cli() {
-        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
-            .await
-            .map_err(|_| {
-                erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
-                )
-            })?;
-    }
     let fenced_pool_min_connections =
         validate_fenced_pool_min_connections(configured_u32("fenced_pool_min_connections")?)
             .ok_or_else(|| {
@@ -1456,6 +1335,84 @@ async fn run_hub(
         configured_usize("max_code_host_result_items")?,
         configured_usize("max_repository_file_content_bytes")?,
     );
+    let mut database = FencedHubDatabase::connect_production(
+        configuration.database_url(),
+        fenced_pool_min_connections,
+    )
+    .await
+    .map_err(|error| {
+        let phase = match &error {
+            FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
+            FencedHubDatabaseError::ParseOptions(_)
+            | FencedHubDatabaseError::ConnectBootstrap(_)
+            | FencedHubDatabaseError::AcquireGuard(_)
+            | FencedHubDatabaseError::AdvanceFence(_)
+            | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
+        };
+        erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
+    })?;
+    let pool = database.pool().clone();
+    let fenced_pool_floor_pool = pool.clone();
+    migrate(&pool).await.map_err(|error| {
+        tracing::error!(
+            migration_detail = %error,
+            "database migration rejected"
+        );
+        erase_startup_cause(
+            RuntimePhase::Migration,
+            SanitizedStartupCause::Static("database_migration_failed"),
+        )
+    })?;
+    tracing::info!(
+        phase = ?RuntimePhase::Migration,
+        "daemon startup phase completed"
+    );
+    let pending_reload =
+        signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
+            pool.clone(),
+        )
+        .pending()
+        .await
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("configuration_reload_intent_read_failed"),
+            )
+        })?;
+    let retained_startup = pending_reload
+        .first()
+        .map(|(_, intent)| {
+            signalboxd::configuration_reload::ConfigurationReload::startup_snapshot(
+                &on_disk,
+                &intent.replacement_snapshot,
+            )
+        })
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("configuration_reload_snapshot_incompatible"),
+            )
+        })?;
+    let model_configuration = match &retained_startup {
+        Some(catalogs) => (*catalogs.models).clone(),
+        None => HubModelConfiguration::parse(&on_disk).map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::ModelConfiguration(&error),
+            )
+        })?,
+    };
+    if let Some(codex_cli) = model_configuration.codex_cli() {
+        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
+            .await
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
+                )
+            })?;
+    }
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,
@@ -1467,20 +1424,6 @@ async fn run_hub(
         ));
     }
     let daemon_tool_configuration = model_configuration.daemon_tools();
-    let tool_composition = match daemon_tool_configuration {
-        Some(_) => DaemonToolComposition::WithMappedFamilies,
-        None => DaemonToolComposition::Base,
-    };
-    DaemonToolCatalog::validate_approval_postures_for_composition(
-        model_configuration.tool_approval_postures(),
-        tool_composition,
-    )
-    .map_err(|error| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
-        )
-    })?;
     let template_configuration = match retained_startup {
         Some(catalogs) => (*catalogs.templates).clone(),
         None => SessionTemplateConfiguration::read(
@@ -1510,12 +1453,14 @@ async fn run_hub(
         post_kill_reap_bound,
         native_message_limit,
     );
-    runtime_factory.build(&model_configuration).map_err(|_| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("model_runtime_composition_failed"),
-        )
-    })?;
+    runtime_factory
+        .build(&model_configuration)
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static(error.cause_code()),
+            )
+        })?;
     let credential_reference =
         ModelCallCredentialReference::new(model_configuration.fallback_credential_profile());
     let code_host_credentials = FileCredentialAccess::new(
@@ -1948,12 +1893,34 @@ async fn run_hub(
         Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
         None => None,
     };
-    configuration_reload.recover().await.map_err(|_| {
-        erase_startup_cause(
-            RuntimePhase::StartupScan,
-            SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
-        )
-    })?;
+    let recovery_failure =
+        match await_while_guarded(&mut database, configuration_reload.recover()).await {
+            GuardedAwait::Completed(Ok(())) => None,
+            GuardedAwait::Completed(Err(_)) => Some(Err(erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
+            ))),
+            GuardedAwait::GuardLost => Some(Ok(ShutdownOutcome::GuardLost)),
+        };
+    if let Some(outcome) = recovery_failure {
+        if matches!(outcome, Ok(ShutdownOutcome::GuardLost)) {
+            if let Some(registry) = blob_store_registry.as_ref() {
+                registry.disarm_staging_sweep();
+            }
+        } else {
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+        }
+        let _ = repository_watch_shutdown.send(true);
+        if let Some(worker) = repository_watch_worker {
+            let _ = worker.await;
+        }
+        let _ = listener.cleanup();
+        let _ = runner_listener.cleanup();
+        drop(tool_executor);
+        drop(blob_store_registry);
+        let _ = database.close().await;
+        return outcome;
+    }
     let recovered_catalogs = configuration_reload.catalogs();
     let model_configuration = (*recovered_catalogs.models).clone();
     let template_configuration = (*recovered_catalogs.templates).clone();
@@ -2080,10 +2047,10 @@ async fn run_hub(
             ),
         )
     };
-    let baseline_pass = compose_pass(&model_configuration).map_err(|_| {
+    let baseline_pass = compose_pass(&model_configuration).map_err(|error| {
         erase_startup_cause(
             RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("model_runtime_composition_failed"),
+            SanitizedStartupCause::Static(error.cause_code()),
         )
     })?;
     let activated_pass = signalboxd::model_catalog_runtime::CatalogEligibilityPass::new(
@@ -2322,6 +2289,7 @@ async fn run_hub(
             }
         };
 
+        let _ = repository_watch_shutdown.send(true);
         if cause == RuntimeStopCause::GuardLost {
             runtime_tasks.abort_all();
             while runtime_tasks.join_next().await.is_some() {}
@@ -2332,7 +2300,6 @@ async fn run_hub(
             let _ = fenced_pool_floor_shutdown.send(true);
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
-            let _ = repository_watch_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);
             let _ = lifecycle_deadline_shutdown.send(true);
@@ -2680,11 +2647,10 @@ mod tests {
         ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RequiredSettingFailure,
         RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
         RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
-        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
-        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
-        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
-        fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
-        migrate_scan_then_schedule, openai_construction_cause, operator_filter,
+        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, combine_runtime_stop_cause,
+        completed_runtime_outcome, credential_files_conflict, database_close_failure_outcome,
+        drain_runtime_tasks, erase_startup_cause, fenced_pool_floor_reconciliation_policy,
+        graceful_shutdown_window, migrate_scan_then_schedule, operator_filter,
         process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
         runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
         validate_fenced_pool_min_connections,
@@ -2880,7 +2846,8 @@ mod tests {
         let error = AnthropicConstructionError::InvalidBaseUrl {
             detail: adapter_detail.to_owned(),
         };
-        let cause_code = anthropic_construction_cause(&error);
+        let cause_code =
+            signalboxd::model_catalog_runtime::ModelRuntimeBuildError::from(error).cause_code();
         let encoded = capture_startup_cause(SanitizedStartupCause::Static(cause_code));
         assert!(encoded.contains("anthropic_invalid_base_url"));
         assert!(!encoded.contains(adapter_detail));
@@ -2893,7 +2860,8 @@ mod tests {
             detail: adapter_detail.to_owned(),
         };
 
-        let cause_code = openai_construction_cause(&error);
+        let cause_code =
+            signalboxd::model_catalog_runtime::ModelRuntimeBuildError::from(error).cause_code();
         let encoded = capture_startup_cause(SanitizedStartupCause::Static(cause_code));
 
         assert!(encoded.contains("openai_invalid_base_url"));

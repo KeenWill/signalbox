@@ -451,22 +451,24 @@ absolute path when a template uses a `$HOME/` prompt reference. The
 database-channel refusal names the offending channel, never its contents, and
 happens before any database contact.
 
-A missing required value, an unreadable or invalid catalog, an invalid prompt
-file, or a failed provider transport construction fails startup at the
-Configuration phase before database contact. After the database connects, an
-invalid configured workspace root or a failed tool-suite construction fails at
-the same phase. A derived per-session root is composed on first use, so its
-failures are per-session tool failures. Startup and shutdown logs carry the
-phase, an operator failure class, and small typed fields. Every tool dependency
-is supplied by parsed configuration, the database pool, or explicit credential
-and transport values; no tool family discovers ambient authority.
+Missing required values, unreadable model catalogs, and invalid startup-only
+sections fail startup in the Configuration phase before database contact.
+Reloadable catalogs and prompt files are validated after the pending reload
+intent is read; failed provider transport construction also fails in
+Configuration. After the database connects, an invalid configured workspace root
+or a failed tool-suite construction fails at the same phase. A derived
+per-session root is composed on first use, so its failures are per-session tool
+failures. Startup and shutdown logs carry the phase, an operator failure class,
+and small typed fields. Every tool dependency is supplied by parsed
+configuration, the database pool, or explicit credential and transport values;
+no tool family discovers ambient authority.
 
-The deployment paths are accepted without I/O at environment parsing; both
-catalogs and every template prompt file are read during startup. Provider and
-integration credential files are never read at boot, so a missing or unsynced
-one cannot block startup or the recovery scan. The credential of a currently
-routed S3 blob store is the sole exception, read after the recovery scan and
-before socket admission, as [blob storage](blob-storage.md) requires.
+The deployment paths are accepted without I/O at environment parsing; the
+selected catalogs and template prompt contents are validated during startup.
+Provider and integration credential files are never read at boot, so a missing
+or unsynced one cannot block startup or the recovery scan. The credential of a
+currently routed S3 blob store is the sole exception, read after the recovery
+scan and before socket admission, as [blob storage](blob-storage.md) requires.
 
 Unauthenticated session, search, usage, attention, and blob reads require a
 loopback `Host` authority; another authority receives a 403

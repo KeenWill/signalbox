@@ -31,7 +31,7 @@ pub struct ConfigurationCatalogs {
     pub templates: Arc<SessionTemplateConfiguration>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RetainedSnapshot {
     model_catalog: String,
@@ -210,10 +210,11 @@ impl ConfigurationReload {
                     .map_err(|_| {
                         ReloadRepositoryError::Corruption("startup rule activation failed")
                     })?;
-                self.reconcile(&catalogs).await?;
+                let restored = self.reconcile(&catalogs).await?;
                 watch.install_reload(prepared).await.map_err(|_| {
                     ReloadRepositoryError::Corruption("reload worker installation failed")
                 })?;
+                watch.nudge_restored(restored).await;
             }
         } else {
             for (request, intent) in pending {
@@ -276,7 +277,7 @@ impl ConfigurationReload {
     async fn reconcile(
         &self,
         catalogs: &ConfigurationCatalogs,
-    ) -> Result<(), ReloadRepositoryError> {
+    ) -> Result<Vec<signalbox_domain::SessionId>, ReloadRepositoryError> {
         let targets = catalogs
             .models
             .repository_watch()
@@ -290,17 +291,12 @@ impl ConfigurationReload {
                     .map(|number| (repository.repository().clone(), *number))
             })
             .collect::<Vec<_>>();
-        let restored = self
-            .convergence
+        self.convergence
             .reconcile_configured_targets(&targets)
             .await
             .map_err(|_| {
                 ReloadRepositoryError::Corruption("reload convergence reconciliation failed")
-            })?;
-        if let Some(watch) = &self.watch {
-            watch.nudge_restored(restored).await;
-        }
-        Ok(())
+            })
     }
 
     async fn deliver(
@@ -365,18 +361,18 @@ impl ConfigurationReload {
                 let prepared = watch.prepare_reload(prior.clone()).await.map_err(|_| {
                     ReloadRepositoryError::Corruption("prior reload worker preparation failed")
                 })?;
-                self.reconcile(&prior).await?;
                 *self
                     .current
                     .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = prior;
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = prior.clone();
+                let restored = self.reconcile(&prior).await?;
                 watch.install_reload(prepared).await.map_err(|_| {
                     ReloadRepositoryError::Corruption("reload worker installation failed")
                 })?;
+                watch.nudge_restored(restored).await;
                 self.repository.finish(request, &refusal).await?;
                 return Ok(ReloadLookup::Recorded(refusal));
             }
-            self.reconcile(&replacement).await?;
             Some((watch, prepared))
         } else {
             None
@@ -384,11 +380,13 @@ impl ConfigurationReload {
         *self
             .current
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = replacement;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = replacement.clone();
         if let Some((watch, prepared)) = prepared_watch {
+            let restored = self.reconcile(&replacement).await?;
             watch.install_reload(prepared).await.map_err(|_| {
                 ReloadRepositoryError::Corruption("reload worker installation failed")
             })?;
+            watch.nudge_restored(restored).await;
         }
         self.repository
             .finish(request, &ReloadResult::Reloaded)
@@ -526,6 +524,19 @@ impl ConfigurationReload {
         };
         validate_catalogs(&catalogs)?;
         self.validate_runtime(&catalogs)?;
+        let current = self.catalogs();
+        if self.watch.is_none()
+            && current
+                .models
+                .repository_watch()
+                .is_some_and(|watch| watch.enabled())
+            && current.retained()? != catalogs.retained()?
+        {
+            return Err(failure(
+                ReloadPhase::Validate,
+                "catalog changes used by repository watch require activation",
+            ));
+        }
         Ok(catalogs)
     }
 }
@@ -561,15 +572,53 @@ fn startup_sections(models: &HubModelConfiguration) -> Result<toml::Table, Reloa
 }
 
 fn failure(phase: ReloadPhase, reason: &str) -> ReloadResult {
+    let mut sanitized = String::new();
+    for character in reason.chars() {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if sanitized.len() + character.len_utf8()
+            > signalbox_process_protocol::MAX_CONFIGURATION_RELOAD_REASON_BYTES
+        {
+            break;
+        }
+        sanitized.push(character);
+    }
+    if sanitized.trim().is_empty() {
+        sanitized = "configuration reload failed".to_owned();
+    }
     ReloadResult::Failed {
         phase,
-        reason: reason.to_owned(),
+        reason: sanitized,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_reasons_are_bounded_utf8_without_control_characters() {
+        let oversized = format!(
+            "\n{}",
+            "é".repeat(signalbox_process_protocol::MAX_CONFIGURATION_RELOAD_REASON_BYTES)
+        );
+        for input in [oversized.as_str(), "", "\n\t\0"] {
+            let ReloadResult::Failed { reason, .. } = failure(ReloadPhase::Validate, input) else {
+                panic!("failure result");
+            };
+            assert!(!reason.trim().is_empty());
+            assert!(
+                reason.len() <= signalbox_process_protocol::MAX_CONFIGURATION_RELOAD_REASON_BYTES
+            );
+            assert!(!reason.chars().any(char::is_control));
+            if input == oversized {
+                assert!(reason.ends_with('é'));
+            }
+        }
+    }
 
     fn fixture() -> (tempfile::TempDir, ConfigurationReload) {
         let directory = tempfile::tempdir().expect("fixture directory");
@@ -674,6 +723,76 @@ credential_file = "/unused/reload-token"
             ),
         );
         assert!(reload.catalogs().models.repository_watch().is_none());
+    }
+
+    fn fixture_with_repository_watch() -> (tempfile::TempDir, ConfigurationReload) {
+        let (directory, reload) = fixture();
+        // The unread credential path and repository are fixture-only watch inputs.
+        let source = format!(
+            r#"{}
+[repository_watch]
+version = 1
+enabled = true
+signal_reviewers = []
+[[repository_watch.repositories]]
+repository = "example/reload"
+poll_interval_seconds = 60
+credential_file = "/unused/reload-token"
+"#,
+            reload.catalogs().models.source()
+        );
+        reload.current.write().expect("catalog lock").models =
+            Arc::new(HubModelConfiguration::parse(&source).expect("watch configuration"));
+        std::fs::write(&reload.model_path, source).expect("model file");
+        reload
+            .read_replacement()
+            .expect("unchanged catalogs are allowed");
+        (directory, reload)
+    }
+
+    #[tokio::test]
+    async fn active_watch_refuses_model_edits_without_activation() {
+        let (_directory, reload) = fixture_with_repository_watch();
+        let mut source = reload
+            .catalogs()
+            .models
+            .source()
+            .parse::<toml_edit::DocumentMut>()
+            .expect("source");
+        source.remove("aliases");
+        std::fs::write(&reload.model_path, source.to_string()).expect("model edit");
+        assert_eq!(
+            reload
+                .read_replacement()
+                .expect_err("watch models need activation"),
+            failure(
+                ReloadPhase::Validate,
+                "catalog changes used by repository watch require activation"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn active_watch_refuses_template_edits_without_activation() {
+        let (directory, reload) = fixture_with_repository_watch();
+        let alias = reload
+            .catalogs()
+            .models
+            .model_aliases()
+            .next()
+            .expect("alias")
+            .0;
+        std::fs::write(directory.path().join("watch-prompt.txt"), "watch prompt").expect("prompt");
+        std::fs::write(&reload.template_path, format!("version = 1\n[[templates]]\nname = \"watch-template\"\nversion = 1\nalias = \"{}\"\nsystem_prompt_file = \"watch-prompt.txt\"\ndangerous_tool_auto_approval = false\n", alias.as_uuid())).expect("template edit");
+        assert_eq!(
+            reload
+                .read_replacement()
+                .expect_err("watch templates need activation"),
+            failure(
+                ReloadPhase::Validate,
+                "catalog changes used by repository watch require activation"
+            )
+        );
     }
 
     #[tokio::test]
