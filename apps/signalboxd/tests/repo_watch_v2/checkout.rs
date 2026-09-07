@@ -371,6 +371,48 @@ system_prompt = "Inspect repository activity."
         }
     }
 
+    /// Stops after core creation and staging mkdir, before publication or lifecycle settlement.
+    async fn stage_before_publication(&mut self) -> Result<(SessionId, PathBuf), Box<dyn Error>> {
+        use signalbox_module_repo_watch_v2::dispatch::{CommandSubmission, SessionCommandSink};
+        use std::os::unix::ffi::OsStrExt;
+
+        let pending = self
+            .store
+            .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+            .await?;
+        sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+            .bind(self.command.into_uuid())
+            .execute(&self.module)
+            .await?;
+        let result = self
+            .sink
+            .submit(pending[0].command().clone())
+            .await
+            .expect("held core creation");
+        let CommandSubmission::Creation(CreateSessionOutcome::Applied(applied)) = result else {
+            panic!("core creation must be applied");
+        };
+        let session = applied.session();
+        self.store
+            .retain_checkout_location(
+                self.command,
+                session,
+                self.sink
+                    .models
+                    .daemon_tools()
+                    .expect("tools")
+                    .workspace_root()
+                    .as_os_str()
+                    .as_bytes(),
+            )
+            .await?;
+        let staged = self
+            .root(session)
+            .with_file_name(format!(".checkout-{}", pending[0].dispatch().into_uuid()));
+        std::fs::create_dir_all(&staged)?;
+        Ok((session, staged))
+    }
+
     async fn session(&self) -> SessionId {
         let id: Uuid = sqlx::query_scalar(
             "SELECT created_session_id FROM dispatch_ledger WHERE command_id = $1",
@@ -733,6 +775,127 @@ async fn recovery_fetches_an_existing_checkout_without_cloning_again() -> Result
             .fetch_one(&fixture.module)
             .await?;
     assert_eq!(head, fixture.head.as_str());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn replay_publishes_staging_with_its_retained_identity() -> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::checkout::CheckoutDirectoryIdentity;
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    let (session, staged) = fixture.stage_before_publication().await?;
+    let metadata = std::fs::metadata(&staged)?;
+    let identity = CheckoutDirectoryIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+    fixture
+        .store
+        .retain_checkout_identity(fixture.command, identity, true)
+        .await?;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    scavenge_checkouts(&fixture.store, &fixture.core)
+        .await
+        .expect("active staging preserved at startup");
+    assert!(staged.is_dir());
+    fixture.dispatch().await;
+    let root = fixture.root(session);
+    let published = std::fs::metadata(&root)?;
+    assert_eq!(published.dev(), identity.device);
+    assert_eq!(
+        published.ino(),
+        identity.inode,
+        "replay publishes the retained directory"
+    );
+    assert!(!staged.exists());
+    let checkout = fixture
+        .store
+        .dispatch_checkout(fixture.command)
+        .await?
+        .expect("checkout");
+    assert_eq!(checkout.head.as_ref(), Some(&fixture.head));
+    assert!(checkout.retired_reason.is_none());
+    assert!(checkout.stop_command.is_none());
+    assert_eq!(
+        *fixture.runner.steps.lock().expect("Git steps"),
+        ["clone", "fetch", "checkout"]
+    );
+    fixture.dispatch().await;
+    assert_eq!(
+        *fixture.runner.steps.lock().expect("Git steps"),
+        ["clone", "fetch", "checkout"],
+        "settled replay does not provision again"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn replay_refuses_staging_with_a_different_retained_identity() -> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::checkout::CheckoutDirectoryIdentity;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    let (session, staged) = fixture.stage_before_publication().await?;
+    let original = staged.with_file_name("original-staging");
+    std::fs::rename(&staged, &original)?;
+    let metadata = std::fs::metadata(&original)?;
+    fixture
+        .store
+        .retain_checkout_identity(
+            fixture.command,
+            CheckoutDirectoryIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            },
+            true,
+        )
+        .await?;
+    std::fs::create_dir(&staged)?;
+    fixture.dispatch().await;
+    assert!(fixture.runner.steps.lock().expect("Git steps").is_empty());
+    assert!(!fixture.root(session).exists());
+    assert!(
+        staged.is_dir(),
+        "rejected staging is not discarded by preparation"
+    );
+    assert!(original.is_dir());
+    let checkout = fixture
+        .store
+        .dispatch_checkout(fixture.command)
+        .await?
+        .expect("checkout");
+    assert_eq!(
+        checkout.retired_reason,
+        Some(
+            signalbox_module_repo_watch_v2::checkout::CheckoutRetirementReason::ProvisioningFailed
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn replay_does_not_adopt_staging_without_retained_ownership() -> Result<(), Box<dyn Error>> {
+    let mut fixture = CheckoutFixture::new().await?;
+    let (session, staged) = fixture.stage_before_publication().await?;
+    fixture.dispatch().await;
+    assert!(fixture.runner.steps.lock().expect("Git steps").is_empty());
+    assert!(!fixture.root(session).exists());
+    assert!(
+        staged.is_dir(),
+        "unowned staging is not discarded by preparation"
+    );
+    let candidates = fixture.store.checkout_removal_candidates().await?;
+    let candidate = candidates.first().expect("pending staging cleanup");
+    assert!(
+        !candidate.created,
+        "reopening must not claim creation ownership"
+    );
+    assert!(candidate.identity.is_none());
     Ok(())
 }
 

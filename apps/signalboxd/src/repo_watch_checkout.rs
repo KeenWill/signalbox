@@ -81,8 +81,10 @@ pub(crate) struct CheckoutDirectory {
 
 impl Drop for CheckoutDirectory {
     fn drop(&mut self) {
-        if let Some(name) = &self.staged_name {
-            // Unpublished directories have no Git contents; only remove the empty entry.
+        if self.created
+            && let Some(name) = &self.staged_name
+        {
+            // Only discard an unpublished directory created by this preparation.
             let _ = remove_directory_entry(&self.parent, name, &self.directory);
         }
     }
@@ -99,18 +101,22 @@ pub(crate) fn prepare(
     let name = path
         .file_name()
         .ok_or(CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
-    let (directory, staged_name) = match openat(&parent, name, DIRECTORY_FLAGS, Mode::empty()) {
-        Ok(directory) => (directory, None),
-        Err(rustix::io::Errno::NOENT) => {
-            let name = staging_name(dispatch);
-            mkdirat(&parent, &name, Mode::RWXU)
-                .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
-            let directory = openat(&parent, &name, DIRECTORY_FLAGS, Mode::empty())
-                .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
-            (directory, Some(name))
-        }
-        Err(_) => return Err(CheckoutProvisioningFailed::at(CheckoutStep::Workspace)),
-    };
+    let (directory, staged_name, created) =
+        match openat(&parent, name, DIRECTORY_FLAGS, Mode::empty()) {
+            Ok(directory) => (directory, None, false),
+            Err(rustix::io::Errno::NOENT) => {
+                let name = staging_name(dispatch);
+                let created = match mkdirat(&parent, &name, Mode::RWXU) {
+                    Ok(()) => true,
+                    Err(rustix::io::Errno::EXIST) => false,
+                    Err(_) => return Err(CheckoutProvisioningFailed::at(CheckoutStep::Workspace)),
+                };
+                let directory = openat(&parent, &name, DIRECTORY_FLAGS, Mode::empty())
+                    .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+                (directory, Some(name), created)
+            }
+            Err(_) => return Err(CheckoutProvisioningFailed::at(CheckoutStep::Workspace)),
+        };
     let stat = rustix::fs::fstat(&directory)
         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
     #[allow(
@@ -122,7 +128,7 @@ pub(crate) fn prepare(
         path,
         dispatch,
         parent,
-        created: staged_name.is_some(),
+        created,
         staged_name,
         directory,
         identity: CheckoutDirectoryIdentity {
