@@ -204,15 +204,12 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
         store
             .react_to_lifecycle(&created, &mut factory, &mut codec)
             .await?;
-        store
-            .react_to_pull_request_lifecycle(&mut factory, &mut codec)
-            .await?;
         let restarted = RepoWatchStore::new(pool.clone());
         let commands = restarted.recover_pending_commands(&mut codec).await?;
         let command = commands
             .iter()
             .find(|p| p.repository() == &repository)
-            .expect("retirement command")
+            .expect("processing creation retires the session without an idle worker tick")
             .command();
         let command_id = command.command_id();
         let SessionCommandPayload::Lifecycle(stop) = command.clone().into_payload() else {

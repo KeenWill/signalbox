@@ -200,6 +200,7 @@ impl RepoWatchStore {
                 }
             }
         }
+        self.react_to_pull_request_lifecycle(factory, codec).await?;
         let prior: Decimal =
             sqlx::query_scalar("SELECT applied_through FROM core_event_cursor WHERE singleton")
                 .fetch_one(&self.pool)
