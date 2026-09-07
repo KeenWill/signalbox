@@ -553,7 +553,8 @@ authority is cloned into the workspace, Git, and execution suites. A
 nonexistent, non-directory, final-symlink, non-repository, linked, or externally
 administered configured root fails startup for the complete mapped composition.
 
-Provisioning a derived directory is deployment work. Only a reported absence at
+Repository-watch pull-request dispatch provisions its derived directory; other
+derived directories are provisioned by deployment. Only a reported absence at
 the derived path is unprovisioned, and such a session binds the configured root;
 a present non-directory, a symlink, or a path the daemon cannot classify is
 misprovisioned and fails closed. Which root a session bound is recorded on its
