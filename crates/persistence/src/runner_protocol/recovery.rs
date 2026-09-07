@@ -476,13 +476,16 @@ impl RunnerProtocolStore {
         let boundary =
             append_placement_boundary(transaction, command, ordinal, &replacement, boundary)
                 .await?;
-        let directory = lost_runner_working_directory(&replacement.placement);
+        let directory = match replacement.placement.state() {
+            SessionRunnerPlacementState::Pinned(pinned) => &pinned.working_directory,
+            _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+        };
         let state = if row.decode_column::<Option<Uuid>>("lost_runner_id")?
             == Some(enrollment.runner().into_uuid())
             && row
-                .decode_column::<Option<String>>("requested_working_directory")?
+                .decode_column::<Option<String>>("pinned_working_directory")?
                 .as_deref()
-                != directory.as_ref().map(RunnerWorkingDirectory::as_str)
+                != Some(directory.as_str())
         {
             DispatchedRunnerState::WorkingDirectoryChanged
         } else {

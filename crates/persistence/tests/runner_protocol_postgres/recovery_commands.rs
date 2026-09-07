@@ -356,6 +356,74 @@ async fn recovery_replaces_a_delegated_session_after_its_runtime_terminal_bounda
     pinned_installation_preserves_seed(false, true).await
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn same_runner_replacement_preserves_an_unchanged_default_directory_transition()
+-> Result<(), Box<dyn Error>> {
+    same_runner_default_directory_transition(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn same_runner_replacement_reports_a_changed_default_directory() -> Result<(), Box<dyn Error>>
+{
+    same_runner_default_directory_transition(true).await
+}
+
+async fn same_runner_default_directory_transition(changed: bool) -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, runner, _, pin) = stored_pin_fixture(&pool).await?;
+    sqlx::query("INSERT INTO runner_enrollment_request_receipt (request_id, enrollment_id, runner_id, authentication_reference_id, registration_revision) SELECT $1, enrollment_id, runner_id, authentication_reference_id, 1 FROM runner_enrollment WHERE enrollment_id = $2")
+        .bind(Uuid::now_v7())
+        .bind(runner.enrollment().into_uuid())
+        .execute(&pool)
+        .await?;
+    store.register(&runner, narrowed_advertisement()).await?;
+    append_runner_registration_loss_projection(&pool, pin.placement.session()).await?;
+    let old_directory = match pin.placement.state() {
+        SessionRunnerPlacementState::Pinned(pinned) => pinned.working_directory.clone(),
+        _ => panic!("the fixture is pinned"),
+    };
+    let successor = if changed {
+        advertisement()
+    } else {
+        advertisement().with_default_working_directory(Some(old_directory))
+    };
+    store.register(&runner, successor).await?;
+    let command = signalbox_domain::ReplaceLostRunner {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        session: pin.placement.session(),
+        revision: None,
+    };
+    let revision = pin
+        .placement
+        .revision()
+        .checked_next()
+        .expect("successor revision fits");
+    let result = store.replace_lost_runner(command.clone()).await?;
+    assert_eq!(
+        result,
+        RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Replaced {
+            runner: runner.runner(),
+            placement_revision: revision,
+        })
+    );
+    assert_eq!(store.replace_lost_runner(command).await?, result);
+    assert_recovery_event(
+        &pool,
+        pin.placement.session(),
+        runner.runner(),
+        revision,
+        if changed {
+            DispatchedRunnerState::WorkingDirectoryChanged
+        } else {
+            DispatchedRunnerState::Replaced
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 async fn pinned_installation_preserves_seed(
     imported: bool,
     runtime_terminal: bool,
