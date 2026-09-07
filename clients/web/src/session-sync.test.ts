@@ -132,7 +132,7 @@ it('retains the newer live cursor when a buffered event is followed by a failed 
   queries.clear()
 })
 
-it('reloads the workspace once after resynchronization, not on ordinary snapshots', async () => {
+it('preserves held history across ordinary and resynchronization snapshots', async () => {
   const sessionId = '00000000-0000-0000-0000-000000000991'
   vi.mocked(followSession).mockImplementation(async function* () {
     yield { kind: 'snapshot', snapshot: snapshot(sessionId) }
@@ -147,10 +147,7 @@ it('reloads the workspace once after resynchronization, not on ordinary snapshot
   const stop = startSessionSynchronization(store, queries)
   store.dispatch(actions.sessionFollowRequested(sessionId))
   await vi.waitFor(() => expect(selectSessionSync(store.getState()).cursor).toBe('44'))
-  expect(refreshed).toHaveBeenCalledExactlyOnceWith({
-    queryKey: ['production', 'session-workspace', sessionId],
-    exact: true,
-  })
+  expect(refreshed).not.toHaveBeenCalled()
   stop()
   queries.clear()
 })

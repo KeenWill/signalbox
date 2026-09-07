@@ -105,3 +105,37 @@ it('reloads a bounded window when an extension cannot reach the observed tail', 
   expect(queries.getQueryData<SessionWorkspace>(queryKey)?.window.items).toEqual([item(1)])
   queries.clear()
 })
+
+it('preserves an explicit first window and exposes newer history through continuation', async () => {
+  const source: SessionTimelineSource = {
+    limits: { max_timeline_window_items: 256, max_timeline_window_bytes: 65_536 },
+    readDescriptor: vi.fn().mockResolvedValue(descriptor(81)),
+    readWindow: vi.fn(),
+  }
+  const queries = new QueryClient()
+  const queryKey = ['production', 'session-workspace', sessionId]
+  queries.setQueryData<SessionWorkspace>(queryKey, {
+    active: false,
+    anchor: { kind: 'first' },
+    descriptor: descriptor(80),
+    history: new BoundedSessionHistory(sessionId, source),
+    window: {
+      session_id: sessionId,
+      items: Array.from({ length: 80 }, (_, index) => item(index + 1)),
+      projected_structured_bytes: 80 * 78,
+      continuation_before: null,
+      continuation_after: null,
+    },
+  })
+  const reload = vi.spyOn(queries, 'invalidateQueries')
+  await extendSessionWorkspace(queries, sessionId, '81', new AbortController().signal)
+  const held = queries.getQueryData<SessionWorkspace>(queryKey)
+  expect(held?.anchor).toEqual({ kind: 'first' })
+  expect(held?.window.items).toHaveLength(80)
+  expect(held?.window.items[0]).toEqual(item(1))
+  expect(held?.window.items.at(-1)).toEqual(item(80))
+  expect(held?.window.continuation_after).toEqual(item(80).address)
+  expect(source.readWindow).not.toHaveBeenCalled()
+  expect(reload).not.toHaveBeenCalled()
+  queries.clear()
+})

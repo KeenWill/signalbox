@@ -32,6 +32,13 @@ export async function extendSessionWorkspace(
   const last = window.items.at(-1)?.address.event_sequence
   if (
     last &&
+    held.anchor.kind !== 'latest' &&
+    BigInt(descriptor.latest_address.event_sequence) > BigInt(last)
+  ) {
+    window = { ...window, continuation_after: { event_sequence: last } }
+  }
+  if (
+    last &&
     window.continuation_after === null &&
     BigInt(descriptor.latest_address.event_sequence) > BigInt(last)
   ) {
