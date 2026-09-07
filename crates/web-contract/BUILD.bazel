@@ -1,7 +1,7 @@
 load("@aspect_rules_js//js:defs.bzl", "js_test")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_COMPILE_DATA = [
     "tests/fixtures/example.json",
@@ -67,3 +67,8 @@ js_test(
     entry_point = "tests/generated_roundtrip.mjs",
     node_options = ["--test"],
 )
+
+rust_quality_tests(documented_crates = [
+    ":signalbox_web_contract",
+    ":generate-web-contract",
+])

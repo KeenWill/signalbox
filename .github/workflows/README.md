@@ -14,8 +14,9 @@ file in the same pull request.
 
 Both self-hosted scale sets are managed outside of this repo.
 
-`bazel.yml` runs the migrated Rust targets on `signalbox` using the routing
-expression below. Cargo's required checks still cover the full workspace.
+`rust.yml` calls `bazel.yml` for ordinary Rust tests on `signalbox` and all
+manifest PostgreSQL suites on `signalbox-docker`, using the routing expression
+below. `validate` requires the reusable workflow to succeed.
 
 ## The routing rule
 
@@ -43,9 +44,8 @@ runs-on: ${{ github.event_name == 'pull_request'
   reopening or re-running a bot pull request would otherwise mask the bot and
   route its code to self-hosted hardware.
 
-`scripts/postgres_integration_suites.py` fails `validate-checks` when the
-postgres-integration shards do not share one identical runner-selection string,
-so shards cannot drift from each other.
+`scripts/postgres_integration_suites.py` checks that PostgreSQL jobs consume the
+manifest matrix, use the Docker pool, and remain binding on `validate`.
 
 ## Jobs pinned to a self-hosted pool
 

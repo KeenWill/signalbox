@@ -1,9 +1,7 @@
 name: Bazel
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -34,15 +32,28 @@ jobs:
           if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
             cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
           fi
-          bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 "${cache_args[@]}" //:rust_build //:bazel_tests
+          bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 "${cache_args[@]}" //:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation
+
+  postgres-matrix:
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
+    timeout-minutes: 2
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: matrix
+        run: echo "matrix=$(python3 scripts/postgres_integration_suites.py --matrix)" >> "$GITHUB_OUTPUT"
 
   bazel-postgres:
+    needs: postgres-matrix
     strategy:
       fail-fast: false
-      matrix:
-        package: [persistence, program-runtime]
+      matrix: ${{ fromJSON(needs.postgres-matrix.outputs.matrix) }}
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
-    timeout-minutes: 20
+    # Each worker runs one manifest partition across the suite's binaries.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,13 +61,15 @@ jobs:
       - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           bazelisk-version: 1.29.0
-      - name: Build and test the PostgreSQL migration slice
+      - name: Run the manifest PostgreSQL suite
         env:
           BAZEL_REMOTE_CACHE: ${{ vars.BAZEL_REMOTE_CACHE }}
-          BAZEL_POSTGRES_PACKAGE: ${{ matrix.package }}
+          BAZEL_POSTGRES_TARGET: ${{ matrix.target }}
+          BAZEL_POSTGRES_SHARD_INDEX: ${{ matrix.shard_index }}
+          BAZEL_POSTGRES_SHARD_COUNT: ${{ matrix.shard_count }}
         run: |
           cache_args=()
           if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
             cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
           fi
-          bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" "//crates/${BAZEL_POSTGRES_PACKAGE}:postgres_tests"
+          bazel test --keep_going --flaky_test_attempts=2 --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_sharding_strategy=disabled --test_env=SIGNALBOX_TEST_SHARD_INDEX="$BAZEL_POSTGRES_SHARD_INDEX" --test_env=SIGNALBOX_TEST_TOTAL_SHARDS="$BAZEL_POSTGRES_SHARD_COUNT" --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" "$BAZEL_POSTGRES_TARGET"

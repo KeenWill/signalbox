@@ -5349,3 +5349,87 @@ async fn program_cancellation_rejects_a_receipt_for_another_run() -> Result<(), 
     server.await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn reload_configuration_prints_the_correlated_installed_sections()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("reload.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await?;
+        let frame = decode_client_line(&line).map_err(io::Error::other)?;
+        let ClientRequest::ReloadConfiguration { command_id } = frame.request() else {
+            return Err(io::Error::other("expected reload request"));
+        };
+        let receipt = ServerFrame::try_new_for_version(
+            frame.version(),
+            frame.request_id(),
+            ServerMessage::ConfigurationReloaded {
+                command_id: *command_id,
+                reloaded_sections: signalbox_process_protocol::ReloadedSection::ALL.to_vec(),
+            },
+        )
+        .map_err(io::Error::other)?;
+        writer
+            .write_all(&encode_server_line(&receipt).map_err(io::Error::other)?)
+            .await
+    });
+    let mut client = ProcessClient::new(socket);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut output = Output::new(&mut stdout, &mut stderr, false);
+    crate::session::reload_configuration(&mut client, &mut output, None).await?;
+    assert_eq!(
+        String::from_utf8(stdout)?,
+        "reloaded model_catalog session_templates repo_watch\n"
+    );
+    assert!(String::from_utf8(stderr)?.starts_with("command_id="));
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reload_configuration_reuses_the_supplied_command_id() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("reload.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
+    let expected = ClientRequest::ReloadConfiguration { command_id };
+    let receipt = ServerMessage::ConfigurationReloaded {
+        command_id,
+        reloaded_sections: signalbox_process_protocol::ReloadedSection::ALL.to_vec(),
+    };
+    let server =
+        tokio::spawn(async move { accept_request_and_reply(&listener, &expected, receipt).await });
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let identity = command_id.into_uuid().hyphenated().to_string();
+    let exit = run(
+        client_arguments(
+            &socket,
+            &["reload-configuration", "--command-id", &identity],
+        ),
+        None,
+        &mut input,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    server.await??;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    assert_eq!(
+        String::from_utf8(stdout)?,
+        "reloaded model_catalog session_templates repo_watch\n"
+    );
+    assert_eq!(
+        String::from_utf8(stderr)?,
+        format!("command_id={identity}\n")
+    );
+    Ok(())
+}

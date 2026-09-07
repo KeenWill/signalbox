@@ -45,7 +45,11 @@ struct Routing {
     hooks: BTreeMap<u64, Hook>,
 }
 
-type SharedRouting = Arc<RwLock<Arc<Routing>>>;
+#[derive(Clone, Default)]
+struct SharedRouting {
+    current: Arc<RwLock<Arc<Routing>>>,
+    paused: Arc<RwLock<bool>>,
+}
 
 /// A replacement socket is reserved before any running configuration changes.
 pub(crate) struct PreparedListener {
@@ -72,6 +76,13 @@ pub(crate) struct WebhookListener {
 }
 
 impl WebhookListener {
+    pub(crate) async fn pause(&self) {
+        *self.routing.paused.write().await = true;
+    }
+    pub(crate) async fn resume(&self) {
+        *self.routing.paused.write().await = false;
+    }
+
     pub(crate) async fn prepare(
         &self,
         configuration: Option<&RepositoryWatchConfiguration>,
@@ -131,7 +142,7 @@ impl WebhookListener {
     }
 
     pub(crate) async fn apply(&mut self, prepared: PreparedListener) {
-        *self.routing.write().await = prepared.routing;
+        *self.routing.current.write().await = prepared.routing;
         if self.binding.as_ref().map(|binding| binding.address) != prepared.address {
             if let Some(old) = self.binding.take()
                 && let SocketState::Running(shutdown) = old.socket
@@ -144,6 +155,14 @@ impl WebhookListener {
                     socket: SocketState::Reserved(socket),
                 });
             }
+        }
+    }
+
+    pub(crate) async fn apply_joined(&mut self, prepared: PreparedListener) {
+        let changed = self.binding.as_ref().map(|binding| binding.address) != prepared.address;
+        self.apply(prepared).await;
+        if changed {
+            while self.servers.join_next().await.is_some() {}
         }
     }
 
@@ -201,6 +220,9 @@ async fn delivery(
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
+    if *routing.paused.read().await {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
     if method != Method::POST {
         return StatusCode::METHOD_NOT_ALLOWED;
     }
@@ -234,7 +256,7 @@ async fn delivery(
         return StatusCode::BAD_REQUEST;
     };
     loop {
-        let snapshot = routing.read().await.clone();
+        let snapshot = routing.current.read().await.clone();
         if uri.path() != snapshot.path {
             return StatusCode::NOT_FOUND;
         }
@@ -242,7 +264,7 @@ async fn delivery(
             return StatusCode::UNAUTHORIZED;
         };
         let credential = hook.credentials.resolve(&hook.reference).await;
-        let current = routing.read().await;
+        let current = routing.current.read().await;
         // A reload during credential I/O retries admission against the new hook map.
         if !Arc::ptr_eq(&snapshot, &current) {
             continue;
@@ -298,7 +320,11 @@ async fn delivery(
         else {
             return StatusCode::SERVICE_UNAVAILABLE;
         };
-        let current = routing.read().await;
+        let settlement = routing.paused.read().await;
+        if *settlement {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+        let current = routing.current.read().await;
         if !Arc::ptr_eq(&snapshot, &current) {
             continue;
         }
@@ -483,25 +509,28 @@ mod tests {
         let path = directory.path().join("hook-secret");
         let reference = CredentialReference::new("repository-watch:example/project:webhook");
         let wake = Arc::new(Notify::new());
-        let routing = Arc::new(RwLock::new(Arc::new(Routing {
-            path: FIXTURE_PATH.to_owned(),
-            hooks: BTreeMap::from([(
-                FIXTURE_HOOK_ID,
-                Hook {
-                    retention: Duration::from_secs(7 * 24 * 60 * 60),
-                    store: RepoWatchStore::new(
-                        sqlx::postgres::PgPoolOptions::new()
-                            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new()),
-                    ),
-                    repository: RepositorySlug::try_new(String::from("example/project"))
-                        .expect("repository slug"),
-                    credentials: FileCredentialAccess::new(path.clone(), reference.clone()),
-                    reference,
-                    mode: RepositoryWatchWebhookMode::Primary,
-                    wake: wake.clone(),
-                },
-            )]),
-        })));
+        let routing = SharedRouting {
+            current: Arc::new(RwLock::new(Arc::new(Routing {
+                path: FIXTURE_PATH.to_owned(),
+                hooks: BTreeMap::from([(
+                    FIXTURE_HOOK_ID,
+                    Hook {
+                        retention: Duration::from_secs(7 * 24 * 60 * 60),
+                        store: RepoWatchStore::new(
+                            sqlx::postgres::PgPoolOptions::new()
+                                .connect_lazy_with(sqlx::postgres::PgConnectOptions::new()),
+                        ),
+                        repository: RepositorySlug::try_new(String::from("example/project"))
+                            .expect("repository slug"),
+                        credentials: FileCredentialAccess::new(path.clone(), reference.clone()),
+                        reference,
+                        mode: RepositoryWatchWebhookMode::Primary,
+                        wake: wake.clone(),
+                    },
+                )]),
+            }))),
+            paused: Arc::default(),
+        };
         let empty_key_signature = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, b""), FIXTURE_BODY);
         let mut headers = HeaderMap::new();
         headers.insert(

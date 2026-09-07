@@ -98,6 +98,12 @@ impl submit_input::SubmitInputRepository {
     ) -> Self;
     #[must_use]
     pub const fn with_attachment_maximum_bytes(self, maximum_bytes: u64) -> Self;
+    #[must_use]
+    pub const fn with_stop_receipt(self) -> Self;
+    pub async fn is_recorded_stop(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+    ) -> result::Result<bool, submit_input::SubmitInputRepositoryError>;
     pub async fn handle_with_candidates<NextTurn, NextToolCancellation>(
         &self,
         command: signalbox_domain::SubmitInput,

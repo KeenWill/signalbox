@@ -1,0 +1,18 @@
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -54,3 +54,6 @@
+         "indexmap",
+-        "preserve_order",
++    ] + select({
++        "@@//tooling/bazel:sorted_json": [],
++        "//conditions:default": ["preserve_order"],
++    }) + [
+         "raw_value",
+@@ -109,3 +112,6 @@
+         "indexmap",
+-        "preserve_order",
++    ] + select({
++        "@@//tooling/bazel:sorted_json": [],
++        "//conditions:default": ["preserve_order"],
++    }) + [
+         "raw_value",

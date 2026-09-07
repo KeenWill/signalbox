@@ -1,60 +1,9 @@
 #!/usr/bin/env python3
-"""Read the PostgreSQL integration suite manifest, for CI and for the docs gate.
+"""Read the PostgreSQL suite manifest for Bazel CI and the docs gate.
 
-`.github/postgres-integration-suites.toml` is the single authority for what the
-`postgres-integration` check compiles and executes. This module is the only
-reader of it, and it serves two consumers that must never disagree:
-
-* `.github/workflows/rust.yml` calls this file as a program. `--archive-plan`
-  emits the tab-separated rows its build job archives from, and `--matrix`
-  emits the JSON its run job expands into a shard matrix. The workflow
-  therefore restates no package, no feature, no filter, and no shard count.
-* `scripts/check_docs_consistency.py` imports it to check agreement among the
-  suite manifest, workflow, documentation, and workspace packages.
-
-A manifest both sides read turns ordinary drift into a check failure, and
-`check_docs_consistency.py` gates the agreement so the manifest itself cannot
-drift from either side.
-
-Run directly with `--matrix`, `--archive-plan`, or `--check` (validate the
-manifest alone and print a summary). Exits nonzero with a stable message on a
-malformed manifest.
-
-## Scope of the workflow agreement checks
-
-`workflow_disagreements` reads `.github/workflows/rust.yml` to confirm the
-workflow still derives its jobs from the manifest. **Its coverage of workflow,
-shell, and Cargo spellings is best-effort by design, and completeness is not a
-goal.** This is a deliberate limit, settled by owner ruling, not an oversight
-or a backlog.
-
-The reason is that the space of spellings is unbounded. A command can be
-wrapped by any launcher, a value can arrive through any expression, and YAML
-offers several ways to write everything; each spelling this reader does not
-know is one more it could be taught, without end. Chasing that to completion
-would make this module a shell and YAML interpreter — which is precisely the
-coupling the manifest was introduced to remove, since the checker it replaced
-failed exactly by trying to infer CI's behaviour from CI's text.
-
-What that buys, and what it costs:
-
-- **This detects drift, not sabotage.** It is built to catch a workflow that
-  stops honouring the manifest through ordinary editing — a step restructured,
-  an invocation replaced, an assertion dropped. It is not a barrier against an
-  author working around it, who has unbounded options anyway: writing a literal
-  matrix to `$GITHUB_OUTPUT`, invoking the reader and discarding its output, or
-  spelling a command in a form written after this was.
-- **Where a spelling is ambiguous, it fails closed.** A `continue-on-error`
-  whose value is an expression is read as non-blocking; a documented command
-  naming features by reference rather than by listing them is reported rather
-  than guessed at. A false positive is a conversation; a false negative is a
-  green check over tests that never ran.
-- **A new spelling appearing in this repository is a fix worth making.** A new
-  spelling that merely *could* exist is not. The distinction is whether the
-  workflow or the documentation actually acquired it.
-
-The manifest's own agreement with the workspace and with the documented
-commands is checked independently of the workflow syntax scan.
+The workflow matrix and Bazel suite targets consume the manifest directly.
+Workflow agreement checks detect ordinary drift in the repository's shell and
+YAML spellings; they do not model arbitrary shell control flow.
 """
 
 from __future__ import annotations
@@ -68,11 +17,11 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = Path(".github/postgres-integration-suites.toml")
-WORKFLOW = Path(".github/workflows/rust.yml")
+WORKFLOW = Path(".github/workflows/bazel.yml")
+RUST_WORKFLOW = Path(".github/workflows/rust.yml")
 EMITTER = "scripts/postgres_integration_suites.py"
 SUITE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 # Untrusted (fork or Dependabot) pull requests route to a hosted runner; the
@@ -88,7 +37,6 @@ DYNAMIC_RUNS_ON = re.compile(
 def _resolved_runs_on(value: str) -> str:
     match = DYNAMIC_RUNS_ON.match(value)
     return match.group("pool") if match else value
-REQUIRED_MODES = ("--archive-plan", "--matrix")
 INTERPRETERS = ("python3", "python")
 COMMAND_SEPARATOR = re.compile(r"&&|\|\||[;|&\n]")
 ATTACHED_SHORT_OPTIONS = ("-p", "-F", "-j")
@@ -100,28 +48,10 @@ ENV_VALUE_OPTIONS = ("-u", "--unset", "-C", "--chdir", "-S", "--split-string")
 # comparable against the manifest.
 PACKAGE_SPEC = re.compile(r"(?:.*#)?(?P<name>[^@#/]+?)(?:@[^@]*)?$")
 MATRIX_BINDING = re.compile(r"\$\{\{[ ]*matrix\.(?P<field>[A-Za-z_][A-Za-z0-9_]*)[ ]*\}\}")
-MATRIX_FIELDS = ("suite", "partition", "partitions", "filter")
-# Which matrix field each archived-run option must resolve from. A `$` alone is
-# not enough: `--partition "count:1/$PARTITIONS"` expands a variable and still
-# pins every shard to partition 1.
-ARCHIVED_RUN_OPTIONS = {
-    "--archive-file": ("suite",),
-    "--partition": ("partition", "partitions"),
-    "-E": ("filter",),
-}
 WORKSPACE_SELECTORS = ("--workspace", "--all")
-AGGREGATE_JOB = "postgres-integration"
-RUN_JOB = "postgres-integration-run"
-BUILD_JOB = "postgres-integration-build"
-BUILD_RUNNER = "signalbox-docker"
-RUN_RUNNER = "signalbox-docker"
 # Bash's `command [-pVv] name [args]` runs `name`; only `-v`/`-V` print instead.
 COMMAND_BUILTIN_OPTIONS = ("-p",)
 ALWAYS_CONDITION = re.compile(r"^[ ]*if:.*\balways\(\)", re.MULTILINE)
-NEEDS_RESULT = re.compile(
-    r"(?P<variable>[A-Za-z_][A-Za-z0-9_]*):[ ]*"
-    r"\$\{\{[ ]*needs\.postgres-integration-(?P<job>build|run)\.result[ ]*\}\}"
-)
 SUBSTITUTION = re.compile(r"\$\((?P<body>[^()]*)\)")
 # Cargo feature names, one per manifest entry. Cargo would read a comma or a
 # space inside one entry as a separator and enable two features; the docs
@@ -136,7 +66,7 @@ class ManifestError(Exception):
 
 @dataclass(frozen=True)
 class Suite:
-    """One archived-and-sharded PostgreSQL integration suite."""
+    """One PostgreSQL integration suite."""
 
     name: str
     package: str
@@ -145,28 +75,6 @@ class Suite:
     skip: tuple[str, ...]
     include_binaries: tuple[str, ...]
     exclude_binaries: tuple[str, ...]
-
-    def filterset(self) -> str:
-        """Render this suite's nextest filterset expression.
-
-        Binary predicates partition same-package test targets before
-        `not test(<substring>)` reproduces libtest's `--skip <substring>`:
-        nextest's `test()` predicate matches a substring of the test path by
-        default, which is exactly what libtest matched. With nothing skipped
-        the expression is `all()`, so the run job always passes a `-E` and
-        needs no conditional.
-        """
-        terms: list[str] = []
-        if self.include_binaries:
-            included = " or ".join(
-                f"binary({binary})" for binary in self.include_binaries
-            )
-            terms.append(f"({included})")
-        terms.extend(
-            f"not binary({binary})" for binary in self.exclude_binaries
-        )
-        terms.extend(f"not test({skipped})" for skipped in self.skip)
-        return " and ".join(terms) if terms else "all()"
 
 
 def manifest_line(text: str, name: str) -> int:
@@ -309,42 +217,18 @@ def load_suites(root: Path) -> tuple[Suite, ...]:
 
 
 def run_matrix(suites: tuple[Suite, ...]) -> dict[str, list[dict[str, object]]]:
-    """Expand the suites into the workflow's `strategy.matrix` object.
-
-    One entry per shard, so a suite declaring one shard costs exactly one
-    runner and stays in the same machinery as a sharded one.
-    """
-    include: list[dict[str, object]] = []
-    for suite in suites:
-        for partition in range(1, suite.shards + 1):
-            include.append(
-                {
-                    "suite": suite.name,
-                    "partition": partition,
-                    "partitions": suite.shards,
-                    "filter": suite.filterset(),
-                }
-            )
-    return {"include": include}
-
-
-def archive_plan(suites: tuple[Suite, ...]) -> str:
-    """Render one tab-separated `name<TAB>package<TAB>features` row per suite.
-
-    Tabs, not JSON: the build job reads these with a plain `while IFS=$'\\t'
-    read` loop and needs no parser on the runner. Features are comma-joined
-    because that is the spelling `cargo --features` already accepts, and an
-    empty field means the suite adds none.
-    """
-    rows = [
-        "\t".join((suite.name, suite.package, ",".join(suite.features)))
-        for suite in suites
-    ]
-    return "".join(f"{row}\n" for row in rows)
+    """Give every manifest shard its own worker and native test partition."""
+    return {"include": [
+        {"suite": suite.name, "target": "//:postgres_" + suite.name.replace("-", "_"),
+         "shard_index": index, "shard_count": suite.shards}
+        for suite in suites for index in range(suite.shards)
+    ]}
 
 
 def workflow_document(text: str) -> dict[str, object]:
     """Decode one GitHub Actions workflow with the maintained YAML parser."""
+    import yaml
+
     try:
         document = yaml.safe_load(text)
     except yaml.YAMLError as error:
@@ -365,32 +249,6 @@ def mappings(value: object):
             yield from mappings(child)
 
 
-def uploaded_artifacts(text: str) -> list[tuple[str, str | None]]:
-    """Return each `actions/upload-artifact` step's artifact name and path.
-
-    Read from the upload steps themselves, not from the file's text: an
-    artifact name surviving in a comment after its upload step was deleted
-    would otherwise still count as published, and the docs gate would keep
-    asserting that a suite whose archive no longer exists is executed.
-    """
-    uploads: list[tuple[str, str | None]] = []
-    for step in mappings(workflow_document(text)):
-        action = step.get("uses")
-        if not isinstance(action, str) or not action.startswith("actions/upload-artifact@"):
-            continue
-        settings = step.get("with")
-        if not isinstance(settings, dict):
-            continue
-        name = settings.get("name")
-        path = settings.get("path")
-        if (
-            isinstance(name, str)
-            and name.startswith("postgres-integration-archive-")
-        ):
-            uploads.append((name, path if isinstance(path, str) else None))
-    return uploads
-
-
 def job_lines(text: str, name: str) -> list[str]:
     """Return the lines of one workflow job's block, or none if it is absent.
 
@@ -399,6 +257,8 @@ def job_lines(text: str, name: str) -> list[str]:
     sitting in an unrelated job says nothing about whether branch protection
     consults the shards.
     """
+    import yaml
+
     jobs = workflow_document(text).get("jobs")
     if not isinstance(jobs, dict) or name not in jobs:
         return []
@@ -472,210 +332,62 @@ def invokes_reader(tokens: list[str], mode: str) -> bool:
 
 
 def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
-    """Report every way the Rust workflow disagrees with the manifest.
-
-    The workflow is checked for agreement, never parsed for meaning: this reads
-    the upload steps' artifact names and the commands the runner executes, and
-    deliberately does not reconstruct Cargo invocations out of YAML. What keeps
-    the two sides equal is that the workflow derives its matrix and its archive
-    plan from this module at run time; these assertions prove it still does.
-
-    The boundary, chosen rather than overlooked: this detects drift, not
-    sabotage. Shell control flow is not modelled, so `false && python3 …
-    --matrix` reads as an invocation. An author working around the gate has
-    unbounded options anyway — writing a literal matrix to `$GITHUB_OUTPUT`,
-    or invoking the reader and discarding it — and none of them is decidable
-    from the file. Modelling `&&` would buy one evasion at the price of making
-    this a partial shell interpreter, which is the coupling the manifest was
-    introduced to remove. What is caught is every way the derivation is
-    honestly lost: the invocation replaced, commented out, or merely named.
-    """
+    """Check that manifest-derived Bazel jobs remain binding on validate."""
     text = (root / WORKFLOW).read_text(encoding="utf-8")
-    commands = workflow_shell_commands(text)
-    failures: list[str] = []
-
-    # Both modes, each as a command the shell actually executes — naming the
-    # reader is not running it. The modes feed different jobs: `--archive-plan`
-    # the build, `--matrix` the shards, so each is asserted on its own.
-    # Each executed command travels with the matrix bindings of its own step,
-    # so an archived run is judged against the variables it can actually see.
-    executed = [
-        (tokens, variables)
-        for command, variables, _ in commands
-        for tokens in simple_commands(command)
-    ]
-
-    # Scoped to the job whose steps actually consume the reader's output: the
-    # same invocation sitting in an unrelated step proves nothing about whether
-    # the archive plan and the shard matrix still come from the manifest.
-    build_job = "\n".join(job_lines(text, BUILD_JOB))
-    build_commands = [
-        tokens
-        for command, _, _ in workflow_shell_commands(build_job)
-        for tokens in simple_commands(command)
-    ]
-    for mode in REQUIRED_MODES:
-        if not any(invokes_reader(tokens, mode) for tokens in build_commands):
-            failures.append(
-                f"{WORKFLOW} job `{BUILD_JOB}` executes no `{EMITTER} {mode}` "
-                f"command, so its PostgreSQL integration jobs no longer derive "
-                f"from {MANIFEST}"
-            )
-
-    uploads = uploaded_artifacts(text)
-    named = {
-        name.removeprefix("postgres-integration-archive-") for name, _ in uploads
-    }
-    # An upload keeping its name while pointing at another suite's archive
-    # would publish the wrong tests under the right label, and every shard
-    # would pass having run the wrong suite.
-    for name, path in uploads:
-        suite = name.removeprefix("postgres-integration-archive-")
-        basename = None if path is None else path.rsplit("/", 1)[-1]
-        if basename != f"{suite}.tar.zst":
-            failures.append(
-                f"{WORKFLOW} uploads `{name}` from `{path}`, which is not that "
-                f"suite's `{suite}.tar.zst` archive"
-            )
-    expected = {suite.name for suite in suites}
-    for missing in sorted(expected - named):
-        failures.append(
-            f"{MANIFEST} declares suite `{missing}` but {WORKFLOW} publishes no "
-            f"postgres-integration-archive-{missing} artifact"
-        )
-    for extra in sorted(named - expected):
-        failures.append(
-            f"{WORKFLOW} publishes a postgres-integration-archive-{extra} "
-            f"artifact for a suite {MANIFEST} does not declare"
-        )
-
-    # An ignored-test run spelled directly in the workflow is a run the
-    # manifest does not describe, which is precisely the drift this gate
-    # exists to prevent. Read from the same executed commands as above, so the
-    # YAML wrapping, the shell operators, and Cargo's global options before the
-    # subcommand are all already resolved.
-    for tokens, variables in executed:
-        arguments = cargo_test_arguments(tokens)
-        if (
-            arguments is not None
-            and runs_ignored_tests(arguments)
-            and not runs_file_media_isolation_tests(arguments)
-        ):
-            failures.append(
-                f"{WORKFLOW} runs ignored tests through `cargo test` outside "
-                f"{MANIFEST}: {' '.join(tokens)}"
-            )
-        # A nextest run selecting ignored tests without reading an archive is
-        # not the manifest-driven run: it chooses its own packages. Requiring
-        # only that one archive-backed run exists would let a rogue one sit
-        # beside it.
-        if nonconforming_ignored_nextest(tokens, variables):
-            failures.append(
-                f"{WORKFLOW} runs ignored tests through a `cargo nextest run` "
-                f"that is not the manifest-driven archived run, outside "
-                f"{MANIFEST}: {' '.join(tokens)}"
-            )
-
-    shard_job = "\n".join(job_lines(text, RUN_JOB))
-    shard_commands = [
-        (tokens, variables, blocking)
-        for command, variables, blocking in workflow_shell_commands(shard_job)
-        for tokens in simple_commands(command)
-    ]
-    # Blocking, because a step allowed to fail enforces nothing.
-    if not any(
-        runs_archived_ignored_tests(tokens, variables) and blocking
-        for tokens, variables, blocking in shard_commands
-    ):
-        failures.append(
-            f"{WORKFLOW} job `{RUN_JOB}` runs no archive-backed `cargo nextest "
-            f"run` with `--run-ignored only`, so the suites {MANIFEST} declares "
-            "are never executed"
-        )
-
-    # The aggregate job carries the required check's name, so it going green
-    # without consulting the shards would let branch protection pass while
-    # every manifest-declared test failed or never ran. Read from that job's
-    # own block: the same binding and assertion elsewhere proves nothing.
-    aggregate = "\n".join(job_lines(text, AGGREGATE_JOB))
-    # Without `always()` the aggregate job is skipped when a dependency fails,
-    # and a skipped required check reports success — branch protection green
-    # with the build or every shard failed.
-    if aggregate and ALWAYS_CONDITION.search(aggregate) is None:
-        failures.append(
-            f"{WORKFLOW} job `{AGGREGATE_JOB}` has no `if: always()`, so it is "
-            "skipped when a dependency fails instead of failing the check"
-        )
-    asserted = {
-        match.group("job"): match.group("variable")
-        for match in NEEDS_RESULT.finditer(aggregate)
-    }
-    aggregate_commands = [
-        tokens
-        for command, _, _ in workflow_shell_commands(aggregate)
-        for tokens in simple_commands(command)
-    ]
-    for job in ("build", "run"):
-        variable = asserted.get(job)
-        if variable is None or not any(
-            asserts_success(tokens, variable) for tokens in aggregate_commands
-        ):
-            failures.append(
-                f"{WORKFLOW} does not assert "
-                f"`needs.postgres-integration-{job}.result` is success, so the "
-                "aggregate check can pass without it"
-            )
-
-    # A weaker, independent statement than the per-step check below: the
-    # workflow must bind every field the generated matrix supplies, whether or
-    # not any one step reads it.
-    bound = {match.group("field") for match in MATRIX_BINDING.finditer(text)}
-    for field in MATRIX_FIELDS:
-        if field not in bound:
-            failures.append(
-                f"{WORKFLOW} binds no `matrix.{field}`, so its shards no longer "
-                f"take that value from the matrix {MANIFEST} generates"
-            )
-
-    # The build and run shards must share the dedicated Docker fleet's image and
-    # absolute work-path shape: nextest archives retain paths from compilation,
-    # and every shard needs an isolated Docker daemon for PostgreSQL. Check each
-    # job independently so either half cannot drift to another environment.
-    expected_targets = {
-        BUILD_JOB: BUILD_RUNNER,
-        RUN_JOB: RUN_RUNNER,
-    }
-    raw_selections = {}
-    jobs = workflow_document(text).get("jobs")
-    jobs = jobs if isinstance(jobs, dict) else {}
-    shards_resolve_clean = True
-    for job, expected_target in expected_targets.items():
-        job_value = jobs.get(job)
-        runs_on = job_value.get("runs-on") if isinstance(job_value, dict) else None
-        raw = {runs_on} if isinstance(runs_on, str) else set()
-        raw_selections[job] = raw
-        targets = {_resolved_runs_on(value) for value in raw}
-        if targets != {expected_target}:
-            shards_resolve_clean = False
-            listing = ", ".join(sorted(targets)) or "none"
-            failures.append(
-                f"{WORKFLOW} job `{job}` must run on `{expected_target}`, "
-                f"found: {listing}"
-            )
-    # The arms must agree in full, not merely resolve to the same fleet: a
-    # divergent hosted arm would build the archive in one environment and run
-    # it in another on routed (fork or bot) pull requests. Reported only when
-    # both shards resolve clean, so single-shard drift keeps one diagnostic.
-    if shards_resolve_clean and raw_selections[BUILD_JOB] != raw_selections[RUN_JOB]:
-        failures.append(
-            f"{WORKFLOW} jobs `{BUILD_JOB}` and `{RUN_JOB}` must share one "
-            "complete runner selection, found: "
-            + " vs ".join(
-                ", ".join(sorted(raw_selections[job])) or "none"
-                for job in (BUILD_JOB, RUN_JOB)
-            )
-        )
-
+    rust = (root / RUST_WORKFLOW).read_text(encoding="utf-8")
+    jobs = workflow_document(text).get("jobs", {})
+    failures = []
+    matrix = "\n".join(job_lines(text, "postgres-matrix"))
+    commands = [tokens for command, _, _ in workflow_shell_commands(matrix)
+                for tokens in simple_commands(command)]
+    if not any(invokes_reader(tokens, "--matrix") for tokens in commands):
+        failures.append(f"{WORKFLOW} postgres-matrix executes no `{EMITTER} --matrix`")
+    run = jobs.get("bazel-postgres", {})
+    if run.get("strategy", {}).get("matrix") != "${{ fromJSON(needs.postgres-matrix.outputs.matrix) }}":
+        failures.append(f"{WORKFLOW} bazel-postgres does not use the manifest matrix")
+    shard = "\n".join(job_lines(text, "bazel-postgres"))
+    executed = [(tokens, variables, blocking)
+                for command, variables, blocking in workflow_shell_commands(shard)
+                for tokens in simple_commands(command)]
+    if run.get("continue-on-error", False) is not False or not any(blocking and tokens[:2] == ["bazel", "test"]
+               and variables.get("target")
+               and any(references_variable(word, variables["target"]) for word in tokens[2:])
+               for tokens, variables, blocking in executed):
+        failures.append(f"{WORKFLOW} bazel-postgres runs no blocking matrix-target Bazel test")
+    if not any(tokens[:2] == ["bazel", "test"]
+               and "--test_sharding_strategy=disabled" in tokens
+               and all(variables.get(field) and any(
+                   word.startswith("--test_env=" + environment + "=")
+                   and references_variable(word, variables[field]) for word in tokens)
+                   for field, environment in (
+                       ("shard_index", "SIGNALBOX_TEST_SHARD_INDEX"),
+                       ("shard_count", "SIGNALBOX_TEST_TOTAL_SHARDS")))
+               for tokens, variables, _ in executed):
+        failures.append(f"{WORKFLOW} bazel-postgres does not select its matrix shard exactly once")
+    if _resolved_runs_on(run.get("runs-on", "")) != "signalbox-docker":
+        failures.append(f"{WORKFLOW} bazel-postgres must run on signalbox-docker")
+    rust_jobs = workflow_document(rust).get("jobs", {})
+    if rust_jobs.get("bazel", {}).get("uses") != "./.github/workflows/bazel.yml":
+        failures.append(f"{RUST_WORKFLOW} does not call the Bazel workflow")
+    aggregate = "\n".join(job_lines(rust, "validate"))
+    if ALWAYS_CONDITION.search(aggregate) is None:
+        failures.append(f"{RUST_WORKFLOW} validate has no always() condition")
+    if "bazel" not in rust_jobs.get("validate", {}).get("needs", []):
+        failures.append(f"{RUST_WORKFLOW} validate does not depend on bazel")
+    binding = re.search(r"(\w+): \$\{\{ needs\.bazel\.result \}\}", aggregate)
+    aggregate_commands = [tokens for command, _, _ in workflow_shell_commands(aggregate)
+                          for tokens in simple_commands(command)]
+    if binding is None or not any(asserts_success(tokens, binding[1]) for tokens in aggregate_commands):
+        failures.append(f"{RUST_WORKFLOW} validate does not assert Bazel success")
+    for workflow, content in ((WORKFLOW, text), (RUST_WORKFLOW, rust)):
+        for command, _, _ in workflow_shell_commands(content):
+            for tokens in simple_commands(command):
+                arguments = cargo_test_arguments(tokens)
+                if arguments is not None and runs_ignored_tests(arguments) and not runs_file_media_isolation_tests(arguments):
+                    failures.append(f"{workflow} runs ignored Cargo tests outside {MANIFEST}")
+                nextest = cargo_subcommand_arguments(tokens, ("nextest",))
+                if nextest and nextest[0] == "run" and "--run-ignored" in nextest:
+                    failures.append(f"{workflow} runs ignored nextest tests outside {MANIFEST}")
     return failures
 
 
@@ -795,60 +507,6 @@ def cargo_test_arguments(tokens: list[str]) -> list[str] | None:
     """
     arguments = cargo_subcommand_arguments(tokens, CARGO_TEST_COMMANDS)
     return None if arguments is None else normalized_cargo_arguments(arguments)
-
-
-def nonconforming_ignored_nextest(
-    tokens: list[str], variables: dict[str, str]
-) -> bool:
-    """Return whether one nextest run selects ignored tests some other way.
-
-    Every ignored-test run has to be the manifest-driven one, not merely one of
-    them: a second archived run that drops the partition would rerun a whole
-    suite on every shard, and one naming its own packages would run tests the
-    manifest never declared. Both would sit beside a conforming run unreported
-    if only the existence of a conforming run were required.
-    """
-    arguments = cargo_subcommand_arguments(tokens, ("nextest",))
-    if not arguments or arguments[0] != "run":
-        return False
-    if "--run-ignored" not in normalized_cargo_arguments(arguments[1:]):
-        return False
-    return not runs_archived_ignored_tests(tokens, variables)
-
-
-def runs_archived_ignored_tests(
-    tokens: list[str], variables: dict[str, str]
-) -> bool:
-    """Return whether one command runs a nextest archive's ignored tests.
-
-    The positive half of the workflow's contract. Every other assertion here is
-    negative — nothing else may run ignored tests, no suite may lack an
-    artifact — and negatives alone are satisfied by a workflow that runs
-    nothing at all: delete the run step and the shards pass having merely
-    downloaded their archives while those tests do not execute.
-    """
-    arguments = cargo_subcommand_arguments(tokens, ("nextest",))
-    if not arguments or arguments[0] != "run":
-        return False
-    arguments = normalized_cargo_arguments(arguments[1:])
-    if "--archive-file" not in arguments or "--run-ignored" not in arguments:
-        return False
-    selection = arguments.index("--run-ignored") + 1
-    if selection >= len(arguments) or arguments[selection] != "only":
-        return False
-    # Parameterised by the matrix, and by the right field of it. A run naming
-    # one fixed archive, dropping the filterset, or pinning a partition
-    # numerator would execute a different set of tests on every shard than the
-    # manifest describes while still being an archive-backed ignored run.
-    for option, fields in ARCHIVED_RUN_OPTIONS.items():
-        value = option_value(arguments, option)
-        if value is None:
-            return False
-        for field in fields:
-            variable = variables.get(field)
-            if variable is None or not references_variable(value, variable):
-                return False
-    return True
 
 
 def asserts_success(tokens: list[str], variable: str) -> bool:
@@ -987,7 +645,7 @@ def documentation_disagreements(
     """Report documented ignored-test commands the manifest does not describe.
 
     Documentation that tells a reader how to run a suite locally states the
-    same package and features CI archives. When the manifest moves and the
+    same package and features CI compiles. When the manifest moves and the
     prose does not, the prose is wrong in the one way a reader cannot detect:
     it still runs, and it silently runs a different set of tests.
     """
@@ -1100,7 +758,7 @@ def report_documented_selection(
                 line,
                 f"{label} documents `cargo test -p {package}` for ignored "
                 f"tests with {' and '.join(indirect)}; state the features "
-                f"{MANIFEST} archives that suite with instead",
+                f"{MANIFEST} compiles that suite with instead",
             )
         )
         return
@@ -1116,7 +774,7 @@ def report_documented_selection(
             line,
             f"{label} documents `cargo test -p {package}` with features "
             f"{','.join(sorted(features)) or '(none)'} for ignored tests, "
-            f"but {MANIFEST} archives that package with "
+            f"but {MANIFEST} compiles that package with "
             f"{' or '.join(expected)}",
         )
     )
@@ -1129,11 +787,6 @@ def main() -> int:
         "--matrix",
         action="store_true",
         help="emit the run job's strategy.matrix object as compact JSON",
-    )
-    mode.add_argument(
-        "--archive-plan",
-        action="store_true",
-        help="emit one `name<TAB>package<TAB>features` row per suite",
     )
     mode.add_argument(
         "--check",
@@ -1151,16 +804,14 @@ def main() -> int:
     if arguments.matrix:
         print(json.dumps(run_matrix(suites), separators=(",", ":"), sort_keys=True))
         return 0
-    if arguments.archive_plan:
-        sys.stdout.write(archive_plan(suites))
-        return 0
-
     shards = sum(suite.shards for suite in suites)
     for suite in suites:
         features = ",".join(suite.features) or "(none)"
         print(
             f"{suite.name}: -p {suite.package} --features {features} "
-            f"across {suite.shards} shard(s), filter {suite.filterset()}"
+            f"across {suite.shards} shard(s), skip {list(suite.skip)}, "
+            f"include binaries {list(suite.include_binaries)}, "
+            f"exclude binaries {list(suite.exclude_binaries)}"
         )
     print(f"{len(suites)} suites over {shards} shards")
     return 0
