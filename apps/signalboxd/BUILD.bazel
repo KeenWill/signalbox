@@ -1,7 +1,6 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_unit_test")
 
 rust_package()
 
@@ -189,14 +188,8 @@ rust_binary(
     ],
 )
 
-rust_test(
+rust_unit_test(
     name = "unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     compile_data = ["//crates/process-protocol:src/request.rs"],
     crate = ":signalboxd_lib",
     crate_features = ["test-support"],
@@ -212,13 +205,7 @@ rust_test(
         "NEXTEST_BIN_EXE_signalbox_claude_mcp_bridge": "$(rootpath //crates/model-runtime-claude-cli:signalbox-claude-mcp-bridge)",
         "TMPDIR": "/tmp",
     },
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "apps/signalboxd"},
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
     # Socket ownership and host-tool tests need the host's actual UID mapping.
     tags = [
         "external",
@@ -229,77 +216,41 @@ rust_test(
         "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
         "//crates/persistence:signalbox_persistence",
         "//crates/test-bin:signalbox_test_bin",
-    ] + all_crate_deps(normal_dev = True),
+    ],
 )
 
-rust_test(
+rust_unit_test(
     name = "approval_judge_eval_unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":approval-judge-eval",
     crate_features = ["test-support"],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
     deps = [
         "//crates/application:signalbox_application",
         "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
         "//crates/persistence:signalbox_persistence",
         "//crates/test-bin:signalbox_test_bin",
-    ] + all_crate_deps(normal_dev = True),
+    ],
 )
 
-rust_test(
+rust_unit_test(
     name = "signalbox_debug_unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":signalbox-debug",
     crate_features = ["test-support"],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
     deps = [
         "//crates/application:signalbox_application",
         "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
         "//crates/persistence:signalbox_persistence",
         "//crates/test-bin:signalbox_test_bin",
-    ] + all_crate_deps(normal_dev = True),
+    ],
 )
 
-rust_test(
+rust_unit_test(
     name = "signalboxd_unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":signalboxd",
     crate_features = ["test-support"],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
     deps = [
         "//crates/application:signalbox_application",
         "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
         "//crates/persistence:signalbox_persistence",
         "//crates/test-bin:signalbox_test_bin",
-    ] + all_crate_deps(normal_dev = True),
+    ],
 )
