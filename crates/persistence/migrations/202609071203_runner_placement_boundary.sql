@@ -86,6 +86,7 @@ BEGIN
         UNION (SELECT context_frontier_id FROM runner_placement_boundary
             WHERE session_id = NEW.session_id AND placement_revision < NEW.placement_revision
             ORDER BY placement_revision DESC LIMIT 1)
+        UNION SELECT seed_context_frontier_id FROM imported_session_seed WHERE session_id = NEW.session_id
         UNION SELECT compaction.result_frontier_id FROM context_compaction AS compaction
             WHERE compaction.session_id = NEW.session_id AND NOT EXISTS (SELECT 1 FROM context_compaction AS successor
                 WHERE successor.predecessor_compaction_id = compaction.context_compaction_id)

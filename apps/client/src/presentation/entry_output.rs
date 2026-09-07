@@ -479,6 +479,16 @@ impl<'a> Output<'a> {
                 entry.source_session_id,
                 entry.entry_id
             ),
+            SnapshotEntryKind::Marker(TranscriptEntry::ToolInadmissible {
+                tool_request_id,
+                content,
+            }) => writeln!(
+                self.stdout,
+                "tool_inadmissible request={tool_request_id} content={} source={} entry={}",
+                self.render(content),
+                entry.source_session_id,
+                entry.entry_id
+            ),
             SnapshotEntryKind::Marker(TranscriptEntry::ToolClosed {
                 tool_request_id,
                 content,

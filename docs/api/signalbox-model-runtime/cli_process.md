@@ -175,3 +175,18 @@ pub async fn execute_cli_process<C: clone::Clone + marker::Send + marker::Sync, 
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence;
 ```
+
+## execute_cli_process_with_credentials
+
+```rust
+#[cfg(feature = "cli-process")]
+pub async fn execute_cli_process_with_credentials<
+    C: clone::Clone + marker::Send + marker::Sync,
+    D: CliSession<C>,
+>(
+    request: CliProcessRequest<D>,
+    sink: &mut (dyn ObservationSink<C> + marker::Send),
+    cancellation: &mut CancellationSignal,
+    exact_credentials: &[CredentialValue],
+) -> TerminalEvidence;
+```

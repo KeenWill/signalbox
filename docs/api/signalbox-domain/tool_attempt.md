@@ -241,6 +241,8 @@ impl CurrentToolAttempt {
         self,
         error: ToolExecutionError,
     ) -> result::Result<EndedToolAttempt, ToolAttemptTransitionError>;
+    pub fn end_placement_lost(self)
+        -> result::Result<EndedToolAttempt, ToolAttemptTransitionError>;
     pub fn apply_terminal_observation(
         self,
         observation: CorrelatedToolAttemptObservation,

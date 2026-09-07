@@ -374,6 +374,37 @@ pub(super) fn render_frontier_messages_with_placements<'a>(
                     },
                 });
             }
+            SemanticTranscriptEntryPayload::ToolInadmissible { request } => {
+                let Some(ResolvedToolConversationEntry::Inadmissible {
+                    request: record, ..
+                }) = resolved_tools.remove(&source)
+                else {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                };
+                if record.id() != *request || record.session() != source.source_session() {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                }
+                let Some(reason) = record.inadmissible_reason() else {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                };
+                messages.push(ModelConversationMessage::ToolResult {
+                    source,
+                    request: *request,
+                    content: ModelToolResultContent::ExecutionError(reason.execution_error()),
+                });
+            }
             SemanticTranscriptEntryPayload::ToolClosed { request } => {
                 let Some(ResolvedToolConversationEntry::Closed {
                     request: record, ..
@@ -516,6 +547,7 @@ pub(super) fn projected_frontier_content_bytes<'a>(
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
             | SemanticTranscriptEntryPayload::ToolClosed { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
@@ -551,6 +583,14 @@ pub(super) fn projected_frontier_content_bytes<'a>(
                 },
                 // A closed request renders a fixed marker carrying no content.
                 ResolvedToolConversationEntry::Closed { .. } => 0,
+                ResolvedToolConversationEntry::Inadmissible { request, .. } => {
+                    request.inadmissible_reason().map_or(0, |reason| {
+                        reason
+                            .execution_error()
+                            .detail()
+                            .map_or(0, |detail| detail.as_str().len())
+                    })
+                }
             };
             total.saturating_add(bytes)
         })

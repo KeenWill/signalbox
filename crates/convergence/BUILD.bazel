@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 filegroup(
     name = "fixtures",
@@ -42,3 +42,37 @@ rust_api_json(
     name = "api_json",
     crate = ":signalbox_convergence",
 )
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_convergence",
+)
+
+rust_integration_test(
+    name = "corpus",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    crate_root = "tests/corpus.rs",
+    data = glob([
+        "fixtures/**",
+        "examples/**",
+    ]) + glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [":signalbox-converge"],
+    env = {"NEXTEST_BIN_EXE_signalbox_converge": "$(rootpath :signalbox-converge)"},
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/convergence",
+        "CARGO_BIN_EXE_signalbox-converge": "$(rootpath :signalbox-converge)",
+    },
+    deps = [
+        "//crates/convergence:signalbox_convergence",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
+)
+
+rust_quality_tests(documented_crates = [
+    ":signalbox_convergence",
+    ":signalbox-converge",
+])

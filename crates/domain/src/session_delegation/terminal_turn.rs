@@ -139,6 +139,7 @@ pub(super) fn delegation_content_from_live_completed(
             | crate::SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | crate::SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | crate::SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | crate::SemanticTranscriptEntryPayload::ToolInadmissible { .. }
             | crate::SemanticTranscriptEntryPayload::ToolClosed { .. }
             | crate::SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | crate::SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }

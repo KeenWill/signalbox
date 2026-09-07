@@ -465,6 +465,12 @@ model_call_cause_tokens! {
     CredentialUnmapped => "credential_unmapped",
     CredentialUnavailable => "credential_unavailable",
     CredentialUnreadable => "credential_unreadable",
+    OauthTupleMismatch => "oauth_tuple_mismatch",
+    OauthRefreshAmbiguous => "oauth_refresh_ambiguous",
+    OauthRefreshRejected => "oauth_refresh_rejected",
+    OauthIdentityChanged => "oauth_identity_changed",
+    OauthCredentialHome => "oauth_credential_home",
+
     CredentialUnusable => "credential_unusable",
     ProviderTargetSubstituted => "provider_target_substituted",
     UnrepresentableToolMaterial => "unrepresentable_tool_material",
@@ -663,6 +669,16 @@ pub enum CredentialAccessCode {
     Unavailable,
     /// The artifact was present but could not be read as a value.
     Unreadable,
+    /// OAuth delivery failure: `oauth_tuple_mismatch`.
+    OauthTupleMismatch,
+    /// OAuth delivery failure: `oauth_refresh_ambiguous`.
+    OauthRefreshAmbiguous,
+    /// OAuth delivery failure: `oauth_refresh_rejected`.
+    OauthRefreshRejected,
+    /// OAuth delivery failure: `oauth_identity_changed`.
+    OauthIdentityChanged,
+    /// OAuth delivery failure: `oauth_credential_home`.
+    OauthCredentialHome,
 }
 
 impl CredentialAccessCode {
@@ -676,6 +692,11 @@ impl CredentialAccessCode {
             Self::Unmapped => ModelCallCauseToken::CredentialUnmapped,
             Self::Unavailable => ModelCallCauseToken::CredentialUnavailable,
             Self::Unreadable => ModelCallCauseToken::CredentialUnreadable,
+            Self::OauthTupleMismatch => ModelCallCauseToken::OauthTupleMismatch,
+            Self::OauthRefreshAmbiguous => ModelCallCauseToken::OauthRefreshAmbiguous,
+            Self::OauthRefreshRejected => ModelCallCauseToken::OauthRefreshRejected,
+            Self::OauthIdentityChanged => ModelCallCauseToken::OauthIdentityChanged,
+            Self::OauthCredentialHome => ModelCallCauseToken::OauthCredentialHome,
         }
     }
 
@@ -684,6 +705,11 @@ impl CredentialAccessCode {
             CredentialAccessFailure::Unmapped => Self::Unmapped,
             CredentialAccessFailure::Unavailable => Self::Unavailable,
             CredentialAccessFailure::Unreadable => Self::Unreadable,
+            CredentialAccessFailure::OauthTupleMismatch => Self::OauthTupleMismatch,
+            CredentialAccessFailure::OauthRefreshAmbiguous => Self::OauthRefreshAmbiguous,
+            CredentialAccessFailure::OauthRefreshRejected => Self::OauthRefreshRejected,
+            CredentialAccessFailure::OauthIdentityChanged => Self::OauthIdentityChanged,
+            CredentialAccessFailure::OauthCredentialHome => Self::OauthCredentialHome,
         }
     }
 }

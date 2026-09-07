@@ -6,17 +6,18 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use schemars::JsonSchema;
 use serde::Deserialize;
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
     CredentialReference, DeliveryMode, LossCause, MessagePart, ModelOperation, ModelRuntime,
-    Observation, ObservationFact, PreparationFailure, PreparationOutcome, ProviderErrorKind,
-    REDACTED, RequestedTarget, ResolvedTarget, StreamInterruption, StructuredDecodeFailure,
-    StructuredOutputContract, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
-    ToolCallsAtLoss, ToolChoice, ToolDefinition, ToolName, decode_structured,
+    Observation, ObservationFact, ObservationSink, PreparationFailure, PreparationOutcome,
+    ProviderErrorKind, REDACTED, RateLimitSnapshot, RequestedTarget, ResolvedTarget,
+    StreamInterruption, StructuredDecodeFailure, StructuredOutputContract, TerminalEvidence,
+    TokenUsage, ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolChoice, ToolDefinition,
+    ToolName, decode_structured,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
@@ -30,6 +31,163 @@ mod fixtures;
 const CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 const RESOLVED_TARGET: &str = "gpt-offline-exact";
 const OFFLINE_HARNESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct OauthFixture;
+
+impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for OauthFixture {
+    fn deliver<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        installer: &'a mut dyn signalbox_model_runtime_codex_cli::OauthCredentialInstaller,
+        _: CancellationSignal,
+    ) -> signalbox_model_runtime_codex_cli::OauthDeliveryFuture<'a> {
+        Box::pin(async move {
+            installer
+                .install(signalbox_model_runtime_codex_cli::OauthCredentialMaterial {
+                    access_token: signalbox_model_runtime::CredentialValue::new(
+                        b"opaque-access-that-crosses-the-small-stderr-evidence-window".to_vec(),
+                    ),
+                    identity_token: signalbox_model_runtime::CredentialValue::new(
+                        b"opaque-identity".to_vec(),
+                    ),
+                    account_id: Some("fixture-account".into()),
+                })
+                .map(|()| signalbox_model_runtime_codex_cli::OauthDeliveryOutcome::Delivered)
+        })
+    }
+}
+
+#[derive(Debug)]
+struct WaitingOauthFixture;
+
+impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for WaitingOauthFixture {
+    fn deliver<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        _: &'a mut dyn signalbox_model_runtime_codex_cli::OauthCredentialInstaller,
+        cancellation: CancellationSignal,
+    ) -> signalbox_model_runtime_codex_cli::OauthDeliveryFuture<'a> {
+        Box::pin(async move {
+            cancellation.await;
+            Ok(signalbox_model_runtime_codex_cli::OauthDeliveryOutcome::Cancelled)
+        })
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn oauth_delivery_cancellation_reports_cancelled_preparation() {
+    let temporary = tempfile::tempdir().expect("working directory");
+    let root_path = temporary.path().join("oauth");
+    let root = signalbox_model_runtime_codex_cli::OauthCredentialRoot::open(&root_path)
+        .expect("private root");
+    let mut config = CodexCliConfig::new(
+        temporary.path().join("unused-cli"),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
+    );
+    config
+        .oauth_profiles
+        .insert(CredentialReference::new(CREDENTIAL_REFERENCE));
+    let runtime = CodexCliRuntime::new(config)
+        .expect("runtime")
+        .with_oauth_delivery(std::sync::Arc::new(WaitingOauthFixture), root);
+    let (cancel, cancelled) = tokio::sync::oneshot::channel();
+    let waiting = runtime.prepare(
+        operation("oauth-cancel", DeliveryMode::Buffered, OperationShape::Text),
+        CancellationSignal::when(async {
+            let _ = cancelled.await;
+        }),
+    );
+    tokio::pin!(waiting);
+    assert!(
+        std::future::poll_fn(|context| {
+            std::task::Poll::Ready(
+                std::future::Future::poll(waiting.as_mut(), context).is_pending(),
+            )
+        })
+        .await
+    );
+    cancel.send(()).expect("waiting preparation");
+    assert!(
+        matches!(waiting.await, PreparationOutcome::Cancelled { correlation } if correlation == "oauth-cancel")
+    );
+    assert_eq!(
+        std::fs::read_dir(root_path).expect("root entries").count(),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn oauth_dispatch_isolates_file_auth_scrubs_tokens_and_removes_home() {
+    let temporary = tempfile::tempdir().expect("working directory");
+    let root_path = temporary.path().join("oauth");
+    let root = signalbox_model_runtime_codex_cli::OauthCredentialRoot::open(&root_path)
+        .expect("private root");
+    let executable = script_cli(
+        temporary.path(),
+        "oauth-fixture",
+        r#"#!/bin/sh
+test "$HOME" = "$CODEX_HOME" || exit 90
+test -z "$OPENAI_API_KEY$CODEX_API_KEY$CODEX_ACCESS_TOKEN" || exit 91
+printf '%s\n' "$@" > oauth-argv
+umask > oauth-umask
+printf '%s' 'opaque-access-that-crosses-the-small-stderr-evidence-window opaque-identity' >&2
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-offline-1","turn":{"id":"turn-offline-1","status":"failed","items":[],"error":{"message":"opaque-access-that-crosses-the-small-stderr-evidence-window opaque-identity","codexErrorInfo":"other"}}}}'
+exit 1
+"#,
+    );
+    let mut config = CodexCliConfig::new(
+        executable,
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
+    );
+    config
+        .oauth_profiles
+        .insert(CredentialReference::new(CREDENTIAL_REFERENCE));
+    config.stderr_limit = 20;
+    let runtime = CodexCliRuntime::new(config)
+        .expect("runtime")
+        .with_oauth_delivery(std::sync::Arc::new(OauthFixture), root);
+    let prepared = prepare(
+        &runtime,
+        operation("oauth", DeliveryMode::Buffered, OperationShape::Text),
+    )
+    .await;
+    let entry = std::fs::read_dir(&root_path)
+        .expect("root entries")
+        .next()
+        .expect("prepared home")
+        .expect("entry")
+        .path();
+    let auth: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(entry.join("auth.json")).expect("auth file"))
+            .expect("auth JSON");
+    assert_eq!(auth["tokens"]["refresh_token"], "");
+    let report = runtime
+        .execute(prepared, &mut Vec::new(), CancellationSignal::never())
+        .await;
+    let evidence = format!("{:?}", report.evidence);
+    assert!(!evidence.contains("opaque-access"), "{evidence}");
+    assert!(!evidence.contains("opaque-identity"), "{evidence}");
+    assert!(evidence.contains("[redacted]"), "{evidence}");
+    assert!(!entry.exists());
+    assert!(
+        std::fs::read_to_string(temporary.path().join("oauth-argv"))
+            .expect("argv")
+            .contains("cli_auth_credentials_store=\"file\"")
+    );
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("oauth-umask"))
+            .expect("umask")
+            .trim(),
+        "0077"
+    );
+}
 /// Provider text carried by the terminal half of the boundary extractor fixture.
 const BOUNDARY_FIXTURE_TERMINAL_TEXT: &str = "synthetic-terminal-boundary-text";
 /// Provider text carried by the observation half of the boundary extractor fixture.
@@ -45,11 +203,28 @@ enum OperationShape {
 struct ExecutionResult {
     evidence: TerminalEvidence,
     observations: Vec<Observation<String>>,
+    rate_limits: Vec<(String, RateLimitSnapshot)>,
     spawns: usize,
     argv: String,
     thread: serde_json::Value,
     turn: serde_json::Value,
     prompt: String,
+}
+
+#[derive(Default)]
+struct CapturedObservations {
+    observations: Vec<Observation<String>>,
+    rate_limits: Vec<(String, RateLimitSnapshot)>,
+}
+
+impl ObservationSink<String> for CapturedObservations {
+    fn observe(&mut self, observation: Observation<String>) {
+        self.observations.push(observation);
+    }
+
+    fn observe_rate_limits(&mut self, correlation: String, snapshot: RateLimitSnapshot) {
+        self.rate_limits.push((correlation, snapshot));
+    }
 }
 
 /// Flattens only the typed, provider-controlled strings that actually cross
@@ -349,6 +524,7 @@ fn boundary_material_reads_terminal_and_observation_text() {
                 text: BOUNDARY_FIXTURE_OBSERVATION_TEXT.to_string(),
             },
         }],
+        rate_limits: Vec::new(),
         spawns: 0,
         argv: String::new(),
         thread: serde_json::Value::Null,
@@ -414,6 +590,232 @@ fn emitted_streams_keep_separate_streams_apart() {
 #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
 struct Verdict {
     accepted: bool,
+}
+
+#[tokio::test]
+async fn account_read_emits_capacity_for_the_current_call() {
+    let scenario = "capacity_read";
+    let before = SystemTime::now();
+    let result = execute_scenario(
+        scenario,
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    completed(&result.evidence);
+    assert_eq!(result.spawns, 1);
+    let [(correlation, snapshot)] = result.rate_limits.as_slice() else {
+        panic!("the account read emits one snapshot");
+    };
+    assert_eq!(correlation, scenario);
+    assert!(snapshot.observed_at >= before);
+    assert!(snapshot.observed_at <= SystemTime::now());
+    // The peer reports 27% used over 300 minutes and 61% over 10080 minutes.
+    assert_eq!(
+        snapshot.windows,
+        vec![
+            signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: 73,
+                window_duration: Some(Duration::from_secs(18000)),
+                resets_at: Some(UNIX_EPOCH + Duration::from_secs(1800000700)),
+            },
+            signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: 39,
+                window_duration: Some(Duration::from_secs(604800)),
+                resets_at: Some(UNIX_EPOCH + Duration::from_secs(1800001400)),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn fractional_usage_emits_both_capacity_windows() {
+    let scenario = "capacity_fractional";
+    let result = execute_scenario(
+        scenario,
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    completed(&result.evidence);
+    let [(correlation, snapshot)] = result.rate_limits.as_slice() else {
+        panic!("the fractional account read emits one snapshot");
+    };
+    assert_eq!(correlation, scenario);
+    // The peer reports 99.5% and 105.25% used; remaining capacity rounds down.
+    assert_eq!(
+        snapshot.windows,
+        vec![
+            signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: 0,
+                window_duration: Some(Duration::from_secs(18000)),
+                resets_at: Some(UNIX_EPOCH + Duration::from_secs(1800000700)),
+            },
+            signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: -6,
+                window_duration: Some(Duration::from_secs(604800)),
+                resets_at: Some(UNIX_EPOCH + Duration::from_secs(1800001400)),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn empty_capacity_notifications_do_not_reemit_cached_windows() {
+    let scenario = "capacity_empty_update";
+    let result = execute_scenario(
+        scenario,
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    completed(&result.evidence);
+    // A populated read is followed by notifications with omitted and null windows.
+    let [(correlation, snapshot)] = result.rate_limits.as_slice() else {
+        panic!("only the account read emits capacity; empty notifications cannot restamp it");
+    };
+    assert_eq!(correlation, scenario);
+    assert_eq!(snapshot.windows.len(), 2);
+    // The read reports primary 27% used and secondary 61% used.
+    assert_eq!(snapshot.windows[0].remaining_percent, 73);
+    assert_eq!(snapshot.windows[1].remaining_percent, 39);
+}
+
+#[tokio::test]
+async fn sparse_capacity_update_preserves_the_account_reads_primary_window() {
+    let scenario = "capacity_sparse";
+    let result = execute_scenario(
+        scenario,
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    completed(&result.evidence);
+    let [(_, initial), (correlation, updated)] = result.rate_limits.as_slice() else {
+        panic!("the read and notification each emit a snapshot");
+    };
+    assert_eq!(correlation, scenario);
+    assert_eq!(updated.windows.len(), 2);
+    assert_eq!(updated.windows[0], initial.windows[0]);
+    // The notification reports primary:null and secondary usedPercent:88.
+    assert_eq!(updated.windows[1].remaining_percent, 12);
+    assert_eq!(
+        updated.windows[1].resets_at,
+        Some(UNIX_EPOCH + Duration::from_secs(1800001600))
+    );
+}
+
+#[tokio::test]
+async fn capacity_observation_survives_terminal_failure() {
+    let scenario = "capacity_failure";
+    let result = execute_scenario(
+        scenario,
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    provider_error(&result.evidence);
+    let [(_, initial), (correlation, updated)] = result.rate_limits.as_slice() else {
+        panic!("capacity remains observable when the turn fails");
+    };
+    assert_eq!(correlation, scenario);
+    // The failure fixture reports 105% used; remaining capacity is not clamped.
+    assert_eq!(updated.windows[0].remaining_percent, -5);
+    assert_eq!(updated.windows[1], initial.windows[1]);
+}
+
+#[tokio::test]
+async fn unavailable_account_read_continues_without_capacity() {
+    let result = execute_scenario(
+        "capacity_read_error",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    completed(&result.evidence);
+    assert!(result.rate_limits.is_empty());
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn unanswered_capacity_read_does_not_block_the_model_turn() {
+    let result = execute_scenario(
+        "capacity_read_pending",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    completed(&result.evidence);
+    assert!(result.rate_limits.is_empty());
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn delayed_capacity_reply_preserves_model_completion() {
+    for scenario in ["capacity_read_late", "capacity_read_after_completion"] {
+        let result = execute_scenario(
+            scenario,
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        completed(&result.evidence);
+        let [(correlation, snapshot)] = result.rate_limits.as_slice() else {
+            panic!("{scenario}: the delayed read emits one snapshot");
+        };
+        assert_eq!(correlation, scenario);
+        // The delayed response reports primary 27% used and secondary 61% used;
+        // an earlier empty notification in capacity_read_late does not supersede it.
+        assert_eq!(snapshot.windows[0].remaining_percent, 73, "{scenario}");
+        assert_eq!(snapshot.windows[1].remaining_percent, 39, "{scenario}");
+        assert_eq!(result.spawns, 1);
+    }
+}
+
+#[tokio::test]
+async fn a_capacity_notification_supersedes_an_outstanding_read() {
+    for scenario in [
+        "capacity_read_stale",
+        "capacity_read_stale_after_completion",
+    ] {
+        let result = execute_scenario(
+            scenario,
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        completed(&result.evidence);
+        let [(correlation, snapshot)] = result.rate_limits.as_slice() else {
+            panic!("{scenario}: the notification is the only emitted capacity snapshot");
+        };
+        assert_eq!(correlation, scenario);
+        // The read reports 27%/61% used after a notification reports 96%/93%.
+        assert_eq!(
+            snapshot.windows,
+            vec![
+                signalbox_model_runtime::RateLimitWindow {
+                    remaining_percent: 4,
+                    window_duration: Some(Duration::from_secs(18000)),
+                    resets_at: Some(UNIX_EPOCH + Duration::from_secs(1800001800)),
+                },
+                signalbox_model_runtime::RateLimitWindow {
+                    remaining_percent: 7,
+                    window_duration: Some(Duration::from_secs(604800)),
+                    resets_at: Some(UNIX_EPOCH + Duration::from_secs(1800002400)),
+                },
+            ],
+            "{scenario}"
+        );
+    }
 }
 
 /// One completed call crosses exactly one process-spawn
@@ -4081,7 +4483,7 @@ async fn execute_operation_in_directory(
         .expect("the executable fixture is written and executable");
     let runtime = runtime_with_timeout(directory, wrapper, exchange_timeout);
     let prepared = prepare(&runtime, operation).await;
-    let mut observations = Vec::new();
+    let mut observations = CapturedObservations::default();
     let report = runtime
         .execute(prepared, &mut observations, cancellation)
         .await;
@@ -4090,7 +4492,8 @@ async fn execute_operation_in_directory(
 
     ExecutionResult {
         evidence: report.evidence,
-        observations,
+        observations: observations.observations,
+        rate_limits: observations.rate_limits,
         spawns: spawn_count(directory),
         thread: serde_json::from_str(&read_optional(directory.join("fake-codex-thread")))
             .unwrap_or_default(),
@@ -4208,6 +4611,8 @@ fn stderr_holding_incomplete_upload_cli(directory: &Path) -> std::path::PathBuf 
 read -r initialize
 printf '%s\n' '{{"id":1,"result":{{}}}}'
 read -r initialized
+read -r limits
+printf '%s\n' '{{"id":4,"result":{{"rateLimits":{{}}}}}}'
 read -r thread
 printf '%s\n' '{{"id":2,"result":{{"thread":{{"id":"thread-offline-1"}}}}}}'
 exec 0<&-
@@ -4257,6 +4662,8 @@ fn script_cli(directory: &Path, name: &str, script: &str) -> std::path::PathBuf 
     let handshake = r#"read -r initialize
 printf '%s\n' '{"id":1,"result":{}}'
 read -r initialized
+read -r limits
+printf '%s\n' '{"id":4,"result":{"rateLimits":{}}}'
 read -r thread
 printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-offline-1"}}}'
 read -r turn
@@ -4295,6 +4702,8 @@ read -r initialize
 printf '%s\n' '{{"method":"future","params":{{"text":"Authorization:"}}}}'
 printf '%s\n' '{{"id":1,"result":{{}}}}'
 read -r initialized
+read -r limits
+printf '%s\n' '{{"id":4,"result":{{"rateLimits":{{}}}}}}'
 read -r thread
 printf '%s\n' '{{"id":2,"result":{{"thread":{{"id":" {authorization}"}}}}}}'
 read -r turn

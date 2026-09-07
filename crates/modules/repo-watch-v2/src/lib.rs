@@ -29,11 +29,13 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 mod baseline;
+pub mod checkout;
 pub mod dispatch;
 mod event_decode;
 pub mod github;
 pub mod ingest;
 mod observation_decode;
+pub mod poll_cache;
 pub mod provider;
 
 use baseline::observation_payload;
@@ -113,7 +115,7 @@ pub struct RepositoryProjection<'a> {
     /// Complete normalized state used by the repository-event differ.
     pub comparison_baseline: &'a signalbox_ownership_seam::RepoWatchObservation,
     /// Compact baselines retained for merged pull requests.
-    pub merged_baselines: &'a [signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineV1],
+    pub merged_baselines: &'a [ingest::MergedPullRequestBaseline],
 }
 
 /// Authenticated webhook intake retained until its caller-selected expiry.
@@ -503,18 +505,33 @@ pub enum RuleReconciliationAdmission {
     Stale,
 }
 
-/// One repository in the complete configured rule set.
-#[derive(Clone, Copy, Debug)]
-pub struct RepositoryRuleSet<'a> {
-    repository: &'a RepositorySlug,
-    rules: &'a [RepoWatchRule],
-}
+pub use signalbox_ownership_seam::{ReloadIntentInput, RepositoryRuleSet};
 
-impl<'a> RepositoryRuleSet<'a> {
-    /// Binds one repository to its complete ordered checked rule set.
-    pub const fn new(repository: &'a RepositorySlug, rules: &'a [RepoWatchRule]) -> Self {
-        Self { repository, rules }
-    }
+/// Digests checked per-repository rule sets independently of configuration ordering.
+pub fn repository_rule_set_digest(
+    sets: &[RepositoryRuleSet<'_>],
+) -> Result<[u8; 32], serde_json::Error> {
+    let canonical: BTreeMap<_, BTreeMap<_, _>> = sets
+        .iter()
+        .map(|set| {
+            (
+                set.repository.as_str(),
+                set.rules
+                    .iter()
+                    .map(|rule| {
+                        (
+                            rule.id().as_str(),
+                            (
+                                rule.version().get(),
+                                rule.content_digest().as_bytes().to_vec(),
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    Ok(Sha256::digest(serde_json::to_vec(&canonical)?).into())
 }
 
 impl WebhookDisposition {
@@ -530,6 +547,10 @@ impl WebhookDisposition {
 /// Module-local storage failure.
 #[derive(Debug)]
 pub enum StoreError {
+    /// Persisted poll transport state is malformed or belongs to another reviewer set.
+    InvalidPollCache,
+    /// A retained reload activation cannot be encoded.
+    InvalidReloadIntent,
     /// A retained normalized event cannot be decoded.
     InvalidRetainedEvent,
     /// The stored comparison baseline cannot be decoded into checked observations.
@@ -563,6 +584,8 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::InvalidPollCache => "repository-watch poll cache is invalid",
+            Self::InvalidReloadIntent => "repository-watch reload intent is invalid",
             Self::InvalidComparisonBaseline => "repository-watch comparison baseline is invalid",
             Self::InvalidRetainedEvent => "repository-watch retained event is invalid",
             Self::Database(_) => "repository-watch module database operation failed",
@@ -598,7 +621,10 @@ impl fmt::Display for StoreError {
 impl Error for StoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::InvalidComparisonBaseline | Self::InvalidRetainedEvent => None,
+            Self::InvalidPollCache
+            | Self::InvalidReloadIntent
+            | Self::InvalidComparisonBaseline
+            | Self::InvalidRetainedEvent => None,
             Self::Database(error) => Some(error),
             Self::InvalidProviderIdentity
             | Self::InvalidWebhookExpiry
@@ -1102,6 +1128,75 @@ impl RepoWatchStore {
         repositories: &[RepositoryRuleSet<'_>],
         activated_at: OffsetDateTime,
     ) -> Result<RuleReconciliationAdmission, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = Self::reconcile_rules_in(&mut transaction, repositories, activated_at).await?;
+        if matches!(result, RuleReconciliationAdmission::Applied { .. }) {
+            transaction.commit().await?;
+        }
+        Ok(result)
+    }
+
+    /// Activates a retained rule set once and retains each repository's captured tail.
+    pub async fn activate_reload(
+        &self,
+        input: ReloadIntentInput<'_>,
+        activated_at: OffsetDateTime,
+    ) -> Result<RuleReconciliationAdmission, StoreError> {
+        let digest = repository_rule_set_digest(input.repositories)
+            .map_err(|_| StoreError::InvalidReloadIntent)?;
+        if digest != input.rule_set_digest {
+            return Ok(RuleReconciliationAdmission::ConflictingReuse);
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(CONFIGURATION_LOCK)
+            .execute(&mut *transaction)
+            .await?;
+        let standing: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT rule_set_digest FROM reload_activation WHERE command_id = $1",
+        )
+        .bind(input.command_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(standing) = standing {
+            return Ok(if standing == digest {
+                RuleReconciliationAdmission::Applied {
+                    rules: Box::new([]),
+                    deactivated: 0,
+                }
+            } else {
+                RuleReconciliationAdmission::ConflictingReuse
+            });
+        }
+        let result =
+            Self::reconcile_rules_in(&mut transaction, input.repositories, activated_at).await?;
+        if matches!(result, RuleReconciliationAdmission::Applied { .. }) {
+            let mut tails = BTreeMap::new();
+            for repository in input.repositories {
+                let tail: Decimal = sqlx::query_scalar(
+                    "SELECT COALESCE(max(repository_event_ordinal), 0) FROM gh_event WHERE repository = $1")
+                    .bind(repository.repository.as_str()).fetch_one(&mut *transaction).await?;
+                tails.insert(repository.repository.as_str(), tail.to_string());
+            }
+            sqlx::query(
+                "INSERT INTO reload_activation (command_id, rule_set_digest, activation_tails)
+                VALUES ($1, $2, $3::text::jsonb)",
+            )
+            .bind(input.command_id.as_uuid())
+            .bind(digest.as_slice())
+            .bind(serde_json::to_string(&tails).map_err(|_| StoreError::InvalidReloadIntent)?)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+        }
+        Ok(result)
+    }
+
+    async fn reconcile_rules_in(
+        transaction: &mut Transaction<'_, Postgres>,
+        repositories: &[RepositoryRuleSet<'_>],
+        activated_at: OffsetDateTime,
+    ) -> Result<RuleReconciliationAdmission, StoreError> {
         let mut configured = BTreeMap::new();
         for repository in repositories {
             let mut rule_ids = BTreeSet::new();
@@ -1117,28 +1212,27 @@ impl RepoWatchStore {
                 return Err(StoreError::DuplicateRuleIdentity);
             }
         }
-        let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(CONFIGURATION_LOCK)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         let active_repositories: Vec<String> =
             sqlx::query_scalar("SELECT DISTINCT repository FROM rule ORDER BY repository")
-                .fetch_all(&mut *transaction)
+                .fetch_all(&mut **transaction)
                 .await?;
         let mut locked_repositories = configured.keys().copied().collect::<BTreeSet<_>>();
         locked_repositories.extend(active_repositories.iter().map(String::as_str));
         for repository in locked_repositories {
             sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
                 .bind(repository)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
         }
         let active_rules: Vec<(String, String, Decimal)> = sqlx::query_as(
             "SELECT repository, rule_id, active_revision FROM rule
               ORDER BY repository, rule_id FOR UPDATE",
         )
-        .fetch_all(&mut *transaction)
+        .fetch_all(&mut **transaction)
         .await?;
         let mut plans = Vec::new();
         for repository in repositories {
@@ -1147,7 +1241,7 @@ impl RepoWatchStore {
                    FROM gh_event WHERE repository = $1",
             )
             .bind(repository.repository.as_str())
-            .fetch_one(&mut *transaction)
+            .fetch_one(&mut **transaction)
             .await?;
             for rule in repository.rules {
                 let revision = Decimal::from(rule.version().get());
@@ -1159,7 +1253,7 @@ impl RepoWatchStore {
                 )
                 .bind(repository.repository.as_str())
                 .bind(rule.id().as_str())
-                .fetch_optional(&mut *transaction)
+                .fetch_optional(&mut **transaction)
                 .await?;
                 let latest_revision: Option<Decimal> = sqlx::query_scalar(
                     "SELECT max(revision) FROM rule_revision
@@ -1167,7 +1261,7 @@ impl RepoWatchStore {
                 )
                 .bind(repository.repository.as_str())
                 .bind(rule.id().as_str())
-                .fetch_one(&mut *transaction)
+                .fetch_one(&mut **transaction)
                 .await?;
                 let historical_digest: Option<Vec<u8>> = sqlx::query_scalar(
                     "SELECT content_digest FROM rule_revision
@@ -1176,7 +1270,7 @@ impl RepoWatchStore {
                 .bind(repository.repository.as_str())
                 .bind(rule.id().as_str())
                 .bind(revision)
-                .fetch_optional(&mut *transaction)
+                .fetch_optional(&mut **transaction)
                 .await?;
                 if historical_digest
                     .as_ref()
@@ -1187,7 +1281,6 @@ impl RepoWatchStore {
                             *active_revision == revision && active_digest != digest.as_bytes()
                         })
                 {
-                    transaction.rollback().await?;
                     return Ok(RuleReconciliationAdmission::ConflictingReuse);
                 }
                 if historical_digest.is_some() {
@@ -1204,7 +1297,6 @@ impl RepoWatchStore {
                         ));
                         continue;
                     }
-                    transaction.rollback().await?;
                     return Ok(RuleReconciliationAdmission::Stale);
                 }
                 if active
@@ -1212,7 +1304,6 @@ impl RepoWatchStore {
                     .is_some_and(|(active_revision, _)| revision < *active_revision)
                     || latest_revision.is_some_and(|latest| revision < latest)
                 {
-                    transaction.rollback().await?;
                     return Ok(RuleReconciliationAdmission::Stale);
                 }
                 let admission = if active.is_some() || latest_revision.is_some() {
@@ -1234,7 +1325,7 @@ impl RepoWatchStore {
                 continue;
             }
             insert_rule_revision(
-                &mut transaction,
+                transaction,
                 repository,
                 rule,
                 activated_at,
@@ -1243,7 +1334,7 @@ impl RepoWatchStore {
             .await?;
             if let Some(active_revision) = active_revision {
                 retire_rule_revision(
-                    &mut transaction,
+                    transaction,
                     repository.as_str(),
                     rule.id().as_str(),
                     *active_revision,
@@ -1260,7 +1351,7 @@ impl RepoWatchStore {
                 .bind(rule.id().as_str())
                 .bind(Decimal::from(rule.version().get()))
                 .bind(rule.content_digest().as_bytes().as_slice())
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             } else {
                 sqlx::query(
@@ -1272,7 +1363,7 @@ impl RepoWatchStore {
                 .bind(rule.id().as_str())
                 .bind(Decimal::from(rule.version().get()))
                 .bind(rule.content_digest().as_bytes().as_slice())
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             }
         }
@@ -1285,7 +1376,7 @@ impl RepoWatchStore {
                 continue;
             }
             retire_rule_revision(
-                &mut transaction,
+                transaction,
                 &repository,
                 &rule_id,
                 active_revision,
@@ -1295,13 +1386,12 @@ impl RepoWatchStore {
             sqlx::query("DELETE FROM rule WHERE repository = $1 AND rule_id = $2")
                 .bind(&repository)
                 .bind(&rule_id)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             deactivated = deactivated
                 .checked_add(1)
                 .ok_or(StoreError::InvalidRuleFieldInventory)?;
         }
-        transaction.commit().await?;
         Ok(RuleReconciliationAdmission::Applied {
             rules: plans
                 .into_iter()

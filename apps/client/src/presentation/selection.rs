@@ -153,6 +153,9 @@ impl SnapshotSelection {
                     | TranscriptEntry::ToolDenied {
                         tool_request_id, ..
                     }
+                    | TranscriptEntry::ToolInadmissible {
+                        tool_request_id, ..
+                    }
                     | TranscriptEntry::ToolClosed {
                         tool_request_id, ..
                     },
@@ -318,6 +321,9 @@ impl SnapshotSelection {
                     | TranscriptEntry::ToolDenied {
                         tool_request_id, ..
                     }
+                    | TranscriptEntry::ToolInadmissible {
+                        tool_request_id, ..
+                    }
                     | TranscriptEntry::ToolClosed {
                         tool_request_id, ..
                     },
@@ -424,6 +430,7 @@ impl SnapshotSelection {
                     | TranscriptEntry::AssistantToolUse { .. }
                     | TranscriptEntry::ToolExecutionResult { .. }
                     | TranscriptEntry::ToolDenied { .. }
+                    | TranscriptEntry::ToolInadmissible { .. }
                     | TranscriptEntry::ToolClosed { .. }
                     | TranscriptEntry::RunnerPlacementChanged { .. }
                     | TranscriptEntry::TurnCompleted { .. }

@@ -834,7 +834,12 @@ fn redact_bounded_text(text: String, credential: &CredentialValue) -> String {
     redacted
 }
 
-fn redact_native_message(
+/// Redacts an exact credential and its JSON string forms from adapter input text.
+pub fn redact_credential_text(text: String, credential: &CredentialValue) -> String {
+    redact_native_message(text, credential, None)
+}
+
+pub(crate) fn redact_native_message(
     text: String,
     credential: &CredentialValue,
     limit: Option<usize>,

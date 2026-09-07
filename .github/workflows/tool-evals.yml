@@ -54,6 +54,7 @@ on:
       - "crates/model-runtime/**"
       - "crates/model-runtime-openai/**"
       - "crates/persistence/src/model_execution.rs"
+      - "crates/persistence/src/model_execution/**"
       - "crates/persistence/src/model_settings_resolution.rs"
       - "crates/persistence/src/mapping.rs"
       - "crates/persistence/src/outbox.rs"
@@ -71,6 +72,7 @@ on:
       - "crates/persistence/src/submit_input.rs"
       - "crates/persistence/src/submit_input/**"
       - "crates/persistence/src/tool_loop.rs"
+      - "crates/persistence/src/tool_loop/**"
       - ".github/workflows/tool-evals.yml"
   push:
     branches: [main]
@@ -101,6 +103,7 @@ on:
       - "crates/model-runtime/**"
       - "crates/model-runtime-openai/**"
       - "crates/persistence/src/model_execution.rs"
+      - "crates/persistence/src/model_execution/**"
       - "crates/persistence/src/model_settings_resolution.rs"
       - "crates/persistence/src/mapping.rs"
       - "crates/persistence/src/outbox.rs"
@@ -118,6 +121,7 @@ on:
       - "crates/persistence/src/submit_input.rs"
       - "crates/persistence/src/submit_input/**"
       - "crates/persistence/src/tool_loop.rs"
+      - "crates/persistence/src/tool_loop/**"
       - ".github/workflows/tool-evals.yml"
   # One daily provider/model drift sample. GitHub schedules only the copy on
   # the default branch, so this starts after owner merge.
