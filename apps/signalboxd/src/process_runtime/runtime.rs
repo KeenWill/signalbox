@@ -156,11 +156,11 @@ impl ProcessRuntime {
         oauth
             .abandon_pending()
             .await
-            .map_err(|_| ProcessRuntimeError::OauthRecovery)?;
+            .map_err(ProcessRuntimeError::OauthRecovery)?;
         oauth
             .replace_registrations(&self.model_configuration.oauth_registrations())
             .await
-            .map_err(|_| ProcessRuntimeError::OauthRecovery)?;
+            .map_err(ProcessRuntimeError::OauthRecovery)?;
         let fanouts = self.fanouts;
         let connection_dependencies = ConnectionDependencies {
             recovery_reporter: self.recovery_reporter,
