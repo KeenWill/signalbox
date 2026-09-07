@@ -158,3 +158,10 @@ exclusions and reports each suite's outcome without gating merges. LCOV merges
 hits across binaries and declared subprocess fixtures; the report excludes
 dedicated test and benchmark files and marks region coverage unavailable.
 Instrumented binaries keep a relative path to the declared runtime libraries.
+
+`bazel test //clients/web/...` runs Biome, TypeScript, Vitest, the Vite build,
+and the existing Chromium, Firefox, and WebKit Playwright assertions. The npm
+lockfile supplies package versions; its pnpm translation is generated input. The
+browser runtime follows the locked Playwright package, with image checksums
+retained in the Bazel lockfile and declared DejaVu fonts. Browser evidence is
+retained in the test's undeclared outputs. The web CI job uses the shared cache.

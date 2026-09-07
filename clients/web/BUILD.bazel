@@ -1,0 +1,146 @@
+load("@aspect_rules_js//js:defs.bzl", "js_binary", "js_library", "js_run_binary", "js_test")
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@npm//clients/web:@biomejs/biome/package_json.bzl", biome = "bin")
+load("@npm//clients/web:typescript/package_json.bzl", typescript = "bin")
+load("@npm//clients/web:vitest/package_json.bzl", vitest = "bin")
+load("//tooling/bazel:web_public.bzl", "web_public_files")
+
+web_public_files(name = "public")
+
+npm_link_all_packages(name = "node_modules")
+
+exports_files([
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "src/generated/web-contract.mjs",
+])
+
+filegroup(
+    name = "contract_fixtures",
+    srcs = glob(["src/generated/**"]),
+    visibility = ["//:__pkg__"],
+)
+
+WEB_SOURCES = glob(
+    [
+        "**",
+        ".gitignore",
+    ],
+    exclude = [
+        "node_modules/**",
+        "public/**",
+        "dist/**",
+        "playwright-report/**",
+        "test-results/**",
+        "**/*.tsbuildinfo",
+    ],
+) + [":public"]
+
+typescript.tsc_binary(name = "tsc")
+
+ts_project(
+    name = "typescript",
+    srcs = glob(
+        [
+            "src/**/*.ts",
+            "src/**/*.tsx",
+            "src/**/*.mts",
+            "src/**/*.json",
+            "e2e/**/*.ts",
+            "e2e/**/*.json",
+        ],
+        allow_empty = True,
+    ) + [
+        "playwright.config.ts",
+        "vite.config.ts",
+    ],
+    no_emit = True,
+    resolve_json_module = True,
+    supports_workers = 0,
+    tsc = ":tsc",
+    # The native compiler reads the complete tsconfig; the metadata validator uses a JavaScript API.
+    tsc_worker = ":tsc",
+    tsconfig = "tsconfig.json",
+    validate = False,
+    validator = ":tsc",
+    deps = [":node_modules"],
+)
+
+biome.biome_test(
+    name = "lint",
+    args = [
+        "ci",
+        ".",
+        "--vcs-root=../..",
+    ],
+    chdir = package_name(),
+    data = WEB_SOURCES + [
+        ":node_modules",
+        "//:web_gitignore",
+    ],
+)
+
+vitest.vitest_test(
+    name = "unit_tests",
+    args = ["run"],
+    chdir = package_name(),
+    data = WEB_SOURCES + [":node_modules"],
+    env = {"CI": "true"},
+)
+
+js_binary(
+    name = "vite",
+    data = [":node_modules"],
+    entry_point = "vite_build.mjs",
+)
+
+js_run_binary(
+    name = "build",
+    srcs = WEB_SOURCES + [
+        ":node_modules",
+        ":typescript_typecheck",
+    ],
+    chdir = package_name(),
+    out_dirs = ["dist"],
+    tool = ":vite",
+)
+
+build_test(
+    name = "build_test",
+    targets = [":build"],
+)
+
+js_test(
+    name = "browser_tests",
+    size = "large",
+    chdir = package_name(),
+    data = WEB_SOURCES + [
+        ":build",
+        ":node_modules",
+        "@patchelf//:bin/patchelf",
+        "@playwright_runtime//:runtime",
+        "@playwright_runtime//:runtime-root",
+    ],
+    entry_point = "playwright_runner.mjs",
+    env = {
+        "CI": "true",
+        "PLAYWRIGHT_RUNTIME_ROOT": "$(rootpath @playwright_runtime//:runtime-root)",
+        "PLAYWRIGHT_PATCHELF": "$(rootpath @patchelf//:bin/patchelf)",
+    },
+    no_copy_to_bin = [
+        "@patchelf//:bin/patchelf",
+        "@playwright_runtime//:runtime",
+        "@playwright_runtime//:runtime-root",
+    ],
+    patch_node_fs = False,
+)
+
+js_library(
+    name = "contract_javascript",
+    srcs = ["src/generated/web-contract.mjs"],
+    visibility = ["//:__pkg__"],
+)

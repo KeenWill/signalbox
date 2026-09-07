@@ -1,4 +1,4 @@
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("@rules_rust//rust:defs.bzl", "rust_test")
 load(":native_runtime.bzl", "native_runtime")
 load(":testing.bzl", "json_preserve_order")
@@ -12,6 +12,8 @@ native_runtime(
 
 exports_files([
     "check_generated.py",
+    "extract_playwright.py",
+    "web_public.py",
     "check_markdown.py",
     "patches/build-script-lints.patch",
     "patches/deno-embedded-javascript.patch",
@@ -53,4 +55,11 @@ config_setting(
     name = "sorted_json",
     flag_values = {":json_preserve_order": "false"},
     visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "web_public_tool",
+    srcs = ["web_public.py"],
+    main = "web_public.py",
+    visibility = ["//clients/web:__pkg__"],
 )
