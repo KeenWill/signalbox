@@ -179,11 +179,10 @@ impl ModelAdapter {
 
     /// Reports whether this adapter observes remaining provider capacity.
     ///
-    /// Neither composed runtime does. Listing the variants rather than
-    /// answering `false` outright makes a later adapter state its own answer.
     pub(crate) const fn reports_remaining_capacity(self) -> bool {
         match self {
-            Self::Anthropic | Self::ClaudeCli | Self::CodexCli | Self::OpenAi => false,
+            Self::CodexCli => true,
+            Self::Anthropic | Self::ClaudeCli | Self::OpenAi => false,
         }
     }
 
@@ -7665,7 +7664,7 @@ on_headroom_low = "switch_now""#,
     }
 
     #[test]
-    fn configuration_rejects_a_headroom_reserve_no_adapter_reports() {
+    fn configuration_rejects_a_headroom_reserve_without_adapter_capacity() {
         let reserved = configuration_with_anthropic_pool(
             r#"[[credential_pools]]
 name = "anthropic-main"
@@ -7703,7 +7702,7 @@ value = 10"#,
     }
 
     #[test]
-    fn configuration_rejects_a_member_headroom_reserve_no_adapter_reports() {
+    fn configuration_rejects_a_member_headroom_reserve_without_adapter_capacity() {
         let reserved = configuration_with_anthropic_pool(
             r#"[[credential_pools]]
 name = "anthropic-main"
@@ -7729,6 +7728,69 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
 
         HubModelConfiguration::parse(&substituting)
             .expect("Codex turn.failed proves that a successor cannot duplicate acceptance");
+    }
+
+    #[test]
+    fn configuration_admits_codex_least_used_ties() {
+        let pool = r#"[[credential_pools]]
+name = "codex-main"
+tie_break = "least_used"
+on_pool_exhausted = "fail"
+members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
+        HubModelConfiguration::parse(&CONFIGURATION.replace(CODEX_POOL, pool))
+            .expect("Codex capacity evidence admits least_used");
+    }
+
+    #[test]
+    fn configuration_admits_codex_pool_headroom_reserve() {
+        let pool = r#"[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+headroom_reserve_percent = 10
+members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
+        HubModelConfiguration::parse(&CONFIGURATION.replace(CODEX_POOL, pool))
+            .expect("Codex capacity evidence admits the pool reserve");
+    }
+
+    #[test]
+    fn configuration_admits_codex_member_headroom_reserve() {
+        let pool = r#"[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{ profile = "codex-subscription-primary", priority = 1, headroom_reserve_percent = 23 }]"#;
+        HubModelConfiguration::parse(&CONFIGURATION.replace(CODEX_POOL, pool))
+            .expect("Codex capacity evidence admits the member reserve");
+    }
+
+    #[test]
+    fn configuration_admits_codex_headroom_actions_between_calls() {
+        for action in [
+            "stay",
+            "switch_next_turn",
+            "avoid_new_sessions",
+            "quarantine",
+        ] {
+            let pool = format!("{CODEX_POOL}\non_headroom_low = \"{action}\"");
+            assert!(
+                HubModelConfiguration::parse(&CONFIGURATION.replace(CODEX_POOL, &pool)).is_ok(),
+                "Codex capacity evidence admits {action}"
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_rejects_codex_switch_now_on_low_headroom() {
+        let pool = format!("{CODEX_POOL}\non_headroom_low = \"switch_now\"");
+        assert_eq!(
+            HubModelConfiguration::parse(&CONFIGURATION.replace(CODEX_POOL, &pool)).err(),
+            Some(
+                HubModelConfigurationError::InadmissibleCredentialPoolAction {
+                    trigger: Arc::from("on_headroom_low"),
+                }
+            ),
+        );
     }
 
     #[test]
@@ -7758,7 +7820,7 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
     }
 
     #[test]
-    fn configuration_rejects_least_used_ties_no_adapter_can_resolve() {
+    fn configuration_rejects_least_used_ties_without_adapter_capacity() {
         let least_used = configuration_with_anthropic_pool(
             r#"[[credential_pools]]
 name = "anthropic-main"
