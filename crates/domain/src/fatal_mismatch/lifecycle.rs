@@ -476,8 +476,8 @@ mod tests {
         causes
     }
 
-    /// unfinished owned work yields only the exact
-    /// fatal-stopped attempt, retaining the same source facts and identity.
+    /// unfinished owned work yields only the exact fatal-stopped attempt, retaining the same source
+    /// facts and identity.
     #[test]
     fn unfinished_work_yields_exact_fatal_stop() {
         assert_unfinished_work_yields_exact_fatal_stop(live_running_source());
@@ -555,10 +555,9 @@ mod tests {
         );
     }
 
-    /// a live running source, a pre-existing
-    /// cancellation-only stop, and an existing multi-failure fatal stop all
-    /// couple closed work to exact known failure and retain the same fatal
-    /// stop as aggregate fallback.
+    /// a live running source, a pre-existing cancellation-only stop, and an existing multi-failure
+    /// fatal stop all couple closed work to exact known failure and retain the same fatal stop as
+    /// aggregate fallback.
     #[test]
     fn closed_sources_yield_exact_failure_candidates() {
         assert_closed_source_yields_exact_failure_candidate(live_running_source());
@@ -625,10 +624,9 @@ mod tests {
         );
     }
 
-    /// a live running
-    /// source, a cancellation-only stop, and an existing multi-failure fatal
-    /// stop close as ambiguous while attempt history, marker reason, and
-    /// fallback all carry the same exact F and the marker carries exactly U.
+    /// a live running source, a cancellation-only stop, and an existing multi-failure fatal stop
+    /// close as ambiguous while attempt history, marker reason, and fallback all carry the same
+    /// exact F and the marker carries exactly U.
     #[test]
     fn closed_sources_yield_exact_reconciliation_candidates() {
         assert_closed_source_yields_exact_reconciliation_candidate(live_running_source());

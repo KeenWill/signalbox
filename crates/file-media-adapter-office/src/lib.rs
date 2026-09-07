@@ -42,51 +42,32 @@ const HOSTILE_ENTRY_NAME: &str = "hostile_entry_name";
 const RECURSIVE_CONTAINER: &str = "recursive_container";
 const SYMLINK_ENTRY: &str = "symlink_entry";
 const XML_MALFORMED: &str = "xml_malformed";
-// numeric-bound: not-a-bound - fixed ZIP signature width required by the format
 const ZIP_PREFIX_BYTES: u64 = 4;
-// numeric-bound: not-a-bound - fixed maximum ZIP comment plus trailing record coverage
+// The ZIP suffix covers the 65,535-byte maximum comment plus one EOCD byte.
 const ZIP_SUFFIX_BYTES: u64 = 65_536;
-// numeric-bound: ceiling - bounds ZIP64 extensible end-record data inspected during probing
 const MAX_ZIP64_EOCD_BYTES: u64 = 64 * 1024;
-// numeric-bound: not-a-bound - maximum EOCD reach, locator width, and bounded ZIP64 record
+// The 22-byte ZIP EOCD and 65,535-byte comment leave 21 bytes before the suffix, followed
+// backward by the 20-byte ZIP64 locator and bounded ZIP64 record (PKWARE APPNOTE).
 const EOCD_PRECEDING_BYTES: u64 = 21 + 20 + MAX_ZIP64_EOCD_BYTES;
-// numeric-bound: not-a-bound - maximum selected main-part name width across supported families
 const SELECTED_PART_NAME_BYTES: u64 = 20;
-// numeric-bound: not-a-bound - fixed number of supported Office families selected by one probe
 const MAX_SELECTED_PARTS: u64 = 3;
-// numeric-bound: ceiling - protects probe broker memory and cumulative source reads
 const VALIDATION_SOURCE_BYTES: u64 = 262_144;
-// numeric-bound: ceiling - protects probe decompression from oversized type metadata
 const CONTENT_TYPES_COMPRESSED_BYTES: u64 = 64 * 1024;
-// numeric-bound: ceiling - protects probe decompression from oversized relationship metadata
 const PACKAGE_RELS_COMPRESSED_BYTES: u64 = 8 * 1024;
-// numeric-bound: not-a-bound - fixed ZIP local-file-header width required by the format
+// The PKWARE APPNOTE defines a 30-byte local-file header.
 const LOCAL_HEADER_BYTES: u64 = 30;
-// numeric-bound: not-a-bound - fixed byte length of the canonical content-types part name
 const CONTENT_TYPES_NAME_BYTES: u64 = 19;
-// numeric-bound: not-a-bound - fixed byte length of the canonical package-relationships name
 const PACKAGE_RELS_NAME_BYTES: u64 = 11;
-// numeric-bound: ceiling - protects probe reads from adversarial local extra fields
 const LOCAL_EXTRA_BYTES: u64 = 256;
-// numeric-bound: ceiling - protects worker memory while reading a complete Office source
 const READ_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
-// numeric-bound: tunable - controls bounded source-read granularity
 const SOURCE_CHUNK_BYTES: u64 = 256 * 1024;
-// numeric-bound: ceiling - protects decoder memory from one expanded Office part
 const MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024;
-// numeric-bound: ceiling - protects worker memory and CPU across all expanded Office parts
 const MAX_TOTAL_EXPANDED_BYTES: u64 = 16 * 1024 * 1024;
-// numeric-bound: ceiling - protects XML parsing from adversarial nesting and scope cloning
 const MAX_XML_DEPTH: usize = 256;
-// numeric-bound: ceiling - bounds one namespace prefix so cloned scopes stay small
 const MAX_NAMESPACE_PREFIX_BYTES: usize = 64;
-// numeric-bound: ceiling - bounds one namespace name so cloned scopes stay small
 const MAX_NAMESPACE_URI_BYTES: usize = 1024;
-// numeric-bound: ceiling - bounds live declarations per scope so per-element clones cannot amplify
 const MAX_NAMESPACE_DECLARATIONS: usize = 128;
-// numeric-bound: ceiling - bounds cumulative markup-compatibility state per scope so per-element clones cannot amplify
 const MAX_MARKUP_COMPATIBILITY_ENTRIES: usize = 128;
-// numeric-bound: ceiling - protects worker framing from oversized metadata output
 const METADATA_OUTPUT_BYTES: usize = 16 * 1024;
 const CONTENT_TYPES: &str = "[Content_Types].xml";
 const PACKAGE_RELS: &str = "_rels/.rels";

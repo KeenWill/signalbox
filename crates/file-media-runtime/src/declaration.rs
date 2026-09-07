@@ -9,7 +9,6 @@ use crate::{
     ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode, VerifiedBlobSource,
 };
 
-// numeric-bound: ceiling - bounds retained model-facing view-description memory
 const MAX_VIEW_DESCRIPTION_BYTES: usize = 512;
 
 /// Strength of one byte-derived probe candidate.

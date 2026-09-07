@@ -9,11 +9,9 @@ use crate::{
 };
 
 /// Maximum accepted size of one fully buffered provider response body.
-// numeric-bound: guard - prevents one buffered provider response from exhausting memory
 pub const MAX_BUFFERED_PROVIDER_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Maximum accepted aggregate size of one streamed provider response.
-// numeric-bound: guard - prevents an unbounded provider stream from exhausting memory
 pub const MAX_STREAMED_PROVIDER_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// How much of a provider response chunk remains inside the aggregate bound.
