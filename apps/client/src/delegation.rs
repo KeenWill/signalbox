@@ -337,6 +337,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::ReviewOrchestration { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
+        | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }
         | ServerMessage::CredentialExclusionEnd { .. }

@@ -241,6 +241,7 @@ impl SessionMetadataRepository {
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
                 | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun
                 | CommandKind::SessionLifecycle,
             ) => Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }),
         }
@@ -600,6 +601,7 @@ async fn existing_or_conflicting(
         | CommandKind::ReprovisionOauthCredential
         | CommandKind::DeleteOauthCredential
         | CommandKind::ClearCredentialExclusion
+        | CommandKind::CancelProgramRun
         | CommandKind::SessionLifecycle => {
             return Ok(ReplaceSessionMetadataHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),

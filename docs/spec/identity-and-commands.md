@@ -148,6 +148,9 @@ For submit-input, equal replay returns the recorded result only when current
 durable state still proves that result correlates with committed effects;
 otherwise the adapter fails closed.
 
+`CancelProgramRun` records its receipt and any applied terminal journal delivery
+atomically; equal replay returns the stored receipt before inspecting the run.
+
 `ClearCredentialExclusion` claims its exact target and terminal outcome in one
 append-only typed command record; equal replay returns that outcome before
 current exclusion state is evaluated.

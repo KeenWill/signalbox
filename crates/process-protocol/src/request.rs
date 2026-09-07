@@ -38,6 +38,11 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
+    /// Cancel a retained program run through its journal.
+    CancelProgramRun {
+        command_id: CommandId,
+        run_id: CanonicalUuid,
+    },
     /// Begin an operator-authorized OAuth device exchange.
     ProvisionOauthCredential {
         /// User-global durable command identity.
@@ -809,6 +814,7 @@ impl ClientRequest {
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
             | Self::DecideToolRequest { .. }
+            | Self::CancelProgramRun { .. }
             | Self::OverrideDeniedToolRequest { .. } => {}
         }
         match self {

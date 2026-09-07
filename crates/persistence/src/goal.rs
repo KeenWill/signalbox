@@ -561,6 +561,7 @@ impl GoalRepository {
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
                 | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun
                 | CommandKind::SessionLifecycle,
             ) => Err(GoalRepositoryError::DifferentCommandKind { command_id }),
         }
@@ -1691,6 +1692,7 @@ async fn existing_or_conflicting(
         | CommandKind::ReprovisionOauthCredential
         | CommandKind::DeleteOauthCredential
         | CommandKind::ClearCredentialExclusion
+        | CommandKind::CancelProgramRun
         | CommandKind::SessionLifecycle => {
             return Ok(GoalCommandHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),

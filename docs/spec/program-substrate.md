@@ -22,10 +22,10 @@ a delivery (what the host answered). Requests are journaled in program order,
 deliveries in delivery order, and every row carries one contiguous global
 position, so their interleaving is retained. The request, delivery, and fault
 vocabularies are closed; the domain crate's `RequestKind`, `DeliveryKind`, and
-`FaultCause` and the migration's check constraints fix their members. Only the
-four primitive answerable requests and only the nondeterminism fault are
-produced today; no executor applies effects, scope cancellation, terminal
-admission, capability rejection, or run terminalization.
+`FaultCause` and the migration's check constraints fix their members. The four
+primitive answerable requests, nondeterminism faults, and user cancellation are
+produced; no executor applies effects, scope cancellation, terminal admission,
+or capability rejection.
 
 Resume discards nothing and restores nothing. A journal that already holds a
 terminal delivery, one that ended the run instead of answering a request, names
@@ -42,8 +42,19 @@ capability vocabulary is closed and fixed by `ProgramCapability` and the
 migration. No code grants or exercises a capability, and registration,
 capability executors, event subscriptions, and session driving have no present
 code. A journaled `run_cancel` delivery is terminal: the host returns the
-cancelled outcome and creates no isolate. No present surface initiates a
-cancellation.
+cancelled outcome and creates no isolate.
+
+Cancel authority is user authority. Cancel is a command with ordinary durable
+command identity ([identity and commands](../spec/identity-and-commands.md)),
+and its wire message pair belongs to
+[process protocol](../spec/process-protocol.md). An applied cancel is journaled
+as one `run_cancel` delivery that carries the command identity and no request
+ordinal, so a cancelled run replays to its cancellation however many requests
+were outstanding.
+
+Cancellation addresses retained journal streams; their terminal states are
+`cancelled` and `faulted`, and the receipt carries a null result because no
+durable program return value is recorded.
 
 ## Design decisions
 
@@ -108,9 +119,6 @@ contract in [persistence protocol](persistence-protocol.md).
   every payload is inline today ([design](../design/program-substrate.md)).
 - Session outcome frames carrying session, turn, and input identities and an
   outcome digest; no session capability exists
-  ([design](../design/program-substrate.md)).
-- Run cancellation as a user command journaled as a `run_cancel` delivery
-  carrying the command identity; no present surface cancels a run
   ([design](../design/program-substrate.md)).
 - Turn-by-turn session driving with no contract inside a turn; no session
   capability exists ([design](../design/program-substrate.md)).

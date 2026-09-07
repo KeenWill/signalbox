@@ -178,6 +178,7 @@ async fn inspect_existing(
             | CommandKind::ReprovisionOauthCredential
             | CommandKind::DeleteOauthCredential
             | CommandKind::ClearCredentialExclusion
+            | CommandKind::CancelProgramRun
             | CommandKind::SessionLifecycle,
         ) => Ok(ClaimInspection::Conflicting),
     }

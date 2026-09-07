@@ -69,6 +69,8 @@ pub(super) enum InternalDiagnostic {
     SessionDefaultsCommandKindMismatch,
     SessionDefaultsCorruption,
     CredentialExclusionDatabase,
+    ProgramCancellationDatabase,
+    ProgramCancellationCorruption,
     CredentialExclusionCorruption,
     SessionDelegationDatabase,
     SessionDelegationCorruption,
@@ -99,6 +101,7 @@ impl InternalDiagnostic {
             | Self::SessionCreationDatabase
             | Self::SessionMetadataDatabase
             | Self::SessionDefaultsDatabase
+            | Self::ProgramCancellationDatabase
             | Self::CredentialExclusionDatabase
             | Self::SessionDelegationDatabase => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
@@ -153,6 +156,7 @@ impl InternalDiagnostic {
             | Self::ConversationListingCorruption
             | Self::SessionMetadataCorruption
             | Self::SessionDefaultsCorruption
+            | Self::ProgramCancellationCorruption
             | Self::CredentialExclusionCorruption
             | Self::SessionDelegationCorruption
             | Self::SubmitInputCorruption
@@ -218,6 +222,8 @@ impl InternalDiagnostic {
             Self::SessionDefaultsCommitAmbiguous => "session_defaults_commit_ambiguous",
             Self::SessionDefaultsCommandKindMismatch => "session_defaults_command_kind_mismatch",
             Self::SessionDefaultsCorruption => "session_defaults_corruption",
+            Self::ProgramCancellationDatabase => "program_cancellation_database",
+            Self::ProgramCancellationCorruption => "program_cancellation_corruption",
             Self::CredentialExclusionDatabase => "credential_exclusion_database",
             Self::CredentialExclusionCorruption => "credential_exclusion_corruption",
             Self::SessionDelegationDatabase => "session_delegation_database",

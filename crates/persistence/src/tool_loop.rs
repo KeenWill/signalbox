@@ -537,6 +537,7 @@ impl PostgresToolLoopRepository {
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
                 | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun
                 | CommandKind::SessionLifecycle
                 | CommandKind::OverrideDeniedToolRequest,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
@@ -710,6 +711,7 @@ impl PostgresToolLoopRepository {
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
                 | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun
                 | CommandKind::SessionLifecycle,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }

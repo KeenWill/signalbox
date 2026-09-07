@@ -6,12 +6,12 @@ owner has committed and the daemon and terminal client do not implement.
 
 ## Goal
 
-Future implementation of these seven surfaces under protocol version 1 must pair
+Future implementation of these six surfaces under protocol version 1 must pair
 each daemon handler with its terminal-client consumer in the same change:
 provisioning an `oauth` credential profile, re-provisioning it after a rejected
-daemon-owned refresh, deleting it, configuration reload, program-run
-cancellation, runner placement facts, and the typed projection of
-credential-pool exhaustion and of the credential-availability wait.
+daemon-owned refresh, deleting it, configuration reload, runner placement facts,
+and the typed projection of credential-pool exhaustion and of the
+credential-availability wait.
 
 ## Design
 
@@ -84,18 +84,6 @@ an array of the closed values `model_catalog`, `session_templates`, and
 `configuration_reload_failed { command_id, phase, reason }`, sanitized as
 startup logs are. Which sections reload and the validate-then-swap rule belong
 to [configuration-and-credentials.md](../spec/configuration-and-credentials.md).
-
-Program-run cancellation is the request
-`cancel_program_run { run_id, command_id }` and the receipt
-`program_run_cancellation_receipt { command_id, run_id, outcome }`. The outcome
-is `applied { terminal_state: "cancelled", result: null }`, `not_found`, or
-`already_terminal { terminal_state, result }` naming the standing terminal state
-and result the command found. An identical request bearing the same `command_id`
-replays its stored receipt even if the run's standing state later changes; the
-same identity with a different payload is conflicting reuse. Run-state semantics
-belong to [program-substrate.md](../spec/program-substrate.md); this pair, its
-version-1 encoding, and the closed receipt algebra belong here, and a later
-incompatible shape requires a new protocol version.
 
 Runner placement facts are a paged `read_runner_status` read beside the built
 `runner_state_transition` event. The read carries `page_size` 1 through 100 and
@@ -195,9 +183,6 @@ Every request and message above decodes under version 1 with unknown fields
 rejected, and each surface ships with its daemon handler and the terminal-client
 consumer it lacks; a follower-visible addition also ships the native client's
 decoder and projection updates.
-
-An equal `command_id` replay returns the stored receipt for
-`cancel_program_run`.
 
 A follower learns a live runner loss, change, or relocation through
 `runner_state_transition` and the current runner state from its snapshot, and

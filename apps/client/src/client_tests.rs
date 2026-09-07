@@ -5311,3 +5311,41 @@ async fn credential_clear_rejects_a_receipt_for_another_generation() -> Result<(
     server.await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn program_cancellation_rejects_a_receipt_for_another_run() -> Result<(), Box<dyn Error>> {
+    use signalbox_process_protocol::ProgramRunCancellationOutcome;
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &ClientRequest::CancelProgramRun { command_id, run_id },
+            ServerMessage::ProgramRunCancellationReceipt {
+                command_id,
+                run_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
+                outcome: ProgramRunCancellationOutcome::NotFound {},
+            },
+        )
+        .await
+    });
+    let mut client = ProcessClient::new(socket);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = crate::program::execute(
+        &mut client,
+        &mut Output::new(&mut stdout, &mut stderr, false),
+        crate::arguments::ProgramCommand::Cancel {
+            run_id,
+            command_id: Some(command_id),
+        },
+    )
+    .await;
+    assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
+    assert!(stdout.is_empty());
+    server.await??;
+    Ok(())
+}
