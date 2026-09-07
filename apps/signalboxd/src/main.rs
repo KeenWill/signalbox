@@ -853,6 +853,7 @@ fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailure
         | ProcessRuntimeError::SpoolIo(_)
         | ProcessRuntimeError::InsufficientPoolCapacity
         | ProcessRuntimeError::CleanupSocket(_)
+        | ProcessRuntimeError::RunnerRecoveryNotifications(_)
         | ProcessRuntimeError::Dispatch(OutboxDispatchError::Database(_)) => {
             OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
