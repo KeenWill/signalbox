@@ -2095,7 +2095,8 @@ async fn run_hub(
         Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
         None => process_runtime,
     };
-    let web_http_runtime = web_http_listener.into_runtime(process_runtime.monitor());
+    let web_http_runtime =
+        web_http_listener.into_runtime(process_runtime.monitor(), eligibility_nudge.clone());
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
     let counter = AttachmentPreparingModelCallProvider::for_counting(

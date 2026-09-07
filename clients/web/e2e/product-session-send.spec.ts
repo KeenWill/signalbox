@@ -1,0 +1,512 @@
+import { expect, type Page, test } from '@playwright/test'
+import type { WebSessionTimelineDetail } from '../src/generated/web-contract.mjs'
+import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+
+const sessionId = '00000000-0000-0000-0000-000000000991'
+const turnId = '00000000-0000-0000-0000-000000000992'
+const initialMessage = 'Check the session and explain the next step.'
+const assistantMessage = 'The session is ready. I can continue from the recorded conversation.'
+const excerpt = (text: string) => ({
+  text,
+  offset_bytes: '0',
+  total_bytes: String(new TextEncoder().encode(text).length),
+  continuation: null,
+})
+
+async function sessionApi(page: Page, busy = false, selectedSessionId = sessionId) {
+  const state = {
+    grown: false,
+    observed: false,
+    submissions: [] as Array<{ command_id: string; message: string }>,
+  }
+  let releaseFollow = () => {}
+  const followReady = new Promise<void>((resolve) => {
+    releaseFollow = resolve
+  })
+  const snapshot = () => ({
+    session_id: selectedSessionId,
+    observed_through: state.grown || state.observed ? '44' : '43',
+    active: busy ? { turn_id: turnId, state: { kind: 'running', model_call_id: null } } : null,
+    queued_turn_count: '0',
+    queued_turn_ids: [],
+    reconciliation: null,
+    runner: null,
+  })
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention', (route) =>
+    route.fulfill({ json: { cursor: '0', summaries: [], continuation_after_session_id: null } }),
+  )
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      contentType: 'application/x-ndjson',
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: { cursor: '0', summaries: [], continuation_after_session_id: null } })}\n`,
+    }),
+  )
+  await page.route(`**/api/sessions/${selectedSessionId}**`, async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/input')) {
+      state.submissions.push(route.request().postDataJSON())
+      return route.fulfill({ status: 204 })
+    }
+    if (url.pathname.endsWith('/live')) return route.fulfill({ json: snapshot() })
+    if (url.pathname.endsWith('/follow')) {
+      const initial = snapshot()
+      await followReady
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body: `${JSON.stringify({ kind: 'snapshot', snapshot: initial })}\n${JSON.stringify({ kind: 'durable', cursor: '44', address: { event_sequence: '44' }, event_kind: 'model_call_transition' })}\n`,
+      })
+    }
+    if (url.pathname.endsWith('/timeline-detail')) {
+      const items: WebSessionTimelineDetail[] = [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          projected_body_bytes: 128 + initialMessage.length,
+          body: {
+            type: 'user_input',
+            turn_id: turnId,
+            text: excerpt(initialMessage),
+            attachments: [],
+          },
+        },
+      ]
+      if (state.grown)
+        items.push({
+          address: { event_sequence: '44' },
+          kind: 'model_call_transition',
+          projected_body_bytes: 128 + assistantMessage.length,
+          body: {
+            type: 'model_call',
+            turn_id: turnId,
+            model_call_id: turnId,
+            model_identity_id: turnId,
+            request_context_items: '1',
+            response: excerpt(assistantMessage),
+            state: { type: 'terminal', disposition: 'completed' },
+            usage: {},
+          },
+        })
+      return route.fulfill({
+        json: {
+          session_id: selectedSessionId,
+          projected_body_bytes: items.reduce((sum, item) => sum + item.projected_body_bytes, 0),
+          items,
+          continuation: null,
+        },
+      })
+    }
+    const latest = state.grown ? '44' : '43'
+    if (url.pathname.endsWith('/timeline'))
+      return route.fulfill({
+        json: {
+          session_id: selectedSessionId,
+          items: [
+            {
+              address: { event_sequence: '41' },
+              kind: 'input_accepted',
+              projected_structured_bytes: 78,
+            },
+            {
+              address: { event_sequence: '43' },
+              kind: 'turn_completed',
+              projected_structured_bytes: 78,
+            },
+            ...(state.grown
+              ? [
+                  {
+                    address: { event_sequence: '44' },
+                    kind: 'model_call_transition',
+                    projected_structured_bytes: 85,
+                  },
+                ]
+              : []),
+          ],
+          projected_structured_bytes: state.grown ? 241 : 156,
+          continuation_before: null,
+          continuation_after: null,
+        },
+      })
+    return route.fulfill({
+      json: {
+        session_id: selectedSessionId,
+        sizes: {
+          item_count: state.grown ? '3' : '2',
+          projected_text_bytes: String(
+            initialMessage.length + (state.grown ? assistantMessage.length : 0),
+          ),
+          projected_structured_bytes: state.grown ? '241' : '156',
+          referenced_blob_count: '0',
+          referenced_blob_bytes: '0',
+        },
+        first_address: { event_sequence: '41' },
+        latest_address: { event_sequence: latest },
+        observed_through: state.observed ? '44' : latest,
+        work: { active_turn_count: busy ? '1' : '0', queued_turn_count: '0' },
+      },
+    })
+  })
+  return {
+    state,
+    advanceObservation: () => {
+      state.observed = true
+      releaseFollow()
+    },
+    grow: () => {
+      state.grown = true
+      releaseFollow()
+    },
+  }
+}
+
+async function openSession(page: Page) {
+  await page.goto(`/sessions?workspace=true&session=${sessionId}`)
+  await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+}
+
+test('reads durable transcript growth and sends a message by keyboard', async ({ page }) => {
+  const api = await sessionApi(page)
+  await openSession(page)
+  api.grow()
+  await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
+  await page
+    .getByRole('textbox', { name: 'Message to session' })
+    .fill('Continue with the next step.')
+  await page.getByRole('button', { name: 'Send message', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Message accepted by the daemon.' }),
+  ).toBeVisible()
+  expect(api.state.submissions).toHaveLength(1)
+  expect(api.state.submissions[0]?.message).toBe('Continue with the next step.')
+  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveValue('')
+})
+
+test('retries an unconfirmed acceptance with the same command and text', async ({ page }) => {
+  const api = await sessionApi(page)
+  const attempts: unknown[] = []
+  await page.route(`**/api/sessions/${sessionId}/input`, (route) => {
+    attempts.push(route.request().postDataJSON())
+    return attempts.length === 1 ? route.abort() : route.fulfill({ status: 204 })
+  })
+  await openSession(page)
+  await page.getByRole('textbox', { name: 'Message to session' }).fill('Preserve this message.')
+  await page.getByRole('button', { name: 'Send message', exact: true }).click()
+  await expect(
+    page.getByText('Acceptance is unconfirmed. Retry sends the same command and message.'),
+  ).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveAttribute(
+    'readonly',
+    '',
+  )
+  await expect(page.getByRole('button', { name: 'Discard retained command' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toHaveCount(0)
+  await page
+    .getByRole('link', { name: 'Settings Local workspace preferences', exact: true })
+    .click()
+  await expect(page.getByRole('form', { name: 'Message composer' })).toHaveCount(0)
+  await page.goBack()
+  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveValue(
+    'Preserve this message.',
+  )
+  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveAttribute(
+    'readonly',
+    '',
+  )
+  await page.route(`**/api/sessions/${sessionId}/timeline?**`, (route) =>
+    route.fulfill({ status: 503, body: 'Timeline temporarily unavailable' }),
+  )
+  api.grow()
+  await expect(
+    page
+      .getByRole('alert')
+      .filter({ hasText: 'The daemon could not provide this bounded session window' }),
+  ).toBeVisible()
+  await page.getByRole('button', { name: 'Retry message' }).click()
+  await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
+  expect(attempts).toHaveLength(2)
+  expect(attempts[1]).toEqual(attempts[0])
+  api.grow()
+})
+
+test('retains a command whose response is lost while its composer is unmounted', async ({
+  page,
+}) => {
+  const api = await sessionApi(page)
+  const attempts: unknown[] = []
+  let loseResponse = () => {}
+  const responsePending = new Promise<void>((resolve) => {
+    loseResponse = resolve
+  })
+  await page.route(`**/api/sessions/${sessionId}/input`, async (route) => {
+    attempts.push(route.request().postDataJSON())
+    if (attempts.length === 1) {
+      await responsePending
+      return route.abort()
+    }
+    return route.fulfill({ status: 204 })
+  })
+  await openSession(page)
+  await page
+    .getByRole('textbox', { name: 'Message to session' })
+    .fill('Keep the in-flight identity.')
+  await page.getByRole('button', { name: 'Send message', exact: true }).click()
+  await expect.poll(() => attempts.length).toBe(1)
+  await page
+    .getByRole('link', { name: 'Settings Local workspace preferences', exact: true })
+    .click()
+  await expect(page.getByRole('form', { name: 'Message composer' })).toHaveCount(0)
+  loseResponse()
+  await page.goBack()
+  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveValue(
+    'Keep the in-flight identity.',
+  )
+  await page.getByRole('button', { name: 'Retry message' }).click()
+  await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
+  expect(attempts).toHaveLength(2)
+  expect(attempts[1]).toEqual(attempts[0])
+  api.grow()
+})
+
+test('reports the daemon rejection reason and keeps the draft editable', async ({ page }) => {
+  const api = await sessionApi(page)
+  await page.route(`**/api/sessions/${sessionId}/input`, (route) =>
+    route.fulfill({
+      status: 409,
+      json: {
+        error: {
+          kind: 'application',
+          code: 'active_turn_present',
+          message: 'input cannot start a turn while another turn is active',
+        },
+      },
+    }),
+  )
+  await openSession(page)
+  await page.getByRole('textbox', { name: 'Message to session' }).fill('Keep the rejected draft.')
+  await page.getByRole('button', { name: 'Send message', exact: true }).click()
+  await expect(
+    page.getByText('Rejected: input cannot start a turn while another turn is active'),
+  ).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Message to session' })).toBeEditable()
+  api.grow()
+})
+
+test('shows when an active turn prevents starting another turn', async ({ page }) => {
+  const api = await sessionApi(page, true)
+  await openSession(page)
+  await expect(page.getByText('Input unavailable: running')).toBeVisible()
+  await page.getByRole('textbox', { name: 'Message to session' }).fill('A draft for later.')
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
+  expect(api.state.submissions).toHaveLength(0)
+  api.grow()
+})
+
+for (const viewport of [
+  { name: 'desktop', width: 1440, height: 1000 },
+  { name: 'phone', width: 390, height: 844 },
+]) {
+  test(`read and send workspace at ${viewport.name} size`, async ({ page, browserName }) => {
+    test.skip(browserName !== 'chromium', 'Chromium owns product visual goldens')
+    await page.setViewportSize(viewport)
+    const api = await sessionApi(page)
+    await openSession(page)
+    api.grow()
+    await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
+    await expect(page.getByText('Live updates unavailable.')).toBeVisible()
+    await page
+      .getByRole('textbox', { name: 'Message to session' })
+      .fill('Continue with the next step.')
+    await expect(page).toHaveScreenshot(`session-read-send-${viewport.name}.png`, {
+      fullPage: true,
+    })
+  })
+}
+
+test('keeps header-only history when transcript detail is not advertised', async ({ page }) => {
+  const api = await sessionApi(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: { ...bootstrapFixture.capabilities, bounded_session_timeline_detail: false },
+      },
+    }),
+  )
+  const detailRequests: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/timeline-detail')) detailRequests.push(request.url())
+  })
+  await page.goto(`/sessions?workspace=true&session=${sessionId}`)
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Transcript text' })).toHaveCount(0)
+  await expect(page.getByRole('textbox', { name: 'Message to session' })).toBeVisible()
+  api.grow()
+  await expect(page.getByRole('option')).toHaveCount(3)
+  expect(detailRequests).toEqual([])
+})
+
+test('refuses new session input at the retained-command limit while allowing exact retries', async ({
+  page,
+}) => {
+  const ids = [
+    sessionId,
+    '00000000-0000-0000-0000-000000000993',
+    '00000000-0000-0000-0000-000000000994',
+    '00000000-0000-0000-0000-000000000995',
+    '00000000-0000-0000-0000-000000000996',
+  ] as const
+  const apis = []
+  const attempts: Array<{ command_id: string; message: string }> = []
+  for (const id of ids) apis.push(await sessionApi(page, false, id))
+  await page.route('**/api/sessions/*/input', (route) => {
+    attempts.push(route.request().postDataJSON())
+    return route.abort()
+  })
+  await openSession(page)
+  const open = async (id: string) => {
+    await page.getByRole('textbox', { name: 'Exact session ID' }).fill(id)
+    await page.getByRole('button', { name: 'Open workspace', exact: true }).click()
+  }
+  for (const id of ids.slice(0, 4)) {
+    await open(id)
+    await page.getByRole('textbox', { name: 'Message to session' }).fill('Retain this command.')
+    await page.getByRole('button', { name: 'Send message', exact: true }).click()
+    await expect(
+      page.getByText('Acceptance is unconfirmed. Retry sends the same command and message.'),
+    ).toBeVisible()
+  }
+  const last = ids[4]
+  await open(last)
+  await page.getByRole('textbox', { name: 'Message to session' }).fill('Wait for capacity.')
+  await expect(
+    page.getByText(
+      'Pending-message limit reached. Retry a retained message before sending to another session.',
+    ),
+  ).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
+  expect(attempts).toHaveLength(4)
+  await page.route(`**/api/sessions/${sessionId}/input`, (route) => {
+    attempts.push(route.request().postDataJSON())
+    return route.fulfill({ status: 204 })
+  })
+  await open(sessionId)
+  await page.getByRole('button', { name: 'Retry message' }).click()
+  await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
+  expect(attempts[4]).toEqual(attempts[0])
+  await open(last)
+  await page
+    .getByRole('textbox', { name: 'Message to session' })
+    .fill('Capacity is available again.')
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeEnabled()
+  for (const api of apis) api.grow()
+})
+
+test('times out an unanswered send and retries its retained identity', async ({ page }) => {
+  const api = await sessionApi(page)
+  await page.clock.install()
+  const attempts: Array<{ command_id: string; message: string }> = []
+  let release = () => {}
+  const stalled = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route(`**/api/sessions/${sessionId}/input`, async (route) => {
+    attempts.push(route.request().postDataJSON())
+    if (attempts.length === 1) {
+      await stalled
+      return route.abort()
+    }
+    return route.fulfill({ status: 204 })
+  })
+  await openSession(page)
+  const draft = page.getByRole('textbox', { name: 'Message to session' })
+  await expect(draft).toHaveAttribute('maxlength', '65536')
+  await draft.fill('Keep the deadline identity.')
+  await page.getByRole('button', { name: 'Send message', exact: true }).click()
+  await expect.poll(() => attempts.length).toBe(1)
+  await page.clock.fastForward(30_001)
+  await expect(
+    page.getByText('Acceptance is unconfirmed. Retry sends the same command and message.'),
+  ).toBeVisible()
+  await page.getByRole('button', { name: 'Retry message' }).click()
+  await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
+  expect(attempts[1]).toEqual(attempts[0])
+  release()
+  api.grow()
+})
+
+test('uses smaller advertised transcript limits in the workspace', async ({ page }) => {
+  const api = await sessionApi(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        limits: {
+          ...bootstrapFixture.limits,
+          max_timeline_detail_items: 1,
+          max_timeline_detail_bytes: 1024,
+        },
+      },
+    }),
+  )
+  const requests: URL[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/timeline-detail')) requests.push(new URL(request.url()))
+  })
+  await openSession(page)
+  expect(requests.length).toBeGreaterThan(0)
+  expect(
+    requests.every(
+      (url) =>
+        url.searchParams.get('max_items') === '1' && url.searchParams.get('max_bytes') === '1024',
+    ),
+  ).toBe(true)
+  api.advanceObservation()
+})
+
+test('resets text pagination when only the window observation changes', async ({ page }) => {
+  const api = await sessionApi(page)
+  const cursors: Array<string | null> = []
+  await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get('cursor_address')
+    cursors.push(cursor)
+    const item: WebSessionTimelineDetail =
+      cursor === null
+        ? {
+            address: { event_sequence: '41' },
+            kind: 'input_accepted',
+            projected_body_bytes: 128 + initialMessage.length,
+            body: {
+              type: 'user_input',
+              turn_id: turnId,
+              text: excerpt(initialMessage),
+              attachments: [],
+            },
+          }
+        : {
+            address: { event_sequence: '43' },
+            kind: 'turn_completed',
+            projected_body_bytes: 128,
+            body: { type: 'event_fact', kind: 'turn_completed' },
+          }
+    return route.fulfill({
+      json: {
+        session_id: sessionId,
+        items: [item],
+        projected_body_bytes: item.projected_body_bytes,
+        continuation:
+          cursor === null ? { type: 'more_at', address: { event_sequence: '43' } } : null,
+      },
+    })
+  })
+  await openSession(page)
+  await page.getByRole('button', { name: 'Next text page' }).click()
+  await expect(page.getByRole('button', { name: 'First text page' })).toBeVisible()
+  expect(cursors).toEqual([null, '43'])
+  api.advanceObservation()
+  await expect(page.getByText('Live updates unavailable.')).toBeVisible()
+  await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'First text page' })).toHaveCount(0)
+  expect(cursors.slice(2).length).toBeGreaterThan(0)
+  expect(cursors.slice(2).every((cursor) => cursor === null)).toBe(true)
+})

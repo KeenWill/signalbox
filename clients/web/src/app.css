@@ -2783,6 +2783,7 @@ kbd {
 
 .session-workspace-surface {
   display: grid;
+  grid-auto-rows: max-content;
   align-content: start;
   gap: 12px;
 }
@@ -2846,6 +2847,7 @@ kbd {
 }
 .session-workspace {
   display: grid;
+  grid-auto-rows: max-content;
   min-height: 0;
   border: 1px solid var(--border);
   background: var(--surface-2);
@@ -3037,6 +3039,71 @@ kbd {
     align-items: flex-start;
     flex-direction: column;
   }
+}
+
+.session-transcript-text {
+  max-height: 55vh;
+  overflow: auto;
+  padding: 0.75rem;
+  border-block: 1px solid var(--border);
+}
+.session-message-entry:has(.session-message-text) {
+  padding-block: 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.session-message-text {
+  margin: 0.4rem 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  user-select: text;
+}
+.session-text-pagination,
+.session-composer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+.session-composer textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 5rem;
+  padding: 0.6rem;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font: inherit;
+}
+.session-composer button,
+.session-transcript-text button,
+.session-live-status button {
+  background: var(--surface-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+}
+.session-composer button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.session-composer label,
+.session-composer header span,
+.session-composer-actions,
+.session-live-status {
+  font-size: 0.72rem;
+}
+.session-live-status {
+  padding-inline: 0.6rem;
+}
+.session-window-controls {
+  flex-wrap: wrap;
+}
+.session-workspace-surface > .session-composer {
+  border: 1px solid var(--border);
 }
 
 .catalog-rates {

@@ -165,6 +165,18 @@ impl WebContractBootstrap {
     }
 }
 
+/// An idempotent text submission using the session's current defaults.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSubmitInputRequest {
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub command_id: String,
+    #[schemars(length(min = 1))]
+    pub message: String,
+}
+
 /// Small generated-contract fixture proving Rust/TypeScript round trips.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2206,6 +2218,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebContractBootstrap",
             decoder: "decodeWebContractBootstrap",
             schema: canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value()),
+        },
+        ContractSchema {
+            name: "WebSubmitInputRequest",
+            decoder: "decodeWebSubmitInputRequest",
+            schema: canonical_schema(schemars::schema_for!(WebSubmitInputRequest).to_value()),
         },
         ContractSchema {
             name: "WebContractExample",

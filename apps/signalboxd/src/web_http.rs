@@ -682,7 +682,11 @@ struct ProductionReadRuntime {
 
 impl BoundWebHttpListener {
     /// Attaches the daemon's one bounded monitor and builds the production router.
-    pub fn into_runtime(self, monitor: ProcessMonitor) -> WebHttpRuntime {
+    pub fn into_runtime(
+        self,
+        monitor: ProcessMonitor,
+        eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
+    ) -> WebHttpRuntime {
         let (follow_shutdown, follow_shutdown_receiver) = watch::channel(false);
         let router = production_router_with_budget(
             self.asset_root,
@@ -695,6 +699,7 @@ impl BoundWebHttpListener {
                 shutdown: Some(follow_shutdown_receiver),
                 monitor: Some(monitor),
             },
+            Some(eligibility_nudge),
         );
         WebHttpRuntime {
             listener: self.listener,
@@ -798,6 +803,7 @@ impl WebHttpRuntime {
                 shutdown: Some(follow_shutdown_receiver),
                 monitor: None,
             },
+            None,
         );
         Self::bind_router_with_follow_shutdown(
             configuration.bind_address,
@@ -875,6 +881,7 @@ pub fn production_router(
     model_configuration: Option<HubModelConfiguration>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     shutdown: Option<watch::Receiver<bool>>,
+    eligibility_nudge: Option<signalbox_application::InProcessEligibilityNudge>,
 ) -> Router {
     let snapshot_reader_budget = pool.as_ref().and_then(|pool| {
         super::process_runtime::shared_snapshot_reader_budget(
@@ -893,6 +900,7 @@ pub fn production_router(
             shutdown,
             monitor: None,
         },
+        eligibility_nudge,
     )
 }
 
@@ -903,6 +911,7 @@ fn production_router_with_budget(
     model_configuration: Option<HubModelConfiguration>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     read_runtime: ProductionReadRuntime,
+    eligibility_nudge: Option<signalbox_application::InProcessEligibilityNudge>,
 ) -> Router {
     let http_state = WebHttpState {
         blobs,
@@ -923,6 +932,7 @@ fn production_router_with_budget(
         snapshot_reader_budget: read_runtime.snapshot_reader_budget.clone(),
         shutdown: read_runtime.shutdown,
         monitor: read_runtime.monitor,
+        eligibility_nudge,
     };
     // Every route that reads session data sits behind the loopback authority
     // gate. The attention projection returns session identities, goal-need
@@ -931,6 +941,11 @@ fn production_router_with_budget(
     // rebound origin must not reach session data with an attacker's authority.
     // `same_origin_router` additionally gates the whole listener, `/bootstrap`
     // and the static assets included, so this route layer is the inner of two.
+    let session_inputs = Router::new()
+        .route("/sessions/{session_id}/input", post(session_submit_input))
+        .route_layer(middleware::from_fn(validate_json_mutation))
+        .route_layer(middleware::from_fn(validate_loopback_host))
+        .with_state(state.clone());
     let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
         .route(
@@ -985,6 +1000,7 @@ fn production_router_with_budget(
         .route("/bootstrap", get(contract_bootstrap))
         .with_state(http_state)
         .merge(session_reads)
+        .merge(session_inputs)
         .merge(blob_reads);
     // Imported-conversation reads need both a pool and hub model settings; the
     // bootstrap and session surfaces stay routable without either.
@@ -1050,6 +1066,7 @@ struct WebApiState {
     snapshot_reader_budget: Option<Arc<Semaphore>>,
     shutdown: Option<watch::Receiver<bool>>,
     monitor: Option<ProcessMonitor>,
+    eligibility_nudge: Option<signalbox_application::InProcessEligibilityNudge>,
 }
 
 #[derive(Debug, Default)]
@@ -1060,6 +1077,229 @@ struct SessionCatalogQuery {
     sort: Option<String>,
     after_session_id: Option<String>,
     after_activity_unix_microseconds: Option<String>,
+}
+
+async fn session_submit_input(
+    State(state): State<WebApiState>,
+    Path(session_id): Path<String>,
+    request: Request,
+) -> Response {
+    use signalbox_application::{
+        EligibilityNudge as _, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+        UuidV7SubmitInputIdGenerator,
+    };
+    use signalbox_domain::{
+        DeliveryRequest, DurableCommandId, ModelSelectionOverride, PerInputConfigurationChoices,
+        UserContent,
+    };
+    use signalbox_persistence::{
+        session::SessionRepository,
+        submit_input::{SubmitInputRepository, SubmitInputRepositoryError},
+    };
+    let request =
+        match decode_bounded_json::<signalbox_web_contract::WebSubmitInputRequest>(request).await {
+            Ok(request) => request,
+            Err(response) => return response,
+        };
+    let Ok(session) = parse_canonical_session_id(&session_id) else {
+        return application_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_session_id",
+            "session identity is not canonical",
+        );
+    };
+    let Some(command_id) = Uuid::parse_str(&request.command_id)
+        .ok()
+        .filter(|identity| identity.to_string() == request.command_id)
+    else {
+        return application_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_command_id",
+            "command identity is not a canonical UUID",
+        );
+    };
+    let command_id = DurableCommandId::from_uuid(command_id);
+    let Ok(content) = UserContent::try_text(request.message) else {
+        return application_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "message must be nonempty, NUL-free text within the input limit",
+        );
+    };
+    let (Some(pool), Some(configuration), Some(eligibility_nudge)) = (
+        state.pool,
+        state.model_configuration,
+        state.eligibility_nudge,
+    ) else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "input_unavailable",
+            "session input is not configured",
+        );
+    };
+    let repository = SubmitInputRepository::with_model_capabilities(
+        pool.clone(),
+        configuration.model_capability_catalog(),
+    );
+    match repository.load(command_id).await {
+        Ok(Some(recorded)) => {
+            if recorded.command().session() != session
+                || recorded.command().content() != &content
+                || !matches!(
+                    recorded.command().delivery(),
+                    DeliveryRequest::StartWhenNoActiveTurn { configuration }
+                        if configuration == PerInputConfigurationChoices::new(
+                            configuration.expected_session_defaults_version(),
+                            ModelSelectionOverride::UseSessionDefault,
+                        )
+                )
+            {
+                return web_input_conflict();
+            }
+            if matches!(
+                recorded.result(),
+                signalbox_domain::SubmitInputResult::Applied(
+                    signalbox_domain::SubmitInputAppliedResult::TurnOrigin(_)
+                )
+            ) {
+                let _ = eligibility_nudge.nudge(session);
+            }
+            return web_input_result(recorded.result());
+        }
+        Ok(None) => {}
+        Err(SubmitInputRepositoryError::DifferentCommandKind { .. }) => {
+            return web_input_conflict();
+        }
+        Err(_) => return web_input_unconfirmed(),
+    }
+    let current = match SessionRepository::new(pool).load_session(session).await {
+        Ok(Some(current)) => current,
+        Ok(None) => {
+            return application_error(
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+                "the requested session does not exist",
+            );
+        }
+        Err(_) => return web_input_unconfirmed(),
+    };
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: PerInputConfigurationChoices::new(
+            current.current_configuration_defaults().version(),
+            ModelSelectionOverride::UseSessionDefault,
+        ),
+    };
+    let maximum = configuration
+        .numeric_bounds()
+        .integer("max_message_utf8_bytes")
+        .flatten()
+        .and_then(|value| usize::try_from(value).ok());
+    let request = match SubmitInputRequest::try_new_with_content_limit(
+        command_id, session, content, delivery, maximum,
+    ) {
+        Ok(request) => request,
+        Err(_) => {
+            return application_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "command identity or message exceeds input admission bounds",
+            );
+        }
+    };
+    let mut service = SubmitInputService::new(
+        UuidV7SubmitInputIdGenerator,
+        crate::process_runtime::ConfiguredSubmitInputTransaction {
+            repository,
+            model_configuration: &configuration,
+            principal: signalbox_domain::CommandPrincipal::Operator,
+            cascade_root_kind: signalbox_domain::ParentTerminationKind::Cancelled,
+        },
+        eligibility_nudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
+    );
+    match service.execute(request).await {
+        Ok(SubmitInputOutcome::Recorded(result)) => web_input_result(&result),
+        // A concurrent request may have resolved different session defaults.
+        // Retry reads its recorded command before resolving defaults again.
+        Ok(SubmitInputOutcome::ConflictingReuse { .. }) => web_input_unconfirmed(),
+        Err(SubmitInputRepositoryError::UnsupportedModelSetting(_)) => application_error(
+            StatusCode::CONFLICT,
+            "unsupported_model_setting",
+            "the selected model does not support an explicitly requested setting",
+        ),
+        Err(_) => web_input_unconfirmed(),
+    }
+}
+
+fn web_input_conflict() -> Response {
+    application_error(
+        StatusCode::CONFLICT,
+        "conflicting_command_reuse",
+        "command identity already names a different request",
+    )
+}
+
+fn web_input_unconfirmed() -> Response {
+    application_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "input_outcome_unconfirmed",
+        "input outcome is unconfirmed; retry the same command and message",
+    )
+}
+
+fn web_input_result(result: &signalbox_domain::SubmitInputResult) -> Response {
+    use signalbox_domain::{SubmitInputRejectedResult as Rejected, SubmitInputResult};
+    let SubmitInputResult::Rejected(rejection) = result else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    let (code, reason) = match rejection {
+        Rejected::ActiveTurnPresent { .. } => (
+            "active_turn_present",
+            "input cannot start a turn while another turn is active",
+        ),
+        Rejected::SessionNotFound { .. } => {
+            ("session_not_found", "the requested session does not exist")
+        }
+        Rejected::SessionDefaultsVersionMismatch { .. } => (
+            "session_defaults_changed",
+            "session defaults changed during submission; submit again with a new command",
+        ),
+        Rejected::UnknownModelAlias { .. } => (
+            "unknown_model_alias",
+            "the session model alias has no selectable definition",
+        ),
+        Rejected::AcceptancePositionExhausted { .. } => (
+            "acceptance_position_exhausted",
+            "the session cannot accept more input positions",
+        ),
+        Rejected::AttachmentBlobNotFound { .. } => {
+            ("attachment_not_found", "an attachment is unavailable")
+        }
+        Rejected::AttachmentByteBudgetExceeded { .. } => (
+            "attachment_budget_exceeded",
+            "attachments exceed the byte budget",
+        ),
+        Rejected::NoActiveTurn { .. } => {
+            ("no_active_turn", "the expected active turn does not exist")
+        }
+        Rejected::ActiveTurnMismatch { .. } => (
+            "active_turn_mismatch",
+            "the active turn does not match the request",
+        ),
+        Rejected::SafePointUnavailableWhileStopping { .. } => (
+            "safe_point_unavailable",
+            "the stopping turn cannot accept this input",
+        ),
+        Rejected::InterruptAlreadyApplied { .. } => (
+            "interrupt_already_applied",
+            "an interrupt already owns this turn",
+        ),
+        Rejected::InterruptUnavailableWhileAwaitingApproval { .. } => (
+            "awaiting_approval",
+            "the turn is waiting for an approval decision",
+        ),
+    };
+    application_error(StatusCode::CONFLICT, code, reason)
 }
 
 async fn session_rates(State(state): State<WebApiState>, RawQuery(query): RawQuery) -> Response {
@@ -4908,6 +5148,7 @@ mod tests {
             model_configuration,
             blob_store_registry,
             None,
+            None,
         )
     }
 
@@ -4928,6 +5169,7 @@ mod tests {
                 shutdown: None,
                 monitor,
             },
+            None,
         )
     }
 
@@ -4949,6 +5191,7 @@ mod tests {
                 shutdown: Some(shutdown),
                 monitor: None,
             },
+            None,
         )
     }
 
