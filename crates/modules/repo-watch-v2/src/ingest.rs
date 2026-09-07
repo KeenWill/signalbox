@@ -90,16 +90,24 @@ impl RepoWatchStore {
             Some(row) => {
                 let value: Value = serde_json::from_str(&row.comparison_baseline)
                     .map_err(|_| StoreError::InvalidComparisonBaseline)?;
+                let comparison = if observation_decode::requires_refetch(&value) {
+                    (None, Vec::new())
+                } else {
+                    (
+                        Some(
+                            observation_decode::observation(&value)
+                                .ok_or(StoreError::InvalidComparisonBaseline)?,
+                        ),
+                        observation_decode::merged_baselines(&value)
+                            .ok_or(StoreError::InvalidComparisonBaseline)?,
+                    )
+                };
                 (
                     row.frontier_generation
                         .to_u64()
                         .ok_or(StoreError::InvalidFrontierGeneration)?,
-                    Some(
-                        observation_decode::observation(&value)
-                            .ok_or(StoreError::InvalidComparisonBaseline)?,
-                    ),
-                    observation_decode::merged_baselines(&value)
-                        .ok_or(StoreError::InvalidComparisonBaseline)?,
+                    comparison.0,
+                    comparison.1,
                 )
             }
             None => (0, None, Vec::new()),
