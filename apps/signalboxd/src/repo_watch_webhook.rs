@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
 use axum::{
     Router,
     body::Bytes,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, Method, StatusCode, Uri},
 };
 use ring::hmac;
@@ -25,6 +25,9 @@ use uuid::Uuid;
 use crate::{
     FileCredentialAccess, RepositoryWatchConfiguration, configuration::RepositoryWatchWebhookMode,
 };
+
+// Matches the webhook_body CHECK in 202609050102_repo_watch_v2_ingest.sql.
+const MAX_WEBHOOK_BODY_BYTES: usize = 26_214_400;
 
 struct Hook {
     store: RepoWatchStore,
@@ -152,6 +155,7 @@ impl WebhookListener {
             SocketState::Reserved(socket) => {
                 let router = Router::new()
                     .fallback(delivery)
+                    .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES))
                     .with_state(self.routing.clone());
                 let (shutdown, stopped) = oneshot::channel();
                 self.servers.spawn(async move {
@@ -276,6 +280,8 @@ async fn delivery(
         let Some(expires_at) = received_at.checked_add(retention) else {
             return StatusCode::SERVICE_UNAVAILABLE;
         };
+        // Reload may replace routing while durable admission waits on PostgreSQL.
+        drop(current);
         let Ok(admission) = hook
             .store
             .admit_webhook(WebhookDelivery {
@@ -292,7 +298,14 @@ async fn delivery(
         else {
             return StatusCode::SERVICE_UNAVAILABLE;
         };
-        return settle_and_wake(hook, hook_id, delivery_id, admission).await;
+        let current = routing.read().await;
+        if !Arc::ptr_eq(&snapshot, &current) {
+            continue;
+        }
+        // Settlement and wake use one routing generation, excluding a concurrent reload.
+        let response = settle_and_wake(hook, hook_id, delivery_id, admission).await;
+        drop(current);
+        return response;
     }
 }
 
@@ -308,19 +321,18 @@ async fn settle_and_wake(
         WebhookAdmission::ConflictingReuse => return StatusCode::CONFLICT,
     }
     let disposition = match hook.mode {
-        RepositoryWatchWebhookMode::Primary => {
-            hook.wake.notify_one();
-            WebhookDisposition::Applied
-        }
+        RepositoryWatchWebhookMode::Primary => WebhookDisposition::Applied,
         RepositoryWatchWebhookMode::Shadow => WebhookDisposition::Ignored,
     };
-    if hook
+    let Ok(newly_settled) = hook
         .store
         .settle_webhook(hook_id, delivery_id, disposition, OffsetDateTime::now_utc())
         .await
-        .is_err()
-    {
+    else {
         return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    if newly_settled && hook.mode == RepositoryWatchWebhookMode::Primary {
+        hook.wake.notify_one();
     }
     StatusCode::ACCEPTED
 }
@@ -329,6 +341,99 @@ async fn settle_and_wake(
 mod tests {
     use super::*;
     use futures_util::FutureExt;
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL"]
+    async fn overlapping_pending_deliveries_wake_only_the_settlement_winner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalbox_persistence::{
+            disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
+            disposable_test_container_labels, local_test_connection_options, migrate,
+        };
+        use testcontainers_modules::{
+            postgres::Postgres,
+            testcontainers::{ImageExt, runners::AsyncRunner},
+        };
+        const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+        const FIXTURE_DATABASE: &str = "webhook_settlement";
+        const FIXTURE_USER: &str = "signalbox";
+        const FIXTURE_PASSWORD: &str = "signalbox-test-only";
+        const FIXTURE_HOOK_ID: u64 = 17;
+        let container = Postgres::default()
+            .with_db_name(FIXTURE_DATABASE)
+            .with_user(FIXTURE_USER)
+            .with_password(FIXTURE_PASSWORD)
+            .with_cmd(disposable_postgres_server_args())
+            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
+            .with_tag(POSTGRES_IMAGE_TAG)
+            .with_labels(disposable_test_container_labels())
+            .start()
+            .await?;
+        let host = container.get_host().await?;
+        let port = container.get_host_port_ipv4(5432).await?;
+        let url = format!(
+            "postgres://{FIXTURE_USER}:{FIXTURE_PASSWORD}@{host}:{port}/{FIXTURE_DATABASE}"
+        );
+        let core = sqlx::postgres::PgPoolOptions::new()
+            .connect_with(local_test_connection_options(&url)?)
+            .await?;
+        migrate(&core).await?;
+        let pool = crate::repo_watch_runtime::connect_repository_watch_pool(&core)
+            .await
+            .expect("module pool");
+        let directory = tempfile::tempdir()?;
+        let reference = CredentialReference::new("repository-watch:example/project:webhook");
+        let wake = Arc::new(Notify::new());
+        let hook = Hook {
+            store: RepoWatchStore::new(pool.clone()),
+            retention: Duration::from_secs(7 * 24 * 60 * 60),
+            repository: RepositorySlug::try_new(String::from("example/project"))?,
+            credentials: FileCredentialAccess::new(
+                directory.path().join("unused-secret"),
+                reference.clone(),
+            ),
+            reference,
+            mode: RepositoryWatchWebhookMode::Primary,
+            wake: wake.clone(),
+        };
+        let id = Uuid::now_v7();
+        let received_at = OffsetDateTime::now_utc();
+        let delivery = || WebhookDelivery {
+            repository: &hook.repository,
+            hook_id: FIXTURE_HOOK_ID,
+            delivery_id: id,
+            event: "push",
+            action: None,
+            body: br#"{"repository":{"full_name":"example/project"}}"#,
+            received_at,
+            expires_at: received_at + hook.retention,
+        };
+        // Both requests admit before either settles: the second result can become stale.
+        let first = hook.store.admit_webhook(delivery()).await?;
+        let overlapping = hook.store.admit_webhook(delivery()).await?;
+        assert_eq!(first, WebhookAdmission::Inserted);
+        assert_eq!(overlapping, WebhookAdmission::PendingReplay);
+        assert_eq!(
+            settle_and_wake(&hook, FIXTURE_HOOK_ID, id, first).await,
+            StatusCode::ACCEPTED
+        );
+        assert!(
+            wake.notified().now_or_never().is_some(),
+            "the settlement winner wakes ingestion"
+        );
+        assert_eq!(
+            settle_and_wake(&hook, FIXTURE_HOOK_ID, id, overlapping).await,
+            StatusCode::ACCEPTED
+        );
+        assert!(
+            wake.notified().now_or_never().is_none(),
+            "a stale pending replay cannot emit a second wake"
+        );
+        pool.close().await;
+        core.close().await;
+        drop(container);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn settled_replays_do_not_wake_primary_ingestion_or_rewrite_settlement() {

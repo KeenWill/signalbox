@@ -42,8 +42,8 @@ from postgres_integration_suites import (
     workflow_shell_commands,
 )
 
-READER = Path(__file__).resolve().parent / "postgres_integration_suites.py"
-ROOT = Path(__file__).resolve().parent.parent
+READER = Path(__file__).absolute().parent / "postgres_integration_suites.py"
+ROOT = Path(__file__).absolute().parent.parent
 
 VALID = """
 [[suite]]

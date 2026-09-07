@@ -19,6 +19,7 @@ pub const SUPPORTED_CODEX_CLI_VERSION: &str;
 ```rust
 pub enum CodexCliVersionProbeError {
     InvalidBound,
+    ExecutableReadFailed,
     SpawnFailed,
     TimedOut,
     OutputFailed,

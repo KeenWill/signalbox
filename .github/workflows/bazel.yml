@@ -32,9 +32,13 @@ jobs:
           if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
             cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
           fi
-          bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 "${cache_args[@]}" //:bazel_tests
+          bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 "${cache_args[@]}" //:rust_build //:bazel_tests
 
   bazel-postgres:
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [persistence, program-runtime]
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
     timeout-minutes: 20
     steps:
@@ -47,9 +51,10 @@ jobs:
       - name: Build and test the PostgreSQL migration slice
         env:
           BAZEL_REMOTE_CACHE: ${{ vars.BAZEL_REMOTE_CACHE }}
+          BAZEL_POSTGRES_PACKAGE: ${{ matrix.package }}
         run: |
           cache_args=()
           if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
             cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
           fi
-          bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" //crates/persistence:postgres_tests
+          bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" "//crates/${BAZEL_POSTGRES_PACKAGE}:postgres_tests"

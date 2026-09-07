@@ -26,12 +26,17 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let mode = env::args()
-        .nth(1)
-        .ok_or_else(|| String::from("usage: generate-reference-projections (--check|--write)"))?;
-    if env::args().nth(2).is_some() || !matches!(mode.as_str(), "--check" | "--write") {
+    let mut arguments = env::args().skip(1);
+    let mode = arguments.next().ok_or_else(|| {
+        String::from("usage: generate-reference-projections (--check|--write) [OUTPUT_DIRECTORY]")
+    })?;
+    let output_directory = arguments
+        .next()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("projections"));
+    if arguments.next().is_some() || !matches!(mode.as_str(), "--check" | "--write") {
         return Err(String::from(
-            "usage: generate-reference-projections (--check|--write)",
+            "usage: generate-reference-projections (--check|--write) [OUTPUT_DIRECTORY]",
         ));
     }
 
@@ -41,7 +46,6 @@ fn run() -> Result<(), String> {
         Mode::Write
     };
     let catalog = bundled_catalog().map_err(|error| error.to_string())?;
-    let output_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("projections");
     synchronize_projections(mode, &output_directory, render_projections(&catalog))
 }
 

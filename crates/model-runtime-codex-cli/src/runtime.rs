@@ -140,7 +140,7 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
 /// Codex CLI protocol snapshot covered by this adapter's offline fixtures.
 ///
 /// The build derives this marker from the exact pin in
-/// `tooling/codex-cli/package.json`, so a Renovate change is mechanically
+/// `tooling/codex-cli/release.json`, so a Renovate change is mechanically
 /// complete and the binding smoke tests that same version. That live exchange
 /// does not prove the offline fixture corpus still represents the CLI's current
 /// event shapes; fixture regeneration or validation against the installed CLI
@@ -156,7 +156,9 @@ const VERSION_PROBE_SPAWN_RETRY_DELAY: Duration = Duration::from_millis(20);
 pub enum CodexCliVersionProbeError {
     /// The configured probe bound was zero.
     InvalidBound,
-    /// The executable could not be started.
+    /// The executable file could not be read for SHA-256 verification.
+    ExecutableReadFailed,
+    /// The executable could not be started or its path was not absolute.
     SpawnFailed,
     /// The executable did not finish within the deployment-owned bound.
     TimedOut,
@@ -174,6 +176,7 @@ impl std::fmt::Display for CodexCliVersionProbeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::InvalidBound => "Codex CLI version probe bound is invalid",
+            Self::ExecutableReadFailed => "Codex CLI executable could not be read",
             Self::SpawnFailed => "Codex CLI version probe could not start",
             Self::TimedOut => "Codex CLI version probe exceeded its bound",
             Self::OutputFailed => "Codex CLI version probe output could not be collected",
@@ -187,13 +190,17 @@ impl std::fmt::Display for CodexCliVersionProbeError {
 impl std::error::Error for CodexCliVersionProbeError {}
 
 /// Proves that the executable invoked by the composition matches this
-/// adapter's exact protocol pin before the composition admits model work.
+/// adapter's upstream version and executable SHA-256 pin before the composition
+/// admits model work. The path must be absolute; both checks share `bound`.
 pub async fn verify_pinned_codex_cli_version(
     executable: &Path,
     bound: Duration,
 ) -> Result<(), CodexCliVersionProbeError> {
     if bound.is_zero() {
         return Err(CodexCliVersionProbeError::InvalidBound);
+    }
+    if !executable.is_absolute() {
+        return Err(CodexCliVersionProbeError::SpawnFailed);
     }
     let deadline = tokio::time::Instant::now()
         .checked_add(bound)
@@ -247,7 +254,12 @@ pub async fn verify_pinned_codex_cli_version(
     if version != supported {
         return Err(CodexCliVersionProbeError::VersionMismatch);
     }
-    Ok(())
+    crate::executable_pin::verify_executable_digest(
+        executable,
+        env!("SIGNALBOX_CODEX_CLI_SHA256"),
+        deadline,
+    )
+    .await
 }
 
 async fn spawn_version_probe(
@@ -944,14 +956,14 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn pinned_version_probe_accepts_the_exact_adapter_pin() {
+    async fn pinned_version_probe_rejects_an_unpinned_executable_reporting_the_supported_version() {
         let script =
             format!("#!/bin/sh\nprintf 'codex-cli %s\\n' '{SUPPORTED_CODEX_CLI_VERSION}'\n");
         let (_directory, executable) = version_fixture(&script);
 
         let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
 
-        assert_eq!(result, Ok(()));
+        assert_eq!(result, Err(CodexCliVersionProbeError::VersionMismatch));
     }
 
     #[cfg(unix)]

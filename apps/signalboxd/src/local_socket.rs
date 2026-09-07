@@ -681,7 +681,7 @@ mod tests {
 
     impl TestDirectory {
         fn create() -> Result<Self, Box<dyn Error>> {
-            let path = std::env::current_dir()?.join(format!(
+            let path = std::env::temp_dir().join(format!(
                 "sbx-sock-{}-{}",
                 std::process::id(),
                 NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed)

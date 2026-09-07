@@ -3047,6 +3047,8 @@ fn bridge_build_rejects_an_ambiguous_directly_invoked_test_binary() {
     let invocation_directory =
         tempfile::tempdir().expect("synthetic direct invocation directory exists");
     let output = Command::new(ambiguous_artifact)
+        .env_remove("NEXTEST_BIN_EXE_signalbox_claude_mcp_bridge")
+        .env_remove("NEXTEST_BIN_EXE_signalbox-claude-mcp-bridge")
         .arg("daemon_tools::tests::bridge_build_direct_invocation_fixture")
         .args(["--exact", "--ignored"])
         .current_dir(invocation_directory.path())
@@ -3228,6 +3230,10 @@ fn owned_process_group_cleanup_terminates_a_descendant_holding_stderr() {
 #[cfg(target_os = "linux")]
 #[track_caller]
 fn ensure_claude_mcp_bridge_executable() -> PathBuf {
+    let declared = signalbox_test_bin::resolve(CLAUDE_MCP_BRIDGE_BINARY, Path::new(""));
+    if !declared.as_os_str().is_empty() {
+        return fs::canonicalize(declared).expect("the test runner's declared bridge exists");
+    }
     let _build_guard = BRIDGE_BUILD_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4892,8 +4898,16 @@ fn claude_mcp_bridge_acknowledges_a_workspace_proposal() {
     let called = fixture.call_write_file();
     fixture.finish();
 
-    expect![[r#"{"content":[{"text":"Signalbox recorded this tool proposal for external execution.","type":"text"}],"isError":false}"#]]
-            .assert_eq(&called["result"].to_string());
+    assert_eq!(
+        called["result"],
+        serde_json::json!({
+            "content": [{
+                "text": "Signalbox recorded this tool proposal for external execution.",
+                "type": "text",
+            }],
+            "isError": false,
+        }),
+    );
 }
 
 #[cfg(target_os = "linux")]

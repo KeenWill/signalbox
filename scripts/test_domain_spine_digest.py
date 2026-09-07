@@ -262,7 +262,7 @@ sample
 
     def test_api_snapshots_are_rust_reaching_paths(self) -> None:
         workflow = (
-            Path(__file__).resolve().parents[1] / ".github/workflows/rust.yml"
+            Path(__file__).absolute().parents[1] / ".github/workflows/rust.yml"
         ).read_text()
 
         self.assertIn("| docs/api/*", workflow)
