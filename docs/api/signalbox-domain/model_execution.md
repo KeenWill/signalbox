@@ -209,6 +209,337 @@ impl ModelCallExecution {
 }
 ```
 
+## ModelCallOriginContent
+
+```rust
+pub struct ModelCallOriginContent {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelCallOriginContent {
+    pub const fn from_goal_turn(accepted_input: AcceptedInputId, content: UserContent) -> Self;
+    pub fn from_pending_steering(pending: &PendingSteeringInput, content: UserContent) -> Self;
+    pub fn from_consumed_steering(consumed: &ConsumedSteeringInput, content: UserContent) -> Self;
+    pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> option::Option<Self>;
+    pub fn from_reconstituted_turn_origin(
+        origin: &SubmitInputTurnOriginReconstitutionInput,
+    ) -> option::Option<Self>;
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn content(&self) -> &UserContent;
+}
+```
+
+## ModelCallPreparationFailure
+
+```rust
+pub enum ModelCallPreparationFailure {
+    TargetUnavailable,
+    CallAlreadyExists,
+    AttemptIsNotPrepared,
+    SteeringIdentityCountMismatch,
+    SteeringFrontierIdentityMismatch,
+    SteeringCorrelationMismatch,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelCallPreparationError
+
+```rust
+pub struct ModelCallPreparationError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelCallPreparationError {
+    pub const fn failure(&self) -> ModelCallPreparationFailure;
+    pub const fn execution(&self) -> &ModelCallExecution;
+    pub const fn target_resolution_error(&self) -> option::Option<ModelTargetResolutionError>;
+}
+```
+
+## PreparedInitialModelCall
+
+```rust
+pub struct PreparedInitialModelCall {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl PreparedInitialModelCall {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn attempt(&self) -> TurnAttemptId;
+    pub const fn call(&self) -> &CurrentModelCall;
+    pub fn consumed_steering(&self) -> &[PreparedSteeringConsumption];
+    pub const fn steering_snapshot(&self) -> option::Option<&ResolvedContextFrontierSnapshot>;
+}
+```
+
+## PreparedSteeringConsumption
+
+```rust
+pub struct PreparedSteeringConsumption {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl PreparedSteeringConsumption {
+    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle;
+    pub const fn semantic_entry(&self) -> &SemanticTranscriptEntry;
+}
+```
+
+## PreparedModelCallRequest
+
+```rust
+pub struct PreparedModelCallRequest {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl PreparedModelCallRequest {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn attempt(&self) -> TurnAttemptId;
+    pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval;
+    pub const fn model_settings(&self) -> ValidatedModelSettings;
+    pub const fn call(&self) -> &CurrentModelCall;
+    pub fn frontier_entries(
+        &self,
+    ) -> impl exact_size::ExactSizeIterator<Item = &SemanticTranscriptEntry>;
+    pub const fn frontier_entry_slice(&self) -> &[SemanticTranscriptEntry];
+    pub fn origin_content(&self, accepted_input: AcceptedInputId) -> option::Option<&UserContent>;
+    pub fn attachment_byte_length(&self, digest: BlobDigest)
+        -> option::Option<nonzero::NonZeroU64>;
+}
+```
+
+## ModelCallResumeFailure
+
+```rust
+pub enum ModelCallResumeFailure {
+    CallMissing,
+    CallIsNotPrepared,
+    AttemptIsNotPrepared,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelCallAuthorizationFailure
+
+```rust
+pub enum ModelCallAuthorizationFailure {
+    CallMissing,
+    CallIsNotPrepared,
+    AttemptIsNotPrepared,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelCallAuthorizationError
+
+```rust
+pub struct ModelCallAuthorizationError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelCallAuthorizationError {
+    pub const fn failure(&self) -> ModelCallAuthorizationFailure;
+    pub const fn execution(&self) -> &ModelCallExecution;
+}
+```
+
+## AuthorizedModelCall
+
+```rust
+pub struct AuthorizedModelCall {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl AuthorizedModelCall {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn attempt(&self) -> &CurrentTurnAttempt;
+    pub const fn call(&self) -> &CurrentModelCall;
+    pub fn frontier_entries(
+        &self,
+    ) -> impl exact_size::ExactSizeIterator<Item = &SemanticTranscriptEntry>;
+    pub fn origin_content(&self, accepted_input: AcceptedInputId) -> option::Option<&UserContent>;
+    pub const fn observation_correlation(&self) -> IssuedModelCallCorrelation;
+}
+```
+
+## IssuedModelCallCorrelation
+
+```rust
+pub struct IssuedModelCallCorrelation {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl IssuedModelCallCorrelation {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn attempt(&self) -> TurnAttemptId;
+    pub const fn call(&self) -> ModelCallId;
+    pub const fn target(&self) -> ResolvedProviderTarget;
+    pub const fn frontier(&self) -> ContextFrontierId;
+    pub fn bind_terminal_observation(
+        self,
+        observation: ModelCallTerminalObservation,
+    ) -> CorrelatedModelCallTerminalObservation;
+    pub fn bind_terminal_observation_with_usage(
+        self,
+        observation: ModelCallTerminalObservation,
+        usage: ProviderReportedTokenUsage,
+    ) -> CorrelatedModelCallTerminalObservation;
+    pub fn bind_provider_failure_observation_with_usage(
+        self,
+        cause: ProviderModelCallFailureCause,
+        usage: ProviderReportedTokenUsage,
+    ) -> CorrelatedModelCallTerminalObservation;
+    pub fn bind_provider_failure_observation_with_retry_after(
+        self,
+        cause: ProviderModelCallFailureCause,
+        usage: ProviderReportedTokenUsage,
+        retry_after: option::Option<time::Duration>,
+        non_acceptance_proven: bool,
+    ) -> CorrelatedModelCallTerminalObservation;
+}
+```
+
+## ProviderReportedTokenUsage
+
+```rust
+pub struct ProviderReportedTokenUsage {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
+impl ProviderReportedTokenUsage {
+    pub const fn unreported() -> Self;
+    pub const fn with_input_tokens(self, input_tokens: option::Option<u64>) -> Self;
+    pub const fn with_output_tokens(self, output_tokens: option::Option<u64>) -> Self;
+    pub const fn with_cache_creation_input_tokens(
+        self,
+        cache_creation_input_tokens: option::Option<u64>,
+    ) -> Self;
+    pub const fn with_cache_read_input_tokens(
+        self,
+        cache_read_input_tokens: option::Option<u64>,
+    ) -> Self;
+    pub const fn input_tokens(self) -> option::Option<u64>;
+    pub const fn output_tokens(self) -> option::Option<u64>;
+    pub const fn cache_creation_input_tokens(self) -> option::Option<u64>;
+    pub const fn cache_read_input_tokens(self) -> option::Option<u64>;
+}
+```
+
+## ProviderModelCallFailureCause
+
+```rust
+pub enum ProviderModelCallFailureCause {
+    CredentialRejected,
+    PermissionDenied,
+    InvalidRequest,
+    TargetNotFound,
+    RequestTooLarge,
+    RateLimited,
+    QuotaExhausted,
+    Overloaded,
+    ProviderInternal,
+    Unrecognized,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+```
+
+## CorrelatedModelCallTerminalObservation
+
+```rust
+pub struct CorrelatedModelCallTerminalObservation {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl CorrelatedModelCallTerminalObservation {
+    pub const fn call(&self) -> ModelCallId;
+    pub const fn correlation(&self) -> &IssuedModelCallCorrelation;
+    pub const fn observation(&self) -> &ModelCallTerminalObservation;
+    pub const fn usage(&self) -> ProviderReportedTokenUsage;
+    pub const fn provider_failure_cause(&self) -> option::Option<ProviderModelCallFailureCause>;
+    pub const fn retry_after(&self) -> option::Option<time::Duration>;
+    pub const fn non_acceptance_proven(&self) -> bool;
+}
+```
+
+## ModelCallTerminalObservation
+
+```rust
+pub enum ModelCallTerminalObservation {
+    Completed {
+        assistant_text: vec::Vec<AssistantText>,
+    },
+    CompletedWithProviderCompaction {
+        response: vec::Vec<AssistantResponsePart>,
+        retained_input_tokens: u64,
+        retained_output_tokens: u64,
+    },
+    CompletedWithTools {
+        response: ToolUsingAssistantResponse,
+        retained_input_tokens: option::Option<u64>,
+        retained_output_tokens: option::Option<u64>,
+    },
+    KnownFailed,
+    Refused,
+    RefusedWithProviderCompaction {
+        provider_compaction: vec::Vec<ProviderCompactionBlock>,
+        retained_input_tokens: u64,
+        retained_output_tokens: u64,
+    },
+    Cancelled,
+    Ambiguous,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelCallTerminalObservation {
+    pub const fn retained_input_tokens(&self) -> option::Option<u64>;
+    pub const fn retained_output_tokens(&self) -> option::Option<u64>;
+    pub const fn disposition(&self) -> ModelCallDisposition;
+}
+```
+
+## ModelTargetDefinition
+
+```rust
+pub struct ModelTargetDefinition {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelTargetDefinition {
+    pub const fn new(selection: DirectModelSelection, target: ResolvedProviderTarget) -> Self;
+    pub const fn selection(&self) -> DirectModelSelection;
+    pub const fn target(&self) -> ResolvedProviderTarget;
+}
+```
+
+## ModelTargetCatalog
+
+```rust
+pub struct ModelTargetCatalog {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelTargetCatalog {
+    pub fn try_from_definitions(
+        definitions: impl collect::IntoIterator<Item = ModelTargetDefinition>,
+    ) -> result::Result<Self, ModelTargetCatalogError>;
+    pub fn resolve(
+        &self,
+        selection: FrozenModelSelection,
+    ) -> result::Result<ResolvedModelSelection, ModelTargetResolutionError>;
+}
+```
+
+## ModelTargetCatalogError
+
+```rust
+pub enum ModelTargetCatalogError {
+    DuplicateSelection { selection: DirectModelSelection },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ResolvedModelSelection
+
+```rust
+pub struct ResolvedModelSelection {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ResolvedModelSelection {
+    pub const fn selection(&self) -> FrozenModelSelection;
+    pub const fn target(&self) -> ResolvedProviderTarget;
+}
+```
+
+## ModelTargetResolutionError
+
+```rust
+pub struct ModelTargetResolutionError {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelTargetResolutionError {
+    pub const fn selection(&self) -> FrozenModelSelection;
+    pub const fn direct_selection(&self) -> DirectModelSelection;
+}
+```
+
 ## PendingSteeringReclassificationIdentity
 
 ```rust
@@ -705,335 +1036,4 @@ pub enum ModelCallClosureError {
     AmbiguityConstructionFailed,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ModelCallOriginContent
-
-```rust
-pub struct ModelCallOriginContent {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelCallOriginContent {
-    pub const fn from_goal_turn(accepted_input: AcceptedInputId, content: UserContent) -> Self;
-    pub fn from_pending_steering(pending: &PendingSteeringInput, content: UserContent) -> Self;
-    pub fn from_consumed_steering(consumed: &ConsumedSteeringInput, content: UserContent) -> Self;
-    pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> option::Option<Self>;
-    pub fn from_reconstituted_turn_origin(
-        origin: &SubmitInputTurnOriginReconstitutionInput,
-    ) -> option::Option<Self>;
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn content(&self) -> &UserContent;
-}
-```
-
-## ModelCallPreparationFailure
-
-```rust
-pub enum ModelCallPreparationFailure {
-    TargetUnavailable,
-    CallAlreadyExists,
-    AttemptIsNotPrepared,
-    SteeringIdentityCountMismatch,
-    SteeringFrontierIdentityMismatch,
-    SteeringCorrelationMismatch,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ModelCallPreparationError
-
-```rust
-pub struct ModelCallPreparationError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelCallPreparationError {
-    pub const fn failure(&self) -> ModelCallPreparationFailure;
-    pub const fn execution(&self) -> &ModelCallExecution;
-    pub const fn target_resolution_error(&self) -> option::Option<ModelTargetResolutionError>;
-}
-```
-
-## PreparedInitialModelCall
-
-```rust
-pub struct PreparedInitialModelCall {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl PreparedInitialModelCall {
-    pub const fn session(&self) -> SessionId;
-    pub const fn turn(&self) -> TurnId;
-    pub const fn attempt(&self) -> TurnAttemptId;
-    pub const fn call(&self) -> &CurrentModelCall;
-    pub fn consumed_steering(&self) -> &[PreparedSteeringConsumption];
-    pub const fn steering_snapshot(&self) -> option::Option<&ResolvedContextFrontierSnapshot>;
-}
-```
-
-## PreparedSteeringConsumption
-
-```rust
-pub struct PreparedSteeringConsumption {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl PreparedSteeringConsumption {
-    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle;
-    pub const fn semantic_entry(&self) -> &SemanticTranscriptEntry;
-}
-```
-
-## PreparedModelCallRequest
-
-```rust
-pub struct PreparedModelCallRequest {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl PreparedModelCallRequest {
-    pub const fn session(&self) -> SessionId;
-    pub const fn turn(&self) -> TurnId;
-    pub const fn attempt(&self) -> TurnAttemptId;
-    pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval;
-    pub const fn model_settings(&self) -> ValidatedModelSettings;
-    pub const fn call(&self) -> &CurrentModelCall;
-    pub fn frontier_entries(
-        &self,
-    ) -> impl exact_size::ExactSizeIterator<Item = &SemanticTranscriptEntry>;
-    pub const fn frontier_entry_slice(&self) -> &[SemanticTranscriptEntry];
-    pub fn origin_content(&self, accepted_input: AcceptedInputId) -> option::Option<&UserContent>;
-    pub fn attachment_byte_length(&self, digest: BlobDigest)
-        -> option::Option<nonzero::NonZeroU64>;
-}
-```
-
-## ModelCallResumeFailure
-
-```rust
-pub enum ModelCallResumeFailure {
-    CallMissing,
-    CallIsNotPrepared,
-    AttemptIsNotPrepared,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ModelCallAuthorizationFailure
-
-```rust
-pub enum ModelCallAuthorizationFailure {
-    CallMissing,
-    CallIsNotPrepared,
-    AttemptIsNotPrepared,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ModelCallAuthorizationError
-
-```rust
-pub struct ModelCallAuthorizationError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelCallAuthorizationError {
-    pub const fn failure(&self) -> ModelCallAuthorizationFailure;
-    pub const fn execution(&self) -> &ModelCallExecution;
-}
-```
-
-## AuthorizedModelCall
-
-```rust
-pub struct AuthorizedModelCall {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl AuthorizedModelCall {
-    pub const fn session(&self) -> SessionId;
-    pub const fn turn(&self) -> TurnId;
-    pub const fn attempt(&self) -> &CurrentTurnAttempt;
-    pub const fn call(&self) -> &CurrentModelCall;
-    pub fn frontier_entries(
-        &self,
-    ) -> impl exact_size::ExactSizeIterator<Item = &SemanticTranscriptEntry>;
-    pub fn origin_content(&self, accepted_input: AcceptedInputId) -> option::Option<&UserContent>;
-    pub const fn observation_correlation(&self) -> IssuedModelCallCorrelation;
-}
-```
-
-## IssuedModelCallCorrelation
-
-```rust
-pub struct IssuedModelCallCorrelation {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl IssuedModelCallCorrelation {
-    pub const fn session(&self) -> SessionId;
-    pub const fn turn(&self) -> TurnId;
-    pub const fn attempt(&self) -> TurnAttemptId;
-    pub const fn call(&self) -> ModelCallId;
-    pub const fn target(&self) -> ResolvedProviderTarget;
-    pub const fn frontier(&self) -> ContextFrontierId;
-    pub fn bind_terminal_observation(
-        self,
-        observation: ModelCallTerminalObservation,
-    ) -> CorrelatedModelCallTerminalObservation;
-    pub fn bind_terminal_observation_with_usage(
-        self,
-        observation: ModelCallTerminalObservation,
-        usage: ProviderReportedTokenUsage,
-    ) -> CorrelatedModelCallTerminalObservation;
-    pub fn bind_provider_failure_observation_with_usage(
-        self,
-        cause: ProviderModelCallFailureCause,
-        usage: ProviderReportedTokenUsage,
-    ) -> CorrelatedModelCallTerminalObservation;
-    pub fn bind_provider_failure_observation_with_retry_after(
-        self,
-        cause: ProviderModelCallFailureCause,
-        usage: ProviderReportedTokenUsage,
-        retry_after: option::Option<time::Duration>,
-        non_acceptance_proven: bool,
-    ) -> CorrelatedModelCallTerminalObservation;
-}
-```
-
-## ProviderReportedTokenUsage
-
-```rust
-pub struct ProviderReportedTokenUsage {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl ProviderReportedTokenUsage {
-    pub const fn unreported() -> Self;
-    pub const fn with_input_tokens(self, input_tokens: option::Option<u64>) -> Self;
-    pub const fn with_output_tokens(self, output_tokens: option::Option<u64>) -> Self;
-    pub const fn with_cache_creation_input_tokens(
-        self,
-        cache_creation_input_tokens: option::Option<u64>,
-    ) -> Self;
-    pub const fn with_cache_read_input_tokens(
-        self,
-        cache_read_input_tokens: option::Option<u64>,
-    ) -> Self;
-    pub const fn input_tokens(self) -> option::Option<u64>;
-    pub const fn output_tokens(self) -> option::Option<u64>;
-    pub const fn cache_creation_input_tokens(self) -> option::Option<u64>;
-    pub const fn cache_read_input_tokens(self) -> option::Option<u64>;
-}
-```
-
-## ProviderModelCallFailureCause
-
-```rust
-pub enum ProviderModelCallFailureCause {
-    CredentialRejected,
-    PermissionDenied,
-    InvalidRequest,
-    TargetNotFound,
-    RequestTooLarge,
-    RateLimited,
-    QuotaExhausted,
-    Overloaded,
-    ProviderInternal,
-    Unrecognized,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-```
-
-## CorrelatedModelCallTerminalObservation
-
-```rust
-pub struct CorrelatedModelCallTerminalObservation {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl CorrelatedModelCallTerminalObservation {
-    pub const fn call(&self) -> ModelCallId;
-    pub const fn correlation(&self) -> &IssuedModelCallCorrelation;
-    pub const fn observation(&self) -> &ModelCallTerminalObservation;
-    pub const fn usage(&self) -> ProviderReportedTokenUsage;
-    pub const fn provider_failure_cause(&self) -> option::Option<ProviderModelCallFailureCause>;
-    pub const fn retry_after(&self) -> option::Option<time::Duration>;
-    pub const fn non_acceptance_proven(&self) -> bool;
-}
-```
-
-## ModelCallTerminalObservation
-
-```rust
-pub enum ModelCallTerminalObservation {
-    Completed {
-        assistant_text: vec::Vec<AssistantText>,
-    },
-    CompletedWithProviderCompaction {
-        response: vec::Vec<AssistantResponsePart>,
-        retained_input_tokens: u64,
-        retained_output_tokens: u64,
-    },
-    CompletedWithTools {
-        response: ToolUsingAssistantResponse,
-        retained_input_tokens: option::Option<u64>,
-        retained_output_tokens: option::Option<u64>,
-    },
-    KnownFailed,
-    Refused,
-    RefusedWithProviderCompaction {
-        provider_compaction: vec::Vec<ProviderCompactionBlock>,
-        retained_input_tokens: u64,
-        retained_output_tokens: u64,
-    },
-    Cancelled,
-    Ambiguous,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelCallTerminalObservation {
-    pub const fn retained_input_tokens(&self) -> option::Option<u64>;
-    pub const fn retained_output_tokens(&self) -> option::Option<u64>;
-    pub const fn disposition(&self) -> ModelCallDisposition;
-}
-```
-
-## ModelTargetDefinition
-
-```rust
-pub struct ModelTargetDefinition {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelTargetDefinition {
-    pub const fn new(selection: DirectModelSelection, target: ResolvedProviderTarget) -> Self;
-    pub const fn selection(&self) -> DirectModelSelection;
-    pub const fn target(&self) -> ResolvedProviderTarget;
-}
-```
-
-## ModelTargetCatalog
-
-```rust
-pub struct ModelTargetCatalog {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelTargetCatalog {
-    pub fn try_from_definitions(
-        definitions: impl collect::IntoIterator<Item = ModelTargetDefinition>,
-    ) -> result::Result<Self, ModelTargetCatalogError>;
-    pub fn resolve(
-        &self,
-        selection: FrozenModelSelection,
-    ) -> result::Result<ResolvedModelSelection, ModelTargetResolutionError>;
-}
-```
-
-## ModelTargetCatalogError
-
-```rust
-pub enum ModelTargetCatalogError {
-    DuplicateSelection { selection: DirectModelSelection },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ResolvedModelSelection
-
-```rust
-pub struct ResolvedModelSelection {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ResolvedModelSelection {
-    pub const fn selection(&self) -> FrozenModelSelection;
-    pub const fn target(&self) -> ResolvedProviderTarget;
-}
-```
-
-## ModelTargetResolutionError
-
-```rust
-pub struct ModelTargetResolutionError {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelTargetResolutionError {
-    pub const fn selection(&self) -> FrozenModelSelection;
-    pub const fn direct_selection(&self) -> DirectModelSelection;
-}
 ```
