@@ -29,22 +29,25 @@ is 1 through 256 printable ASCII bytes; `verification_uri` is an absolute
 Invalid fields fail as `device_endpoint_rejected` before progress is emitted.
 Each request ends with
 `oauth_credential_receipt { command_id, profile, outcome }`, whose outcome is
-`provisioned`, `reprovisioned`, `deleted`, `already_deleted`, `abandoned`, or
-`failed { reason }`, where `reason` is one of the fieldless values
-`device_endpoint_rejected`, `polling_expired`,
+`provisioned`, `reprovisioned`, `deleted`, `already_deleted`, `abandoned`,
+`superseded`, or `failed { reason }`, where `reason` is one of the fieldless
+values `device_endpoint_rejected`, `polling_expired`,
 `token_response_without_identity`, or `account_independence_failed`.
 Provisioning stores the authorization; re-provisioning replaces it and clears
 its refresh quarantine only on success. Deletion ends its delivery-origin
 quarantine and removes stored authorization and cached access tokens, preventing
 future dispatches while retaining the configured registration and referenced
-history; a child already holding a copied token finishes its invocation. An
-equal request with the same `command_id` reports busy while pending or returns
-its stored receipt without repeating the exchange or deletion; conflicting reuse
-is rejected. Startup terminalizes each pending provisioning or re-provisioning
-claim with an `abandoned` receipt; another provisioning attempt requires a new
-`command_id`. The credential mutation and terminal receipt commit atomically
-under the command claim protocol in
-[identity and commands](../spec/identity-and-commands.md).
+history; a child already holding a copied token finishes its invocation. Each
+profile retains a generation that every deletion advances. Provisioning and
+re-provisioning commit authorization and advance that generation atomically only
+when their starting generation is current; otherwise the transaction records
+`superseded` without storing authorization. An equal request with the same
+`command_id` reports busy while pending or returns its stored receipt without
+repeating the exchange or deletion; conflicting reuse is rejected. Startup
+terminalizes each pending provisioning or re-provisioning claim with an
+`abandoned` receipt; another provisioning attempt requires a new `command_id`.
+The credential mutation and terminal receipt commit atomically under the command
+claim protocol in [identity and commands](../spec/identity-and-commands.md).
 
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
@@ -83,13 +86,11 @@ reaching the owner-private socket is the authority.
 Configuration reload is one `reload_configuration { command_id }` request
 carrying a user-global command identity. An equal command retry reports busy
 while pending or replays its stored result without re-reading configuration.
-Module rule reconciliation is idempotent, keyed by the configured rule-set
-digest and event tail, and commits first through the
-[ownership seam](../spec/ownership-seam.md); the core command result commits
-second. Startup re-runs the retained reconciliation for each pending reload
-claim before terminalizing it with
-`configuration_reload_failed { command_id, phase: "startup", reason: "abandoned" }`;
-another reload requires a new `command_id`. Success returns
+Core first commits the reload command with the new rule-set digest and event
+tail as durable intent; the [ownership seam](../spec/ownership-seam.md) delivers
+that intent, and the module activates the rules atomically and idempotently,
+keyed by that digest and event tail. Startup replays any undelivered intent
+before terminalizing its claim. Success returns
 `configuration_reloaded { command_id, reloaded_sections }`, whose sections are
 an array of the closed values `model_catalog`, `session_templates`, and
 `repo_watch`. Failure returns
