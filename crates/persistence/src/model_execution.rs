@@ -874,6 +874,7 @@ impl PostgresModelCallRepository {
                                      AND entry.payload_kind IN (
                                          'assistant_text',
                                          'provider_compaction',
+                                         'provider_reasoning',
                                          'assistant_tool_use'
                                      )
                                 THEN 0
@@ -996,6 +997,7 @@ impl PostgresModelCallRepository {
                                           latest_call.call_kind = 'ordinary'
                                           AND entry.payload_kind IN (
                                               'assistant_text',
+                                              'provider_reasoning',
                                               'assistant_tool_use'
                                           )
                                           AND entry.producing_model_call_id =

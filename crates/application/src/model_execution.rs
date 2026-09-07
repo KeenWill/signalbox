@@ -774,7 +774,7 @@ fn projected_frontier_content_bytes<'a>(
             SemanticTranscriptEntryPayload::ProviderCompaction { block, .. } => {
                 block.as_json().len()
             }
-            SemanticTranscriptEntryPayload::ProviderReasoning { item, .. } => item.as_json().len(),
+            SemanticTranscriptEntryPayload::ProviderReasoning { .. } => 0,
             // Identity-only payloads carry no content of their own. Tool
             // payloads name evidence rather than carrying it, and that
             // evidence is summed below.
@@ -3149,6 +3149,27 @@ mod tests {
 
         assert!(stub.len() <= MAX_RENDERED_ATTACHMENT_STUB_BYTES);
         assert_eq!(stub.len(), 2_242);
+    }
+
+    #[test]
+    fn omitted_reasoning_contributes_no_rendered_content_bytes() {
+        let source = SemanticTranscriptEntryRef::from_source(
+            identity(40, SessionId::from_uuid),
+            identity(41, SemanticTranscriptEntryId::from_uuid),
+        );
+        let payload = SemanticTranscriptEntryPayload::ProviderReasoning {
+            producing_call: identity(42, ModelCallId::from_uuid),
+            item: signalbox_domain::ProviderReasoningItem::try_new(String::from(
+                r#"{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"opaque"}"#,
+            )).expect("complete reasoning fixture"),
+        };
+        let messages = render_frontier_messages([(source, &payload)], |_| None, |_| None, [])
+            .expect("reasoning is omitted");
+        assert!(messages.is_empty());
+        assert_eq!(
+            projected_frontier_content_bytes([(source, &payload)], |_| None, []),
+            0
+        );
     }
 
     #[test]

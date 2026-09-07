@@ -5,6 +5,93 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn provider_reasoning_covered_by_reported_output_is_not_charged_again()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    for (offset, compacted, output_tokens) in [
+        (0, false, Some(8)),
+        (0x100, true, None),
+        (0x200, false, None),
+    ] {
+        let seed = 0x6dc0 + offset;
+        let (fixture, repository, authorized) =
+            authorize_checkpointed_model_call(&pool, seed).await?;
+        let correlation = authorized.observation_correlation();
+        let raw =
+            r#"{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"opaque"}"#;
+        let reasoning = AssistantResponsePart::ProviderReasoning(
+            signalbox_domain::ProviderReasoningItem::try_new(raw.to_string())
+                .expect("reasoning fixture"),
+        );
+        let (observation, entries) = if compacted {
+            let block = ProviderCompactionBlock::try_new(String::from(
+                r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+            ))
+            .expect("compaction fixture");
+            (
+                ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                    response: vec![AssistantResponsePart::ProviderCompaction(block), reasoning],
+                    retained_input_tokens: 19,
+                    retained_output_tokens: 3,
+                },
+                2,
+            )
+        } else {
+            (
+                ModelCallTerminalObservation::CompletedWithProviderReasoning {
+                    response: vec![reasoning],
+                },
+                1,
+            )
+        };
+        let frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24));
+        repository
+            .apply_terminal_observation(
+                fixture.session,
+                correlation.bind_terminal_observation_with_usage(
+                    observation,
+                    ProviderReportedTokenUsage::unreported()
+                        .with_input_tokens(Some(70))
+                        .with_output_tokens(output_tokens),
+                ),
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    (0..entries)
+                        .map(|index| {
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 20 + index))
+                        })
+                        .collect(),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                    frontier,
+                )),
+                |_| panic!("no pending steering"),
+            )
+            .await?;
+        let reported = repository
+            .latest_reported_usage(
+                fixture.session,
+                correlation.target(),
+                FastMode::Disabled,
+                compacted,
+                frontier,
+            )
+            .await?
+            .expect("provider input usage retained");
+        assert_eq!(
+            reported.projected_unreported_content_bytes(),
+            if compacted || output_tokens.is_some() {
+                0
+            } else {
+                u64::try_from(raw.len())?
+            }
+        );
+    }
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn completed_provider_reasoning_retains_order_and_projects_a_marker()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
