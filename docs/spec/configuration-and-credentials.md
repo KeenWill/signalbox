@@ -8,7 +8,7 @@ reaches a provider without being stored or logged.
 
 Configuration is loaded once at startup from the process environment and two
 versioned TOML documents: the model catalog and the session-template catalog.
-The parser in `apps/signalboxd/src/configuration.rs` and
+The parser in `apps/signalboxd/src/configuration/mod.rs` and
 `apps/signalboxd/src/credential_pools.rs` admits a document fail-closed. The
 subsystem also owns the runner's startup configuration, the refusals that keep
 ambient settings away from the production database channel, and the bridge that

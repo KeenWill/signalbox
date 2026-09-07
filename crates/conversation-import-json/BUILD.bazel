@@ -1,0 +1,26 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//cargo:defs.bzl", "extract_cargo_lints")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+exports_files(["Cargo.toml"])
+
+extract_cargo_lints(
+    name = "cargo_lints",
+    manifest = "Cargo.toml",
+    workspace = "//:Cargo.toml",
+)
+
+rust_library(
+    name = "signalbox_conversation_import_json",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = ["//crates/domain:signalbox_domain"] + all_crate_deps(normal = True),
+)
