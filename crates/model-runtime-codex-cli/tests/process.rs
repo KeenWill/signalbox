@@ -2530,7 +2530,7 @@ async fn omitted_cache_write_counter_remains_unreported() {
 }
 
 #[tokio::test]
-async fn missing_required_usage_axis_is_protocol_loss() {
+async fn omitted_usage_axes_remain_unreported() {
     let result = execute_scenario(
         "usage_partial_axes",
         DeliveryMode::Buffered,
@@ -2539,18 +2539,19 @@ async fn missing_required_usage_axis_is_protocol_loss() {
     )
     .await;
 
-    assert!(matches!(
-        boundary_loss(&result.evidence).cause,
-        LossCause::StreamProtocolViolation { .. }
-    ));
     assert_eq!(
-        boundary_loss(&result.evidence).usage,
-        TokenUsage::unreported()
+        completed(&result.evidence).usage,
+        TokenUsage {
+            input_tokens: None,
+            output_tokens: Some(fixtures::OUTPUT_TOKENS),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(fixtures::CACHE_READ_INPUT_TOKENS),
+        }
     );
 }
 
 #[tokio::test]
-async fn total_only_usage_is_protocol_loss() {
+async fn total_only_usage_records_no_distributed_counts() {
     let result = execute_scenario(
         "usage_total_only",
         DeliveryMode::Buffered,
@@ -2559,14 +2560,7 @@ async fn total_only_usage_is_protocol_loss() {
     )
     .await;
 
-    assert!(matches!(
-        boundary_loss(&result.evidence).cause,
-        LossCause::StreamProtocolViolation { .. }
-    ));
-    assert_eq!(
-        boundary_loss(&result.evidence).usage,
-        TokenUsage::unreported()
-    );
+    assert_eq!(completed(&result.evidence).usage, TokenUsage::unreported());
 }
 
 /// Pre-dispatch cancellation performs no process spawn.
@@ -4905,6 +4899,80 @@ fn unsupported_detail(failure: PreparationFailure) -> String {
         panic!("expected unsupported-operation preparation failure");
     };
     detail
+}
+
+#[tokio::test]
+async fn sparse_cumulative_usage_updates_preserve_omitted_axes() {
+    let result = execute_scenario(
+        "usage_sparse_updates",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    assert_eq!(
+        completed(&result.evidence).usage,
+        TokenUsage {
+            input_tokens: Some(13),
+            output_tokens: Some(9),
+            cache_creation_input_tokens: Some(7),
+            cache_read_input_tokens: Some(5),
+        }
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn invalid_ambient_credential_home_is_proven_unsent_before_spawn() {
+    const PROBE: &str = "SIGNALBOX_TEST_INVALID_CODEX_HOME";
+    if let Some(case) = std::env::var_os(PROBE) {
+        let temporary = tempfile::tempdir().expect("isolated test directory");
+        let runtime = runtime(temporary.path(), fake_cli());
+        if case == "unresolvable" {
+            let removed = temporary.path().join("removed-working-directory");
+            std::fs::create_dir(&removed).expect("working directory exists");
+            std::env::set_current_dir(&removed).expect("child test owns its working directory");
+            std::fs::remove_dir(&removed).expect("empty working directory can be removed");
+        }
+        let prepared = prepare(
+            &runtime,
+            operation(
+                "buffered_completed",
+                DeliveryMode::Buffered,
+                OperationShape::Text,
+            ),
+        )
+        .await;
+        let mut observations = Vec::new();
+        let report = runtime
+            .execute(prepared, &mut observations, CancellationSignal::never())
+            .await;
+        assert!(matches!(report.evidence, TerminalEvidence::ProvenUnsent(_)));
+        assert!(observations.is_empty());
+        assert_eq!(spawn_count(temporary.path()), 0);
+        return;
+    }
+    for (case, home) in [("empty", ""), ("unresolvable", "relative-home")] {
+        let output =
+            tokio::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "invalid_ambient_credential_home_is_proven_unsent_before_spawn",
+                    "--nocapture",
+                ])
+                .env(PROBE, case)
+                .env("CODEX_HOME", home)
+                .output()
+                .await
+                .expect("isolated environment test starts");
+        assert!(
+            output.status.success(),
+            "{case}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[tokio::test]

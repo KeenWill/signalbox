@@ -740,7 +740,7 @@ fn agent_items_deltas_and_total_usage_are_decoded_without_projection_loss() {
             total.reasoning_output_tokens,
             total.total_tokens
         ),
-        (100, 20, Some(10), 5, 3, 105)
+        (Some(100), Some(20), Some(10), Some(5), Some(3), Some(105))
     );
 }
 
