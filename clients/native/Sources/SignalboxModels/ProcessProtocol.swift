@@ -2288,7 +2288,11 @@ public struct SignalboxInputSubmitted: Decodable, Equatable, Sendable {
       decoder: decoder
     )
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    termination = try container.decodeIfPresent(SignalboxTerminationReceipt.self, forKey: .termination)
+    if container.contains(.termination) {
+      termination = try container.decode(SignalboxTerminationReceipt.self, forKey: .termination)
+    } else {
+      termination = nil
+    }
     sessionID = try container.decode(SignalboxCanonicalUUID.self, forKey: .sessionID)
     acceptedInputID = try container.decode(
       SignalboxCanonicalUUID.self,
