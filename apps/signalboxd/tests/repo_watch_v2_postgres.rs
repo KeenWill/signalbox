@@ -3452,7 +3452,7 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
         models,
         templates,
         model_path.clone(),
-        template_path,
+        template_path.clone(),
         None,
     )
     .expect("reload composition")
@@ -3506,7 +3506,9 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     .fetch_one(&module_pool)
     .await?;
     // No model file exists: recovery must use the checked intent after the activation commit.
+    std::fs::remove_file(&template_path)?;
     reload.recover().await?;
+    std::fs::write(&template_path, templates_source)?;
     assert_eq!(
         repository.lookup(request).await?,
         ReloadLookup::Recorded(ReloadResult::Reloaded)

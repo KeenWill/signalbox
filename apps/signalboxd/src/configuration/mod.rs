@@ -169,6 +169,16 @@ impl HubModelConfiguration {
         Self::parse(&content)
     }
 
+    /// Checks startup-only numeric limits before opening the fenced database.
+    pub fn startup_numeric_bounds(
+        content: &str,
+    ) -> Result<NumericBoundsConfiguration, HubModelConfigurationError> {
+        let document = content
+            .parse::<DocumentMut>()
+            .map_err(|_| HubModelConfigurationError::InvalidDocument)?;
+        NumericBoundsConfiguration::parse(document.get("numeric_bounds"))
+    }
+
     /// Parses one complete versioned configuration document.
     pub fn parse(content: &str) -> Result<Self, HubModelConfigurationError> {
         let document = DocumentMut::from_str(content)

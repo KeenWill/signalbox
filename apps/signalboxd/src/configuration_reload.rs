@@ -174,7 +174,7 @@ impl ConfigurationReload {
                     ReloadRepositoryError::Corruption("reload worker preparation failed")
                 })?;
                 watch
-                    .reload_configuration(catalogs.models.repository_watch().cloned())
+                    .activate_startup(catalogs.models.repository_watch())
                     .await
                     .map_err(|_| {
                         ReloadRepositoryError::Corruption("startup rule activation failed")
@@ -196,12 +196,19 @@ impl ConfigurationReload {
     }
 
     fn restore(&self, snapshot: &str) -> Result<ConfigurationCatalogs, ReloadResult> {
+        let catalogs = Self::startup_snapshot(self.catalogs().models.source(), snapshot)?;
+        self.validate_runtime(&catalogs)?;
+        Ok(catalogs)
+    }
+
+    /// Validates retained catalogs with only the startup-only members of the on-disk document.
+    pub fn startup_snapshot(
+        on_disk: &str,
+        snapshot: &str,
+    ) -> Result<ConfigurationCatalogs, ReloadResult> {
         let snapshot: RetainedSnapshot = serde_json::from_str(snapshot)
             .map_err(|_| failure(ReloadPhase::Validate, "retained snapshot cannot be decoded"))?;
-        let mut source = self
-            .catalogs()
-            .models
-            .source()
+        let mut source = on_disk
             .parse::<toml_edit::DocumentMut>()
             .map_err(|_| failure(ReloadPhase::Validate, "startup source is invalid"))?;
         source
@@ -230,7 +237,6 @@ impl ConfigurationReload {
             templates: Arc::new(templates),
         };
         validate_catalogs(&catalogs)?;
-        self.validate_runtime(&catalogs)?;
         Ok(catalogs)
     }
 
@@ -589,5 +595,27 @@ mod tests {
             "accepted prompt"
         );
         assert!(!retained.session_templates.contains("system_prompt_file"));
+    }
+    #[tokio::test]
+    async fn startup_uses_retained_catalogs_and_rejects_invalid_startup_members() {
+        let (_directory, reload) = fixture();
+        let original = reload.catalogs();
+        let snapshot =
+            serde_json::to_string(&original.retained().expect("snapshot")).expect("JSON");
+        let mut on_disk = original
+            .models
+            .source()
+            .parse::<toml_edit::DocumentMut>()
+            .expect("source");
+        on_disk.remove("models");
+        assert!(HubModelConfiguration::parse(&on_disk.to_string()).is_err());
+        let restored = ConfigurationReload::startup_snapshot(&on_disk.to_string(), &snapshot)
+            .expect("retained models supersede the changed catalog");
+        assert_eq!(
+            restored.models.model_aliases().count(),
+            original.models.model_aliases().count()
+        );
+        on_disk.remove("version");
+        assert!(ConfigurationReload::startup_snapshot(&on_disk.to_string(), &snapshot).is_err());
     }
 }
