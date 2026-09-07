@@ -45,7 +45,7 @@ use signalbox_model_runtime_codex_cli::{
 };
 
 /// Overrides the executable under test. The default resolves through `PATH`;
-/// CI points it at the binary `npm ci` unpacked from the pin manifest.
+/// CI points it at the binary installed from the pinned release manifest.
 const EXECUTABLE_VARIABLE: &str = "SIGNALBOX_CODEX_SMOKE_EXECUTABLE";
 
 /// Overrides the model. The default is the cheapest model this CLI advertises
@@ -679,7 +679,7 @@ async fn assert_pinned_version(executable: &std::path::Path) {
         "the executable at `{}` reports {version}, but this smoke can \
          only produce compatibility evidence for the pinned \
          {SUPPORTED_CODEX_CLI_VERSION}; install the version pinned in \
-         tooling/codex-cli/package.json",
+         tooling/codex-cli/release.json",
         executable.display()
     );
 }

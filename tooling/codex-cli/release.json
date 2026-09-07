@@ -1,0 +1,5 @@
+{
+  "release": "rust-v0.153.4-signalbox.1",
+  "asset": "codex-x86_64-unknown-linux-musl.tar.gz",
+  "sha256": "d5063e61202cac05eaa42ce0276a5e77a82b392a15eb0a21a43d070d54f85b32"
+}

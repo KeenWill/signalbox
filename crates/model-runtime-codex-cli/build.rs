@@ -1,5 +1,5 @@
-//! Reads the exact pinned `@openai/codex` version from
-//! `../../tooling/codex-cli/package.json` and exports it as the
+//! Reads the upstream version of the pinned fork release from
+//! `../../tooling/codex-cli/release.json` and exports it as the
 //! `SIGNALBOX_CODEX_CLI_VERSION` build environment variable the adapter and
 //! its pin test compare against.
 
@@ -7,8 +7,7 @@ mod version_pin;
 
 use std::path::PathBuf;
 
-const PIN_MANIFEST: &str = "../../tooling/codex-cli/package.json";
-const PIN_PACKAGE: &str = "@openai/codex";
+const PIN_MANIFEST: &str = "../../tooling/codex-cli/release.json";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={PIN_MANIFEST}");
@@ -24,22 +23,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     })?;
     let pinned = manifest
-        .get("dependencies")
-        .and_then(|dependencies| dependencies.get(PIN_PACKAGE))
+        .get("release")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
             std::io::Error::other(format!(
-                "{} declares a {PIN_PACKAGE} dependency",
+                "{} declares a fork release tag",
                 manifest_path.display()
             ))
         })?;
-    if !version_pin::is_exact_pin(pinned) {
-        return Err(std::io::Error::other(format!(
-            "{} must pin {PIN_PACKAGE} at an exact major.minor.patch release",
+    let pinned = version_pin::upstream_version(pinned).ok_or_else(|| {
+        std::io::Error::other(format!(
+            "{} must pin an exact rust-vX.Y.Z-signalbox.N release",
             manifest_path.display()
         ))
-        .into());
-    }
+    })?;
 
     println!("cargo:rustc-env=SIGNALBOX_CODEX_CLI_VERSION={pinned}");
     Ok(())

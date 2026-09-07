@@ -140,7 +140,7 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
 /// Codex CLI protocol snapshot covered by this adapter's offline fixtures.
 ///
 /// The build derives this marker from the exact pin in
-/// `tooling/codex-cli/package.json`, so a Renovate change is mechanically
+/// `tooling/codex-cli/release.json`, so a Renovate change is mechanically
 /// complete and the binding smoke tests that same version. That live exchange
 /// does not prove the offline fixture corpus still represents the CLI's current
 /// event shapes; fixture regeneration or validation against the installed CLI
