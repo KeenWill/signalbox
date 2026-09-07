@@ -134,3 +134,76 @@ it('retains the newer live cursor when a buffered event is followed by a failed 
   unsubscribe()
   queries.clear()
 })
+
+const draftSessionId = '00000000-0000-0000-0000-000000000993'
+const draft = (content: string, part_index = 0): WebSessionLiveStreamEvent => ({
+  kind: 'provider_text_delta',
+  turn_id: draftSessionId,
+  model_call_id: draftSessionId,
+  part_index,
+  content,
+})
+
+it('joins provider parts in arrival order and discards them on a replacement snapshot', async () => {
+  let replace = () => {}
+  const replacement = new Promise<void>((resolve) => {
+    replace = resolve
+  })
+  vi.mocked(followSession).mockImplementation(async function* () {
+    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    yield draft('First')
+    yield draft('Second', 1)
+    yield draft(' part')
+    await replacement
+    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+  })
+  const store = createAppStore()
+  const queries = new QueryClient()
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(draftSessionId))
+  await vi.waitFor(() =>
+    expect(selectSessionSync(store.getState()).drafts.map((part) => part.content)).toEqual([
+      'First part',
+      'Second',
+    ]),
+  )
+  replace()
+  await vi.waitFor(() => expect(selectSessionSync(store.getState()).drafts).toEqual([]))
+  stop()
+  queries.clear()
+})
+
+it.each([
+  { limit: 'part count', events: Array.from({ length: 33 }, (_, index) => draft('x', index)) },
+  { limit: 'UTF-8 bytes', events: [draft('é'.repeat(32_768)), draft('x')] },
+])('requests resynchronization and clears every draft on $limit overflow', async ({ events }) => {
+  let requested = false
+  vi.mocked(followSession).mockImplementation(async function* (_sessionId, _signal, needsResync) {
+    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    for (const event of events) yield event
+    requested = needsResync?.() ?? false
+  })
+  const store = createAppStore()
+  const queries = new QueryClient()
+  const retained: { parts: number; bytes: number }[] = []
+  const unsubscribe = store.subscribe(() => {
+    const drafts = selectSessionSync(store.getState()).drafts
+    retained.push({
+      parts: drafts.length,
+      bytes: drafts.reduce((sum, part) => sum + new TextEncoder().encode(part.content).length, 0),
+    })
+  })
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(draftSessionId))
+  await vi.waitFor(() => expect(requested).toBe(true))
+  expect(selectSessionSync(store.getState())).toMatchObject({
+    phase: 'resyncing',
+    snapshot: null,
+    drafts: [],
+  })
+  expect(Math.max(...retained.map((value) => value.parts))).toBeLessThanOrEqual(32)
+  expect(Math.max(...retained.map((value) => value.bytes))).toBeLessThanOrEqual(65_536)
+  stop()
+  unsubscribe()
+  queries.clear()
+})
