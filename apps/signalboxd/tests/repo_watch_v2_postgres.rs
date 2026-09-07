@@ -2113,6 +2113,25 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .await?;
     assert_eq!(kinds, vec![String::from("check_run_completed")]);
     let retained = reopened.ingest_baseline(&compact_repository).await?;
+    assert!(
+        retained
+            .observation
+            .as_ref()
+            .expect("committed ordinary observation")
+            .state()
+            .pull_requests()
+            .is_empty(),
+        "refetched compact pull requests remain outside the ordinary baseline"
+    );
+    let ordinary_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pr_state WHERE repository = $1")
+            .bind(compact_repository.as_str())
+            .fetch_one(&module_pool)
+            .await?;
+    assert_eq!(
+        ordinary_rows, 0,
+        "refetch does not recreate ordinary PR rows"
+    );
     assert_eq!(retained.merged_baselines.len(), 1);
     assert_eq!(
         retained.merged_baselines[0].completed_check_runs().len(),

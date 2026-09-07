@@ -309,7 +309,12 @@ async fn fetch_pull(
                     CheckConclusion::Success
                     | CheckConclusion::Neutral
                     | CheckConclusion::Skipped => ChecksOutcome::Success,
-                    _ => ChecksOutcome::Failure,
+                    CheckConclusion::Failure
+                    | CheckConclusion::Cancelled
+                    | CheckConclusion::TimedOut
+                    | CheckConclusion::ActionRequired
+                    | CheckConclusion::Stale
+                    | CheckConclusion::StartupFailure => ChecksOutcome::Failure,
                 },
             ));
         }
