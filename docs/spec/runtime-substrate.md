@@ -167,12 +167,12 @@ Idle-connection reuse is disabled so every send opens a fresh connection; this
 removes stale-connection replay and lets a connect failure claim proven-unsent.
 
 The OpenAI adapter sends `POST /v1/responses` with `store: false` and no
-stored-state chaining. It rejects non-empty stop sequences before send as
-`UnsupportedOperation`. Configuration validation and preparation require
-`max_output_tokens` to be at least 16. A completed response maps to end of turn
-or tool use according to its output; `incomplete_details.reason` maps
-`max_output_tokens` to the output ceiling and `content_filter` to refusal, while
-other reasons remain unrecognized.
+stored-state chaining. It rejects non-empty stop sequences during settings
+validation and before send as `UnsupportedOperation`. Configuration validation
+and preparation require `max_output_tokens` to be at least 16. A completed
+response maps to end of turn or tool use according to its output;
+`incomplete_details.reason` maps `max_output_tokens` to the output ceiling and
+`content_filter` to refusal, while other reasons remain unrecognized.
 
 The Codex CLI adapter neither resumes nor persists a Codex thread; each call is
 a fresh invocation given the complete conversation frontier, so provider session
@@ -208,8 +208,8 @@ A smoke's required aggregate gates merge for a pull request that changes the
 paths its gate names, an exception to the repository default that a credentialed
 live smoke never gates merge. The Anthropic, OpenAI and Claude Code gates name
 their adapter crate and workflow file, the Claude Code gate also the shared CLI
-supervision module; the Codex gate names only the `tooling/codex-cli` pin
-directory and its workflow file, so an adapter-only change runs no Codex smoke.
+supervision module; the Codex gate names its adapter crate, the shared CLI
+supervision module, the `tooling/codex-cli` pin directory and its workflow file.
 
 A twice-daily schedule runs each smoke as a provider-drift canary between
 adapter-touching changes, spending one paid exchange per run.

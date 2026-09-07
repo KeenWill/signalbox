@@ -1,6 +1,7 @@
 import { configureStore, createSlice, type Middleware } from '@reduxjs/toolkit'
 import { useDispatch, useSelector } from 'react-redux'
 import type { AttentionSyncPhase } from './attention'
+import type { WebSessionLiveSnapshot, WebSubmitInputRequest } from './generated/web-contract.mjs'
 import {
   type BrowserPreferences,
   createDefaultBrowserPreferences,
@@ -23,12 +24,30 @@ export interface VisibleRange {
   end: number
 }
 
+export interface SessionSyncState {
+  sessionId: string | null
+  attempt: number
+  phase: 'idle' | 'connecting' | 'live' | 'resyncing' | 'failed'
+  snapshot: WebSessionLiveSnapshot | null
+  cursor: string | null
+}
+
+// Hard safety ceiling: unresolved identities cannot be evicted to admit new messages.
+export const MAX_PENDING_SESSION_INPUTS = 4
+
+export interface PendingSessionInput {
+  input: WebSubmitInputRequest
+  phase: 'sending' | 'unconfirmed'
+}
+
 interface AppState extends BrowserPreferences {
   layout: LayoutMode
   density: DensityMode
   detail: DetailMode
   theme: ThemeMode
   overlay: Overlay
+  sessionSync: SessionSyncState
+  pendingSessionInputs: Record<string, PendingSessionInput>
   attentionSync: AttentionSyncPhase
   selectedTimeline: string | null
   selectedArtifact: string | null
@@ -42,6 +61,8 @@ interface AppState extends BrowserPreferences {
 const initialState: AppState = {
   ...loadBrowserPreferences(),
   overlay: null,
+  sessionSync: { sessionId: null, attempt: 0, phase: 'idle', snapshot: null, cursor: null },
+  pendingSessionInputs: {},
   attentionSync: 'idle',
   selectedTimeline: null,
   selectedArtifact: null,
@@ -61,6 +82,61 @@ const appSlice = createSlice({
   name: 'app',
   initialState,
   reducers: {
+    sessionFollowRequested(state, action: { payload: string | null }) {
+      if (state.sessionSync.sessionId === action.payload) return
+      state.sessionSync = {
+        sessionId: action.payload,
+        attempt: state.sessionSync.attempt + 1,
+        phase: action.payload === null ? 'idle' : 'connecting',
+        snapshot: null,
+        cursor: null,
+      }
+    },
+    sessionFollowReconnectRequested(state) {
+      if (state.sessionSync.sessionId === null) return
+      state.sessionSync.attempt += 1
+      state.sessionSync.phase = 'connecting'
+      state.sessionSync.snapshot = null
+    },
+    sessionFollowUpdated(state, action: { payload: SessionSyncState }) {
+      if (
+        state.sessionSync.sessionId === action.payload.sessionId &&
+        state.sessionSync.attempt === action.payload.attempt
+      )
+        state.sessionSync = {
+          ...action.payload,
+          snapshot:
+            action.payload.snapshot === null
+              ? null
+              : {
+                  ...action.payload.snapshot,
+                  queued_turn_ids: [...action.payload.snapshot.queued_turn_ids],
+                },
+        }
+    },
+    sessionInputStarted(
+      state,
+      action: { payload: { sessionId: string; input: WebSubmitInputRequest } },
+    ) {
+      if (
+        state.pendingSessionInputs[action.payload.sessionId] === undefined &&
+        Object.keys(state.pendingSessionInputs).length >= MAX_PENDING_SESSION_INPUTS
+      )
+        return
+      state.pendingSessionInputs[action.payload.sessionId] = {
+        input: action.payload.input,
+        phase: 'sending',
+      }
+    },
+    sessionInputSettled(
+      state,
+      action: { payload: { sessionId: string; commandId: string; confirmed: boolean } },
+    ) {
+      const pending = state.pendingSessionInputs[action.payload.sessionId]
+      if (pending?.input.command_id !== action.payload.commandId) return
+      if (action.payload.confirmed) delete state.pendingSessionInputs[action.payload.sessionId]
+      else pending.phase = 'unconfirmed'
+    },
     layoutSet(state, action: { payload: LayoutMode }) {
       state.layout = action.payload
       state.activitySequence += 1
@@ -213,3 +289,10 @@ export const selectApp = (state: RootState) => state.app
 export const getRecentActions = (): readonly string[] => actionTrace
 export const useAppDispatch = useDispatch.withTypes<AppDispatch>()
 export const useAppSelector = useSelector.withTypes<RootState>()
+
+export const selectSessionSync = (state: RootState) => state.app.sessionSync
+export const selectPendingSessionInput = (state: RootState, sessionId: string) =>
+  state.app.pendingSessionInputs[sessionId]
+
+export const selectSessionInputCapacityReached = (state: RootState) =>
+  Object.keys(state.app.pendingSessionInputs).length >= MAX_PENDING_SESSION_INPUTS

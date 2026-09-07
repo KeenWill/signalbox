@@ -18,6 +18,7 @@
 | conversation_listing | 4 | 0 | 0 | [conversation_listing](conversation_listing.md) |
 | create_session | 4 | 0 | 0 | [create_session](create_session.md) |
 | create_session_from_imported_frontier | 4 | 0 | 0 | [create_session_from_imported_frontier](create_session_from_imported_frontier.md) |
+| credential_capacity | 0 | 0 | 1 | [credential_capacity](credential_capacity.md) |
 | goal | 7 | 0 | 0 | [goal](goal.md) |
 | goal_turn | 2 | 0 | 0 | [goal_turn](goal_turn.md) |
 | hub_fence | 4 | 0 | 3 | [hub_fence](hub_fence.md) |
@@ -30,6 +31,7 @@
 | process_read | 36 | 0 | 0 | [types](process_read/types.md), [types-2](process_read/types-2.md) |
 | program_journal | 3 | 0 | 0 | [program_journal](program_journal.md) |
 | replace_session_defaults | 5 | 0 | 0 | [replace_session_defaults](replace_session_defaults.md) |
+| repo_watch_command | 1 | 0 | 0 | [repo_watch_command](repo_watch_command.md) |
 | review_orchestration | 11 | 0 | 0 | [review_orchestration](review_orchestration.md) |
 | review_workflow | 10 | 0 | 0 | [review_workflow](review_workflow.md) |
 | runner_protocol | 27 | 0 | 0 | [types](runner_protocol/types.md), [types-2](runner_protocol/types-2.md) |

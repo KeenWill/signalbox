@@ -344,11 +344,10 @@ pub enum ProviderTargetRelation {
 /// table of known provider identifiers:
 ///
 /// - equal spellings are [`Exact`](ProviderTargetRelation::Exact);
-/// - the configured spelling followed by `-` and a *dated snapshot qualifier*
-///   is [`AliasConcretion`](ProviderTargetRelation::AliasConcretion) — the
-///   configured family made concrete;
-/// - everything else is
-///   [`DifferentLineage`](ProviderTargetRelation::DifferentLineage).
+/// - the configured spelling followed by `-` and a *dated snapshot qualifier* is
+///   [`AliasConcretion`](ProviderTargetRelation::AliasConcretion) — the configured family made
+///   concrete;
+/// - everything else is [`DifferentLineage`](ProviderTargetRelation::DifferentLineage).
 ///
 /// A dated snapshot qualifier is `YYYYMMDD` or `YYYY-MM-DD`; calendar
 /// validity is deliberately not checked, because the shape alone makes the
@@ -891,6 +890,7 @@ struct AcceptanceObservations<AcceptancePossible, Correlation> {
     telemetry: ModelCallTelemetry,
     text_deltas: Option<ProviderTextDeltaContext>,
     observations: Vec<Observation<Correlation>>,
+    rate_limits: Option<signalbox_domain::ProviderRateLimitSnapshot>,
 }
 
 struct ProviderTextDeltaContext {
@@ -906,6 +906,31 @@ where
     AcceptancePossible: FnOnce(),
     Correlation: PartialEq,
 {
+    fn observe_rate_limits(
+        &mut self,
+        correlation: Correlation,
+        snapshot: signalbox_model_runtime::RateLimitSnapshot,
+    ) {
+        if correlation != self.expected_correlation {
+            self.correlation_mismatch = true;
+            return;
+        }
+        self.rate_limits = Some(signalbox_domain::ProviderRateLimitSnapshot::new(
+            snapshot.observed_at,
+            snapshot
+                .windows
+                .into_iter()
+                .map(|window| {
+                    signalbox_domain::ProviderRateLimitWindow::new(
+                        window.remaining_percent,
+                        window.window_duration,
+                        window.resets_at,
+                    )
+                })
+                .collect(),
+        ));
+    }
+
     fn observe(&mut self, observation: Observation<Correlation>) {
         if observation.correlation != self.expected_correlation {
             self.correlation_mismatch = true;
@@ -1292,6 +1317,7 @@ where
                 sink: Arc::clone(&self.text_deltas),
             }),
             observations: Vec::new(),
+            rate_limits: None,
         };
         let report = self
             .runtime
@@ -1310,6 +1336,7 @@ where
             ));
         }
         let usage = provider_reported_token_usage(&report.evidence);
+        let rate_limits = observations.rate_limits.take();
         let retry_after = match &report.evidence {
             TerminalEvidence::ProviderError(error) => error.exchange.retry_after,
             _ => None,
@@ -1329,7 +1356,7 @@ where
         })?;
         report_classified_outcome(telemetry, &classified);
         let correlation = authorized.observation_correlation();
-        Ok(match classified.cause {
+        Ok((match classified.cause {
             ModelCallCauseCode::ProviderError(kind) => correlation
                 .bind_provider_failure_observation_with_retry_after(
                     provider_failure_cause(kind),
@@ -1339,6 +1366,7 @@ where
                 ),
             _ => correlation.bind_terminal_observation_with_usage(classified.observation, usage),
         })
+        .with_rate_limits(rate_limits))
     }
 }
 
@@ -2284,6 +2312,105 @@ mod tests {
     const SYNTHETIC_MALFORMED_TOOL_SCHEMA: &str = "{";
     const SYNTHETIC_INVALID_TOOL_NAME: &str = "synthetic_invalid_tool";
 
+    fn capacity_sink() -> AcceptanceObservations<fn(), ModelCallId> {
+        AcceptanceObservations {
+            expected_correlation: call(),
+            correlation_mismatch: false,
+            acceptance_possible: None,
+            telemetry: telemetry(),
+            text_deltas: None,
+            observations: Vec::new(),
+            rate_limits: None,
+        }
+    }
+
+    #[test]
+    fn capacity_bridge_retains_latest_snapshot_through_both_redacting_sinks() {
+        use signalbox_model_runtime::{
+            CredentialRedactingSink, CredentialValue, RateLimitSnapshot, RateLimitWindow,
+            RedactingSink,
+        };
+        use std::time::{Duration, SystemTime};
+
+        let observed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let resets_at = observed_at + Duration::from_secs(900);
+        let mut sink = capacity_sink();
+        sink.observe_rate_limits(
+            call(),
+            RateLimitSnapshot {
+                observed_at: observed_at - Duration::from_secs(1),
+                windows: vec![RateLimitWindow {
+                    remaining_percent: 91,
+                    window_duration: None,
+                    resets_at: None,
+                }],
+            },
+        );
+        let credential = CredentialValue::new(b"synthetic-capacity-test-secret".to_vec());
+        {
+            let mut exact = CredentialRedactingSink::new(&mut sink, &credential);
+            let mut shaped = RedactingSink::new(&mut exact);
+            shaped.observe_rate_limits(
+                call(),
+                RateLimitSnapshot {
+                    observed_at,
+                    windows: vec![
+                        RateLimitWindow {
+                            remaining_percent: 23,
+                            window_duration: Some(Duration::from_secs(18_000)),
+                            resets_at: Some(resets_at),
+                        },
+                        RateLimitWindow {
+                            remaining_percent: 0,
+                            window_duration: None,
+                            resets_at: None,
+                        },
+                    ],
+                },
+            );
+        }
+        sink.observe(Observation {
+            correlation: call(),
+            fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+        });
+        let retained = sink
+            .rate_limits
+            .expect("capacity survives both redacting sinks");
+        assert_eq!(*retained.observed_at(), observed_at);
+        assert_eq!(retained.windows().len(), 2);
+        assert_eq!(*retained.windows()[0].remaining_percent(), 23);
+        assert_eq!(
+            *retained.windows()[0].window_duration(),
+            Some(Duration::from_secs(18_000))
+        );
+        assert_eq!(*retained.windows()[0].resets_at(), Some(resets_at));
+        assert_eq!(*retained.windows()[1].remaining_percent(), 0);
+        assert_eq!(*retained.windows()[1].window_duration(), None);
+        assert_eq!(*retained.windows()[1].resets_at(), None);
+    }
+
+    #[test]
+    fn capacity_bridge_rejects_evidence_for_another_call() {
+        use signalbox_model_runtime::{RateLimitSnapshot, RateLimitWindow};
+        let mut sink = capacity_sink();
+        sink.observe_rate_limits(
+            ModelCallId::from_uuid(Uuid::from_u128(99)),
+            RateLimitSnapshot {
+                observed_at: std::time::SystemTime::UNIX_EPOCH,
+                windows: vec![RateLimitWindow {
+                    remaining_percent: 7,
+                    window_duration: None,
+                    resets_at: None,
+                }],
+            },
+        );
+        assert!(
+            sink.correlation_mismatch,
+            "misbound evidence must fail the invocation closed"
+        );
+        assert_eq!(sink.rate_limits, None);
+    }
+
     fn call() -> ModelCallId {
         ModelCallId::from_uuid(Uuid::from_u128(1))
     }
@@ -2454,9 +2581,8 @@ mod tests {
         .into_request()
     }
 
-    /// the outward runtime bridge consumes imported
-    /// messages under their rendered role and exact text without consulting or
-    /// manufacturing native execution provenance.
+    /// the outward runtime bridge consumes imported messages under their rendered role and exact
+    /// text without consulting or manufacturing native execution provenance.
     #[test]
     fn imported_messages_map_to_provider_neutral_text_roles() {
         let source = SemanticTranscriptEntryRef::from_source(
@@ -2487,9 +2613,8 @@ mod tests {
         );
     }
 
-    /// the provider bridge renders the durable identity boundary
-    /// as the exact injected user-role session event selected by the recorded
-    /// context-lifecycle decision.
+    /// the provider bridge renders the durable identity boundary as the exact injected user-role
+    /// session event selected by the recorded context-lifecycle decision.
     #[test]
     fn model_identity_boundary_is_an_injected_user_message() {
         let source = source(12);
@@ -2589,9 +2714,8 @@ mod tests {
             usage: TokenUsage::unreported(),
         })
     }
-    /// one provider response and its ordered result
-    /// batch remain grouped, while malformed arguments use replay-safe JSON
-    /// without replacing their exact durable request evidence.
+    /// one provider response and its ordered result batch remain grouped, while malformed arguments
+    /// use replay-safe JSON without replacing their exact durable request evidence.
     #[test]
     fn tool_history_is_grouped_and_replay_safe() {
         let first = request(20, "{}");
@@ -2711,6 +2835,7 @@ mod tests {
             telemetry: telemetry(),
             text_deltas: None,
             observations: Vec::new(),
+            rate_limits: None,
         };
 
         sink.observe(Observation {
@@ -2747,6 +2872,7 @@ mod tests {
             telemetry: telemetry(),
             text_deltas: None,
             observations: Vec::new(),
+            rate_limits: None,
         };
 
         sink.observe(Observation {
@@ -2798,6 +2924,7 @@ mod tests {
                 sink: Arc::new(recorded.clone()),
             }),
             observations: Vec::new(),
+            rate_limits: None,
         };
         let mismatched = Observation {
             correlation: ModelCallId::from_uuid(Uuid::from_u128(2)),
@@ -2859,8 +2986,8 @@ mod tests {
         );
     }
 
-    /// runtime terminal evidence maps to the exact
-    /// physical disposition without retryability or error-string inference.
+    /// runtime terminal evidence maps to the exact physical disposition without retryability or
+    /// error-string inference.
     #[test]
     fn terminal_evidence_classification_is_total() {
         let exchange = ExchangeFacts::default();
@@ -2960,8 +3087,8 @@ mod tests {
         );
     }
 
-    /// only exact text from a matching reported target becomes
-    /// assistant content; empty blocks create no invalid empty entry.
+    /// only exact text from a matching reported target becomes assistant content; empty blocks
+    /// create no invalid empty entry.
     #[test]
     fn matching_completion_preserves_text_parts() {
         assert_eq!(
@@ -3149,8 +3276,8 @@ mod tests {
         ));
     }
 
-    /// runtime-native tool calls become ordered,
-    /// normalized domain proposals without retaining provider identifiers.
+    /// runtime-native tool calls become ordered, normalized domain proposals without retaining
+    /// provider identifiers.
     #[test]
     fn tool_completion_crosses_as_provider_neutral_proposals() {
         let classified = classify_terminal(
@@ -3178,10 +3305,9 @@ mod tests {
         ));
     }
 
-    /// a Claude 5-family tool completion carrying the
-    /// omitted-display empty thinking part classifies as a tool round — the
-    /// empty part is dropped like an empty text block instead of failing the
-    /// whole legitimate completion closed.
+    /// a Claude 5-family tool completion carrying the omitted-display empty thinking part
+    /// classifies as a tool round — the empty part is dropped like an empty text block instead of
+    /// failing the whole legitimate completion closed.
     #[test]
     fn empty_thinking_part_is_dropped_from_a_tool_completion() {
         let classified = classify_terminal(
@@ -3217,9 +3343,8 @@ mod tests {
         ));
     }
 
-    /// thinking with actual text still fails the bridge
-    /// closed — dropping it would silently erase response material for which
-    /// no durable semantic representation exists.
+    /// thinking with actual text still fails the bridge closed — dropping it would silently erase
+    /// response material for which no durable semantic representation exists.
     #[test]
     fn nonempty_thinking_part_still_fails_closed() {
         let outcome = classify_terminal(
@@ -3243,8 +3368,8 @@ mod tests {
         ));
     }
 
-    /// tool-call content and the `ToolUse` finish reason must
-    /// agree before either terminal completion observation is constructed.
+    /// tool-call content and the `ToolUse` finish reason must agree before either terminal
+    /// completion observation is constructed.
     #[test]
     fn mismatched_tool_finish_is_known_failed() {
         assert_eq!(
@@ -3433,9 +3558,9 @@ mod tests {
         );
     }
 
-    /// an alias resolved to its own canonical dated form is
-    /// the same logical target. The exchange completes, and the concrete
-    /// identity that actually served it is retained as sanitized evidence.
+    /// an alias resolved to its own canonical dated form is the same logical target. The exchange
+    /// completes, and the concrete identity that actually served it is retained as sanitized
+    /// evidence.
     ///
     /// This is the regression pin for the live wedge: before the
     /// normalization law, a configured undated alias whose response echoed
@@ -3477,8 +3602,8 @@ mod tests {
         );
     }
 
-    /// an exactly matching identity needs no normalization
-    /// record, so nothing is manufactured for it.
+    /// an exactly matching identity needs no normalization record, so nothing is manufactured for
+    /// it.
     #[test]
     fn exact_identity_records_no_concretion() {
         let classified = classify_terminal(
@@ -3520,8 +3645,8 @@ mod tests {
             .collect()
     }
 
-    /// the discriminator between an alias made concrete and a
-    /// substituted lineage, stated as a table.
+    /// the discriminator between an alias made concrete and a substituted lineage, stated as a
+    /// table.
     #[test]
     fn distinguishes_exact_targets_alias_concretion_and_different_lineages() {
         let rows = relation_rows(&[

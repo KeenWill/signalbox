@@ -120,28 +120,20 @@ helper signatures, where it is applied least consistently.
 ## Numeric bounds
 
 A production numeric bound stays in code only when removing it can break the
-process itself. Declare that structural **guard** with
-`// numeric-bound: guard - <pathological case prevented>`. A mechanically
-derived guard declares the guard it derives from. Configuration may lower a
-guard but not raise it.
+process itself. Configuration may lower such a guard but not raise it.
 
 Every other timeout, interval, attempt budget, concurrency or page bound, and
 retained-detail policy the task names is required deployment configuration, with
 no code default and no production constant; one the task does not name is not
 introduced at all ([minimum mechanism](../AGENTS.md)). Test-only constants may
-size or bound their fixture without a production declaration.
+size or bound their fixture.
 
-A constant whose name reads like a bound but states a fixed representation fact
-— a numeric type's exact maximum, UTF-8's continuation width, the basis points
-in full scale — is **not a bound**, and says so in place of a kind. Declaring it
-keeps the exception visible where silence would read as an undeclared cap.
-
-The test is whether the number could sensibly have been chosen differently. A
-representation fact has one correct value that no deployment raises or lowers; a
-number anyone could argue about is either a structural guard or deployment
-policy however its name reads. Checking live input against a representation fact
-does not convert it into a bound, and no amount of arithmetic converts a chosen
-allowance into a fact.
+A representation fact, such as a type's maximum or an encoding width, is not a
+bound. A literal that encodes an external limit cites its source in a plain
+comment; a non-obvious derivation gets a plain explanation. Omit comments that
+merely restate the name or surrounding code. Review checks that literals
+encoding external limits cite their sources and that no bound classification
+tags remain.
 
 ## Conventions at component seams
 
@@ -369,11 +361,8 @@ type or decoder mirroring a wire shape additionally names the wire discriminant
 it decodes, which makes a missing decoder visible by inspection.
 
 Every public item in the domain and application crates — including enum variants
-and public struct fields — carries a doc comment. `DelegationTransitionFailure`
-and `DelegationTransitionError` in
-`crates/domain/src/session_delegation/relation.rs` are undocumented; document
-them when next changing that file. `missing_docs` stays off until the workspace
-has no undocumented public items (see mechanical enforcement).
+and public struct fields — carries a doc comment. `missing_docs` stays off until
+the workspace has no undocumented public items (see mechanical enforcement).
 
 Every arm of a tagged wire decoder in the native client names its complete
 admitted field set, through the shared rejection helper or a hand-written
@@ -551,8 +540,8 @@ guide introduces:
   when next changing the file.
 
 - **Namespaced generators** for values whose only obligation is distinctness —
-  `next_test_submit_uuid()` in `postgres_integration/main.rs:1722-1725` prefixes
-  its IDs with `0xfeed_cafe_dead_beef`. A value from a generator is arbitrary by
+  `next_test_submit_uuid()` in `postgres_integration/main.rs` prefixes its IDs
+  with `0xfeed_cafe_dead_beef`. A value from a generator is arbitrary by
   construction; no reader will mistake it for load-bearing.
 
 - **One-knob fixtures** (TS-4) so arbitrary plumbing does not reach the test
@@ -561,7 +550,7 @@ guide introduces:
   (`crates/runner-wire/src/tests.rs` uses the prefix).
 
 Worked example: `checkpoint_restart_model_call` combines both problems in one
-signature (`postgres_integration/main.rs:3084-3088`, twelve call sites):
+signature (`postgres_integration/main.rs`, twelve call sites):
 
 ```rust
 async fn checkpoint_restart_model_call(pool: &PgPool, seed: u128, authorize: bool) -> ...
@@ -655,8 +644,8 @@ The domain crate's ID discipline (`SessionId`, `TurnId`, `AcceptedInputId`,
 differ in type, so they cannot be confused (principle 2, and Rust API Guidelines
 C-NEWTYPE). Extend the same discipline to counts and versions in helper
 signatures. For example, `input_choices(expected: u64, ...)`
-(`postgres_integration/main.rs:2619`) takes a bare `u64` immediately converted
-into a `SessionConfigurationDefaultsVersion`; twenty-plus call sites read
+(`postgres_integration/main.rs`) takes a bare `u64` immediately converted into a
+`SessionConfigurationDefaultsVersion`; twenty-plus call sites read
 `input_choices(1, ...)` where neither the name `expected` nor the literal `1`
 reveals that the value is a defaults *version*. Take the domain type and the
 call sites explain themselves. Renaming the parameter alone does not change
@@ -673,7 +662,7 @@ Where the repository already does this well; point reviews here.
   `InterruptImmediatelyAfter { predecessor }` (principles 3 and 5).
 - `crates/domain/src/provider_evidence.rs:790-795` — doc-commented test
   constants distinguishing load-bearing from arbitrary identities (principle 1).
-- `crates/persistence/tests/postgres_integration/main.rs:1722-1725` —
+- `crates/persistence/tests/postgres_integration/main.rs` —
   `next_test_submit_uuid()`, arbitrary-by-construction IDs under a visible
   namespace (principle 1).
 - The domain crate's ID newtypes and state enums throughout —

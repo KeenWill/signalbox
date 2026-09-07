@@ -158,10 +158,22 @@ pub use signalbox_application::RepoWatchThreadState;
 pub use signalbox_application::RepoWatchWorkflowRunObservation;
 ```
 
+## UuidV7RepoWatchEventIdGenerator
+
+```rust
+pub use signalbox_application::UuidV7RepoWatchEventIdGenerator;
+```
+
 ## derive_repo_watch_events
 
 ```rust
 pub use signalbox_application::derive_repo_watch_events;
+```
+
+## derive_repo_watch_events_with_merged_baselines
+
+```rust
+pub use signalbox_application::derive_repo_watch_events_with_merged_baselines;
 ```
 
 ## BranchName
@@ -907,6 +919,13 @@ impl LifecycleEvent {
     pub const fn recorded_at(&self) -> offset_date_time::OffsetDateTime;
     pub const fn session(&self) -> option::Option<signalbox_domain::SessionId>;
     pub const fn kind(&self) -> &LifecycleEventKind;
+    #[cfg(feature = "test-support")]
+    pub const fn for_test(
+        sequence: u64,
+        recorded_at: offset_date_time::OffsetDateTime,
+        session: option::Option<signalbox_domain::SessionId>,
+        kind: LifecycleEventKind,
+    ) -> Self;
     #[cfg(feature = "test-support")]
     pub const fn session_created_for_test(
         sequence: u64,

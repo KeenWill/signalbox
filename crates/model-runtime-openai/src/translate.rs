@@ -58,11 +58,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
             detail: "top_p must be a finite number from 0 through 1".to_string(),
         });
     }
-    if !operation.settings.stop_sequences.is_empty() {
-        return Err(PreparationFailure::UnsupportedOperation {
-            detail: "Responses does not support stop sequences".to_string(),
-        });
-    }
+    validate_stop_sequences(&operation.settings)?;
     let (tools, tool_choice, parallel_tool_calls) = tools_and_choice(operation)?;
     let mut messages = Vec::new();
     if let Some(system) = &operation.system {
@@ -109,11 +105,21 @@ pub(crate) fn build_request_with_fast_mode<C>(
 /// owns cross-knob constraints that independent capability sets cannot state.
 pub fn validate_model_settings(settings: &ModelSettings) -> Result<(), PreparationFailure> {
     validate_output_ceiling(settings)?;
+    validate_stop_sequences(settings)?;
     settings
         .reasoning_level
         .map(openai_reasoning_effort)
         .transpose()?;
     openai_service_tier(settings, settings.fast_mode)?;
+    Ok(())
+}
+
+fn validate_stop_sequences(settings: &ModelSettings) -> Result<(), PreparationFailure> {
+    if !settings.stop_sequences.is_empty() {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "Responses does not support stop sequences".to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -1375,17 +1381,31 @@ mod tests {
     }
 
     #[test]
-    fn a_nonempty_stop_sequence_is_rejected_before_any_send() {
-        let mut operation = operation("call-too-many-stops");
-        operation.settings.stop_sequences = vec!["END".to_string()];
+    fn nonempty_stop_sequences_fail_configuration_and_preparation() {
+        let mut candidate = operation("call-stop-sequences");
+        candidate.settings.stop_sequences = vec!["END".to_string()];
 
-        let failure = build_request(&operation)
-            .expect_err("the provider accepts no more than four stop sequences");
+        let validation = validate_model_settings(&candidate.settings)
+            .expect_err("Responses cannot enforce a stop sequence");
+        let preparation =
+            build_request(&candidate).expect_err("unsupported stops must fail before send");
 
-        assert!(matches!(
-            failure,
-            PreparationFailure::UnsupportedOperation { .. }
-        ));
+        assert_eq!(
+            validation,
+            PreparationFailure::UnsupportedOperation {
+                detail: "Responses does not support stop sequences".to_string(),
+            }
+        );
+        assert_eq!(preparation, validation);
+    }
+
+    #[test]
+    fn empty_stop_sequences_pass_configuration_and_preparation() {
+        let mut candidate = operation("call-no-stop-sequences");
+        candidate.settings.stop_sequences = Vec::new();
+
+        assert!(validate_model_settings(&candidate.settings).is_ok());
+        assert!(build_request(&candidate).is_ok());
     }
 
     #[test]

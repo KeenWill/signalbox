@@ -53,7 +53,6 @@ const REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1: &[u8] =
 /// an occurrence number, which mints a content identity that collides with an
 /// already-durable one, so the differ stops rather than emit an identity that
 /// does not identify its occurrence.
-// numeric-bound: guard - prevents hostile identity fan-out from exhausting resident memory
 const MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS: usize = 1_000_000;
 
 /// A source-independent SHA-256 identity for one normalized event occurrence.
@@ -300,7 +299,6 @@ pub enum RepoWatchPullRequestLifecycle {
     Merged,
 }
 
-// numeric-bound: guard - preserves the advertised provider check-generation wire grammar
 const MAX_CHECK_COMPLETION_GENERATION_BYTES: usize = 64;
 
 /// Opaque provider generation for one completed check execution.
@@ -548,6 +546,7 @@ impl RepoWatchMergedCheckRunBaselineV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchMergedPullRequestBaselineInputV1 {
     pub number: PullRequestNumber,
+    pub head_repository: RepositorySlug,
     pub head_sha: CommitSha,
     pub signal_reviewers: Vec<RepoWatchAuthorLogin>,
     pub labels: Vec<LabelName>,
@@ -562,11 +561,12 @@ pub struct RepoWatchMergedPullRequestBaselineInputV1 {
 /// Minimal consecutive-comparison state for a merged pull request.
 ///
 /// Full provider details leave the ordinary observation after merge, while
-/// this baseline retains only members the differ needs to recognize a later
-/// post-merge occurrence without replaying terminal history.
+/// this baseline retains comparison state and the head repository needed to
+/// observe post-merge activity after a fork is deleted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchMergedPullRequestBaselineV1 {
     number: PullRequestNumber,
+    head_repository: RepositorySlug,
     head_sha: CommitSha,
     signal_reviewers: Box<[RepoWatchAuthorLogin]>,
     labels: Box<[LabelName]>,
@@ -633,6 +633,7 @@ impl RepoWatchMergedPullRequestBaselineV1 {
         input.reactions.dedup();
         Ok(Self {
             number: input.number,
+            head_repository: input.head_repository,
             head_sha: input.head_sha,
             signal_reviewers: input.signal_reviewers.into_boxed_slice(),
             labels: input.labels.into_boxed_slice(),
@@ -654,6 +655,7 @@ impl RepoWatchMergedPullRequestBaselineV1 {
         }
         Self::try_new(RepoWatchMergedPullRequestBaselineInputV1 {
             number: state.context().number(),
+            head_repository: state.context().head_repository().clone(),
             head_sha: state.context().head_sha().clone(),
             signal_reviewers: signal_reviewers.to_vec(),
             labels: state.context().labels().to_vec(),
@@ -692,6 +694,10 @@ impl RepoWatchMergedPullRequestBaselineV1 {
 
     pub const fn number(&self) -> PullRequestNumber {
         self.number
+    }
+
+    pub const fn head_repository(&self) -> &RepositorySlug {
+        &self.head_repository
     }
 
     pub const fn head_sha(&self) -> &CommitSha {
@@ -2854,6 +2860,7 @@ mod tests {
     fn merged_baseline_input() -> Result<RepoWatchMergedPullRequestBaselineInputV1, Box<dyn Error>>
     {
         Ok(RepoWatchMergedPullRequestBaselineInputV1 {
+            head_repository: RepositorySlug::try_new(String::from(HEAD_REPOSITORY))?,
             number: pull_request_number(PULL_REQUEST_NUMBER),
             head_sha: CommitSha::try_new(String::from(INITIAL_HEAD))?,
             signal_reviewers: vec![reviewer(REVIEWER)?],

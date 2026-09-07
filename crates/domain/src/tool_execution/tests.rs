@@ -72,8 +72,7 @@ fn awaiting_batch() -> ToolBatch {
     .expect("the first undecided request is exact")
 }
 
-/// user decisions advance exactly one
-/// earliest wait and retain explicit user provenance.
+/// user decisions advance exactly one earliest wait and retain explicit user provenance.
 #[test]
 fn user_decision_advances_to_next_wait() {
     let batch = awaiting_batch();
@@ -112,8 +111,7 @@ fn user_decision_advances_to_next_wait() {
     assert_eq!(*next_request, expected_next_request);
 }
 
-/// durable approval history is exactly a proposal-order
-/// prefix and cannot skip the current wait.
+/// durable approval history is exactly a proposal-order prefix and cannot skip the current wait.
 #[test]
 fn reconstitution_rejects_nonprefix_approval_inventory() {
     let first = request(10, 0);
@@ -218,9 +216,8 @@ fn reconstitution_rejects_delegate_resolution_for_human_request() {
     );
 }
 
-/// reconstitution enforces the same 32-request bound as
-/// provider-response admission instead of granting authority to oversized
-/// stored batches.
+/// reconstitution enforces the same 32-request bound as provider-response admission instead of
+/// granting authority to oversized stored batches.
 #[test]
 fn reconstitution_rejects_oversized_request_batch() {
     let requests = (0..33)
@@ -248,8 +245,8 @@ fn reconstitution_rejects_oversized_request_batch() {
     );
 }
 
-/// model-call completion may freeze automatic
-/// approval for a later request while an earlier confirmation still waits.
+/// model-call completion may freeze automatic approval for a later request while an earlier
+/// confirmation still waits.
 #[test]
 fn later_automatic_approval_survives_reconstitution() {
     let first = request(10, 0);
@@ -277,8 +274,8 @@ fn later_automatic_approval_survives_reconstitution() {
     );
 }
 
-/// a user decision is admissible only at the exact
-/// durable approval wait and cannot manufacture a wait from execution.
+/// a user decision is admissible only at the exact durable approval wait and cannot manufacture a
+/// wait from execution.
 #[test]
 fn user_decision_rejects_nonwaiting_batch_unchanged() {
     let only = request(10, 0);
@@ -317,8 +314,8 @@ fn user_decision_rejects_nonwaiting_batch_unchanged() {
     );
 }
 
-/// one active batch cannot turn an existing request from a
-/// different aggregate into a user-global not-found result.
+/// one active batch cannot turn an existing request from a different aggregate into a user-global
+/// not-found result.
 #[test]
 fn out_of_batch_decision_is_a_correlation_error() {
     let command = DecideToolRequest::new(
@@ -343,8 +340,7 @@ fn out_of_batch_decision_is_a_correlation_error() {
     );
 }
 
-/// serialized execution prepares only the first
-/// approved request without terminal attempt evidence.
+/// serialized execution prepares only the first approved request without terminal attempt evidence.
 #[test]
 fn execution_prepares_first_unattempted_request() {
     let first = request(10, 0);
@@ -377,8 +373,7 @@ fn execution_prepares_first_unattempted_request() {
     );
 }
 
-/// only a completely reconstituted ambiguous
-/// batch can expose the exact tool recovery-wait subject.
+/// only a completely reconstituted ambiguous batch can expose the exact tool recovery-wait subject.
 #[test]
 fn ambiguous_batch_exposes_opaque_recovery_wait() {
     let only = request(10, 0);
@@ -418,8 +413,8 @@ fn ambiguous_batch_exposes_opaque_recovery_wait() {
     assert_eq!(wait.attempt(), tool_attempt_id(13));
 }
 
-/// impossible effect-free ambiguity cannot
-/// manufacture recovery-wait authority during checked reconstitution.
+/// impossible effect-free ambiguity cannot manufacture recovery-wait authority during checked
+/// reconstitution.
 #[test]
 fn effect_free_ambiguous_history_fails_closed() {
     let only = request(10, 0);
@@ -456,8 +451,7 @@ fn effect_free_ambiguous_history_fails_closed() {
     );
 }
 
-/// a live serialized attempt is the last
-/// attempt that can exist in proposal order.
+/// a live serialized attempt is the last attempt that can exist in proposal order.
 #[test]
 fn reconstitution_rejects_attempt_after_live_attempt() {
     let first = request(10, 0);
@@ -512,8 +506,7 @@ fn reconstitution_rejects_attempt_after_live_attempt() {
     );
 }
 
-/// recovery evidence belongs to one issuing
-/// continuation tenure throughout the complete batch.
+/// recovery evidence belongs to one issuing continuation tenure throughout the complete batch.
 #[test]
 fn recovery_rejects_mixed_issuing_attempts() {
     let first = request(10, 0);
@@ -570,8 +563,8 @@ fn recovery_rejects_mixed_issuing_attempts() {
     );
 }
 
-/// crash-lost evidence is a turn-level blocker,
-/// so no later approved request can be prepared or already attempted.
+/// crash-lost evidence is a turn-level blocker, so no later approved request can be prepared or
+/// already attempted.
 #[test]
 fn crash_loss_stops_serial_batch_execution() {
     let first = request(10, 0);
@@ -671,8 +664,7 @@ fn crash_loss_stops_serial_batch_execution() {
     );
 }
 
-/// result projection uses only attempt/request
-/// references and preserves proposal order.
+/// result projection uses only attempt/request references and preserves proposal order.
 #[test]
 fn result_projection_is_reference_only_and_ordered() {
     let executed = request(10, 0);
@@ -738,8 +730,8 @@ fn result_projection_is_reference_only_and_ordered() {
     );
 }
 
-/// a delivered foreground child wait reopens the
-/// batch under a fresh turn attempt and projects the typed result once.
+/// a delivered foreground child wait reopens the batch under a fresh turn attempt and projects the
+/// typed result once.
 #[test]
 fn foreground_child_wait_resumes_and_projects_typed_result() {
     let awaited = request(10, 0);
@@ -845,8 +837,8 @@ fn foreground_child_wait_resumes_and_projects_typed_result() {
     );
 }
 
-/// terminal recovery closes every
-/// logical request in proposal order without rewriting physical ambiguity.
+/// terminal recovery closes every logical request in proposal order without rewriting physical
+/// ambiguity.
 #[test]
 fn reconciliation_projection_closes_ambiguity() {
     let ambiguous = request(10, 0);
@@ -907,8 +899,7 @@ fn reconciliation_projection_closes_ambiguity() {
     );
     assert_eq!(projection.snapshot().entry_count(), 2);
 }
-/// every clone of one checked batch shares one
-/// runner-authorization issuance capability.
+/// every clone of one checked batch shares one runner-authorization issuance capability.
 #[test]
 fn runner_authorization_is_single_use_across_batch_clones() {
     let only = request(10, 0);
@@ -954,8 +945,8 @@ fn runner_authorization_is_single_use_across_batch_clones() {
     );
 }
 
-/// restored in-flight authority is also
-/// single-use for runner conversion across clones of one checked batch.
+/// restored in-flight authority is also single-use for runner conversion across clones of one
+/// checked batch.
 #[test]
 fn in_flight_runner_authorization_is_single_use_across_clones() {
     let only = request(10, 0);
@@ -1030,8 +1021,8 @@ fn in_flight_runner_authorization_is_single_use_across_clones() {
     );
 }
 
-/// reconstitution restores every retired
-/// identity and rejects it as a later claimed-attempt replacement.
+/// reconstitution restores every retired identity and rejects it as a later claimed-attempt
+/// replacement.
 #[test]
 fn reconstituted_batch_rejects_retired_identity_reuse() {
     let only = request(10, 0);

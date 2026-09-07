@@ -2,234 +2,40 @@
 
 # repo_watch
 
-## RepoWatchTextError
+## RepoWatchRuleActionV1
 
 ```rust
-pub enum RepoWatchTextError {
-    Empty,
-    ContainsNull,
-    TooLong { bytes: usize, maximum: usize },
-    TooManyCharacters { characters: usize, maximum: usize },
-    Malformed,
-    UnanchoredPattern,
-    InvalidPattern { reason: string::String },
+pub enum RepoWatchRuleActionV1 {
+    DispatchSession { template: SessionTemplateName },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for RepoWatchTextError {
+impl RepoWatchRuleActionV1 {
+    pub const fn template(&self) -> &SessionTemplateName;
+}
+```
+
+## RepoWatchSingletonScope
+
+```rust
+pub enum RepoWatchSingletonScope {
+    PullRequest,
+    Stack,
+    Rule,
+    Repository,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## RepoWatchDispatchContextShape
+
+```rust
+pub enum RepoWatchDispatchContextShape {
+    PullRequest,
+    Branch,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl fmt::Display for RepoWatchDispatchContextShape {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for RepoWatchTextError {}
-```
-
-## RepositorySlug
-
-```rust
-pub struct RepositorySlug(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl RepositorySlug {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## BranchName
-
-```rust
-pub struct BranchName(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl BranchName {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## LabelName
-
-```rust
-pub struct LabelName(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl LabelName {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## RepoWatchAuthorLogin
-
-```rust
-pub struct RepoWatchAuthorLogin(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl RepoWatchAuthorLogin {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## CheckRunName
-
-```rust
-pub struct CheckRunName(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl CheckRunName {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## WorkflowName
-
-```rust
-pub struct WorkflowName(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl WorkflowName {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## ReactionContent
-
-```rust
-pub struct ReactionContent(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ReactionContent {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## RepoWatchRuleId
-
-```rust
-pub struct RepoWatchRuleId(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl RepoWatchRuleId {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## ReviewThreadId
-
-```rust
-pub struct ReviewThreadId(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ReviewThreadId {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## PullRequestTitle
-
-```rust
-pub struct PullRequestTitle(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl PullRequestTitle {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## PullRequestBody
-
-```rust
-pub struct PullRequestBody(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl PullRequestBody {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## CommitSha
-
-```rust
-pub struct CommitSha(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl CommitSha {
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## PullRequestNumber
-
-```rust
-pub struct PullRequestNumber(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl PullRequestNumber {
-    pub const fn new(value: nonzero::NonZeroU64) -> Self;
-    pub const fn get(self) -> u64;
-}
-```
-
-## GitHubObjectId
-
-```rust
-pub struct GitHubObjectId(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl GitHubObjectId {
-    pub const fn new(value: nonzero::NonZeroU64) -> Self;
-    pub const fn get(self) -> u64;
-}
-```
-
-## RepoWatchWorkflowRunAttempt
-
-```rust
-pub struct RepoWatchWorkflowRunAttempt(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl RepoWatchWorkflowRunAttempt {
-    pub const fn new(value: nonzero::NonZeroU64) -> Self;
-    pub const fn get(self) -> u64;
-}
-```
-
-## RepoWatchPattern
-
-```rust
-pub struct RepoWatchPattern {/* private */}
-// derives: clone::Clone
-impl fmt::Debug for RepoWatchPattern {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl cmp::PartialEq for RepoWatchPattern {
-    fn eq(&self, other: &Self) -> bool;
-}
-impl cmp::Eq for RepoWatchPattern {}
-impl hash::Hash for RepoWatchPattern {
-    fn hash<H: hash::Hasher>(&self, state: &mut H);
-}
-impl RepoWatchPattern {
-    pub const MAX_UTF8_BYTES: usize;
-    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
-    pub fn as_str(&self) -> &str;
-    pub fn is_match(&self, candidate: &str) -> bool;
-}
-```
-
-## RepoWatchRuleVersion
-
-```rust
-pub struct RepoWatchRuleVersion(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl RepoWatchRuleVersion {
-    pub const V1: Self;
-    pub const fn new(value: nonzero::NonZeroU64) -> option::Option<Self>;
-    pub const fn get(self) -> u64;
 }
 ```
 
@@ -549,43 +355,6 @@ pub struct RepoWatchMatcherV1Input {
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
 ```
 
-## RepoWatchSingletonScope
-
-```rust
-pub enum RepoWatchSingletonScope {
-    PullRequest,
-    Stack,
-    Rule,
-    Repository,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## RepoWatchDispatchContextShape
-
-```rust
-pub enum RepoWatchDispatchContextShape {
-    PullRequest,
-    Branch,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl fmt::Display for RepoWatchDispatchContextShape {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-```
-
-## RepoWatchRuleActionV1
-
-```rust
-pub enum RepoWatchRuleActionV1 {
-    DispatchSession { template: SessionTemplateName },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl RepoWatchRuleActionV1 {
-    pub const fn template(&self) -> &SessionTemplateName;
-}
-```
-
 ## RepoWatchRuleContentDigest
 
 ```rust
@@ -679,4 +448,235 @@ impl fmt::Display for RepoWatchRuleValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchRuleValidationError {}
+```
+
+## RepoWatchTextError
+
+```rust
+pub enum RepoWatchTextError {
+    Empty,
+    ContainsNull,
+    TooLong { bytes: usize, maximum: usize },
+    TooManyCharacters { characters: usize, maximum: usize },
+    Malformed,
+    UnanchoredPattern,
+    InvalidPattern { reason: string::String },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl fmt::Display for RepoWatchTextError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for RepoWatchTextError {}
+```
+
+## RepositorySlug
+
+```rust
+pub struct RepositorySlug(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl RepositorySlug {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## BranchName
+
+```rust
+pub struct BranchName(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl BranchName {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## LabelName
+
+```rust
+pub struct LabelName(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl LabelName {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## RepoWatchAuthorLogin
+
+```rust
+pub struct RepoWatchAuthorLogin(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl RepoWatchAuthorLogin {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## CheckRunName
+
+```rust
+pub struct CheckRunName(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl CheckRunName {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## WorkflowName
+
+```rust
+pub struct WorkflowName(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl WorkflowName {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## ReactionContent
+
+```rust
+pub struct ReactionContent(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ReactionContent {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## RepoWatchRuleId
+
+```rust
+pub struct RepoWatchRuleId(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl RepoWatchRuleId {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## ReviewThreadId
+
+```rust
+pub struct ReviewThreadId(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ReviewThreadId {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## PullRequestTitle
+
+```rust
+pub struct PullRequestTitle(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl PullRequestTitle {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## PullRequestBody
+
+```rust
+pub struct PullRequestBody(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl PullRequestBody {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## CommitSha
+
+```rust
+pub struct CommitSha(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl CommitSha {
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## PullRequestNumber
+
+```rust
+pub struct PullRequestNumber(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl PullRequestNumber {
+    pub const fn new(value: nonzero::NonZeroU64) -> Self;
+    pub const fn get(self) -> u64;
+}
+```
+
+## GitHubObjectId
+
+```rust
+pub struct GitHubObjectId(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl GitHubObjectId {
+    pub const fn new(value: nonzero::NonZeroU64) -> Self;
+    pub const fn get(self) -> u64;
+}
+```
+
+## RepoWatchWorkflowRunAttempt
+
+```rust
+pub struct RepoWatchWorkflowRunAttempt(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl RepoWatchWorkflowRunAttempt {
+    pub const fn new(value: nonzero::NonZeroU64) -> Self;
+    pub const fn get(self) -> u64;
+}
+```
+
+## RepoWatchPattern
+
+```rust
+pub struct RepoWatchPattern {/* private */}
+// derives: clone::Clone
+impl fmt::Debug for RepoWatchPattern {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl cmp::PartialEq for RepoWatchPattern {
+    fn eq(&self, other: &Self) -> bool;
+}
+impl cmp::Eq for RepoWatchPattern {}
+impl hash::Hash for RepoWatchPattern {
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
+}
+impl RepoWatchPattern {
+    pub const MAX_UTF8_BYTES: usize;
+    pub fn try_new(value: string::String) -> result::Result<Self, RepoWatchTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn is_match(&self, candidate: &str) -> bool;
+}
+```
+
+## RepoWatchRuleVersion
+
+```rust
+pub struct RepoWatchRuleVersion(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl RepoWatchRuleVersion {
+    pub const V1: Self;
+    pub const fn new(value: nonzero::NonZeroU64) -> option::Option<Self>;
+    pub const fn get(self) -> u64;
+}
 ```

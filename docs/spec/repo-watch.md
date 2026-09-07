@@ -34,7 +34,7 @@ mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
 
-The module schema contains twelve tables:
+The module schema contains thirteen tables:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A
   repository row fences complete frontier commits with a generation and the
@@ -66,6 +66,8 @@ The module schema contains twelve tables:
 - `webhook_delivery`, `webhook_body`, and `webhook_disposition` retain one
   authenticated delivery under its caller-selected expiry.
 - `core_event_cursor` records module application progress.
+- `rule_evaluation_cursor` records each rule revision's last evaluated
+  repository event, including nonmatches and suppressed dispatches.
 
 The repository-event reducer evaluates the existing checked rule matcher and
 returns one batch with a fresh dispatch identity for each matching rule. It
@@ -85,10 +87,11 @@ template and the timing policy, and each repository lists its
 predicate described in [review workflows](review-workflows.md). The sweep
 evaluates one revalidated snapshot and uses that verdict for its decision.
 
-The v2 module is not composed into the daemon runtime: the daemon starts no
-module worker and exposes no module operator route. Planned dispatch actions and
-lifecycle reactions are retained in strictly increasing, unique action-ordinal
-order; no submitter is composed and no submission behavior is specified.
+The daemon composes the repository-watch module when `[repository_watch]` is
+configured and enabled. Dispatch actions and lifecycle reactions are retained in
+strictly increasing, unique action-ordinal order. The module submitter recovers
+exact retained payloads and invokes core session handlers through the daemon's
+command adapter.
 
 ## Design decisions
 
@@ -117,6 +120,28 @@ is a replay; different content is a conflict. Settlement changes a pending
 disposition exactly once. A frontier release supplies its observed generation
 and is stale after any intervening frontier commit.
 
+The module's repository task serializes polling and webhook wakes. Poll
+intervals are start-to-start; a wake received during an attempt waits for that
+attempt to finish and does not postpone the periodic poll deadline. Each attempt
+reloads its committed comparison baseline and frontier, including compacted
+merged pull requests and their head repository identities, fetches a complete
+observation, and commits the differ's facts with their poll or webhook lineage.
+Failed observations leave the prior committed state intact. The daemon starts
+these tasks, the configured webhook listener, and one serialized command worker
+beside the convergence sweep, and drains them before closing its database.
+
+The webhook listener authenticates the configured hook identity, secret, and
+repository before accepting a delivery. An empty resolved webhook secret is
+unavailable. Primary hooks wake the repository task; shadow hooks acknowledge
+without waking it. The runtime's `reload_configuration` reconciles rule
+revisions and replaces listener settings inside the reload. Enabled rule
+templates must resolve before composition or reload. Stale or conflicting rule
+revisions fail reload without replacing the running configuration. Same-address
+changes swap the path and hook map atomically; address changes bind a
+replacement before retiring the running listener, and a bind failure preserves
+the running settings. In-flight deliveries retry against the replacement
+configuration.
+
 Lifecycle reactions accept only `session_terminal` or `goal_changed` inputs and
 only `release_start` or sticky-stop lifecycle commands. These are the command
 forms used for convergence release and stale-work termination; no module lease
@@ -125,15 +150,38 @@ own one-based ordinal. A reaction naming a committed dispatch remains admissible
 after its rule is deactivated; deactivation prevents only new matched
 dispatches.
 
-The module retains a command in `dispatch_ledger` before any future submission
-and applies settlement lifecycle events to pending ledger rows. `SessionCreated`
-settles the next pending create action for its repository-watch dispatch and
-records the new session; replaying the event cannot settle another action.
-Identity reuse is idempotent only when all retained command metadata agrees. One
-dispatch reference names exactly one rule revision and event evaluation,
-including its complete ordered action batch. Pending ledger rows remain
-recoverable without the removed or inactive rule, and newly resolved template or
-configuration values cannot replace the committed payload.
+The module retains a command in `dispatch_ledger` before submission and applies
+settlement lifecycle events to pending ledger rows. `SessionCreated` settles the
+next pending create action for its repository-watch dispatch and records the new
+session; replaying the event cannot settle another action. Identity reuse is
+idempotent only when all retained command metadata agrees. One dispatch
+reference names exactly one rule revision and event evaluation, including its
+complete ordered action batch. Pending ledger rows remain recoverable without
+the removed or inactive rule, and newly resolved template or configuration
+values cannot replace the committed payload.
+
+Rule evaluation starts after the active revision's activation tail and resumes
+from its durable cursor. Matching facts acquire the configured singleton before
+commands and evaluation progress commit together. Pull-request scope keys the
+provider number; stack scope keys the root of the open base/head-branch
+component; repository scope keys the repository; rule scope spans repositories.
+Each key belongs to one rule revision. A live dispatch suppresses later matching
+facts. Nonsticky session termination releases its action; cooldown begins when
+the last action releases. A sticky stop keeps redispatch suppressed for that
+key.
+
+Goal commissioning or resumption releases the dispatched session's held start
+gate. Goal achievement or a user-stopped goal issues a parent-only sticky stop.
+Reactions retain their original rule and action even after configuration removes
+the rule. The module commits lifecycle effects before advancing its application
+cursor; the daemon acknowledges the corresponding seam event afterward.
+
+The command adapter copies complete resolved template defaults without initial
+input or repository credentials and stamps the module issuer on creation claims.
+Pending submission follow-ups remain retryable after core command settlement,
+including interruption of a live turn whose session is closing. Synchronous
+command-identity conflicts settle as rejected before submission continues to the
+next action.
 
 ## Boundary contracts
 
@@ -143,7 +191,7 @@ commands. It cannot import core persistence, qualify `public` tables, or name
 another module schema.
 
 The module retains an authenticated, HTTPS-only GitHub client for API-relative
-GET requests. It is an external-I/O capability and receives no database handle.
+GET requests and GraphQL observation queries. It receives no database handle.
 The daemon's repository-specific client loader rereads the configured credential
 file on each load and returns only an authenticated client handle. Credential
 and client-construction failures have distinct redacted error classes.

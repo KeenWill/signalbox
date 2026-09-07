@@ -626,6 +626,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             ),
         ]
     );
+    let loaded = RepoWatchStore::new(module_pool.clone())
+        .ingest_baseline(&repository)
+        .await?;
+    assert_eq!(loaded.generation, 1);
+    assert_eq!(loaded.observation.as_ref(), Some(&comparison_baseline));
+    assert_eq!(loaded.frontier, frontier);
     let retained_event_source: (String, Decimal) = sqlx::query_as(
         "SELECT producer, repository_event_ordinal FROM gh_event WHERE event_id = $1",
     )
@@ -1957,7 +1963,1070 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .await?;
     assert_eq!(retained_sequence, Decimal::from(3_u64));
 
+    // A separate repository exercises the runtime's empty-store and restart path.
+    let runtime_repository = RepositorySlug::try_new(String::from("runtime-restart/project"))?;
+    let empty_baseline = store.ingest_baseline(&runtime_repository).await?;
+    assert_eq!(empty_baseline.generation, 0);
+    assert!(empty_baseline.observation.is_none());
+    let observed = signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        repository: runtime_repository.clone(),
+        default_branch: default_branch.clone(),
+        default_head: default_head.clone(),
+        observation: comparison_baseline.clone(),
+        observed_at,
+    };
+    assert!(matches!(
+        store
+            .ingest_observation(&empty_baseline, &observed, EventProducer::Webhook)
+            .await?,
+        FrontierEventAdmission::Committed { generation: 1, .. }
+    ));
+    let restarted = RepoWatchStore::new(module_pool.clone());
+    let restart_baseline = restarted.ingest_baseline(&runtime_repository).await?;
+    assert_eq!(
+        restart_baseline.observation.as_ref(),
+        Some(&comparison_baseline)
+    );
+    assert_eq!(
+        restarted
+            .ingest_observation(&restart_baseline, &observed, EventProducer::Poll)
+            .await?,
+        FrontierEventAdmission::Unchanged
+    );
+    let retry = restarted
+        .ingest_observation(&empty_baseline, &observed, EventProducer::Poll)
+        .await?;
+    let FrontierEventAdmission::Committed { generation, events } = retry else {
+        panic!("an identical retry must recover its committed frontier");
+    };
+    assert_eq!(generation, 1);
+    assert!(!events.is_empty());
+    assert!(
+        events
+            .iter()
+            .all(|event| *event == EventAdmission::Replayed)
+    );
+    let lineage: (i64, bool) = sqlx::query_as(
+        "SELECT count(*), bool_and(producer = 'webhook'
+                AND frontier_generation = 1 AND repository_event_ordinal = event_ordinal)
+           FROM gh_event WHERE repository = $1",
+    )
+    .bind(runtime_repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert!(lineage.0 > 0);
+    assert!(lineage.1);
+
+    let compact_repository = RepositorySlug::try_new(String::from("compacted-restart/project"))?;
+    let source = &comparison_baseline.state().pull_requests()[0];
+    let merged = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        context: source.context().clone(),
+        lifecycle: RepoWatchPullRequestLifecycle::Merged,
+        mergeable_state: source.mergeable_state(),
+        completed_check_suites: source.completed_check_suites().to_vec(),
+        completed_check_runs: source.completed_check_runs().to_vec(),
+        reviews: source.reviews().to_vec(),
+        threads: source.threads().to_vec(),
+        reactions: source.reactions().to_vec(),
+    })?;
+    let compacted =
+        signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineV1::from_merged_state(
+            &merged,
+            comparison_baseline.signal_reviewers(),
+        )?
+        .expect("merged baseline");
+    let compact_observation = RepoWatchObservation::new(
+        comparison_baseline.signal_reviewers().to_vec(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                default_branch.clone(),
+                default_head.clone(),
+            )],
+        })?,
+    );
+    let compact_projection = RepositoryProjection {
+        repository: RepositoryState {
+            repository: &compact_repository,
+            default_branch: &default_branch,
+            default_head: &default_head,
+            observed_at,
+        },
+        pull_requests: Vec::new(),
+        comparison_baseline: &compact_observation,
+        merged_baselines: std::slice::from_ref(&compacted),
+    };
+    store
+        .commit_frontier_candidate(
+            &compact_projection,
+            0,
+            &[],
+            &[],
+            EventProducer::Poll,
+            observed_at,
+        )
+        .await?;
+    let reopened = RepoWatchStore::new(module_pool.clone());
+    let restored = reopened.ingest_baseline(&compact_repository).await?;
+    assert_eq!(restored.merged_baselines, vec![compacted]);
+    let mut completed_check_runs = merged.completed_check_runs().to_vec();
+    // A distinct completed run is the only change after compaction and restart.
+    completed_check_runs.push(RepoWatchCheckRunObservation::new(
+        GitHubObjectId::new(NonZeroU64::new(900001).expect("new fixture check identity")),
+        RepoWatchCheckCompletionGeneration::try_new(String::from("post-merge-completion"))?,
+        CheckRunName::try_new(String::from("post-merge"))?,
+        CheckConclusion::Success,
+    ));
+    let changed = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        context: merged.context().clone(),
+        lifecycle: RepoWatchPullRequestLifecycle::Merged,
+        mergeable_state: merged.mergeable_state(),
+        completed_check_suites: merged.completed_check_suites().to_vec(),
+        completed_check_runs,
+        reviews: merged.reviews().to_vec(),
+        threads: merged.threads().to_vec(),
+        reactions: merged.reactions().to_vec(),
+    })?;
+    let next = signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        repository: compact_repository.clone(),
+        default_branch: default_branch.clone(),
+        default_head: default_head.clone(),
+        observed_at,
+        observation: RepoWatchObservation::new(
+            comparison_baseline.signal_reviewers().to_vec(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests: vec![changed],
+                workflow_runs: Vec::new(),
+                branch_heads: compact_observation.state().branch_heads().to_vec(),
+            })?,
+        ),
+    };
+    reopened
+        .ingest_observation(&restored, &next, EventProducer::Poll)
+        .await?;
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT event_kind FROM gh_event WHERE repository = $1 ORDER BY repository_event_ordinal",
+    )
+    .bind(compact_repository.as_str())
+    .fetch_all(&module_pool)
+    .await?;
+    assert_eq!(kinds, vec![String::from("check_run_completed")]);
+    let retained = reopened.ingest_baseline(&compact_repository).await?;
+    assert!(
+        retained
+            .observation
+            .as_ref()
+            .expect("committed ordinary observation")
+            .state()
+            .pull_requests()
+            .is_empty(),
+        "refetched compact pull requests remain outside the ordinary baseline"
+    );
+    let ordinary_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pr_state WHERE repository = $1")
+            .bind(compact_repository.as_str())
+            .fetch_one(&module_pool)
+            .await?;
+    assert_eq!(
+        ordinary_rows, 0,
+        "refetch does not recreate ordinary PR rows"
+    );
+    assert_eq!(retained.merged_baselines.len(), 1);
+    assert_eq!(
+        retained.merged_baselines[0].completed_check_runs().len(),
+        merged.completed_check_runs().len() + 1
+    );
+    assert_eq!(
+        reopened
+            .ingest_observation(&retained, &next, EventProducer::Poll)
+            .await?,
+        FrontierEventAdmission::Unchanged
+    );
+
     module_pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+impl signalbox_module_repo_watch_v2::dispatch::LifecycleCommandFactory for FixtureSessionFactory {
+    fn lifecycle(
+        &mut self,
+        session: SessionId,
+        operation: SessionLifecycleOperation,
+    ) -> SessionLifecycleCommand {
+        let id = DurableCommandId::from_uuid(Uuid::from_u128(self.next_command));
+        self.next_command += 1;
+        SessionLifecycleCommand::new(id, session, operation)
+    }
+}
+
+fn dispatch_observation(
+    repository: &RepositorySlug,
+    run: u64,
+    now: OffsetDateTime,
+) -> signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+    // Distinct run identities produce successive facts on one unchanged branch.
+    let branch = BranchName::try_new(String::from("main")).expect("branch");
+    let head =
+        CommitSha::try_new(String::from("1111111111111111111111111111111111111111")).expect("head");
+    signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        repository: repository.clone(),
+        default_branch: branch.clone(),
+        default_head: head.clone(),
+        observed_at: now,
+        observation: RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests: Vec::new(),
+                branch_heads: vec![RepoWatchBranchHead::new(branch.clone(), head)],
+                workflow_runs: vec![RepoWatchWorkflowRunObservation::new(
+                    GitHubObjectId::new(NonZeroU64::new(run).expect("positive run")),
+                    GitHubObjectId::new(NonZeroU64::new(1).expect("workflow")),
+                    RepoWatchWorkflowRunAttempt::new(NonZeroU64::new(1).expect("attempt")),
+                    branch,
+                    WorkflowName::try_new(String::from("CI")).expect("workflow"),
+                    CheckConclusion::Success,
+                )],
+            })
+            .expect("complete observation"),
+        ),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_cooldown()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_ownership_seam::{
+        GoalChange, GoalEventKind, LifecycleActor, LifecycleEventKind, SessionStateKind,
+        SessionTerminal, SessionTerminalOutcome,
+    };
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    sqlx::query("CREATE FUNCTION reject_redundant_cursor_update() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.event_ordinal = OLD.event_ordinal THEN RAISE EXCEPTION 'redundant evaluation cursor update'; END IF; RETURN NEW; END $$")
+        .execute(&pool).await?;
+    sqlx::query(
+        "CREATE TRIGGER reject_redundant_cursor_update BEFORE UPDATE ON rule_evaluation_cursor
+        FOR EACH ROW EXECUTE FUNCTION reject_redundant_cursor_update()",
+    )
+    .execute(&pool)
+    .await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("dispatch/project"))?;
+    let now = OffsetDateTime::now_utc();
+    let initial = dispatch_observation(&repository, 1, now);
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &initial,
+            EventProducer::Poll,
+        )
+        .await?;
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("ci"))?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+            repository: Some(repository.clone()),
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(String::from("watch"))?,
+        }],
+        RepoWatchSingletonScope::Repository,
+        Duration::from_secs(5),
+    )?;
+    store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                &repository,
+                std::slice::from_ref(&rule),
+            )],
+            now,
+        )
+        .await?;
+    assert!(
+        store.next_rule_event(&repository, &rule).await?.is_none(),
+        "activation excludes already-admitted facts"
+    );
+    let mut ids = FixedDispatchIds {
+        value: 10001,
+        calls: 0,
+    };
+    let mut factory = FixtureSessionFactory {
+        next_command: 20001,
+        model: 30001,
+    };
+    let mut codec = FixtureCommandCodec;
+    for run in [2, 3] {
+        let observation = dispatch_observation(&repository, run, now);
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &observation,
+                EventProducer::Poll,
+            )
+            .await?;
+        assert!(
+            store
+                .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, now)
+                .await
+                .expect("evaluate")
+        );
+    }
+    let commands = store.recover_pending_commands(&mut codec).await?;
+    assert_eq!(
+        commands.len(),
+        1,
+        "the second matching fact is suppressed while the singleton is held"
+    );
+    let first = &commands[0];
+    let session = SessionId::from_uuid(Uuid::from_u128(40001));
+    let creation = LifecycleEvent::session_created_for_test(
+        1,
+        now,
+        session,
+        SessionCreated {
+            cause: SessionCreationCause::ModuleDispatched {
+                dispatch: ModuleDispatch::RepositoryWatch {
+                    dispatch: first.dispatch(),
+                },
+            },
+            ownership: SessionOwnership::Owned,
+        },
+    );
+    store
+        .react_to_lifecycle(&creation, &mut factory, &mut codec)
+        .await?;
+    let goal = LifecycleEvent::for_test(
+        2,
+        now,
+        Some(session),
+        LifecycleEventKind::GoalChanged(GoalChange {
+            event_ordinal: 1,
+            generation: 1,
+            kind: GoalEventKind::Commissioned,
+        }),
+    );
+    store
+        .react_to_lifecycle(&goal, &mut factory, &mut codec)
+        .await?;
+    store
+        .react_to_lifecycle(&goal, &mut factory, &mut codec)
+        .await?;
+    let reactions = store.recover_pending_commands(&mut codec).await?;
+    assert_eq!(reactions.len(), 1, "a replay retains one reaction identity");
+    assert!(
+        matches!(reactions[0].command().clone().into_payload(),SessionCommandPayload::Lifecycle(command) if *command.operation() == SessionLifecycleOperation::ReleaseStart)
+    );
+    let release_id = reactions[0].command().command_id();
+    let mut sink = SettlingThenFailingSink {
+        store: store.clone(),
+        fail: true,
+        calls: Vec::new(),
+        now,
+    };
+    assert!(store.submit_pending(&mut codec, &mut sink).await.is_err());
+    assert_eq!(
+        store.recover_pending_commands(&mut codec).await?.len(),
+        1,
+        "a committed command still retries an unfinished submission follow-up"
+    );
+    sink.fail = false;
+    store
+        .submit_pending(&mut codec, &mut sink)
+        .await
+        .expect("retry follow-up");
+    assert_eq!(
+        sink.calls,
+        vec![release_id, release_id],
+        "retry uses the exact command identity"
+    );
+    assert!(store.recover_pending_commands(&mut codec).await?.is_empty());
+    let terminal = LifecycleEvent::for_test(
+        3,
+        now,
+        Some(session),
+        LifecycleEventKind::SessionTerminal(SessionTerminal {
+            prior: SessionStateKind::Created,
+            outcome: SessionTerminalOutcome::AchievedVerified,
+            standing: None,
+            actor: LifecycleActor::Operator,
+        }),
+    );
+    store
+        .react_to_lifecycle(&terminal, &mut factory, &mut codec)
+        .await?;
+    let restarted = RepoWatchStore::new(pool.clone());
+    assert!(
+        restarted
+            .next_rule_event(&repository, &rule)
+            .await?
+            .is_none(),
+        "suppressed facts stay consumed across restart"
+    );
+    for (run, elapsed, expected_creations) in [(4, 4, 1), (5, 5, 2)] {
+        let time = now + Duration::from_secs(elapsed);
+        let observation = dispatch_observation(&repository, run, time);
+        restarted
+            .ingest_observation(
+                &restarted.ingest_baseline(&repository).await?,
+                &observation,
+                EventProducer::Poll,
+            )
+            .await?;
+        assert!(
+            restarted
+                .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, time)
+                .await
+                .expect("evaluate")
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM dispatch_ledger WHERE trigger_sequence IS NULL",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            count, expected_creations,
+            "cooldown begins when the previous singleton releases"
+        );
+    }
+    store
+        .reconcile_rules(&[], now + Duration::from_secs(6))
+        .await?;
+    let stop = LifecycleEvent::for_test(
+        4,
+        now + Duration::from_secs(6),
+        Some(session),
+        LifecycleEventKind::GoalChanged(GoalChange {
+            event_ordinal: 2,
+            generation: 1,
+            kind: GoalEventKind::UserStopped,
+        }),
+    );
+    restarted
+        .react_to_lifecycle(&stop, &mut factory, &mut codec)
+        .await?;
+    assert!(restarted.recover_pending_commands(&mut codec).await?.iter().any(|p| matches!(p.command().clone().into_payload(),SessionCommandPayload::Lifecycle(command) if matches!(command.operation(),SessionLifecycleOperation::Stop { sticky:StopStickiness::Sticky, .. }))),"removed rules still retain their lifecycle reaction origin");
+    pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+struct SettlingThenFailingSink {
+    store: RepoWatchStore,
+    fail: bool,
+    calls: Vec<DurableCommandId>,
+    now: OffsetDateTime,
+}
+impl signalbox_module_repo_watch_v2::dispatch::SessionCommandSink for SettlingThenFailingSink {
+    type Error = ();
+    async fn submit(
+        &mut self,
+        command: SessionCommand,
+    ) -> Result<signalbox_module_repo_watch_v2::dispatch::CommandSubmission, ()> {
+        use signalbox_ownership_seam::{CommandSettlement, LifecycleEventKind};
+        let SessionCommandPayload::Lifecycle(command) = command.into_payload() else {
+            panic!("fixture submits only its start release");
+        };
+        self.calls.push(command.command_id());
+        let event = LifecycleEvent::for_test(
+            99,
+            self.now,
+            Some(command.session()),
+            LifecycleEventKind::CommandSettled {
+                command: command.command_id(),
+                result: CommandSettlement::Applied,
+            },
+        );
+        self.store
+            .apply_lifecycle_event(&event)
+            .await
+            .expect("core settlement");
+        if self.fail {
+            Err(())
+        } else {
+            Ok(signalbox_module_repo_watch_v2::dispatch::CommandSubmission::Accepted)
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn repository_watch_creation_records_its_module_issuer() -> Result<(), Box<dyn Error>> {
+    use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
+    use signalbox_module_repo_watch_v2::dispatch::{CommandSubmission, SessionCommandSink};
+    use signalbox_persistence::scheduler::PostgresEligibilitySweep;
+    use signalboxd::{HubModelConfiguration, repo_watch_dispatch::RepositoryWatchCommandSink};
+    use std::sync::Arc;
+
+    let (container, pool, _) = postgres().await?;
+    migrate(&pool).await?;
+    let models = HubModelConfiguration::parse(
+        &include_str!("../../../config/signalboxd.example.toml").replace(
+            "/usr/local/bin/signalbox-exec-supervisor",
+            std::env::current_exe()?.to_string_lossy().as_ref(),
+        ),
+    )?;
+    let (eligibility_nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    let mut sink = RepositoryWatchCommandSink {
+        pool: pool.clone(),
+        models: Arc::new(models),
+        eligibility_nudge,
+        tool_dispatch_gate: InProcessToolDispatchGate::default(),
+    };
+    let id = DurableCommandId::from_uuid(Uuid::now_v7());
+    let command = SessionCommand::create_session(
+        CreateSession::new(
+            id,
+            SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
+                dispatch: RepoWatchDispatchId::from_uuid(Uuid::now_v7()),
+            }),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(Uuid::now_v7()),
+            )),
+        )
+        .with_lifecycle(
+            StartGate::Held,
+            SessionOwnership::Owned,
+            Some(FinishCondition::ExternalGate),
+        ),
+    )
+    .expect("held seam command");
+    assert!(matches!(
+        sink.submit(command.clone()).await.expect("create session"),
+        CommandSubmission::Creation(CreateSessionOutcome::Applied(_))
+    ));
+    assert!(matches!(
+        sink.submit(command).await.expect("replay creation"),
+        CommandSubmission::Creation(CreateSessionOutcome::Applied(_))
+    ));
+    let issuer: (String, Option<String>) = sqlx::query_as(
+        "SELECT issuer_kind, issuer_module FROM durable_command WHERE command_id = $1",
+    )
+    .bind(id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        issuer,
+        (String::from("module"), Some(String::from("repo_watch")))
+    );
+    let held: bool = sqlx::query_scalar("SELECT start_gate_held FROM session_lifecycle")
+        .fetch_one(&pool)
+        .await?;
+    assert!(held);
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(inputs, 0);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+struct RuntimeHookFixture<'a> {
+    address: std::net::SocketAddr,
+    path: &'a str,
+    id: u64,
+    secret: &'a std::path::Path,
+    enabled: bool,
+    rule_version: u64,
+    template: &'a str,
+}
+
+fn runtime_configuration(
+    hook: &RuntimeHookFixture<'_>,
+) -> Result<signalboxd::HubModelConfiguration, Box<dyn Error>> {
+    let catalog = include_str!("../../../config/signalboxd.example.toml").replace(
+        "/usr/local/bin/signalbox-exec-supervisor",
+        std::env::current_exe()?.to_string_lossy().as_ref(),
+    );
+    Ok(signalboxd::HubModelConfiguration::parse(&format!(
+        r#"{catalog}
+[repository_watch]
+version = 1
+enabled = {enabled}
+signal_reviewers = []
+[repository_watch.webhook]
+bind_address = "{address}"
+path = "{path}"
+[[repository_watch.repositories]]
+repository = "runtime/project"
+poll_interval_seconds = 60
+credential_file = "{poll_credential}"
+webhook_hook_id = {id}
+webhook_secret_file = "{secret}"
+webhook_mode = "primary"
+[[repository_watch.rules]]
+id = "ci"
+version = {rule_version}
+singleton_per = "repo"
+cooldown_seconds = 0
+[repository_watch.rules.matcher]
+event_kinds = ["branch_workflow_run_completed"]
+[[repository_watch.rules.actions]]
+kind = "dispatch_session"
+template = "{template}"
+"#,
+        enabled = hook.enabled,
+        rule_version = hook.rule_version,
+        template = hook.template,
+        address = hook.address,
+        path = hook.path,
+        id = hook.id,
+        secret = hook.secret.display(),
+        poll_credential = hook.secret.with_extension("missing-token").display(),
+    ))?)
+}
+
+async fn unused_webhook_address() -> Result<std::net::SocketAddr, std::io::Error> {
+    tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await?
+        .local_addr()
+}
+
+const RUNTIME_WEBHOOK_BODY: &str = r#"{"repository":{"full_name":"Runtime/Project"}}"#;
+
+async fn webhook_status(
+    hook: &RuntimeHookFixture<'_>,
+    secret: &[u8],
+) -> Result<reqwest::StatusCode, reqwest::Error> {
+    let signature = ring::hmac::sign(
+        &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret),
+        RUNTIME_WEBHOOK_BODY.as_bytes(),
+    );
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    Ok(reqwest::Client::builder()
+        .no_proxy()
+        .build()?
+        .post(format!("http://{}{}", hook.address, hook.path))
+        .header("x-github-hook-id", hook.id)
+        .header(
+            "x-hub-signature-256",
+            format!("sha256={}", hex::encode(signature.as_ref())),
+        )
+        .body(RUNTIME_WEBHOOK_BODY)
+        .send()
+        .await?
+        .status())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn composed_repository_watch_dispatches_and_reloads_its_running_listener()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
+    use signalbox_persistence::scheduler::PostgresEligibilitySweep;
+    use signalboxd::{
+        SessionTemplateConfiguration,
+        repo_watch_runtime::{
+            RepositoryWatchRuntime, RepositoryWatchServices, connect_repository_watch_pool,
+        },
+    };
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (container, core_pool, _) = postgres().await?;
+    migrate(&core_pool).await?;
+    let module_pool = connect_repository_watch_pool(&core_pool)
+        .await
+        .expect("independently authenticated module pool");
+    let user: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(&module_pool)
+        .await?;
+    assert_eq!(user, "mod_repo_watch");
+    assert!(
+        sqlx::query("SELECT * FROM public.session_lifecycle")
+            .fetch_all(&module_pool)
+            .await
+            .is_err(),
+        "module login cannot read core session tables"
+    );
+    let files = tempfile::tempdir()?;
+    let secret = files.path().join("hook-secret");
+    std::fs::write(&secret, b"initial-hook-secret")?;
+    let mut hook = RuntimeHookFixture {
+        address: unused_webhook_address().await?,
+        path: "/initial",
+        id: 17,
+        secret: &secret,
+        enabled: false,
+        rule_version: 1,
+        template: "watch",
+    };
+    let models = runtime_configuration(&hook)?;
+    let template_path = files.path().join("templates.toml");
+    std::fs::write(
+        &template_path,
+        r#"version = 1
+[[templates]]
+name = "watch"
+version = 1
+alias = "540ce009-c2ec-4a04-b823-c411ea189778"
+dangerous_tool_auto_approval = false
+system_prompt = "Inspect repository activity."
+"#,
+    )?;
+    let templates = SessionTemplateConfiguration::read(&template_path, || None, &models)?;
+    let (eligibility_nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(core_pool.clone()));
+    let runtime = RepositoryWatchRuntime::new(
+        module_pool.clone(),
+        models.repository_watch().cloned(),
+        RepositoryWatchServices {
+            core_pool: core_pool.clone(),
+            models: Arc::new(models),
+            templates: Arc::new(templates),
+            eligibility_nudge,
+            tool_dispatch_gate: InProcessToolDispatchGate::default(),
+        },
+    )
+    .await
+    .expect("prepare runtime");
+    let (shutdown, stopped) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(runtime.clone().run(stopped));
+    assert!(
+        tokio::net::TcpStream::connect(hook.address).await.is_err(),
+        "disabled module has no listener"
+    );
+    hook.enabled = true;
+    runtime
+        .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+        .await
+        .expect("enable during reload");
+    assert_eq!(
+        webhook_status(&hook, b"wrong-secret").await?,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        webhook_status(&hook, b"initial-hook-secret").await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+
+    let store = RepoWatchStore::new(module_pool.clone());
+    let repository = RepositorySlug::try_new(String::from("runtime/project"))?;
+    for run in [1, 2] {
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &dispatch_observation(&repository, run, OffsetDateTime::now_utc()),
+                EventProducer::Poll,
+            )
+            .await?;
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM session_lifecycle")
+                .fetch_one(&core_pool)
+                .await?;
+            let applied: Decimal =
+                sqlx::query_scalar("SELECT applied_through FROM core_event_cursor")
+                    .fetch_one(&module_pool)
+                    .await?;
+            if count == 1 && applied > Decimal::ZERO {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    let held: bool = sqlx::query_scalar("SELECT start_gate_held FROM session_lifecycle")
+        .fetch_one(&core_pool)
+        .await?;
+    assert!(held);
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+        .fetch_one(&core_pool)
+        .await?;
+    assert_eq!(inputs, 0);
+
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let occupied_hook = RuntimeHookFixture {
+        address: occupied.local_addr()?,
+        ..hook
+    };
+    assert!(
+        runtime
+            .reload_configuration(
+                runtime_configuration(&occupied_hook)?
+                    .repository_watch()
+                    .cloned()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        webhook_status(&hook, b"initial-hook-secret").await?,
+        reqwest::StatusCode::ACCEPTED,
+        "failed replacement bind preserves running settings"
+    );
+
+    // Expect/continue proves the old server admitted the request before replacement.
+    let mut inflight = tokio::net::TcpStream::connect(hook.address).await?;
+    let replacement_secret = files.path().join("replacement-secret");
+    std::fs::write(&replacement_secret, b"replacement-hook-secret")?;
+    let signature = ring::hmac::sign(
+        &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"replacement-hook-secret"),
+        RUNTIME_WEBHOOK_BODY.as_bytes(),
+    );
+    inflight.write_all(format!("POST {} HTTP/1.1\r\nHost: {}\r\nExpect: 100-continue\r\nConnection: close\r\nContent-Length: {}\r\nx-github-hook-id: {}\r\nx-hub-signature-256: sha256={}\r\n\r\n", hook.path, hook.address, RUNTIME_WEBHOOK_BODY.len(), hook.id, hex::encode(signature.as_ref())).as_bytes()).await?;
+    let mut interim = [0; 25];
+    tokio::time::timeout(Duration::from_secs(5), inflight.read_exact(&mut interim)).await??;
+    assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+    hook.address = unused_webhook_address().await?;
+    hook.secret = &replacement_secret;
+    runtime
+        .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+        .await
+        .expect("rebind during delivery");
+    inflight.write_all(RUNTIME_WEBHOOK_BODY.as_bytes()).await?;
+    let mut response = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        inflight.read_to_string(&mut response),
+    )
+    .await??;
+    assert!(
+        response.starts_with("HTTP/1.1 202"),
+        "in-flight delivery uses replacement hook map: {response}"
+    );
+    assert_eq!(
+        webhook_status(&hook, b"replacement-hook-secret").await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    let old_path = RuntimeHookFixture { ..hook };
+    hook.path = "/replacement";
+    hook.id = 18;
+    runtime
+        .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+        .await
+        .expect("swap path and hook map on same socket");
+    assert_eq!(
+        webhook_status(&old_path, b"replacement-hook-secret").await?,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let old_id = RuntimeHookFixture {
+        id: old_path.id,
+        ..hook
+    };
+    assert_eq!(
+        webhook_status(&old_id, b"replacement-hook-secret").await?,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        webhook_status(&hook, b"replacement-hook-secret").await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    shutdown.send(true)?;
+    worker.await?.expect("orderly module shutdown");
+    assert!(module_pool.is_closed());
+    assert!(tokio::net::TcpStream::connect(hook.address).await.is_err());
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn repository_watch_rejects_invalid_reloads_and_keeps_dispatching_running_rules()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
+    use signalbox_persistence::scheduler::PostgresEligibilitySweep;
+    use signalboxd::{
+        SessionTemplateConfiguration,
+        repo_watch_runtime::{
+            RepositoryWatchRuntime, RepositoryWatchRuntimeError, RepositoryWatchServices,
+            connect_repository_watch_pool,
+        },
+    };
+    use std::sync::Arc;
+
+    let (container, core_pool, _) = postgres().await?;
+    migrate(&core_pool).await?;
+    let module_pool = connect_repository_watch_pool(&core_pool)
+        .await
+        .expect("module login");
+    let files = tempfile::tempdir()?;
+    let secret = files.path().join("hook-secret");
+    std::fs::write(&secret, b"hook-secret")?;
+    let mut hook = RuntimeHookFixture {
+        address: unused_webhook_address().await?,
+        path: "/running",
+        id: 17,
+        secret: &secret,
+        enabled: true,
+        rule_version: 1,
+        template: "watch",
+    };
+    let models = Arc::new(runtime_configuration(&hook)?);
+    let template_path = files.path().join("templates.toml");
+    std::fs::write(
+        &template_path,
+        r#"version = 1
+[[templates]]
+name = "watch"
+version = 1
+alias = "540ce009-c2ec-4a04-b823-c411ea189778"
+dangerous_tool_auto_approval = false
+system_prompt = "Inspect repository activity."
+[[templates]]
+name = "alternate"
+version = 1
+alias = "540ce009-c2ec-4a04-b823-c411ea189778"
+dangerous_tool_auto_approval = false
+system_prompt = "Inspect workflow failures."
+"#,
+    )?;
+    let templates = Arc::new(SessionTemplateConfiguration::read(
+        &template_path,
+        || None,
+        &models,
+    )?);
+    let (eligibility_nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(core_pool.clone()));
+    let services = || RepositoryWatchServices {
+        core_pool: core_pool.clone(),
+        models: models.clone(),
+        templates: templates.clone(),
+        eligibility_nudge: eligibility_nudge.clone(),
+        tool_dispatch_gate: InProcessToolDispatchGate::default(),
+    };
+    let missing = RuntimeHookFixture {
+        template: "missing",
+        ..hook
+    };
+    assert!(matches!(
+        RepositoryWatchRuntime::new(
+            module_pool.clone(),
+            runtime_configuration(&missing)?.repository_watch().cloned(),
+            services(),
+        )
+        .await,
+        Err(RepositoryWatchRuntimeError::Rules)
+    ));
+    let rules: i64 = sqlx::query_scalar("SELECT count(*) FROM rule")
+        .fetch_one(&module_pool)
+        .await?;
+    assert_eq!(rules, 0, "invalid composition admits no rules");
+    let runtime = RepositoryWatchRuntime::new(
+        module_pool.clone(),
+        models.repository_watch().cloned(),
+        services(),
+    )
+    .await
+    .expect("valid composition after rejected templates");
+    let (shutdown, stopped) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(runtime.clone().run(stopped));
+    let conflicting = RuntimeHookFixture {
+        template: "alternate",
+        ..hook
+    };
+    for rejected in [missing, conflicting] {
+        let replacement = RuntimeHookFixture {
+            path: "/rejected",
+            ..rejected
+        };
+        assert_eq!(
+            runtime
+                .reload_configuration(
+                    runtime_configuration(&replacement)?
+                        .repository_watch()
+                        .cloned()
+                )
+                .await,
+            Err(RepositoryWatchRuntimeError::Rules),
+            "missing templates and conflicting revision reuse both fail reload"
+        );
+        assert_eq!(
+            webhook_status(&hook, b"hook-secret").await?,
+            reqwest::StatusCode::ACCEPTED,
+            "rejected reload retains the running listener"
+        );
+    }
+
+    let store = RepoWatchStore::new(module_pool.clone());
+    let repository = RepositorySlug::try_new(String::from("runtime/project"))?;
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &dispatch_observation(&repository, 1, OffsetDateTime::now_utc()),
+            EventProducer::Poll,
+        )
+        .await?;
+    for run in [2, 3] {
+        if run == 3 {
+            let stale = RuntimeHookFixture {
+                path: "/stale",
+                ..hook
+            };
+            hook.rule_version = 2;
+            hook.template = "alternate";
+            runtime
+                .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+                .await
+                .expect("apply next revision");
+            assert_eq!(
+                runtime
+                    .reload_configuration(
+                        runtime_configuration(&stale)?.repository_watch().cloned()
+                    )
+                    .await,
+                Err(RepositoryWatchRuntimeError::Rules),
+                "historical revision fails reload"
+            );
+            assert_eq!(
+                webhook_status(&hook, b"hook-secret").await?,
+                reqwest::StatusCode::ACCEPTED
+            );
+        }
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &dispatch_observation(&repository, run, OffsetDateTime::now_utc()),
+                EventProducer::Poll,
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let sessions: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT created_session_id FROM dispatch_ledger
+                     WHERE rule_revision = $1 AND created_session_id IS NOT NULL",
+                )
+                .bind(Decimal::from(hook.rule_version))
+                .fetch_all(&module_pool)
+                .await?;
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM session
+                     WHERE template_name = $1 AND session_id = ANY($2)",
+                )
+                .bind(hook.template)
+                .bind(sessions)
+                .fetch_one(&core_pool)
+                .await?;
+                if count == 1 {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        let active: Decimal = sqlx::query_scalar("SELECT active_revision FROM rule")
+            .fetch_one(&module_pool)
+            .await?;
+        assert_eq!(active, Decimal::from(hook.rule_version));
+    }
+    shutdown.send(true)?;
+    worker
+        .await?
+        .expect("orderly shutdown after rejected reloads");
     core_pool.close().await;
     drop(container);
     Ok(())

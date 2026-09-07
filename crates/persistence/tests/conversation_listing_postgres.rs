@@ -513,8 +513,8 @@ async fn unified_pagination_reports_its_cursor_without_silent_truncation()
     Ok(())
 }
 
-/// import derives and stores the display title once, from the summary
-/// record for Claude Code and from the first attested user text for Codex.
+/// import derives and stores the display title once, from the summary record for Claude Code and
+/// from the first attested user text for Codex.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn import_derives_and_stores_the_display_title() -> Result<(), Box<dyn Error>> {

@@ -1,0 +1,14 @@
+exports_files([
+    "Cargo.lock",
+    "Cargo.toml",
+    "config/signalboxd.example.toml",
+])
+
+test_suite(
+    name = "bazel_tests",
+    tests = [
+        "//crates/blob-store:unit_tests",
+        "//crates/domain:unit_tests",
+        "//crates/newtype:unit_tests",
+    ],
+)

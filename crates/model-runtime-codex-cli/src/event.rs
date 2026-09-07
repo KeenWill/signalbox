@@ -1184,7 +1184,8 @@ fn provider_failure<C: Clone>(
         exchange,
         reported_model: None,
         kind,
-        non_acceptance_proven,
+        non_acceptance_proven: non_acceptance_proven
+            && kind != ProviderErrorKind::CredentialRejected,
         native: NativeErrorFacts {
             error_token: Some("codex_cli_error".to_string()),
             error_code: None,

@@ -267,6 +267,7 @@ impl RepoWatchMergedCheckRunBaselineV1 {
 ```rust
 pub struct RepoWatchMergedPullRequestBaselineInputV1 {
     pub number: signalbox_domain::PullRequestNumber,
+    pub head_repository: signalbox_domain::RepositorySlug,
     pub head_sha: signalbox_domain::CommitSha,
     pub signal_reviewers: vec::Vec<signalbox_domain::RepoWatchAuthorLogin>,
     pub labels: vec::Vec<signalbox_domain::LabelName>,
@@ -294,6 +295,7 @@ impl RepoWatchMergedPullRequestBaselineV1 {
         signal_reviewers: &[signalbox_domain::RepoWatchAuthorLogin],
     ) -> result::Result<option::Option<Self>, RepoWatchRepositoryStateError>;
     pub const fn number(&self) -> signalbox_domain::PullRequestNumber;
+    pub const fn head_repository(&self) -> &signalbox_domain::RepositorySlug;
     pub const fn head_sha(&self) -> &signalbox_domain::CommitSha;
     pub fn signal_reviewers(&self) -> &[signalbox_domain::RepoWatchAuthorLogin];
     pub fn labels(&self) -> &[signalbox_domain::LabelName];

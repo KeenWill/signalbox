@@ -115,8 +115,8 @@ fn assert_codex_payload_projects_one_entry_attesting_no_speaker(
     );
 }
 
-/// the Codex reprojection maps a `tool_search_call`'s exact
-/// `arguments` value as tool input and fabricates no tool name for it.
+/// the Codex reprojection maps a `tool_search_call`'s exact `arguments` value as tool input and
+/// fabricates no tool name for it.
 #[test]
 fn codex_reprojection_maps_tool_search_call_arguments_without_a_name() {
     assert_codex_payload_projects_one_entry_attesting_no_speaker(
@@ -146,8 +146,8 @@ fn codex_reprojection_maps_tool_search_call_arguments_without_a_name() {
     );
 }
 
-/// the Codex reprojection maps a `local_shell_call`'s exact
-/// `action` value as tool input and fabricates no tool name for it.
+/// the Codex reprojection maps a `local_shell_call`'s exact `action` value as tool input and
+/// fabricates no tool name for it.
 #[test]
 fn codex_reprojection_maps_local_shell_call_action_without_a_name() {
     assert_codex_payload_projects_one_entry_attesting_no_speaker(
@@ -177,9 +177,8 @@ fn codex_reprojection_maps_local_shell_call_action_without_a_name() {
     );
 }
 
-/// the Codex reprojection takes a web-search call's identity
-/// from the item `id`; the payload also states a competing `call_id` the
-/// mapping must not read.
+/// the Codex reprojection takes a web-search call's identity from the item `id`; the payload also
+/// states a competing `call_id` the mapping must not read.
 #[test]
 fn codex_reprojection_maps_web_search_item_id_as_call_identity() {
     assert_codex_payload_projects_one_entry_attesting_no_speaker(
@@ -210,8 +209,8 @@ fn codex_reprojection_maps_web_search_item_id_as_call_identity() {
     );
 }
 
-/// the Codex reprojection reads a custom tool call's payload
-/// from `input` while retaining its exact attested name.
+/// the Codex reprojection reads a custom tool call's payload from `input` while retaining its exact
+/// attested name.
 #[test]
 fn codex_reprojection_maps_custom_tool_call_input_field() {
     assert_codex_payload_projects_one_entry_attesting_no_speaker(
@@ -241,9 +240,8 @@ fn codex_reprojection_maps_custom_tool_call_input_field() {
     );
 }
 
-/// the Codex reprojection maps a
-/// `custom_tool_call_output`'s exact `call_id` and string `output` as an
-/// exact-text result without fabricating an error attestation.
+/// the Codex reprojection maps a `custom_tool_call_output`'s exact `call_id` and string `output` as
+/// an exact-text result without fabricating an error attestation.
 #[test]
 fn codex_reprojection_maps_custom_tool_call_output_as_exact_text_result() {
     let source_call_id = text("call-custom");
@@ -269,9 +267,8 @@ fn codex_reprojection_maps_custom_tool_call_output_as_exact_text_result() {
     );
 }
 
-/// the Codex reprojection emits one ordered source result
-/// block per tool-search element, retaining an object element's exact type
-/// attestation and leaving a non-object element unattested.
+/// the Codex reprojection emits one ordered source result block per tool-search element, retaining
+/// an object element's exact type attestation and leaving a non-object element unattested.
 #[test]
 fn codex_reprojection_maps_tool_search_output_as_ordered_blocks() {
     assert_codex_payload_projects_one_entry_attesting_no_speaker(
@@ -313,8 +310,7 @@ fn codex_reprojection_maps_tool_search_output_as_ordered_blocks() {
     );
 }
 
-/// cloning an unvalidated source value is
-/// stack-safe before typed depth rejection.
+/// cloning an unvalidated source value is stack-safe before typed depth rejection.
 #[test]
 fn unvalidated_structured_clone_is_stack_safe() {
     let value = nested_array(32_768);
@@ -323,8 +319,7 @@ fn unvalidated_structured_clone_is_stack_safe() {
     drop(cloned);
 }
 
-/// structural equality for unvalidated source
-/// values is stack-safe before typed depth rejection.
+/// structural equality for unvalidated source values is stack-safe before typed depth rejection.
 #[test]
 fn unvalidated_structured_equality_is_stack_safe() {
     let value = nested_array(32_768);
@@ -333,8 +328,7 @@ fn unvalidated_structured_equality_is_stack_safe() {
     assert_ne!(value, nested_array(32_767));
 }
 
-/// formatting an unvalidated source value is
-/// stack-safe before typed depth rejection.
+/// formatting an unvalidated source value is stack-safe before typed depth rejection.
 #[test]
 fn unvalidated_structured_debug_is_stack_safe() {
     let value = nested_array(32_768);
@@ -344,8 +338,7 @@ fn unvalidated_structured_debug_is_stack_safe() {
     assert!(rendered.ends_with("])])"));
 }
 
-/// hashing an unvalidated source value is
-/// stack-safe before typed depth rejection.
+/// hashing an unvalidated source value is stack-safe before typed depth rejection.
 #[test]
 fn unvalidated_structured_hash_is_stack_safe() {
     let value = nested_array(32_768);
@@ -1127,8 +1120,8 @@ fn raw_record_entry_count_must_match_its_normalized_projection() {
     );
 }
 
-/// converter version 1 retains its original closed block
-/// interpretation while version 2 admits source-defined message blocks.
+/// converter version 1 retains its original closed block interpretation while version 2 admits
+/// source-defined message blocks.
 #[test]
 fn converter_versions_do_not_reinterpret_source_blocks() {
     let owner = conversation(1);
@@ -1182,8 +1175,7 @@ fn converter_versions_do_not_reinterpret_source_blocks() {
     );
 }
 
-/// the version boundary also preserves the original closed
-/// tool-result block vocabulary.
+/// the version boundary also preserves the original closed tool-result block vocabulary.
 #[test]
 fn converter_versions_do_not_reinterpret_result_blocks() {
     let owner = conversation(1);
@@ -1286,8 +1278,7 @@ fn complete_normalized_record_rejects_129_containers() {
     );
 }
 
-/// stored structured depth is checked iteratively
-/// before any recursive conversion-digest traversal.
+/// stored structured depth is checked iteratively before any recursive conversion-digest traversal.
 #[test]
 fn checks_raw_depth_before_recursive_conversion_digest() {
     let owner = conversation(1);
@@ -1330,8 +1321,8 @@ fn checks_raw_depth_before_recursive_conversion_digest() {
     );
 }
 
-/// conversion digesting and rejection remain
-/// stack-safe for excessive caller-supplied structured depth.
+/// conversion digesting and rejection remain stack-safe for excessive caller-supplied structured
+/// depth.
 #[test]
 fn converted_raw_depth_fails_closed_and_drops_safely() {
     let owner = conversation(1);

@@ -158,6 +158,11 @@ priority order, skipping excluded ones and breaking ties by the snapshot's rule.
 Trigger actions and the exclusions they create are durable. Every availability
 ending is owned by [credential availability](credential-availability.md).
 
+The model-call observation commit retains a reported capacity snapshot against
+the call's credential reference, including each window's remaining percentage,
+reported duration and reset instant. The latest observation time wins across
+calls; an absent snapshot preserves the retained evidence.
+
 The session-template catalog is read after the model catalog. Each template
 binds a name and version to a model or alias, a system prompt, and a
 dangerous-tool blanket. A prompt is inline or a file reference, either relative
@@ -656,6 +661,11 @@ successful code-host result, is scrubbed of that value and its JSON-escaped form
 before it crosses into evidence. An `ambient` or `codex_home` profile gives the
 daemon no value, so a CLI child's output receives only the credential-shape
 redaction owned by [runtime substrate](runtime-substrate.md).
+
+The optional `[repository_watch]` section composes the
+[repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
+true; false disables module polling, webhook listening, and command dispatch,
+including convergence-sweep target enrollment and session commissioning.
 
 The optional `[convergence]` table deserializes the
 [shared convergence policy](../../crates/convergence/README.md), including its

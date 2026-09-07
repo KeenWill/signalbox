@@ -1192,8 +1192,8 @@ mod tests {
         )
     }
 
-    /// a `tool_search_call` maps its exact `call_id` and its
-    /// structured `arguments` value, fabricating no tool name.
+    /// a `tool_search_call` maps its exact `call_id` and its structured `arguments` value,
+    /// fabricating no tool name.
     #[test]
     fn normalizes_tool_search_call_structured_arguments() {
         let imported = convert_synthetic(
@@ -1215,8 +1215,8 @@ mod tests {
         );
     }
 
-    /// a `local_shell_call` maps its structured `action` value
-    /// as tool input, fabricating no tool name.
+    /// a `local_shell_call` maps its structured `action` value as tool input, fabricating no tool
+    /// name.
     #[test]
     fn normalizes_local_shell_call_structured_action() {
         let imported = convert_synthetic(
@@ -1240,9 +1240,8 @@ mod tests {
         );
     }
 
-    /// a `web_search_call` takes its call identity from the item
-    /// `id`. The fixture also states a competing `call_id`, which the mapping
-    /// must not read.
+    /// a `web_search_call` takes its call identity from the item `id`. The fixture also states a
+    /// competing `call_id`, which the mapping must not read.
     #[test]
     fn normalizes_web_search_call_item_id_as_call_identity() {
         let imported = convert_synthetic(
@@ -1264,8 +1263,8 @@ mod tests {
         );
     }
 
-    /// a `custom_tool_call` maps its exact `name` and reads its
-    /// input from `input` rather than `arguments`, keeping the lexical string.
+    /// a `custom_tool_call` maps its exact `name` and reads its input from `input` rather than
+    /// `arguments`, keeping the lexical string.
     #[test]
     fn normalizes_custom_tool_call_string_input() {
         let imported = convert_synthetic(
@@ -1284,8 +1283,8 @@ mod tests {
         );
     }
 
-    /// a `custom_tool_call_output` maps its exact `call_id` and
-    /// string `output` as an exact-text tool result with no error attestation.
+    /// a `custom_tool_call_output` maps its exact `call_id` and string `output` as an exact-text
+    /// tool result with no error attestation.
     #[test]
     fn normalizes_custom_tool_call_output_as_exact_text_result() {
         let imported = convert_synthetic(
@@ -1305,9 +1304,8 @@ mod tests {
         );
     }
 
-    /// a `tool_search_output` emits one ordered source result
-    /// block per `tools` element, retaining an object element's exact type
-    /// attestation and leaving a non-object element unattested.
+    /// a `tool_search_output` emits one ordered source result block per `tools` element, retaining
+    /// an object element's exact type attestation and leaving a non-object element unattested.
     #[test]
     fn normalizes_tool_search_output_tools_as_ordered_source_blocks() {
         let imported = convert_synthetic(

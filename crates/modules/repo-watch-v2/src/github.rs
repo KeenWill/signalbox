@@ -4,7 +4,7 @@ use std::{error::Error, fmt};
 
 use reqwest::{
     Client, StatusCode,
-    header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, LINK, USER_AGENT},
 };
 
 const API_ROOT: &str = "https://api.github.com";
@@ -44,6 +44,11 @@ impl GitHubClient {
 
     /// Fetches one API-relative resource as exact response bytes.
     pub async fn get(&self, path: &str) -> Result<Vec<u8>, GitHubClientError> {
+        self.get_page(path).await.map(|(body, _)| body)
+    }
+
+    /// Fetches one page and reports GitHub's next-page link without following it.
+    pub async fn get_page(&self, path: &str) -> Result<(Vec<u8>, bool), GitHubClientError> {
         validate_path(path)?;
         let response = self
             .client
@@ -54,6 +59,33 @@ impl GitHubClient {
         let status = response.status();
         if !status.is_success() {
             return Err(GitHubClientError::Rejected(status));
+        }
+        let has_next = response.headers().get_all(LINK).iter().any(|value| {
+            value.to_str().is_ok_and(|links| {
+                links
+                    .split(',')
+                    .any(|link| link.split(';').any(|part| part.trim() == "rel=\"next\""))
+            })
+        });
+        response
+            .bytes()
+            .await
+            .map(|body| (body.to_vec(), has_next))
+            .map_err(GitHubClientError::Request)
+    }
+
+    /// Submits the module's encoded GraphQL observation query to GitHub.
+    pub async fn graphql(&self, body: Vec<u8>) -> Result<Vec<u8>, GitHubClientError> {
+        let response = self
+            .client
+            .post(format!("{API_ROOT}/graphql"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(GitHubClientError::Request)?;
+        if !response.status().is_success() {
+            return Err(GitHubClientError::Rejected(response.status()));
         }
         response
             .bytes()

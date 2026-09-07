@@ -23,7 +23,7 @@ use signalbox_domain::{
     DecideToolRequestResult, DelegateApprovalRecommendation, DelegateToolApproval,
     DelegationContent, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
     DelegationProvenanceReconstitutionInput, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, EndedToolAttempt, GoalGeneration, NormalizedToolArguments,
+    DurableCommandId, EndedToolAttempt, FastMode, GoalGeneration, NormalizedToolArguments,
     OverrideDeniedToolRequest, OverrideDeniedToolRequestResult, PreparedDecideToolRequest,
     PreparedOverrideDeniedToolRequest, PreparedToolBatchDecision, PreparedToolResultProjection,
     ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
@@ -61,7 +61,7 @@ use crate::{
     },
     model_execution::{
         insert_prepared_call, insert_snapshot, lock_delegated_child_endpoint_sessions,
-        lock_delegated_turn_terminal_frontier,
+        lock_delegated_turn_terminal_frontier, prepared_serving_evidence,
     },
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
@@ -71,11 +71,8 @@ use crate::{
 /// The durable admission here and the daemon's argument validator are the two
 /// constructors of this bound, so it is declared once here and imported at the
 /// tool boundary rather than restated there.
-// numeric-bound: guard - prevents one blob_read tool response from exhausting turn memory
 pub const MAX_BLOB_READ_TOOL_BYTES: u64 = 524_288;
-// numeric-bound: guard - prevents accumulated blob_read responses in one turn from exhausting turn memory
 const MAX_BLOB_READ_TURN_BYTES: u64 = 2_097_152;
-// numeric-bound: guard - prevents unbounded blob_read requests in one turn from exhausting turn budget
 const MAX_BLOB_READ_REQUESTS_PER_TURN: i64 = 64;
 
 const BLOB_NOT_VISIBLE_DETAIL: &str = "blob_not_visible";
@@ -1295,6 +1292,32 @@ impl PostgresToolLoopRepository {
                 },
             )
             .await?;
+            let fast_mode: String = sqlx::query_scalar(
+                "SELECT resolved_model_settings #>> '{effective,fast_mode}'
+                   FROM turn_model_settings_resolved
+                  WHERE session_id = $1
+                    AND turn_id = $2",
+            )
+            .bind(session_id_to_uuid(session))
+            .bind(turn_id_to_uuid(turn))
+            .fetch_one(&mut *transaction)
+            .await?;
+            let fast_mode = match fast_mode.as_str() {
+                "disabled" => FastMode::Disabled,
+                "enabled" => FastMode::Enabled,
+                _ => {
+                    return Err(ToolLoopCorruption::Inconsistent(
+                        "continuation effective fast mode",
+                    )
+                    .into());
+                }
+            };
+            let serving_evidence = prepared_serving_evidence(
+                self.credential_families.as_ref(),
+                &self.continuation_usage_limits,
+                prepared.call().target(),
+                fast_mode,
+            );
             insert_prepared_call(
                 &mut transaction,
                 prepared,
@@ -1302,6 +1325,7 @@ impl PostgresToolLoopRepository {
                 None,
                 self.cache_inclusive_input_targets
                     .contains(&prepared.call().target()),
+                serving_evidence,
             )
             .await
             .map_err(map_model_call_error)?;

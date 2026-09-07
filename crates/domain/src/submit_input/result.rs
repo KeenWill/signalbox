@@ -1,4 +1,5 @@
-//! Recorded submit-input acceptance and rejection results for `docs/spec/turn-lifecycle-and-scheduling.md`.
+//! Recorded submit-input acceptance and rejection results for
+//! `docs/spec/turn-lifecycle-and-scheduling.md`.
 
 use crate::AcceptedInputDisposition;
 use crate::AcceptedInputId;

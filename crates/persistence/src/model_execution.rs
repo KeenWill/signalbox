@@ -635,6 +635,8 @@ impl PostgresModelCallRepository {
         replays_provider_compaction: bool,
         prospective: impl Into<ProspectiveModelInput<'a>>,
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
+        let effective_target =
+            serving_pool_target(self.credential_families.as_ref(), target, fast_mode);
         let (projected_members, uncommitted_content_bytes) = match prospective.into() {
             ProspectiveModelInput::Committed(frontier) => {
                 let mut connection = self.pool.acquire().await?;
@@ -713,17 +715,13 @@ impl PostgresModelCallRepository {
                        headroom.projected_result_content_bytes AS
                            proven_unreported_content_bytes
                   FROM model_call
-                  JOIN turn_model_settings_resolved AS settings
-                    ON settings.session_id = model_call.session_id
-                   AND settings.turn_id = model_call.turn_id
                   LEFT JOIN tool_continuation_context_headroom AS headroom
                     ON headroom.session_id = model_call.session_id
                    AND headroom.producing_model_call_id = model_call.model_call_id
                  WHERE model_call.session_id = $1
-                   AND model_call.resolved_provider_model_identity_id = $2
+                   AND model_call.effective_provider_model_identity_id = $6
                    AND model_call.state_kind = 'terminal'
                    AND model_call.usage_input_tokens IS NOT NULL
-                   AND settings.resolved_model_settings #>> '{effective,fast_mode}' = $6
                    AND NOT EXISTS (
                        SELECT 1
                          FROM latest_compaction AS latest
@@ -765,7 +763,7 @@ impl PostgresModelCallRepository {
                        false AS has_provider_compaction,
                        NULL::numeric AS proven_unreported_content_bytes
                   FROM latest_compaction AS latest
-                 WHERE latest.resolved_provider_model_identity_id = $2
+                 WHERE latest.resolved_provider_model_identity_id = $6
                    AND latest.state_kind = 'terminal'
                    AND latest.terminal_disposition_kind = 'completed'
                    AND latest.usage_input_tokens IS NOT NULL
@@ -785,7 +783,7 @@ impl PostgresModelCallRepository {
                 -- projected member except its summary is content the next
                 -- request adds to that summary.
                 SELECT prospective.source_session_id, prospective.semantic_entry_id
-                  FROM UNNEST($3::uuid[], $4::uuid[])
+                  FROM UNNEST($2::uuid[], $3::uuid[])
                        AS prospective(source_session_id, semantic_entry_id)
                 EXCEPT
                 SELECT reported.source_session_id, reported.semantic_entry_id
@@ -806,7 +804,7 @@ impl PostgresModelCallRepository {
                     COALESCE(latest_call.proven_unreported_content_bytes, 0)
                     -- Entries an uncommitted preview minted have no durable row
                     -- to score; the preview measured their content itself.
-                    + $5::numeric
+                    + $4::numeric
                     + (
                         SELECT COALESCE(SUM(
                             CASE
@@ -874,7 +872,7 @@ impl PostgresModelCallRepository {
                                     WHEN 'assistant_text' THEN
                                         COALESCE(octet_length(entry.assistant_text_value), 0)
                                     WHEN 'provider_compaction' THEN
-                                        CASE WHEN $7::boolean THEN
+                                        CASE WHEN $5::boolean THEN
                                             COALESCE(octet_length(entry.assistant_text_value), 0)
                                         ELSE 0 END
                                     WHEN 'assistant_tool_use' THEN
@@ -956,15 +954,11 @@ impl PostgresModelCallRepository {
                FROM latest_call",
         )
         .bind(session_id_to_uuid(session))
-        .bind(target.identity().into_uuid())
         .bind(&member_sessions)
         .bind(&member_entries)
         .bind(Decimal::from(uncommitted_content_bytes))
-        .bind(match fast_mode {
-            FastMode::Disabled => "disabled",
-            FastMode::Enabled => "enabled",
-        })
         .bind(replays_provider_compaction)
+        .bind(effective_target.identity().into_uuid())
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -1262,16 +1256,18 @@ impl PostgresModelCallRepository {
         // too, so activation would abort before selection could reach the
         // admissible member. Selection consumes no displacement row and this
         // transaction rolls back, so nothing durable moves.
+        let serving_evidence = prepared_serving_evidence(
+            self.credential_families.as_ref(),
+            &self.continuation_usage_limits,
+            request.call().target(),
+            fast_mode,
+        );
         let selected = select_runtime_pool_credential(
             &mut transaction,
             session_id,
             execution.turn(),
             execution.current_attempt().id(),
-            serving_pool_target(
-                self.credential_families.as_ref(),
-                request.call().target(),
-                fast_mode,
-            ),
+            serving_evidence,
             credential_reference.clone(),
             &self.credential_pools,
         )
@@ -1341,16 +1337,18 @@ impl PostgresModelCallRepository {
             self.credential_families.as_ref(),
         )
         .await?;
+        let serving_evidence = prepared_serving_evidence(
+            self.credential_families.as_ref(),
+            &self.continuation_usage_limits,
+            prepared.call().target(),
+            fast_mode,
+        );
         let selected = select_runtime_pool_credential(
             connection,
             prepared.session(),
             prepared.turn(),
             prepared.attempt(),
-            serving_pool_target(
-                self.credential_families.as_ref(),
-                prepared.call().target(),
-                fast_mode,
-            ),
+            serving_evidence,
             credential_reference,
             &self.credential_pools,
         )
@@ -1374,6 +1372,7 @@ impl PostgresModelCallRepository {
             selected.policy.as_ref(),
             self.cache_inclusive_input_targets
                 .contains(&prepared.call().target()),
+            serving_evidence,
         )
         .await?;
         consume_pool_member_actions(
@@ -1571,17 +1570,19 @@ impl PostgresModelCallRepository {
                 )
                 .await?;
                 acquire_model_call_outbox_order_guard(&mut transaction).await?;
+                let serving_evidence = prepared_serving_evidence(
+                    self.credential_families.as_ref(),
+                    &self.continuation_usage_limits,
+                    resolved.target(),
+                    fast_mode,
+                );
                 let selected = Some(
                     select_runtime_pool_credential(
                         &mut transaction,
                         session,
                         execution.turn(),
                         execution.current_attempt().id(),
-                        serving_pool_target(
-                            self.credential_families.as_ref(),
-                            resolved.target(),
-                            fast_mode,
-                        ),
+                        serving_evidence,
                         credential_reference,
                         &self.credential_pools,
                     )
@@ -1697,6 +1698,12 @@ impl PostgresModelCallRepository {
                     .ok_or(ModelCallRepositoryError::InvalidTransition(
                         "admitted credential pool omitted its selected member",
                     ))?;
+            let serving_evidence = prepared_serving_evidence(
+                self.credential_families.as_ref(),
+                &self.continuation_usage_limits,
+                prepared.call().target(),
+                fast_mode,
+            );
             insert_prepared_call(
                 &mut transaction,
                 &prepared,
@@ -1704,6 +1711,7 @@ impl PostgresModelCallRepository {
                 selected.policy.as_ref(),
                 self.cache_inclusive_input_targets
                     .contains(&prepared.call().target()),
+                serving_evidence,
             )
             .await?;
             consume_pool_member_actions(
@@ -1750,19 +1758,59 @@ impl PostgresModelCallRepository {
                     }
                     Err(error) => return Err(error),
                 };
-            if !matches!(
-                execution.current_call(),
-                Some(current)
-                    if current.id() == call
-                        && current.state()
-                            == signalbox_domain::CurrentModelCallState::Prepared
+            let Some(current) = execution.current_call() else {
+                return Ok((false, AuthorizeModelCallOutcome::NoSend));
+            };
+            if current.id() != call
+                || current.state() != signalbox_domain::CurrentModelCallState::Prepared
+            {
+                return Ok((false, AuthorizeModelCallOutcome::NoSend));
+            }
+            let fast_mode = execution
+                .configuration()
+                .effective()
+                .model_settings()
+                .effective()
+                .fast_mode();
+            let current_serving_evidence = prepared_serving_evidence(
+                self.credential_families.as_ref(),
+                &self.continuation_usage_limits,
+                current.target(),
+                fast_mode,
+            );
+            let current_effective_target = current_serving_evidence.effective_target;
+            let stored_serving_evidence = sqlx::query(
+                "SELECT effective_provider_model_identity_id,
+                        prepared_credential_model_family,
+                        prepared_max_output_tokens,
+                        prepared_context_window_tokens,
+                        prepared_provider_compaction_replay
+                   FROM model_call
+                  WHERE model_call_id = $1",
+            )
+            .bind(call.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+            let stored_effective_target =
+                ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                    stored_serving_evidence.try_get("effective_provider_model_identity_id")?,
+                ));
+            let stored_credential_model_family = stored_serving_evidence
+                .try_get::<Option<String>, _>("prepared_credential_model_family")?;
+            let stored_limit =
+                decode_prepared_usage_limit(&stored_serving_evidence, stored_effective_target)?;
+            if !prepared_serving_configuration_is_compatible(
+                stored_effective_target,
+                stored_credential_model_family.as_deref(),
+                stored_limit,
+                current_serving_evidence,
             ) {
                 return Ok((false, AuthorizeModelCallOutcome::NoSend));
             }
             let authorized = execution.authorize_send().map_err(|_| {
                 ModelCallCorruption::Inconsistent("checked Prepared call could not authorize send")
             })?;
-            persist_authorization(&mut transaction, &authorized).await?;
+            persist_authorization(&mut transaction, &authorized, current_effective_target).await?;
             Ok((
                 true,
                 AuthorizeModelCallOutcome::Authorized(Box::new(authorized)),
@@ -1837,6 +1885,14 @@ impl PostgresModelCallRepository {
                 &mut next_reclassified_turn,
             )?;
             let usage = observation.usage();
+            if let Some(snapshot) = observation.rate_limits() {
+                crate::credential_capacity::retain_call_rate_limits(
+                    &mut transaction,
+                    observation.call(),
+                    snapshot,
+                )
+                .await?;
+            }
             let retained_input_tokens = observation.observation().retained_input_tokens();
             let retained_output_tokens = observation.observation().retained_output_tokens();
             let provider_failure_cause = observation.provider_failure_cause();
@@ -3148,6 +3204,7 @@ where
             session,
             turn,
             producing_call,
+            serving_pool_target(credential_families, resolved.target(), fast_mode),
             *limit,
         )
         .await?
@@ -3201,13 +3258,19 @@ where
             credential_families,
         )
         .await?;
+        let serving_evidence = prepared_serving_evidence(
+            credential_families,
+            continuation_usage_limits,
+            resolved.target(),
+            fast_mode,
+        );
         let selected = Some(
             select_runtime_pool_credential(
                 connection,
                 session,
                 turn,
                 execution.current_attempt().id(),
-                serving_pool_target(credential_families, resolved.target(), fast_mode),
+                serving_evidence,
                 default_reference,
                 credential_pools,
             )
@@ -3319,12 +3382,19 @@ where
             .ok_or(ModelCallRepositoryError::InvalidTransition(
                 "available continuation selection omitted a credential reference",
             ))?;
+    let serving_evidence = prepared_serving_evidence(
+        credential_families,
+        continuation_usage_limits,
+        prepared.call().target(),
+        fast_mode,
+    );
     insert_prepared_call(
         connection,
         &prepared,
         &credential_reference,
         selected.policy.as_ref(),
         cache_inclusive_input_targets.contains(&prepared.call().target()),
+        serving_evidence,
     )
     .await?;
     consume_pool_member_actions(
@@ -3349,10 +3419,12 @@ async fn load_tool_continuation_headroom_evidence(
     session: SessionId,
     turn: TurnId,
     producing_call: ModelCallId,
+    current_effective_target: ResolvedProviderTarget,
     limit: ToolContinuationUsageLimit,
 ) -> Result<Option<ToolContinuationHeadroomEvidence>, ModelCallRepositoryError> {
     let row = sqlx::query(
-        "SELECT usage_input_includes_cache_tokens,
+        "SELECT effective_provider_model_identity_id,
+                usage_input_includes_cache_tokens,
                 usage_input_tokens, usage_output_tokens,
                 usage_cache_creation_input_tokens,
                 usage_cache_read_input_tokens,
@@ -3443,6 +3515,12 @@ async fn load_tool_continuation_headroom_evidence(
     let Some(row) = row else {
         return Err(ModelCallCorruption::Missing("completed tool-producing call").into());
     };
+    let producing_effective_target = ResolvedProviderTarget::naming(
+        ProviderModelIdentity::from_uuid(row.try_get("effective_provider_model_identity_id")?),
+    );
+    if producing_effective_target != current_effective_target {
+        return Ok(None);
+    }
     let decode = |field: &'static str| -> Result<Option<u64>, ModelCallRepositoryError> {
         row.try_get::<Option<Decimal>, _>(field)?
             .map(|value| {
@@ -3485,7 +3563,7 @@ async fn load_tool_continuation_headroom_evidence(
     }
     if has_provider_compaction && !limit.replays_provider_compaction() {
         // The disabled projection omits the opaque block and replays the
-        // preserved history that the aggregate usage measured.
+        // preserved history that aggregate usage measured.
         retained_input_tokens = None;
         retained_output_tokens = None;
         input_is_retained = true;
@@ -6734,6 +6812,120 @@ fn serving_pool_target(
     })
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct PreparedServingEvidence<'a> {
+    effective_target: ResolvedProviderTarget,
+    credential_model_family: Option<&'a str>,
+    limit: Option<ToolContinuationUsageLimit>,
+}
+
+pub(crate) fn prepared_serving_evidence<'a>(
+    families: Option<&'a crate::ModelCredentialFamilyCatalog>,
+    limits: &ToolContinuationUsageLimitCatalog,
+    selected_target: ResolvedProviderTarget,
+    fast_mode: FastMode,
+) -> PreparedServingEvidence<'a> {
+    let effective_target = serving_pool_target(families, selected_target, fast_mode);
+    PreparedServingEvidence {
+        effective_target,
+        credential_model_family: families.and_then(|families| families.family(effective_target)),
+        limit: limits.get(&(selected_target, fast_mode)).copied(),
+    }
+}
+
+fn remap_preserves_preflight_limits(
+    previous: Option<ToolContinuationUsageLimit>,
+    current: Option<ToolContinuationUsageLimit>,
+) -> bool {
+    match (previous, current) {
+        (Some(previous), Some(current)) => {
+            let previous_input_allowance = previous
+                .context_window_tokens()
+                .saturating_sub(previous.max_output_tokens());
+            let current_input_allowance = current
+                .context_window_tokens()
+                .saturating_sub(current.max_output_tokens());
+            current_input_allowance >= previous_input_allowance
+                && current.replays_provider_compaction() == previous.replays_provider_compaction()
+        }
+        _ => false,
+    }
+}
+
+fn prepared_serving_configuration_is_compatible(
+    prepared_target: ResolvedProviderTarget,
+    prepared_family: Option<&str>,
+    prepared_limit: Option<ToolContinuationUsageLimit>,
+    current: PreparedServingEvidence<'_>,
+) -> bool {
+    let configuration_changed = prepared_target != current.effective_target
+        || prepared_family != current.credential_model_family
+        || !prepared_limit_configuration_matches(prepared_limit, current.limit);
+    !configuration_changed
+        || (matches!(
+            (prepared_family, current.credential_model_family),
+            (Some(prepared), Some(current)) if prepared == current
+        ) && remap_preserves_preflight_limits(prepared_limit, current.limit))
+}
+
+fn prepared_limit_configuration_matches(
+    prepared: Option<ToolContinuationUsageLimit>,
+    current: Option<ToolContinuationUsageLimit>,
+) -> bool {
+    match (prepared, current) {
+        (None, None) => true,
+        (Some(prepared), Some(current)) => {
+            prepared
+                .context_window_tokens()
+                .saturating_sub(prepared.max_output_tokens())
+                == current
+                    .context_window_tokens()
+                    .saturating_sub(current.max_output_tokens())
+                && prepared.replays_provider_compaction() == current.replays_provider_compaction()
+        }
+        _ => false,
+    }
+}
+
+fn decode_prepared_usage_limit(
+    row: &PgRow,
+    target: ResolvedProviderTarget,
+) -> Result<Option<ToolContinuationUsageLimit>, ModelCallRepositoryError> {
+    let max_output_tokens = row.try_get::<Option<Decimal>, _>("prepared_max_output_tokens")?;
+    let context_window_tokens =
+        row.try_get::<Option<Decimal>, _>("prepared_context_window_tokens")?;
+    let provider_compaction_replay =
+        row.try_get::<Option<bool>, _>("prepared_provider_compaction_replay")?;
+    match (
+        max_output_tokens,
+        context_window_tokens,
+        provider_compaction_replay,
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(max_output_tokens), Some(context_window_tokens), Some(replays)) => {
+            let max_output_tokens = positive_u64_from_numeric(max_output_tokens)
+                .map_err(|_| ModelCallCorruption::Inconsistent("prepared maximum output tokens"))?;
+            let context_window_tokens = positive_u64_from_numeric(context_window_tokens)
+                .map_err(|_| ModelCallCorruption::Inconsistent("prepared context window tokens"))?;
+            let limit = ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                max_output_tokens,
+                context_window_tokens,
+            );
+            Ok(Some(if replays {
+                limit.with_provider_compaction_replay()
+            } else {
+                limit
+            }))
+        }
+        _ => Err(
+            ModelCallCorruption::Inconsistent("prepared serving limit evidence completeness")
+                .into(),
+        ),
+    }
+}
+
 struct SelectedRuntimePoolCredential {
     reference: Option<ModelCallCredentialReference>,
     policy: Option<CredentialPoolRuntimePolicy>,
@@ -7023,7 +7215,7 @@ async fn select_runtime_pool_credential(
     session: SessionId,
     turn: TurnId,
     attempt: TurnAttemptId,
-    target: ResolvedProviderTarget,
+    serving_evidence: PreparedServingEvidence<'_>,
     default_reference: ModelCallCredentialReference,
     policies: &CredentialPoolRuntimeCatalog,
 ) -> Result<SelectedRuntimePoolCredential, ModelCallRepositoryError> {
@@ -7048,17 +7240,43 @@ async fn select_runtime_pool_credential(
                 .ok_or(ModelCallCorruption::Missing(
                     "availability successor predecessor pool policy",
                 ))?;
-            let reference: String = sqlx::query_scalar(
-                "SELECT credential_reference
+            let row = sqlx::query(
+                "SELECT credential_reference,
+                        effective_provider_model_identity_id,
+                        prepared_credential_model_family,
+                        prepared_max_output_tokens,
+                        prepared_context_window_tokens,
+                        prepared_provider_compaction_replay
                    FROM model_call
                   WHERE model_call_id = $1",
             )
             .bind(predecessor)
             .fetch_one(&mut *connection)
             .await?;
+            let reference = row.try_get::<String, _>("credential_reference")?;
+            let prepared_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                row.try_get("effective_provider_model_identity_id")?,
+            ));
+            let prepared_family =
+                row.try_get::<Option<String>, _>("prepared_credential_model_family")?;
+            let prepared_limit = decode_prepared_usage_limit(&row, prepared_target)?;
+            if !prepared_serving_configuration_is_compatible(
+                prepared_target,
+                prepared_family.as_deref(),
+                prepared_limit,
+                serving_evidence,
+            ) {
+                return Err(ModelCallRepositoryError::InvalidTransition(
+                    "availability successor serving configuration changed",
+                ));
+            }
             (Some(policy), Some(reference), rotated)
         }
-        None => (policies.get(&target).cloned(), None, false),
+        None => (
+            policies.get(&serving_evidence.effective_target).cloned(),
+            None,
+            false,
+        ),
     };
     let Some(policy) = policy else {
         return Ok(SelectedRuntimePoolCredential {
@@ -7262,6 +7480,7 @@ pub(crate) async fn insert_prepared_call(
     credential_reference: &ModelCallCredentialReference,
     credential_pool_policy: Option<&CredentialPoolRuntimePolicy>,
     input_includes_cache_tokens: bool,
+    serving_evidence: PreparedServingEvidence<'_>,
 ) -> Result<(), ModelCallRepositoryError> {
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
@@ -7419,10 +7638,13 @@ pub(crate) async fn insert_prepared_call(
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id, frozen_model_alias_id,
              frozen_alias_selected_direct_id, resolved_provider_model_identity_id,
-             context_frontier_id, credential_reference,
+             effective_provider_model_identity_id, prepared_credential_model_family,
+             prepared_max_output_tokens, prepared_context_window_tokens,
+             prepared_provider_compaction_replay, context_frontier_id, credential_reference,
              usage_input_includes_cache_tokens, turn_instruction_manifest_id, state_kind,
              terminal_disposition_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'prepared', NULL)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                 $15, $16, $17, $18, 'prepared', NULL)",
     )
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(prepared.turn()))
@@ -7433,6 +7655,23 @@ pub(crate) async fn insert_prepared_call(
     .bind(alias)
     .bind(alias_selected)
     .bind(call.target().identity().into_uuid())
+    .bind(serving_evidence.effective_target.identity().into_uuid())
+    .bind(serving_evidence.credential_model_family)
+    .bind(
+        serving_evidence
+            .limit
+            .map(|limit| Decimal::from(limit.max_output_tokens())),
+    )
+    .bind(
+        serving_evidence
+            .limit
+            .map(|limit| Decimal::from(limit.context_window_tokens())),
+    )
+    .bind(
+        serving_evidence
+            .limit
+            .map(ToolContinuationUsageLimit::replays_provider_compaction),
+    )
     .bind(call.frontier().snapshot().into_uuid())
     .bind(credential_reference.as_str())
     .bind(input_includes_cache_tokens)
@@ -7830,6 +8069,7 @@ async fn load_frozen_epoch_system_prompt(
 async fn persist_authorization(
     connection: &mut PgConnection,
     authorized: &AuthorizedModelCall,
+    effective_target: ResolvedProviderTarget,
 ) -> Result<(), ModelCallRepositoryError> {
     let attempt_rows = sqlx::query(
         "UPDATE turn_attempt
@@ -7849,7 +8089,8 @@ async fn persist_authorization(
     .rows_affected();
     let call_rows = sqlx::query(
         "UPDATE model_call
-            SET state_kind = 'in_flight'
+            SET state_kind = 'in_flight',
+                effective_provider_model_identity_id = $5
           WHERE model_call_id = $1
             AND turn_id = $2
             AND session_id = $3
@@ -7861,6 +8102,7 @@ async fn persist_authorization(
     .bind(turn_id_to_uuid(authorized.turn()))
     .bind(session_id_to_uuid(authorized.session()))
     .bind(authorized.attempt().id().into_uuid())
+    .bind(effective_target.identity().into_uuid())
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -10744,7 +10986,10 @@ mod tests {
     use std::{borrow::Cow, collections::BTreeSet, error::Error, fmt, io, time::Duration};
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
-    use signalbox_domain::{ModelCallId, ProviderModelCallFailureCause, TurnId};
+    use signalbox_domain::{
+        FastMode, ModelCallId, ProviderModelCallFailureCause, ProviderModelIdentity,
+        ResolvedProviderTarget, TurnId,
+    };
     use sqlx::{
         error::{DatabaseError, ErrorKind},
         types::Uuid,
@@ -10752,12 +10997,21 @@ mod tests {
 
     use super::{
         MAX_AVAILABILITY_BACKOFF, ModelCallCorruption, ModelCallIdentityCollision,
-        ModelCallRepositoryError, StoredTerminalFrontierMember, availability_retry_backoff,
-        cancellation_poll_interval, commit_failure_is_ambiguous,
+        ModelCallRepositoryError, StoredTerminalFrontierMember, ToolContinuationUsageLimit,
+        availability_retry_backoff, cancellation_poll_interval, commit_failure_is_ambiguous,
         completed_terminal_frontier_matches, delegation_terminal_relation_decode_error,
         failed_terminal_frontier_matches, is_same_credential_retry_cause,
-        record_reclassified_turn_candidate,
+        record_reclassified_turn_candidate, remap_preserves_preflight_limits,
     };
+
+    #[test]
+    fn remapped_call_rejects_missing_preparation_limit_evidence() {
+        let target =
+            ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(1)));
+        let current = ToolContinuationUsageLimit::new(target, FastMode::Enabled, 10, 100);
+
+        assert!(!remap_preserves_preflight_limits(None, Some(current)));
+    }
 
     #[test]
     fn same_credential_retry_causes_are_closed() {

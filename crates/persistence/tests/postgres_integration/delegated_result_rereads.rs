@@ -2,8 +2,8 @@
 
 use crate::*;
 
-/// a retained child relationship does not make a
-/// later accepted-input turn subject to delegated initial-result closure.
+/// a retained child relationship does not make a later accepted-input turn subject to delegated
+/// initial-result closure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn successor_completion_rereads_without_delegated_result() -> Result<(), Box<dyn Error>> {
@@ -48,8 +48,8 @@ async fn successor_completion_rereads_without_delegated_result() -> Result<(), B
     Ok(())
 }
 
-/// nonterminal observation reread likewise scopes
-/// delegated-result absence to the exact delegation-origin turn.
+/// nonterminal observation reread likewise scopes delegated-result absence to the exact
+/// delegation-origin turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn successor_tool_round_rereads_without_delegated_result() -> Result<(), Box<dyn Error>> {
@@ -105,8 +105,8 @@ async fn successor_tool_round_rereads_without_delegated_result() -> Result<(), B
     Ok(())
 }
 
-/// a terminal background-delivery wake
-/// authenticates its model-call closure without initial-child result evidence.
+/// a terminal background-delivery wake authenticates its model-call closure without initial-child
+/// result evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn wake_completion_rereads_without_child_result() -> Result<(), Box<dyn Error>> {
@@ -152,8 +152,7 @@ async fn wake_completion_rereads_without_child_result() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// a continuing background-delivery wake
-/// authenticates absence of initial-child result evidence.
+/// a continuing background-delivery wake authenticates absence of initial-child result evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn wake_tool_round_rereads_without_child_result() -> Result<(), Box<dyn Error>> {
@@ -210,8 +209,8 @@ async fn wake_tool_round_rereads_without_child_result() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// a historical wake between accepted-input turns is
-/// not the baseline that precedes the session's earliest accepted input.
+/// a historical wake between accepted-input turns is not the baseline that precedes the session's
+/// earliest accepted input.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn historical_wake_does_not_replace_accepted_baseline() -> Result<(), Box<dyn Error>> {
@@ -488,9 +487,8 @@ async fn insert_historical_delegation_wake(
     Ok(())
 }
 
-/// a failed delegated initial turn remains a complete
-/// semantic subject when the child accepts its next user turn, even though the
-/// failed call produced no assistant entry.
+/// a failed delegated initial turn remains a complete semantic subject when the child accepts its
+/// next user turn, even though the failed call produced no assistant entry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn failed_delegated_subject_allows_successor_input() -> Result<(), Box<dyn Error>> {
@@ -524,8 +522,8 @@ async fn failed_delegated_subject_allows_successor_input() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// a retained relationship with a missing
-/// immutable initial task is corruption, not an ordinary-session reread.
+/// a retained relationship with a missing immutable initial task is corruption, not an
+/// ordinary-session reread.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn capability_reread_requires_initial_task() -> Result<(), Box<dyn Error>> {
@@ -536,8 +534,7 @@ async fn capability_reread_requires_initial_task() -> Result<(), Box<dyn Error>>
     .await
 }
 
-/// ambiguous capability-failure reread
-/// authenticates the delegated child result itself.
+/// ambiguous capability-failure reread authenticates the delegated child result itself.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn capability_reread_requires_delegated_result() -> Result<(), Box<dyn Error>> {
@@ -548,8 +545,7 @@ async fn capability_reread_requires_delegated_result() -> Result<(), Box<dyn Err
     .await
 }
 
-/// ambiguous capability-failure reread
-/// authenticates the exact delegated parent update satellite.
+/// ambiguous capability-failure reread authenticates the exact delegated parent update satellite.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn capability_reread_requires_delegated_update() -> Result<(), Box<dyn Error>> {
@@ -560,8 +556,7 @@ async fn capability_reread_requires_delegated_update() -> Result<(), Box<dyn Err
     .await
 }
 
-/// ambiguous capability-failure reread
-/// requires the canonical delegated parent-update outbox kind.
+/// ambiguous capability-failure reread requires the canonical delegated parent-update outbox kind.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn capability_reread_requires_update_header_kind() -> Result<(), Box<dyn Error>> {
@@ -572,8 +567,7 @@ async fn capability_reread_requires_update_header_kind() -> Result<(), Box<dyn E
     .await
 }
 
-/// ambiguous capability-failure reread
-/// authenticates the exact delegated parent wake satellite.
+/// ambiguous capability-failure reread authenticates the exact delegated parent wake satellite.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn capability_reread_requires_delegated_wake() -> Result<(), Box<dyn Error>> {
@@ -581,8 +575,7 @@ async fn capability_reread_requires_delegated_wake() -> Result<(), Box<dyn Error
         .await
 }
 
-/// ambiguous capability-failure reread
-/// requires the canonical delegated parent-wake outbox kind.
+/// ambiguous capability-failure reread requires the canonical delegated parent-wake outbox kind.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn capability_reread_requires_wake_header_kind() -> Result<(), Box<dyn Error>> {
@@ -593,8 +586,7 @@ async fn capability_reread_requires_wake_header_kind() -> Result<(), Box<dyn Err
     .await
 }
 
-/// a completed delegated observation reread
-/// authenticates its exact delivered child result.
+/// a completed delegated observation reread authenticates its exact delivered child result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn completed_observation_reread_requires_result() -> Result<(), Box<dyn Error>> {
@@ -605,8 +597,7 @@ async fn completed_observation_reread_requires_result() -> Result<(), Box<dyn Er
     .await
 }
 
-/// a known-failed delegated observation
-/// reread authenticates its exact delivered child result.
+/// a known-failed delegated observation reread authenticates its exact delivered child result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn failed_observation_reread_requires_result() -> Result<(), Box<dyn Error>> {
@@ -617,8 +608,7 @@ async fn failed_observation_reread_requires_result() -> Result<(), Box<dyn Error
     .await
 }
 
-/// a refused delegated observation reread
-/// authenticates its exact delivered child result.
+/// a refused delegated observation reread authenticates its exact delivered child result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn refused_observation_reread_requires_result() -> Result<(), Box<dyn Error>> {
@@ -629,8 +619,7 @@ async fn refused_observation_reread_requires_result() -> Result<(), Box<dyn Erro
     .await
 }
 
-/// a cancelled delegated observation reread
-/// authenticates its exact delivered child result.
+/// a cancelled delegated observation reread authenticates its exact delivered child result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn cancelled_observation_reread_requires_result() -> Result<(), Box<dyn Error>> {
@@ -641,8 +630,8 @@ async fn cancelled_observation_reread_requires_result() -> Result<(), Box<dyn Er
     .await
 }
 
-/// authoritative terminal reread
-/// authenticates the complete delivery set for waits that predated the result.
+/// authoritative terminal reread authenticates the complete delivery set for waits that predated
+/// the result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn observation_reread_requires_wait_delivery() -> Result<(), Box<dyn Error>> {
@@ -759,8 +748,7 @@ async fn observation_reread_requires_wait_delivery() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// a tool-round observation cannot retain
-/// child-result closure while the delegated child continues.
+/// a tool-round observation cannot retain child-result closure while the delegated child continues.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn tool_round_reread_rejects_delegated_result() -> Result<(), Box<dyn Error>> {
@@ -771,8 +759,8 @@ async fn tool_round_reread_rejects_delegated_result() -> Result<(), Box<dyn Erro
     .await
 }
 
-/// an ambiguous observation cannot retain
-/// child-result closure while recovery remains authoritative.
+/// an ambiguous observation cannot retain child-result closure while recovery remains
+/// authoritative.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn ambiguous_reread_rejects_delegated_result() -> Result<(), Box<dyn Error>> {
@@ -783,8 +771,8 @@ async fn ambiguous_reread_rejects_delegated_result() -> Result<(), Box<dyn Error
     .await
 }
 
-/// known delegated tool-crash recovery publishes the
-/// typed failed child result, parent update, and parent wake atomically.
+/// known delegated tool-crash recovery publishes the typed failed child result, parent update, and
+/// parent wake atomically.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_tool_crash_publishes_failed_result() -> Result<(), Box<dyn Error>> {
@@ -832,8 +820,8 @@ async fn delegated_tool_crash_publishes_failed_result() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// startup classifies an undecodable delegated active
-/// phase as durable corruption rather than retryable database failure.
+/// startup classifies an undecodable delegated active phase as durable corruption rather than
+/// retryable database failure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_null_active_phase_fails_closed() -> Result<(), Box<dyn Error>> {
@@ -875,8 +863,7 @@ async fn delegated_null_active_phase_fails_closed() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-/// delegated startup crash recovery takes the parent
-/// endpoint prefix before the child scheduler.
+/// delegated startup crash recovery takes the parent endpoint prefix before the child scheduler.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_tool_crash_locks_parent_before_child_scheduler() -> Result<(), Box<dyn Error>> {
@@ -928,8 +915,8 @@ async fn delegated_tool_crash_locks_parent_before_child_scheduler() -> Result<()
     Ok(())
 }
 
-/// completing a delegated initial task atomically creates its
-/// typed returned result, parent update, and parent wake before commit.
+/// completing a delegated initial task atomically creates its typed returned result, parent update,
+/// and parent wake before commit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_completion_materializes_result_update_and_wake() -> Result<(), Box<dyn Error>> {
@@ -992,8 +979,8 @@ async fn delegated_completion_materializes_result_update_and_wake() -> Result<()
     Ok(())
 }
 
-/// initial target resolution failure for a delegated child
-/// atomically materializes the failed result, parent update, and parent wake.
+/// initial target resolution failure for a delegated child atomically materializes the failed
+/// result, parent update, and parent wake.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_initial_target_failure_materializes_parent_delivery()
@@ -1064,8 +1051,8 @@ async fn delegated_initial_target_failure_materializes_parent_delivery()
     Ok(())
 }
 
-/// reconciliation-required delegated work remains unresolved
-/// relationship work and cannot publish a child result, parent update, or wake.
+/// reconciliation-required delegated work remains unresolved relationship work and cannot publish a
+/// child result, parent update, or wake.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_reconciliation_withholds_result_and_parent_delivery()
@@ -1161,9 +1148,9 @@ async fn delegated_reconciliation_withholds_result_and_parent_delivery()
     Ok(())
 }
 
-/// daemon-owned reconciliation of an ambiguous delegated
-/// initial task atomically publishes an unavailable child result and wakes its
-/// parent while retaining the reconciliation-required turn boundary.
+/// daemon-owned reconciliation of an ambiguous delegated initial task atomically publishes an
+/// unavailable child result and wakes its parent while retaining the reconciliation-required turn
+/// boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn automatic_delegated_reconciliation_closes_parent_delivery() -> Result<(), Box<dyn Error>> {
@@ -1262,9 +1249,8 @@ async fn automatic_delegated_reconciliation_closes_parent_delivery() -> Result<(
     Ok(())
 }
 
-/// a child terminal commit takes the canonical parent
-/// session before the child scheduler and relationship, matching peer-message
-/// and descendant-cascade lock order.
+/// a child terminal commit takes the canonical parent session before the child scheduler and
+/// relationship, matching peer-message and descendant-cascade lock order.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_terminal_result_locks_parent_before_relationship() -> Result<(), Box<dyn Error>>
@@ -1350,8 +1336,8 @@ async fn delegated_terminal_result_locks_parent_before_relationship() -> Result<
     Ok(())
 }
 
-/// input submitted to a delegated child takes the canonical
-/// parent endpoint before the child session, scheduler, and relationship.
+/// input submitted to a delegated child takes the canonical parent endpoint before the child
+/// session, scheduler, and relationship.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_input_locks_parent_before_child_scheduler() -> Result<(), Box<dyn Error>> {
@@ -1711,9 +1697,8 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
     Ok(())
 }
 
-/// the Postgres safety-net sweep finds durable
-/// queued work and resumable tool batches while excluding unrelated active
-/// model work.
+/// the Postgres safety-net sweep finds durable queued work and resumable tool batches while
+/// excluding unrelated active model work.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn postgres_sweep_reconstructs_only_candidate_sessions() -> Result<(), Box<dyn Error>> {
@@ -1808,8 +1793,8 @@ async fn postgres_sweep_reconstructs_only_candidate_sessions() -> Result<(), Box
     Ok(())
 }
 
-/// a foreground result remains discoverable by the durable
-/// reconciliation sweep after its best-effort same-process nudge is lost.
+/// a foreground result remains discoverable by the durable reconciliation sweep after its
+/// best-effort same-process nudge is lost.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn foreground_delegation_result_is_a_durable_sweep_candidate() -> Result<(), Box<dyn Error>> {
@@ -1884,8 +1869,8 @@ async fn foreground_delegation_result_is_a_durable_sweep_candidate() -> Result<(
     Ok(())
 }
 
-/// a parent-only interrupt closes a foreground
-/// child wait without fabricating a child result or requiring cascade output.
+/// a parent-only interrupt closes a foreground child wait without fabricating a child result or
+/// requiring cascade output.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn parent_only_interrupt_closes_foreground_wait_without_result() -> Result<(), Box<dyn Error>>
@@ -1943,8 +1928,8 @@ async fn parent_only_interrupt_closes_foreground_wait_without_result() -> Result
     Ok(())
 }
 
-/// a durable foreground result reopens its exact
-/// parked tool batch under a fresh continued attempt after restart.
+/// a durable foreground result reopens its exact parked tool batch under a fresh continued attempt
+/// after restart.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn foreground_delegation_result_resumes_parked_tool_batch() -> Result<(), Box<dyn Error>> {

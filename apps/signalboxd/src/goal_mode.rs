@@ -87,7 +87,6 @@ const CHARGEABLE_FAILURE_RESUME_GUIDANCE: &str = "Continue pursuing the commissi
 /// These are not resumptions and do not spend the attempt budget: nothing was
 /// recorded, so the goal is owed the attempt it was promised. The bound keeps a
 /// database outage from holding a task open indefinitely.
-// numeric-bound: guard - prevents automatic goal recovery from retrying a dead database forever
 const AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES: u32 = 3;
 
 /// Deployment policy for automatic goal resumption.

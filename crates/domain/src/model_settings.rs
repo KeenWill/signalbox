@@ -1344,9 +1344,8 @@ mod tests {
         )
     }
 
-    /// each knob resolves independently through per-call,
-    /// session, profile, then global precedence, and an explicit provider
-    /// default stops lower-layer inheritance.
+    /// each knob resolves independently through per-call, session, profile, then global precedence,
+    /// and an explicit provider default stops lower-layer inheritance.
     #[test]
     fn resolves_the_fixed_precedence_chain_with_explicit_clearing() {
         let per_call = ModelSettingsOverlay::new(
@@ -1486,8 +1485,8 @@ mod tests {
         assert_eq!(settings.validated_for(), None);
     }
 
-    /// an explicit unsupported level is a typed error rather
-    /// than delegated to an open provider enum or silent clamp.
+    /// an explicit unsupported level is a typed error rather than delegated to an open provider
+    /// enum or silent clamp.
     #[test]
     fn explicit_unsupported_reasoning_is_rejected() {
         let selected = direct(1);
@@ -1515,8 +1514,8 @@ mod tests {
         );
     }
 
-    /// model-change incompatibility clamps reasoning downward,
-    /// disables fast mode, clears an unordered tier, and records each change.
+    /// model-change incompatibility clamps reasoning downward, disables fast mode, clears an
+    /// unordered tier, and records each change.
     #[test]
     fn model_change_adjusts_downward_off_and_default() {
         let supported = capabilities(
@@ -1551,8 +1550,8 @@ mod tests {
         );
     }
 
-    /// when no supported level lies below the requested level,
-    /// the model change chooses the lowest supported level.
+    /// when no supported level lies below the requested level, the model change chooses the lowest
+    /// supported level.
     #[test]
     fn model_change_uses_lowest_only_when_nothing_is_below() {
         let supported = capabilities(
@@ -1578,8 +1577,8 @@ mod tests {
         );
     }
 
-    /// inherited incompatibility rewrites the inherited source
-    /// in the validated snapshot while preserving ordered adjustment evidence.
+    /// inherited incompatibility rewrites the inherited source in the validated snapshot while
+    /// preserving ordered adjustment evidence.
     #[test]
     fn model_change_installs_a_self_consistent_adjusted_snapshot() {
         let selected = direct(1);
@@ -1617,8 +1616,8 @@ mod tests {
         );
     }
 
-    /// the same unsupported value remains an error when the
-    /// model-change caller explicitly supplies it.
+    /// the same unsupported value remains an error when the model-change caller explicitly supplies
+    /// it.
     #[test]
     fn model_change_does_not_adjust_an_explicit_unsupported_value() {
         let selected = direct(1);
@@ -1648,8 +1647,7 @@ mod tests {
         );
     }
 
-    /// an alternate fast target is selected only from the
-    /// declared capability record.
+    /// an alternate fast target is selected only from the declared capability record.
     #[test]
     fn fast_mode_uses_only_the_declared_alternate_target() {
         let selected = ResolvedProviderTarget::naming(provider_model_identity(1));
@@ -1666,8 +1664,7 @@ mod tests {
         );
     }
 
-    /// the alternate-target variant cannot silently authorize
-    /// ordinary serving through a self-map.
+    /// the alternate-target variant cannot silently authorize ordinary serving through a self-map.
     #[test]
     fn fast_mode_rejects_a_self_mapped_alternate_target() {
         let selected = ResolvedProviderTarget::naming(provider_model_identity(1));
@@ -1676,8 +1673,8 @@ mod tests {
         assert_eq!(supported.serving_target(selected, FastMode::Enabled), None);
     }
 
-    /// an automatic adjustment is a durable event field and
-    /// cannot disappear after settings preparation.
+    /// an automatic adjustment is a durable event field and cannot disappear after settings
+    /// preparation.
     #[test]
     fn defaults_event_retains_ordered_automatic_adjustments() {
         let selection = direct(1);
@@ -1740,8 +1737,8 @@ mod tests {
         assert_eq!(event.installed_settings(), installed);
     }
 
-    /// an explicit caller value is rejected as unsupported and
-    /// cannot be rewritten by automatic model-change adjustment evidence.
+    /// an explicit caller value is rejected as unsupported and cannot be rewritten by automatic
+    /// model-change adjustment evidence.
     #[test]
     fn defaults_event_rejects_adjustment_of_explicit_caller_value() {
         let prior_selection = direct(1);
@@ -1805,8 +1802,8 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// retaining the same alias spelling can still record an
-    /// adjustment when its validated direct selection changed.
+    /// retaining the same alias spelling can still record an adjustment when its validated direct
+    /// selection changed.
     #[test]
     fn defaults_event_detects_alias_retarget_from_validation_identity() {
         let alias = crate::ModelAlias::from_uuid(Uuid::from_u128(3));
@@ -1925,8 +1922,8 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// a replacement model contributes its newly copied
-    /// profile and global layers to settings-change provenance.
+    /// a replacement model contributes its newly copied profile and global layers to
+    /// settings-change provenance.
     #[test]
     fn defaults_event_uses_replacement_model_lower_layers() {
         let prior_selection = direct(1);
@@ -1982,8 +1979,8 @@ mod tests {
         assert!(event.is_some());
     }
 
-    /// every successor epoch records its newly copied profile
-    /// and global layers even when its direct model is unchanged.
+    /// every successor epoch records its newly copied profile and global layers even when its
+    /// direct model is unchanged.
     #[test]
     fn defaults_event_uses_same_model_successor_lower_layers() {
         let selection = direct(1);

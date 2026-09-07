@@ -710,10 +710,12 @@ struct GoalResumeArguments {
     /// Session whose blocked goal resumes.
     #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
     session_id: CanonicalUuid,
-    /// Optional exact next-turn guidance; at most 1 MiB of UTF-8. Omit both guidance options to use the immutable statement.
+    /// Optional exact next-turn guidance; at most 1 MiB of UTF-8. Omit both guidance options to
+    /// use the immutable statement.
     #[arg(long, value_name = "TEXT")]
     guidance: Option<String>,
-    /// Read optional next-turn guidance from one file; at most 1 MiB of UTF-8. Omit both guidance options to use the immutable statement.
+    /// Read optional next-turn guidance from one file; at most 1 MiB of UTF-8. Omit both guidance
+    /// options to use the immutable statement.
     #[arg(long, value_name = "FILE")]
     guidance_file: Option<PathBuf>,
     /// Reuse an exact non-reserved durable command identity.
@@ -965,7 +967,8 @@ struct RecordReviewFindingEventArguments {
     /// Active turn recording the event.
     #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
     turn_id: CanonicalUuid,
-    /// Output frontier the event is recorded against; omitted only for a blocked-with-reason event.
+    /// Output frontier the event is recorded against; omitted only for a blocked-with-reason
+    /// event.
     #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
     output_frontier_id: Option<CanonicalUuid>,
     /// Finding the event applies to.
@@ -2541,7 +2544,6 @@ fn delegation_text_argument(
 }
 
 fn template_name(value: &str) -> Result<String, String> {
-    // numeric-bound: guard - mirrors the canonical session-template name wire grammar
     const MAX_UTF8_BYTES: usize = 128;
 
     let first_is_admitted = value
@@ -2640,7 +2642,6 @@ fn review_line_number(value: &str) -> Result<CanonicalU64, String> {
 }
 
 fn review_confidence(value: &str) -> Result<CanonicalU64, String> {
-    // numeric-bound: not-a-bound - fixed full-scale basis-point representation
     const MAXIMUM_REVIEW_CONFIDENCE_BASIS_POINTS: u64 = 10_000;
 
     let parsed = canonical_u64(value)?;
@@ -3254,8 +3255,8 @@ mod tests {
         ));
     }
 
-    /// model replacement recovery accepts only the complete set of
-    /// pre-mutation facts printed by the client.
+    /// model replacement recovery accepts only the complete set of pre-mutation facts printed by
+    /// the client.
     #[test]
     fn model_recovery_flags_are_one_complete_defaults_observation() {
         let session = "00000000-0000-0000-0000-000000000001";
@@ -3304,8 +3305,8 @@ mod tests {
         ));
     }
 
-    /// stop recovery accepts only the complete printed observation —
-    /// command identity, defaults version, and the exact expected turn.
+    /// stop recovery accepts only the complete printed observation — command identity, defaults
+    /// version, and the exact expected turn.
     #[test]
     fn stop_recovery_flags_are_one_complete_observation() {
         let session = "00000000-0000-0000-0000-000000000001";
@@ -3398,8 +3399,8 @@ mod tests {
         assert!(descendants);
     }
 
-    /// both decision verbs bind the session and the exact pending
-    /// request, and deny requires its explicit reason.
+    /// both decision verbs bind the session and the exact pending request, and deny requires its
+    /// explicit reason.
     #[test]
     fn decision_verbs_bind_session_request_and_deny_reason() {
         let session = "00000000-0000-0000-0000-000000000001";

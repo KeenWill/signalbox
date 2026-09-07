@@ -13,7 +13,6 @@ use crate::{
     PIXEL_LIMIT_EXCEEDED_REASON, SOURCE_TOO_LARGE_REASON, options_are_empty, source,
 };
 
-// numeric-bound: ceiling - protects worker memory from runaway decoder allocation
 const MAX_DECODER_ALLOCATION_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

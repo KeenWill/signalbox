@@ -3088,8 +3088,8 @@ async fn tier_zero_session_status_updates_metadata_offline() -> Result<(), Box<d
     Ok(())
 }
 
-/// the composed GitHub metadata read is catalog-visible and crosses only
-/// the injected credential, egress policy, and hermetic transport.
+/// the composed GitHub metadata read is catalog-visible and crosses only the injected credential,
+/// egress policy, and hermetic transport.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn composed_github_read_executes_offline() -> Result<(), Box<dyn Error>> {
@@ -3134,8 +3134,8 @@ async fn composed_github_read_executes_offline() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// the composed workspace read is rooted in the injected temporary
-/// directory and returns its exact fixture content without network access.
+/// the composed workspace read is rooted in the injected temporary directory and returns its exact
+/// fixture content without network access.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn composed_workspace_read_executes_offline() -> Result<(), Box<dyn Error>> {
@@ -3182,8 +3182,8 @@ async fn composed_workspace_read_executes_offline() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-/// the composed local Git executor observes the injected repository
-/// worktree and returns its fixture path through the daemon tool loop.
+/// the composed local Git executor observes the injected repository worktree and returns its
+/// fixture path through the daemon tool loop.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn composed_local_git_status_executes_offline() -> Result<(), Box<dyn Error>> {
@@ -3220,11 +3220,10 @@ async fn composed_local_git_status_executes_offline() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// the composed sandboxed executor reaches the injected process boundary
-/// and returns its typed host-refusal evidence through the daemon tool loop.
-/// The session blanket is enabled because `sandboxed_exec` declares `Confirm`,
-/// so an unapproved proposal parks instead of dispatching and this test would
-/// observe the approval gate rather than the process boundary it is about.
+/// the composed sandboxed executor reaches the injected process boundary and returns its typed
+/// host-refusal evidence through the daemon tool loop. The session blanket is enabled because
+/// `sandboxed_exec` declares `Confirm`, so an unapproved proposal parks instead of dispatching and
+/// this test would observe the approval gate rather than the process boundary it is about.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Error>> {
@@ -3265,8 +3264,8 @@ async fn composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-/// the composed conversation port reads the invoking session's real
-/// persisted semantic transcript rather than a synthetic transcript value.
+/// the composed conversation port reads the invoking session's real persisted semantic transcript
+/// rather than a synthetic transcript value.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn composed_introspection_returns_real_own_transcript() -> Result<(), Box<dyn Error>> {
@@ -3329,8 +3328,8 @@ async fn composed_introspection_returns_real_own_transcript() -> Result<(), Box<
     Ok(())
 }
 
-/// workspace mutation remains parked with no filesystem effect until a
-/// user approval is recorded through the process protocol.
+/// workspace mutation remains parked with no filesystem effect until a user approval is recorded
+/// through the process protocol.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn workspace_write_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
@@ -3382,8 +3381,8 @@ async fn workspace_write_gates_through_process_protocol() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// review publication remains parked with no transport effect until a
-/// user approval is recorded through the process protocol.
+/// review publication remains parked with no transport effect until a user approval is recorded
+/// through the process protocol.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn github_publish_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
@@ -3844,9 +3843,8 @@ async fn tier_one_review_gate_check_completes_offline_tool_loop() -> Result<(), 
     .await
 }
 
-/// user denial creates no physical
-/// attempt, projects one error result to the continuation call, and allows the
-/// same turn to complete from the model's response.
+/// user denial creates no physical attempt, projects one error result to the continuation call, and
+/// allows the same turn to complete from the model's response.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn denial_continues_without_execution() -> Result<(), Box<dyn Error>> {
@@ -3918,11 +3916,9 @@ async fn denial_continues_without_execution() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// deny-and-end first
-/// records the exact denial, then the ordinary proof-bearing interrupt closes
-/// the active turn; no tool attempt is created, the stop remains independently
-/// auditable, and a later submit survives reconstitution before its new turn
-/// activates and runs.
+/// deny-and-end first records the exact denial, then the ordinary proof-bearing interrupt closes
+/// the active turn; no tool attempt is created, the stop remains independently auditable, and a
+/// later submit survives reconstitution before its new turn activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn cancelled_tool_round_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
@@ -4031,9 +4027,8 @@ async fn cancelled_tool_round_admits_and_runs_later_turn() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// an interrupt alone against a parked approval
-/// wait records the authoritative typed rejection — it is not a denial and
-/// does not bypass the decision command — and the wait remains parked with no
+/// an interrupt alone against a parked approval wait records the authoritative typed rejection — it
+/// is not a denial and does not bypass the decision command — and the wait remains parked with no
 /// tool attempt until its canonical decision command resolves the obligation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -4112,9 +4107,8 @@ async fn interrupt_against_parked_approval_wait_is_rejected() -> Result<(), Box<
     Ok(())
 }
 
-/// a restart scan preserves an
-/// approval wait exactly; after the user decision, the durable sweep and a
-/// fresh composition resume the same logical turn without replaying activation.
+/// a restart scan preserves an approval wait exactly; after the user decision, the durable sweep
+/// and a fresh composition resume the same logical turn without replaying activation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn restart_leaves_approval_turn_parked() -> Result<(), Box<dyn Error>> {
@@ -4214,9 +4208,8 @@ async fn restart_leaves_approval_turn_parked() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// an auto/confirm batch parks on
-/// its earliest undecided request and, after approval, executes both requests
-/// serially in proposal order with their distinct provenance.
+/// an auto/confirm batch parks on its earliest undecided request and, after approval, executes both
+/// requests serially in proposal order with their distinct provenance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn mixed_batch_executes_in_proposal_order() -> Result<(), Box<dyn Error>> {
@@ -4341,9 +4334,8 @@ async fn mixed_batch_executes_in_proposal_order() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// the explicitly dangerous frozen blanket posture
-/// approves a confirm-default tool under `session_blanket` provenance and the
-/// turn runs unattended without fabricating user agency.
+/// the explicitly dangerous frozen blanket posture approves a confirm-default tool under
+/// `session_blanket` provenance and the turn runs unattended without fabricating user agency.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn blanket_posture_runs_confirm_tool_unattended() -> Result<(), Box<dyn Error>> {
@@ -4394,11 +4386,10 @@ async fn blanket_posture_runs_confirm_tool_unattended() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// losing a dispatched effect-free attempt
-/// never retries it; the dispatch path contains the executor failure by
-/// classifying it `known_failed` with `crash_lost` evidence before releasing
-/// its gate, startup preserves that terminal state idempotently, and a later
-/// submit activates and runs.
+/// losing a dispatched effect-free attempt never retries it; the dispatch path contains the
+/// executor failure by classifying it `known_failed` with `crash_lost` evidence before releasing
+/// its gate, startup preserves that terminal state idempotently, and a later submit activates and
+/// runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn failed_tool_round_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
@@ -4479,11 +4470,10 @@ async fn failed_tool_round_admits_and_runs_later_turn() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// an ordinary provider failure on the continuation model
-/// call of a completed tool round terminalizes the turn naming that call, and
-/// the committed terminal shape reloads through the scheduling projection —
-/// the startup scan completes and the next submit activates and runs instead
-/// of the session becoming permanently unloadable.
+/// an ordinary provider failure on the continuation model call of a completed tool round
+/// terminalizes the turn naming that call, and the committed terminal shape reloads through the
+/// scheduling projection — the startup scan completes and the next submit activates and runs
+/// instead of the session becoming permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn failed_continuation_call_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
@@ -4645,11 +4635,10 @@ fn assert_approved_receipt(message: ServerMessage, request: ToolRequestId) {
     );
 }
 
-/// a provider refusal on the continuation model call of
-/// a completed tool round terminalizes the turn as refused naming that call,
-/// and the committed refused shape reloads through the scheduling
-/// projection — the startup scan completes and the next submit activates and
-/// runs instead of the session becoming permanently unloadable.
+/// a provider refusal on the continuation model call of a completed tool round terminalizes the
+/// turn as refused naming that call, and the committed refused shape reloads through the scheduling
+/// projection — the startup scan completes and the next submit activates and runs instead of the
+/// session becoming permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn refused_continuation_call_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
@@ -4738,12 +4727,10 @@ async fn refused_continuation_call_admits_and_runs_later_turn() -> Result<(), Bo
     Ok(())
 }
 
-/// a NextSafePoint input accepted through
-/// while a tool round is parked is consumed by the
-/// continuation call, the
-/// steering-bearing continuation completes the turn, and the committed shape
-/// reloads through the scheduling projection — the startup scan completes and
-/// the next submit activates and runs.
+/// a NextSafePoint input accepted through while a tool round is parked is consumed by the
+/// continuation call, the steering-bearing continuation completes the turn, and the committed shape
+/// reloads through the scheduling projection — the startup scan completes and the next submit
+/// activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn steering_consumed_at_continuation_completes() -> Result<(), Box<dyn Error>> {
@@ -4872,11 +4859,10 @@ async fn steering_consumed_at_continuation_completes() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// steering consumed by the first model
-/// call stays reconstitutable through the tool round it proposes — the parked
-/// approval wait still admits submits — and a second input steers the
-/// continuation, so one turn consumes steering at both safe points and the
-/// completed history reloads.
+/// steering consumed by the first model call stays reconstitutable through the tool round it
+/// proposes — the parked approval wait still admits submits — and a second input steers the
+/// continuation, so one turn consumes steering at both safe points and the completed history
+/// reloads.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn steering_consumed_at_both_safe_points_reloads() -> Result<(), Box<dyn Error>> {
@@ -5004,10 +4990,8 @@ async fn steering_consumed_at_both_safe_points_reloads() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// losing a dispatched
-/// external-effect attempt never retries it; startup idempotently classifies
-/// exact ambiguity without projecting a result or close, and parks the turn for
-/// user recovery.
+/// losing a dispatched external-effect attempt never retries it; startup idempotently classifies
+/// exact ambiguity without projecting a result or close, and parks the turn for user recovery.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn external_crash_parks_without_retry() -> Result<(), Box<dyn Error>> {

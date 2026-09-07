@@ -140,14 +140,14 @@ impl OverrideDeniedToolRequest {
     /// This is the override verification predicate. Recording requires every
     /// conjunct, each with its own typed rejection:
     ///
-    /// - the recorded approval is a delegate denial, so a user denial, any
-    ///   approval, or an undecided request cannot be overridden;
-    /// - the denial is terminal — its denied-result entry is materialized —
-    ///   so a denial whose round is still resolving cannot be overridden;
-    /// - the request belongs to the command's session, so an override can
-    ///   never pre-approve a proposal in another session; and
-    /// - no override is already recorded for the request, so each denial admits
-    ///   at most one override ever.
+    /// - the recorded approval is a delegate denial, so a user denial, any approval, or an
+    ///   undecided request cannot be overridden;
+    /// - the denial is terminal — its denied-result entry is materialized — so a denial whose round
+    ///   is still resolving cannot be overridden;
+    /// - the request belongs to the command's session, so an override can never pre-approve a
+    ///   proposal in another session; and
+    /// - no override is already recorded for the request, so each denial admits at most one
+    ///   override ever.
     pub fn prepare(
         self,
         request: &ToolRequest,

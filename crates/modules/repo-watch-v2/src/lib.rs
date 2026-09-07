@@ -29,7 +29,12 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 mod baseline;
+pub mod dispatch;
+mod event_decode;
 pub mod github;
+pub mod ingest;
+mod observation_decode;
+pub mod provider;
 
 use baseline::observation_payload;
 
@@ -239,6 +244,8 @@ pub enum RuleAdmission {
 /// Result of idempotently recording one emitted command.
 #[derive(Clone, Debug)]
 pub enum DispatchAdmission {
+    /// A prior dispatch still holds the singleton or its cooldown.
+    Suppressed,
     /// The complete action batch was new.
     Inserted,
     /// This rule revision and event already have a retained action batch.
@@ -521,6 +528,10 @@ impl WebhookDisposition {
 /// Module-local storage failure.
 #[derive(Debug)]
 pub enum StoreError {
+    /// A retained normalized event cannot be decoded.
+    InvalidRetainedEvent,
+    /// The stored comparison baseline cannot be decoded into checked observations.
+    InvalidComparisonBaseline,
     /// PostgreSQL rejected or could not complete the operation.
     Database(sqlx::Error),
     /// A positive provider identity cannot fit the durable numeric shape.
@@ -550,6 +561,8 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::InvalidComparisonBaseline => "repository-watch comparison baseline is invalid",
+            Self::InvalidRetainedEvent => "repository-watch retained event is invalid",
             Self::Database(_) => "repository-watch module database operation failed",
             Self::InvalidProviderIdentity => "repository-watch provider identity is not positive",
             Self::InvalidWebhookExpiry => "repository-watch webhook expiry is not after receipt",
@@ -583,6 +596,7 @@ impl fmt::Display for StoreError {
 impl Error for StoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::InvalidComparisonBaseline | Self::InvalidRetainedEvent => None,
             Self::Database(error) => Some(error),
             Self::InvalidProviderIdentity
             | Self::InvalidWebhookExpiry
@@ -1828,6 +1842,36 @@ impl RepoWatchStore {
         issued_at: OffsetDateTime,
         codec: &mut Codec,
     ) -> Result<DispatchAdmission, StoreError> {
+        self.record_commands_inner(planned, issued_at, codec, None)
+            .await
+    }
+
+    /// Records an initial batch with singleton and cooldown admission in the same transaction.
+    pub async fn record_rule_commands<Codec: SessionCommandCodec>(
+        &self,
+        planned: &[PlannedCommand],
+        issued_at: OffsetDateTime,
+        codec: &mut Codec,
+        singleton_key: &str,
+        cooldown: std::time::Duration,
+    ) -> Result<DispatchAdmission, StoreError> {
+        if planned
+            .first()
+            .is_none_or(|command| command.trigger_sequence().is_some())
+        {
+            return Err(StoreError::InvalidDispatchBatch);
+        }
+        self.record_commands_inner(planned, issued_at, codec, Some((singleton_key, cooldown)))
+            .await
+    }
+
+    async fn record_commands_inner<Codec: SessionCommandCodec>(
+        &self,
+        planned: &[PlannedCommand],
+        issued_at: OffsetDateTime,
+        codec: &mut Codec,
+        admission: Option<(&str, std::time::Duration)>,
+    ) -> Result<DispatchAdmission, StoreError> {
         let Some(first) = planned.first() else {
             return Err(StoreError::InvalidDispatchBatch);
         };
@@ -1978,6 +2022,24 @@ impl RepoWatchStore {
                 return Ok(DispatchAdmission::InactiveRule);
             }
         }
+        if let Some((key, cooldown)) = admission {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('singleton:' || length($1)::text || ':' || $1 || ':' || $2::text || ':' || $3, 0))")
+                .bind(first.rule_id().as_str()).bind(Decimal::from(first.rule_revision().get())).bind(key)
+                .execute(&mut *transaction).await?;
+            let suppressed: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM dispatch_ledger
+                 WHERE rule_id = $1 AND rule_revision = $2 AND singleton_key = $3
+                   AND ((status <> 'rejected' AND singleton_released_at IS NULL)
+                     OR EXTRACT(EPOCH FROM ($4::timestamptz - COALESCE(singleton_released_at, settled_at))) < $5))")
+                .bind(first.rule_id().as_str()).bind(Decimal::from(first.rule_revision().get())).bind(key)
+                .bind(issued_at).bind(Decimal::from(cooldown.as_secs()))
+                .fetch_one(&mut *transaction).await?;
+            if suppressed {
+                advance_evaluation(&mut transaction, first).await?;
+                transaction.commit().await?;
+                return Ok(DispatchAdmission::Suppressed);
+            }
+        }
         let encoded_commands = planned
             .iter()
             .map(|command| {
@@ -1993,8 +2055,8 @@ impl RepoWatchStore {
                     "INSERT INTO dispatch_ledger
                         (dispatch_ref, action_ordinal, command_id, repository, rule_id,
                          rule_revision, event_id, trigger_sequence, command_kind, command_payload,
-                         status, issued_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11)
+                         status, issued_at, singleton_key)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12)
                      ON CONFLICT DO NOTHING",
                 )
                 .bind(command.dispatch().into_uuid())
@@ -2008,6 +2070,7 @@ impl RepoWatchStore {
                 .bind(command_kind_storage(command.command().kind()))
                 .bind(payload)
                 .bind(issued_at)
+                .bind(admission.map(|(key, _)| key))
                 .execute(&mut *transaction)
                 .await?
                 .rows_affected()
@@ -2015,6 +2078,9 @@ impl RepoWatchStore {
             );
         }
         if inserted_count == planned.len() {
+            if admission.is_some() {
+                advance_evaluation(&mut transaction, first).await?;
+            }
             transaction.commit().await?;
             return Ok(DispatchAdmission::Inserted);
         }
@@ -2047,7 +2113,7 @@ impl RepoWatchStore {
             "SELECT dispatch_ref, action_ordinal, command_id, repository, rule_id,
                     rule_revision, event_id, trigger_sequence, command_kind, command_payload
                FROM dispatch_ledger
-              WHERE status = 'pending'
+              WHERE status = 'pending' OR submission_pending
               ORDER BY issued_at, dispatch_ref, trigger_sequence NULLS FIRST, action_ordinal",
         )
         .fetch_all(&self.pool)
@@ -2514,6 +2580,25 @@ fn validate_webhook(delivery: &WebhookDelivery<'_>) -> Result<(), StoreError> {
     } else {
         Ok(())
     }
+}
+
+async fn advance_evaluation(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &PlannedCommand,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO rule_evaluation_cursor(repository, rule_id, rule_revision, event_ordinal)
+        SELECT $1,$2,$3,repository_event_ordinal FROM gh_event WHERE event_id = $4
+        ON CONFLICT (repository, rule_id, rule_revision) DO UPDATE
+        SET event_ordinal = GREATEST(rule_evaluation_cursor.event_ordinal, EXCLUDED.event_ordinal)",
+    )
+    .bind(command.repository().as_str())
+    .bind(command.rule_id().as_str())
+    .bind(Decimal::from(command.rule_revision().get()))
+    .bind(command.event_id().into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

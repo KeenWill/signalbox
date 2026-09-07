@@ -2,169 +2,6 @@
 
 # runner
 
-## RunnerDomainError
-
-```rust
-pub enum RunnerDomainError {
-    Empty,
-    ContainsNull,
-    TooLong,
-    InvalidName,
-    InvalidHex,
-    InvalidBranchName,
-    InvalidRelativePath,
-    InvalidToolInputSchema,
-    DuplicateCapabilityClass(RunnerCapabilityClass),
-    DuplicateTool(ToolName),
-    DuplicateProfile(CredentialProfileName),
-    DuplicateWorkspaceCapability(WorkspaceCapability),
-    DuplicateSandboxProfile(RunnerSandboxProfile),
-    TooManyPermissionOverrides,
-    TooManyAdvertisedRepositories,
-    UndeclaredProfileTool(ToolName),
-    UnsupportedDaemonIdempotency(ToolName),
-    EnrollmentRevoked,
-    CapabilityClassNotAllowed(RunnerCapabilityClass),
-    ToolUndeclared(ToolName),
-    ToolLocusNotAllowed(ToolName),
-    CredentialProfileUndeclared(CredentialProfileName),
-    WorkspaceCapabilityNotAllowed(WorkspaceCapability),
-    SandboxProfileNotAllowed(RunnerSandboxProfile),
-    RepositoryProfileUnavailable(CredentialProfileName),
-    InvalidState,
-    CorrelationMismatch,
-    GenerationExhausted,
-    AttemptIdentityReuse,
-    SelectorMismatch,
-    CredentialProfileUnavailable,
-    WorkingDirectoryMismatch,
-    WorkspaceCapabilityUnavailable,
-    SandboxProfileUnavailable,
-    RepositoryUnavailable,
-    WorkspaceMismatch,
-    ToolUnavailable,
-    GrantRevoked,
-    RegistrationChanged,
-    RegistrationInProgress,
-    CorruptStoredFacts,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## RunnerCapabilityClass
-
-```rust
-pub struct RunnerCapabilityClass(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl RunnerCapabilityClass {
-    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
-    pub fn as_str(&self) -> &str;
-}
-```
-
-## CredentialProfileName
-
-```rust
-pub struct CredentialProfileName(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl CredentialProfileName {
-    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
-    pub fn as_str(&self) -> &str;
-}
-```
-
-## RunnerWorkingDirectory
-
-```rust
-pub struct RunnerWorkingDirectory(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl RunnerWorkingDirectory {
-    pub const MAX_BYTES: usize;
-    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
-    pub fn as_str(&self) -> &str;
-}
-```
-
-## WorkspaceRepositoryKey
-
-```rust
-pub struct WorkspaceRepositoryKey(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl WorkspaceRepositoryKey {
-    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
-    pub fn as_str(&self) -> &str;
-}
-```
-
-## CanonicalCloneUrlDigest
-
-```rust
-pub struct CanonicalCloneUrlDigest(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl CanonicalCloneUrlDigest {
-    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
-    pub fn as_str(&self) -> &str;
-}
-```
-
-## WorkspaceRevision
-
-```rust
-pub struct WorkspaceRevision(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl WorkspaceRevision {
-    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
-    pub fn as_str(&self) -> &str;
-}
-```
-
-## WorkspaceBranchName
-
-```rust
-pub struct WorkspaceBranchName(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl WorkspaceBranchName {
-    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
-    pub fn as_str(&self) -> &str;
-}
-```
-
-## WorkspaceRelativePath
-
-```rust
-pub struct WorkspaceRelativePath(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl WorkspaceRelativePath {
-    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
-    pub fn as_str(&self) -> &str;
-}
-```
-
-## WorkspaceRecovery
-
-```rust
-pub enum WorkspaceRecovery {
-    Commit {
-        revision: WorkspaceRevision,
-    },
-    Branch {
-        name: WorkspaceBranchName,
-        revision: WorkspaceRevision,
-    },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## RunnerSelector
-
-```rust
-pub enum RunnerSelector {
-    Identity(RunnerId),
-    CapabilityClass(RunnerCapabilityClass),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-```
-
 ## ToolAdmissibleLoci
 
 ```rust
@@ -352,6 +189,105 @@ impl RunnerAdvertisement {
 }
 ```
 
+## CredentialProfileGrantState
+
+```rust
+pub enum CredentialProfileGrantState {
+    Active,
+    Revoked,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## CredentialProfileGrant
+
+```rust
+pub struct CredentialProfileGrant {/* private */}
+// derives: fmt::Debug, cmp::Eq, cmp::PartialEq
+impl CredentialProfileGrant {
+    pub const fn state(&self) -> CredentialProfileGrantState;
+    pub const fn revision(&self) -> RunnerGeneration;
+    pub const fn lineage(&self) -> RunnerCredentialGrantLineage;
+    pub const fn profile(&self) -> &CredentialProfileName;
+    pub const fn session(&self) -> SessionId;
+    pub const fn runner(&self) -> RunnerId;
+    pub fn tools(&self) -> impl iterator::Iterator<Item = &ToolName>;
+    pub fn approvals(&self) -> impl iterator::Iterator<Item = (&ToolName, CredentialToolApproval)>;
+    pub fn revoke(self) -> result::Result<Self, RunnerDomainError>;
+    pub fn reconstitute(
+        input: CredentialProfileGrantReconstitutionInput,
+        expected_session: SessionId,
+        registration: &ValidatedRunnerRegistration,
+        sandbox: RunnerSandboxProfile,
+        permission_overrides: &RunnerToolPermissionOverrides,
+    ) -> result::Result<Self, RunnerDomainError>;
+}
+```
+
+## CredentialProfileGrantReconstitutionInput
+
+```rust
+pub struct CredentialProfileGrantReconstitutionInput {
+    pub session: SessionId,
+    pub runner: RunnerId,
+    pub revision: RunnerGeneration,
+    pub profile: CredentialProfileName,
+    pub tools: set::BTreeSet<ToolName>,
+    pub approvals: map::BTreeMap<ToolName, CredentialToolApproval>,
+    pub state: CredentialProfileGrantState,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerCredentialGrantChange
+
+```rust
+pub struct RunnerCredentialGrantChange {
+    pub before: option::Option<CredentialProfileGrantReconstitutionInput>,
+    pub after: option::Option<CredentialProfileGrantReconstitutionInput>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## CredentialDispatchAuthorization
+
+```rust
+pub struct CredentialDispatchAuthorization {
+    pub session: SessionId,
+    pub runner: RunnerId,
+    pub grant_revision: RunnerGeneration,
+    pub profile: CredentialProfileName,
+    pub tool: ToolName,
+    pub approval: CredentialToolApproval,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## CredentialProfileGrantReplacement
+
+```rust
+pub struct CredentialProfileGrantReplacement {
+    pub grant: CredentialProfileGrant,
+    pub change: CredentialProfileChange,
+}
+// derives: fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## CredentialProfileChange
+
+```rust
+pub struct CredentialProfileChange {
+    pub session: SessionId,
+    pub prior_revision: RunnerGeneration,
+    pub replacement_revision: RunnerGeneration,
+    pub before_profile: CredentialProfileName,
+    pub after_profile: CredentialProfileName,
+    pub before_tools: set::BTreeSet<ToolName>,
+    pub after_tools: set::BTreeSet<ToolName>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## RunnerEnrollmentState
 
 ```rust
@@ -490,19 +426,6 @@ pub struct ValidatedRunnerRegistrationReconstitutionInput {
     pub repositories: vec::Vec<RunnerRepositoryEntry>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## RunnerGeneration
-
-```rust
-pub struct RunnerGeneration(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl RunnerGeneration {
-    pub const fn one() -> Self;
-    pub const fn try_from_u64(value: u64) -> option::Option<Self>;
-    pub const fn get(self) -> u64;
-    pub const fn checked_next(self) -> option::Option<Self>;
-}
 ```
 
 ## RunnerLeaseCorrelation
@@ -699,6 +622,182 @@ impl RunnerLeaseRetryAuthority {
         batch: ToolBatch,
         attempt: ToolAttemptId,
     ) -> result::Result<RunnerClaimedAttemptReplacement, RunnerDomainError>;
+}
+```
+
+## RunnerDomainError
+
+```rust
+pub enum RunnerDomainError {
+    Empty,
+    ContainsNull,
+    TooLong,
+    InvalidName,
+    InvalidHex,
+    InvalidBranchName,
+    InvalidRelativePath,
+    InvalidToolInputSchema,
+    DuplicateCapabilityClass(RunnerCapabilityClass),
+    DuplicateTool(ToolName),
+    DuplicateProfile(CredentialProfileName),
+    DuplicateWorkspaceCapability(WorkspaceCapability),
+    DuplicateSandboxProfile(RunnerSandboxProfile),
+    TooManyPermissionOverrides,
+    TooManyAdvertisedRepositories,
+    UndeclaredProfileTool(ToolName),
+    UnsupportedDaemonIdempotency(ToolName),
+    EnrollmentRevoked,
+    CapabilityClassNotAllowed(RunnerCapabilityClass),
+    ToolUndeclared(ToolName),
+    ToolLocusNotAllowed(ToolName),
+    CredentialProfileUndeclared(CredentialProfileName),
+    WorkspaceCapabilityNotAllowed(WorkspaceCapability),
+    SandboxProfileNotAllowed(RunnerSandboxProfile),
+    RepositoryProfileUnavailable(CredentialProfileName),
+    InvalidState,
+    CorrelationMismatch,
+    GenerationExhausted,
+    AttemptIdentityReuse,
+    SelectorMismatch,
+    CredentialProfileUnavailable,
+    WorkingDirectoryMismatch,
+    WorkspaceCapabilityUnavailable,
+    SandboxProfileUnavailable,
+    RepositoryUnavailable,
+    WorkspaceMismatch,
+    ToolUnavailable,
+    GrantRevoked,
+    RegistrationChanged,
+    RegistrationInProgress,
+    CorruptStoredFacts,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerCapabilityClass
+
+```rust
+pub struct RunnerCapabilityClass(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl RunnerCapabilityClass {
+    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
+    pub fn as_str(&self) -> &str;
+}
+```
+
+## CredentialProfileName
+
+```rust
+pub struct CredentialProfileName(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl CredentialProfileName {
+    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
+    pub fn as_str(&self) -> &str;
+}
+```
+
+## RunnerWorkingDirectory
+
+```rust
+pub struct RunnerWorkingDirectory(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl RunnerWorkingDirectory {
+    pub const MAX_BYTES: usize;
+    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
+    pub fn as_str(&self) -> &str;
+}
+```
+
+## WorkspaceRepositoryKey
+
+```rust
+pub struct WorkspaceRepositoryKey(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl WorkspaceRepositoryKey {
+    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
+    pub fn as_str(&self) -> &str;
+}
+```
+
+## CanonicalCloneUrlDigest
+
+```rust
+pub struct CanonicalCloneUrlDigest(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl CanonicalCloneUrlDigest {
+    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
+    pub fn as_str(&self) -> &str;
+}
+```
+
+## WorkspaceRevision
+
+```rust
+pub struct WorkspaceRevision(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl WorkspaceRevision {
+    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
+    pub fn as_str(&self) -> &str;
+}
+```
+
+## WorkspaceBranchName
+
+```rust
+pub struct WorkspaceBranchName(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl WorkspaceBranchName {
+    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
+    pub fn as_str(&self) -> &str;
+}
+```
+
+## WorkspaceRelativePath
+
+```rust
+pub struct WorkspaceRelativePath(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl WorkspaceRelativePath {
+    pub fn try_new(value: string::String) -> result::Result<Self, RunnerDomainError>;
+    pub fn as_str(&self) -> &str;
+}
+```
+
+## WorkspaceRecovery
+
+```rust
+pub enum WorkspaceRecovery {
+    Commit {
+        revision: WorkspaceRevision,
+    },
+    Branch {
+        name: WorkspaceBranchName,
+        revision: WorkspaceRevision,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## RunnerSelector
+
+```rust
+pub enum RunnerSelector {
+    Identity(RunnerId),
+    CapabilityClass(RunnerCapabilityClass),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+```
+
+## RunnerGeneration
+
+```rust
+pub struct RunnerGeneration(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl RunnerGeneration {
+    pub const fn one() -> Self;
+    pub const fn try_from_u64(value: u64) -> option::Option<Self>;
+    pub const fn get(self) -> u64;
+    pub const fn checked_next(self) -> option::Option<Self>;
 }
 ```
 
@@ -1010,103 +1109,4 @@ pub struct CredentialProfilePlacementReplacement {
     pub grant: CredentialProfileGrantReplacement,
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## CredentialProfileGrantState
-
-```rust
-pub enum CredentialProfileGrantState {
-    Active,
-    Revoked,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## CredentialProfileGrant
-
-```rust
-pub struct CredentialProfileGrant {/* private */}
-// derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl CredentialProfileGrant {
-    pub const fn state(&self) -> CredentialProfileGrantState;
-    pub const fn revision(&self) -> RunnerGeneration;
-    pub const fn lineage(&self) -> RunnerCredentialGrantLineage;
-    pub const fn profile(&self) -> &CredentialProfileName;
-    pub const fn session(&self) -> SessionId;
-    pub const fn runner(&self) -> RunnerId;
-    pub fn tools(&self) -> impl iterator::Iterator<Item = &ToolName>;
-    pub fn approvals(&self) -> impl iterator::Iterator<Item = (&ToolName, CredentialToolApproval)>;
-    pub fn revoke(self) -> result::Result<Self, RunnerDomainError>;
-    pub fn reconstitute(
-        input: CredentialProfileGrantReconstitutionInput,
-        expected_session: SessionId,
-        registration: &ValidatedRunnerRegistration,
-        sandbox: RunnerSandboxProfile,
-        permission_overrides: &RunnerToolPermissionOverrides,
-    ) -> result::Result<Self, RunnerDomainError>;
-}
-```
-
-## CredentialProfileGrantReconstitutionInput
-
-```rust
-pub struct CredentialProfileGrantReconstitutionInput {
-    pub session: SessionId,
-    pub runner: RunnerId,
-    pub revision: RunnerGeneration,
-    pub profile: CredentialProfileName,
-    pub tools: set::BTreeSet<ToolName>,
-    pub approvals: map::BTreeMap<ToolName, CredentialToolApproval>,
-    pub state: CredentialProfileGrantState,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## RunnerCredentialGrantChange
-
-```rust
-pub struct RunnerCredentialGrantChange {
-    pub before: option::Option<CredentialProfileGrantReconstitutionInput>,
-    pub after: option::Option<CredentialProfileGrantReconstitutionInput>,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## CredentialDispatchAuthorization
-
-```rust
-pub struct CredentialDispatchAuthorization {
-    pub session: SessionId,
-    pub runner: RunnerId,
-    pub grant_revision: RunnerGeneration,
-    pub profile: CredentialProfileName,
-    pub tool: ToolName,
-    pub approval: CredentialToolApproval,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## CredentialProfileGrantReplacement
-
-```rust
-pub struct CredentialProfileGrantReplacement {
-    pub grant: CredentialProfileGrant,
-    pub change: CredentialProfileChange,
-}
-// derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## CredentialProfileChange
-
-```rust
-pub struct CredentialProfileChange {
-    pub session: SessionId,
-    pub prior_revision: RunnerGeneration,
-    pub replacement_revision: RunnerGeneration,
-    pub before_profile: CredentialProfileName,
-    pub after_profile: CredentialProfileName,
-    pub before_tools: set::BTreeSet<ToolName>,
-    pub after_tools: set::BTreeSet<ToolName>,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

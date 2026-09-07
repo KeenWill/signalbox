@@ -39,23 +39,17 @@ const REST_BASE_URL: &str = "https://api.github.com/";
 const GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const USER_AGENT_VALUE: &str = "signalboxd";
 const API_VERSION: &str = "2026-03-10";
-// numeric-bound: guard - one buffered provider JSON response exhausting process memory
 const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
-// numeric-bound: not-a-bound - fixed maximum JSON escape expansion
+// JSON can encode one source byte as a six-byte Unicode escape.
 const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
 // A standard contents entry can repeat a path in `name`, `path`, four URL
 // fields, and the three `_links` fields. A symlink `target` is blob material,
 // and `submodule_git_url` is only a legacy kind marker; admit and budget both
 // separately instead of treating either as a path.
-// numeric-bound: not-a-bound - fixed GitHub contents response path-field count
 const MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY: usize = 9;
-// numeric-bound: guard - the tool contract advertises accepting symlink targets only to this length
 const MAX_REPOSITORY_SYMLINK_TARGET_BYTES: usize = 4 * 1024;
-// numeric-bound: guard - the tool contract advertises accepting submodule URLs only to this length
 const MAX_REPOSITORY_SUBMODULE_URL_BYTES: usize = 8 * 1024;
-// numeric-bound: guard - fixed entry overhead causing a repository-contents response to exceed buffered response memory
 const MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES: usize = 8 * 1024;
-// numeric-bound: guard - one repository-contents response exhausting process memory
 const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
     * (MAX_FILE_PATH_BYTES
         * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
@@ -65,14 +59,13 @@ const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_EN
         + MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES);
 const DEFAULT_ACCEPT: &str = "application/vnd.github+json";
 const COMMIT_SHA_ACCEPT: &str = "application/vnd.github.sha";
-// numeric-bound: not-a-bound - a 40-character commit SHA plus one optional newline
+// A GitHub commit SHA has 40 characters, followed by at most one newline.
 const MAX_COMMIT_SHA_RESPONSE_BYTES: usize = 41;
 const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
 const BLOB_RAW_ACCEPT: &str = "application/vnd.github.raw+json";
-// numeric-bound: guard - the client contract advertises accepting redirect URLs only to this length
 const MAX_REDIRECT_URL_BYTES: usize = 8 * 1024;
 const PAGE_SIZE: &str = "100";
-// numeric-bound: not-a-bound - 100 per page across GitHub's 3,000-file exposure
+// GitHub lists at most 3,000 pull-request files, at 100 files per page.
 const MAX_CHANGED_FILE_PAGES: u16 = 30;
 
 const REVIEW_THREADS_QUERY: &str = r#"
