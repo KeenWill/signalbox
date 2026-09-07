@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "RUSTC_FLAGS", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_unit_test")
 
 rust_package()
 
@@ -19,4 +19,27 @@ rust_unit_test(
 rust_api_json(
     name = "api_json",
     crate = ":signalbox_domain",
+)
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_domain",
+)
+
+rust_integration_test(
+    name = "instruction_counts",
+    srcs = glob(["benches/**/*.rs"]),
+    args = ["--test"],
+    crate_root = "benches/instruction_counts.rs",
+    use_libtest_harness = False,
+    deps = [":signalbox_domain"],
+)
+
+rust_integration_test(
+    name = "wall_clock",
+    srcs = glob(["benches/**/*.rs"]),
+    args = ["--test"],
+    crate_root = "benches/wall_clock.rs",
+    use_libtest_harness = False,
+    deps = [":signalbox_domain"],
 )

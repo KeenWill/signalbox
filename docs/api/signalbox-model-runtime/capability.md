@@ -23,6 +23,8 @@ impl ModelCapabilities {
         fast_mode: option::Option<FastModeTarget>,
         service_tiers: set::BTreeSet<ServiceTier>,
     ) -> Self;
+    pub fn with_reasoning_replay_family(self, family: option::Option<string::String>) -> Self;
+    pub fn reasoning_replay_family(&self) -> option::Option<&str>;
     pub const fn reasoning_levels(&self) -> &set::BTreeSet<ReasoningLevel>;
     pub const fn fast_mode(&self) -> option::Option<&FastModeTarget>;
     pub const fn service_tiers(&self) -> &set::BTreeSet<ServiceTier>;

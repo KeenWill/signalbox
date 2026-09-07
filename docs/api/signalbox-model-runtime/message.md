@@ -40,6 +40,11 @@ pub enum MessagePart {
     RedactedThinking {
         data: string::String,
     },
+    ProviderReasoning {
+        item_json: string::String,
+        producing_target: ResolvedTarget,
+        producing_credential: CredentialReference,
+    },
     ProviderCompaction {
         block_json: string::String,
     },
@@ -69,6 +74,9 @@ pub enum AssistantPart {
     },
     RedactedThinking {
         data: string::String,
+    },
+    ProviderReasoning {
+        item_json: string::String,
     },
     ProviderCompaction {
         block_json: string::String,

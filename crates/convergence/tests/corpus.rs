@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use signalbox_convergence::{
     ConvergencePolicy, Recording, evaluate, evaluate_facts, fetch::complete_connection,
 };
+use signalbox_test_bin::test_bin_path;
 use std::{collections::BTreeMap, error::Error, path::PathBuf};
 
 fn root() -> PathBuf {
@@ -148,7 +149,7 @@ fn inventory_stability_requires_an_explicit_boolean() -> Result<(), Box<dyn Erro
 fn unknown_cli_options_fail_before_policy_or_evidence_io() -> Result<(), Box<dyn Error>> {
     let repository = policy()?.repository;
     for command in ["record", "evaluate", "reconcile"] {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-converge"))
+        let output = std::process::Command::new(test_bin_path!("signalbox-converge"))
             .args([
                 command,
                 "--policy",
@@ -163,7 +164,7 @@ fn unknown_cli_options_fail_before_policy_or_evidence_io() -> Result<(), Box<dyn
         assert!(output.stdout.is_empty());
         assert!(String::from_utf8(output.stderr)?.contains("--polciy"));
     }
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-converge"))
+    let output = std::process::Command::new(test_bin_path!("signalbox-converge"))
         .args([
             "evalute",
             "--policy",
@@ -364,7 +365,7 @@ fn state_file_settles_inventory_across_cli_evaluations() -> Result<(), Box<dyn E
     std::fs::create_dir(&directory)?;
     let state = directory.join("state.json");
     for exit in [1, 0] {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-converge"))
+        let output = std::process::Command::new(test_bin_path!("signalbox-converge"))
             .arg("evaluate")
             .arg("--fixture")
             .arg(root().join("fixtures/mutations/inventory-unsettled.json"))
