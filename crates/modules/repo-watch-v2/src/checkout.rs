@@ -56,14 +56,13 @@ pub struct CheckoutRemovalCandidate {
 }
 
 impl RepoWatchStore {
-    /// Lists provisioned or failed checkouts, including interrupted command follow-ups.
+    /// Lists retained locations, including interrupted filesystem provisioning.
     pub async fn checkout_removal_candidates(
         &self,
     ) -> Result<Vec<CheckoutRemovalCandidate>, StoreError> {
         let rows: Vec<(Uuid, Uuid, Vec<u8>, Option<String>)> = sqlx::query_as(
             "SELECT command_id, checkout_session_id, checkout_workspace_root, checkout_retired_reason FROM dispatch_ledger
-             WHERE checkout_session_id IS NOT NULL AND NOT checkout_removed
-               AND (checkout_path IS NOT NULL OR checkout_retired_reason IS NOT NULL)",
+             WHERE checkout_session_id IS NOT NULL AND NOT checkout_removed",
         )
         .fetch_all(&self.pool)
         .await?;

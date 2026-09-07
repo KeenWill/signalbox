@@ -213,9 +213,11 @@ scavenges retained checkouts awaiting removal even with pending submissions or
 no repository-watch configuration. The ledger retains the provisioning workspace
 root and core session identity before filesystem work; cleanup uses them without
 waiting for `SessionCreated` settlement or consulting current configuration.
-Removal restores owner directory permissions and refuses mount crossings.
-Pending submission follow-ups remain retryable after core command settlement,
-including interruption of a live turn whose session is closing. Synchronous
+Cleanup includes locations retained before checkout recording. The removal
+migration settles existing provisioned rows without a retained location. Removal
+restores owner directory permissions and refuses mount crossings. Pending
+submission follow-ups remain retryable after core command settlement, including
+interruption of a live turn whose session is closing. Synchronous
 command-identity conflicts settle as rejected before submission continues to the
 next action.
 

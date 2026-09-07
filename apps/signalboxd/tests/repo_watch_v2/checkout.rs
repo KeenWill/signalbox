@@ -146,8 +146,15 @@ impl CheckoutFixture {
     }
 
     async fn with_head_repository(head_repository: &str) -> Result<Self, Box<dyn Error>> {
+        Self::with_migrator(head_repository, &signalbox_persistence::MIGRATOR).await
+    }
+
+    async fn with_migrator(
+        head_repository: &str,
+        migrator: &sqlx::migrate::Migrator,
+    ) -> Result<Self, Box<dyn Error>> {
         let (container, core, url) = postgres().await?;
-        migrate(&core).await?;
+        migrator.run(&core).await?;
         sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
             .execute(&core)
             .await?;
@@ -799,6 +806,60 @@ async fn terminal_session_removes_its_checkout_without_following_tracked_symlink
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn removal_migration_settles_existing_checkouts_without_inventing_locations()
+-> Result<(), Box<dyn Error>> {
+    let parent = sqlx::migrate::Migrator {
+        migrations: signalbox_persistence::MIGRATOR
+            .iter()
+            .filter(|migration| migration.version <= 202609071400)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    let mut fixture = CheckoutFixture::with_migrator("checkout/project", &parent).await?;
+    fixture
+        .store
+        .submit_pending(&mut RepositoryWatchCommandCodec, &mut fixture.sink)
+        .await
+        .expect("parent command submission");
+    fixture
+        .store
+        .record_dispatch_checkout(fixture.command, &fixture.head)
+        .await?;
+
+    migrate(&fixture.core).await?;
+    let checkout: (String, String, bool, bool, bool) = sqlx::query_as(
+        "SELECT checkout_path, checkout_head_sha, checkout_removed,
+                checkout_workspace_root IS NULL, checkout_session_id IS NULL
+         FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.module)
+    .await?;
+    assert_eq!(
+        checkout,
+        (
+            String::from("."),
+            fixture.head.as_str().to_owned(),
+            true,
+            true,
+            true
+        )
+    );
+    assert!(
+        fixture
+            .store
+            .checkout_removal_candidates()
+            .await?
+            .is_empty()
+    );
+    migrate(&fixture.core).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn provisioned_checkout_requires_a_retained_location() -> Result<(), Box<dyn Error>> {
     let mut fixture = CheckoutFixture::new().await?;
     fixture.dispatch().await;
@@ -914,6 +975,51 @@ async fn disabled_runtime_scavenges_checkouts_without_submitting_pending_command
         pending,
         "disabled runtime must not submit retained commands"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn startup_scavenges_a_terminal_checkout_before_its_path_was_recorded()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.submit_without_lifecycle_settlement().await;
+    let session = fixture
+        .store
+        .dispatch_checkout(fixture.command)
+        .await?
+        .expect("checkout row")
+        .location
+        .expect("retained location")
+        .session;
+    // Filesystem work survived the crash; checkout and command settlement did not.
+    sqlx::query("UPDATE dispatch_ledger SET checkout_path = NULL, checkout_head_sha = NULL, submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid()).execute(&fixture.module).await?;
+    let root = fixture.root(session);
+    let restarted = RepoWatchStore::new(fixture.module.clone());
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("active checkout retained before path recording");
+    assert!(root.join(".git").is_dir());
+    fixture.stop(session).await;
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("terminal checkout removed without path recording");
+    assert!(!root.exists());
+    let flags: (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT submission_pending, checkout_removed, checkout_path IS NULL,
+                created_session_id IS NULL FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.module)
+    .await?;
+    assert_eq!(flags, (true, true, true, true));
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("repeated cleanup is idempotent");
+    assert!(restarted.checkout_removal_candidates().await?.is_empty());
     Ok(())
 }
 
