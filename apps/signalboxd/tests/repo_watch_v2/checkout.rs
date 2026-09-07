@@ -55,7 +55,42 @@ impl ProcessRunner for LocalGitRunner {
             .expect("steps lock")
             .push(request.arguments[0].to_string_lossy().into_owned());
         for argument in &mut request.arguments {
-            if argument == "https://github.com/checkout/project.git" {
+            if argument == "https://github.com/checkout/project.git"
+                || argument == "https://github.com/contributor/project.git"
+            {
+                let authorization = tokio::process::Command::new("git")
+                    .args(["config", "--get-urlmatch", "http.extraheader"])
+                    .arg(&argument)
+                    .current_dir(&request.working_directory)
+                    .env_clear()
+                    .envs(&request.environment)
+                    .output()
+                    .await
+                    .expect("resolve Git URL authorization");
+                if argument == "https://github.com/checkout/project.git" {
+                    assert!(authorization.status.success());
+                    assert!(authorization.stdout.starts_with(b"Authorization: Basic "));
+                    let unrelated = tokio::process::Command::new("git")
+                        .args([
+                            "config",
+                            "--get-urlmatch",
+                            "http.extraheader",
+                            "https://github.com/unrelated/project.git",
+                        ])
+                        .current_dir(&request.working_directory)
+                        .env_clear()
+                        .envs(&request.environment)
+                        .output()
+                        .await
+                        .expect("resolve unrelated repository authorization");
+                    assert!(unrelated.stdout.is_empty());
+                } else {
+                    assert!(authorization.stdout.is_empty());
+                    assert_eq!(
+                        request.environment.get(OsStr::new("GIT_CONFIG_VALUE_0")),
+                        Some(&"".into())
+                    );
+                }
                 *argument = self.bare.clone().into_os_string();
             }
         }
@@ -97,6 +132,10 @@ struct CheckoutFixture {
 
 impl CheckoutFixture {
     async fn new() -> Result<Self, Box<dyn Error>> {
+        Self::with_head_repository("checkout/project").await
+    }
+
+    async fn with_head_repository(head_repository: &str) -> Result<Self, Box<dyn Error>> {
         let (container, core, url) = postgres().await?;
         migrate(&core).await?;
         sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
@@ -184,7 +223,7 @@ template = "watch"
                                 NonZeroU64::new(1).expect("positive PR number"),
                             ),
                             head_sha: head.clone(),
-                            head_repository: repository.clone(),
+                            head_repository: RepositorySlug::try_new(head_repository.to_owned())?,
                             base_branch: BranchName::try_new(String::from("main"))?,
                             head_branch: BranchName::try_new(String::from("review"))?,
                             title: PullRequestTitle::try_new(String::from(
@@ -318,6 +357,28 @@ system_prompt = "Inspect repository activity."
         .expect("created session");
         SessionId::from_uuid(id)
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn fork_heads_are_fetched_without_the_watched_repository_credential()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = CheckoutFixture::with_head_repository("contributor/project").await?;
+    fixture.dispatch().await;
+    let roots = SessionWorkspaceRoots::try_new(
+        fixture
+            .sink
+            .models
+            .daemon_tools()
+            .expect("tools")
+            .workspace_root(),
+    )?;
+    let checkout = git2::Repository::open(roots.derived_path(fixture.session().await))?;
+    assert_eq!(
+        checkout.head()?.target().expect("head").to_string(),
+        fixture.head.as_str()
+    );
+    Ok(())
 }
 
 #[tokio::test]

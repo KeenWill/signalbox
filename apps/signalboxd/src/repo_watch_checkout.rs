@@ -91,7 +91,6 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
         ("GIT_CONFIG_GLOBAL", "/dev/null"),
         ("GIT_TERMINAL_PROMPT", "0"),
         ("GIT_CONFIG_COUNT", "3"),
-        ("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader"),
         ("GIT_CONFIG_KEY_1", "credential.helper"),
         ("GIT_CONFIG_VALUE_1", ""),
         ("GIT_CONFIG_KEY_2", "core.hooksPath"),
@@ -105,6 +104,10 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
         environment.insert("PATH".into(), path);
     }
     let repository_url = format!("https://github.com/{}.git", repository.as_str());
+    environment.insert(
+        "GIT_CONFIG_KEY_0".into(),
+        format!("http.{repository_url}.extraheader").into(),
+    );
     match rustix::fs::statat(&directory, ".git", rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::NOENT) => {
             git(
@@ -127,6 +130,9 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
         "https://github.com/{}.git",
         pull_request.head_repository().as_str()
     );
+    if pull_request.head_repository() != repository {
+        environment.insert("GIT_CONFIG_VALUE_0".into(), "".into());
+    }
     git(
         runner,
         &working_directory,
