@@ -287,7 +287,7 @@ pub enum RepositoryAttemptError<E> {
 
 impl<Loader: RepositoryClientLoader> RepositoryTask for GitHubRepositoryTask<Loader>
 where
-    Loader::Error: fmt::Debug,
+    Loader::Error: fmt::Display,
 {
     type Error = RepositoryAttemptError<Loader::Error>;
 
@@ -940,6 +940,20 @@ mod tests {
                 "pageInfo": {"hasNextPage": false, "endCursor": null}
             }}}}}),
         }
+    }
+
+    #[test]
+    fn database_attempt_display_keeps_diagnostics_private() {
+        // The arbitrary diagnostic stands in for unredacted SQLx/provider details.
+        let diagnostic = "private database diagnostic";
+        let error = RepositoryAttemptError::<std::convert::Infallible>::Store(
+            StoreError::Database(sqlx::Error::Protocol(diagnostic.to_owned())),
+        );
+        assert!(format!("{error:?}").contains(diagnostic));
+        assert_eq!(
+            error.to_string(),
+            "repository-watch store: repository-watch module database operation failed"
+        );
     }
 
     #[tokio::test]
