@@ -2539,6 +2539,8 @@ struct RuntimeHookFixture<'a> {
     id: u64,
     secret: &'a std::path::Path,
     enabled: bool,
+    rule_version: u64,
+    template: &'a str,
 }
 
 fn runtime_configuration(
@@ -2566,16 +2568,18 @@ webhook_secret_file = "{secret}"
 webhook_mode = "primary"
 [[repository_watch.rules]]
 id = "ci"
-version = 1
+version = {rule_version}
 singleton_per = "repo"
 cooldown_seconds = 0
 [repository_watch.rules.matcher]
 event_kinds = ["branch_workflow_run_completed"]
 [[repository_watch.rules.actions]]
 kind = "dispatch_session"
-template = "watch"
+template = "{template}"
 "#,
         enabled = hook.enabled,
+        rule_version = hook.rule_version,
+        template = hook.template,
         address = hook.address,
         path = hook.path,
         id = hook.id,
@@ -2656,6 +2660,8 @@ async fn composed_repository_watch_dispatches_and_reloads_its_running_listener()
         id: 17,
         secret: &secret,
         enabled: false,
+        rule_version: 1,
+        template: "watch",
     };
     let models = runtime_configuration(&hook)?;
     let template_path = files.path().join("templates.toml");
@@ -2823,6 +2829,199 @@ system_prompt = "Inspect repository activity."
     worker.await?.expect("orderly module shutdown");
     assert!(module_pool.is_closed());
     assert!(tokio::net::TcpStream::connect(hook.address).await.is_err());
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn repository_watch_rejects_invalid_reloads_and_keeps_dispatching_running_rules()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
+    use signalbox_persistence::scheduler::PostgresEligibilitySweep;
+    use signalboxd::{
+        SessionTemplateConfiguration,
+        repo_watch_runtime::{
+            RepositoryWatchRuntime, RepositoryWatchRuntimeError, RepositoryWatchServices,
+            connect_repository_watch_pool,
+        },
+    };
+    use std::sync::Arc;
+
+    let (container, core_pool, _) = postgres().await?;
+    migrate(&core_pool).await?;
+    let module_pool = connect_repository_watch_pool(&core_pool)
+        .await
+        .expect("module login");
+    let files = tempfile::tempdir()?;
+    let secret = files.path().join("hook-secret");
+    std::fs::write(&secret, b"hook-secret")?;
+    let mut hook = RuntimeHookFixture {
+        address: unused_webhook_address().await?,
+        path: "/running",
+        id: 17,
+        secret: &secret,
+        enabled: true,
+        rule_version: 1,
+        template: "watch",
+    };
+    let models = Arc::new(runtime_configuration(&hook)?);
+    let template_path = files.path().join("templates.toml");
+    std::fs::write(
+        &template_path,
+        r#"version = 1
+[[templates]]
+name = "watch"
+version = 1
+alias = "540ce009-c2ec-4a04-b823-c411ea189778"
+dangerous_tool_auto_approval = false
+system_prompt = "Inspect repository activity."
+[[templates]]
+name = "alternate"
+version = 1
+alias = "540ce009-c2ec-4a04-b823-c411ea189778"
+dangerous_tool_auto_approval = false
+system_prompt = "Inspect workflow failures."
+"#,
+    )?;
+    let templates = Arc::new(SessionTemplateConfiguration::read(
+        &template_path,
+        || None,
+        &models,
+    )?);
+    let (eligibility_nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(core_pool.clone()));
+    let services = || RepositoryWatchServices {
+        core_pool: core_pool.clone(),
+        models: models.clone(),
+        templates: templates.clone(),
+        eligibility_nudge: eligibility_nudge.clone(),
+        tool_dispatch_gate: InProcessToolDispatchGate::default(),
+    };
+    let missing = RuntimeHookFixture {
+        template: "missing",
+        ..hook
+    };
+    assert!(matches!(
+        RepositoryWatchRuntime::new(
+            module_pool.clone(),
+            runtime_configuration(&missing)?.repository_watch().cloned(),
+            services(),
+        )
+        .await,
+        Err(RepositoryWatchRuntimeError::Rules)
+    ));
+    let rules: i64 = sqlx::query_scalar("SELECT count(*) FROM rule")
+        .fetch_one(&module_pool)
+        .await?;
+    assert_eq!(rules, 0, "invalid composition admits no rules");
+    let runtime = RepositoryWatchRuntime::new(
+        module_pool.clone(),
+        models.repository_watch().cloned(),
+        services(),
+    )
+    .await
+    .expect("valid composition after rejected templates");
+    let (shutdown, stopped) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(runtime.clone().run(stopped));
+    let conflicting = RuntimeHookFixture {
+        template: "alternate",
+        ..hook
+    };
+    for rejected in [missing, conflicting] {
+        let replacement = RuntimeHookFixture {
+            path: "/rejected",
+            ..rejected
+        };
+        assert_eq!(
+            runtime
+                .reload_configuration(
+                    runtime_configuration(&replacement)?
+                        .repository_watch()
+                        .cloned()
+                )
+                .await,
+            Err(RepositoryWatchRuntimeError::Rules),
+            "missing templates and conflicting revision reuse both fail reload"
+        );
+        assert_eq!(
+            webhook_status(&hook, b"hook-secret").await?,
+            reqwest::StatusCode::ACCEPTED,
+            "rejected reload retains the running listener"
+        );
+    }
+
+    let store = RepoWatchStore::new(module_pool.clone());
+    let repository = RepositorySlug::try_new(String::from("runtime/project"))?;
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &dispatch_observation(&repository, 1, OffsetDateTime::now_utc()),
+            EventProducer::Poll,
+        )
+        .await?;
+    for run in [2, 3] {
+        if run == 3 {
+            let stale = RuntimeHookFixture {
+                path: "/stale",
+                ..hook
+            };
+            hook.rule_version = 2;
+            hook.template = "alternate";
+            runtime
+                .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+                .await
+                .expect("apply next revision");
+            assert_eq!(
+                runtime
+                    .reload_configuration(
+                        runtime_configuration(&stale)?.repository_watch().cloned()
+                    )
+                    .await,
+                Err(RepositoryWatchRuntimeError::Rules),
+                "historical revision fails reload"
+            );
+            assert_eq!(
+                webhook_status(&hook, b"hook-secret").await?,
+                reqwest::StatusCode::ACCEPTED
+            );
+        }
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &dispatch_observation(&repository, run, OffsetDateTime::now_utc()),
+                EventProducer::Poll,
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM session AS session
+                     JOIN mod_repo_watch.dispatch_ledger AS dispatch
+                       ON dispatch.created_session_id = session.session_id
+                     WHERE session.template_name = $1 AND dispatch.rule_revision = $2",
+                )
+                .bind(hook.template)
+                .bind(Decimal::from(hook.rule_version))
+                .fetch_one(&core_pool)
+                .await?;
+                if count == 1 {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        let active: Decimal = sqlx::query_scalar("SELECT active_revision FROM rule")
+            .fetch_one(&module_pool)
+            .await?;
+        assert_eq!(active, Decimal::from(hook.rule_version));
+    }
+    shutdown.send(true)?;
+    worker
+        .await?
+        .expect("orderly shutdown after rejected reloads");
     core_pool.close().await;
     drop(container);
     Ok(())

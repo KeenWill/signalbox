@@ -6,7 +6,8 @@ use ring::rand::{SecureRandom, SystemRandom};
 use signalbox_application::{InProcessEligibilityNudge, InProcessToolDispatchGate};
 use signalbox_domain::RepositorySlug;
 use signalbox_module_repo_watch_v2::{
-    RepoWatchStore, RepositoryRuleSet, ingest::run_repository_task, provider::GitHubRepositoryTask,
+    RepoWatchStore, RepositoryRuleSet, RuleReconciliationAdmission, ingest::run_repository_task,
+    provider::GitHubRepositoryTask,
 };
 use signalbox_ownership_seam::{LifecycleEventSource, OffsetDateTime};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -161,6 +162,14 @@ impl RepositoryWatchRuntime {
         let enabled = configuration
             .as_ref()
             .filter(|configuration| configuration.enabled());
+        if enabled
+            .into_iter()
+            .flat_map(|configuration| configuration.rules())
+            .flat_map(|rule| rule.actions())
+            .any(|action| state.factory.0.resolve(action.template()).is_none())
+        {
+            return Err(RepositoryWatchRuntimeError::Rules);
+        }
         let wakes: BTreeMap<_, _> = enabled
             .into_iter()
             .flat_map(|configuration| configuration.repositories())
@@ -189,16 +198,21 @@ impl RepositoryWatchRuntime {
             })
             .collect::<Vec<_>>();
         state.stop_repositories().await;
-        if state
+        match state
             .store
             .reconcile_rules(&rules, OffsetDateTime::now_utc())
             .await
-            .is_err()
         {
-            if matches!(state.workers, WorkerState::Running) {
-                state.start_repositories();
+            Ok(RuleReconciliationAdmission::Applied { .. }) => {}
+            Ok(
+                RuleReconciliationAdmission::ConflictingReuse | RuleReconciliationAdmission::Stale,
+            )
+            | Err(_) => {
+                if matches!(state.workers, WorkerState::Running) {
+                    state.start_repositories();
+                }
+                return Err(RepositoryWatchRuntimeError::Rules);
             }
-            return Err(RepositoryWatchRuntimeError::Rules);
         }
         state.wakes = wakes;
         state.configuration = configuration;
