@@ -23,10 +23,7 @@ rust_library(
 rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_program_runtime",
-    crate_features = [
-        "default",
-        "postgres-integration",
-    ],
+    crate_features = CRATE_FEATURES,
     deps = ["//crates/persistence:signalbox_persistence"],
 )
 

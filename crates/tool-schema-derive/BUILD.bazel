@@ -2,6 +2,8 @@ load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_proc_macro")
 load("//tooling/bazel:testing.bzl", "rust_integration_test", "rust_unit_test")
 
+TEST_DEPS = ["//crates/tool-contract:signalbox_tool_contract"]
+
 rust_package()
 
 rust_proc_macro(
@@ -12,7 +14,7 @@ rust_proc_macro(
 rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_tool_schema_derive",
-    deps = ["//crates/tool-contract:signalbox_tool_contract"],
+    deps = TEST_DEPS,
 )
 
 rust_integration_test(
@@ -20,5 +22,5 @@ rust_integration_test(
     size = "small",
     crate_root = "tests/derive.rs",
     proc_macro_deps = [":signalbox_tool_schema_derive"],
-    deps = ["//crates/tool-contract:signalbox_tool_contract"],
+    deps = TEST_DEPS,
 )

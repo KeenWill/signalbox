@@ -19,7 +19,7 @@ rust_library(
 rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_model_runtime",
-    crate_features = ["cli-process"],
+    crate_features = CRATE_FEATURES,
 )
 
 rust_api_json(

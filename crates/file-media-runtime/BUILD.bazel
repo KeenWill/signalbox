@@ -2,12 +2,14 @@ load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_integration_test", "rust_unit_test")
 
+CRATE_PROC_MACRO_DEPS = ["//crates/derive:signalbox_derive"]
+
 rust_package()
 
 rust_library(
     name = "signalbox_file_media_runtime",
     crate_root = "src/lib.rs",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"],
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
 )
 
 rust_unit_test(
@@ -20,7 +22,7 @@ rust_integration_test(
     size = "small",
     srcs = glob(["tests/**/*.rs"]),
     crate_root = "tests/registry_conformance.rs",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"],
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     deps = [":signalbox_file_media_runtime"],
 )
 

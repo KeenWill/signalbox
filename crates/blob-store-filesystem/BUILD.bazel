@@ -22,20 +22,14 @@ rust_library(
 rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_blob_store_filesystem",
-    crate_features = [
-        "default",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     deps = ["//crates/blob-store:signalbox_blob_store"],
 )
 
 rust_integration_test(
     name = "conformance",
     size = "small",
-    crate_features = [
-        "default",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/conformance.rs",
     tags = [
         "external",
