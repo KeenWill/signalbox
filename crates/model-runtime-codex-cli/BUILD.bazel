@@ -74,6 +74,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     args = ["--test-threads=16"],
+    compile_data = ["tests/support/fake_codex_app_server.rs"],
     crate = ":signalbox_model_runtime_codex_cli",
     crate_features = [],
     lint_config = ":cargo_lints",
