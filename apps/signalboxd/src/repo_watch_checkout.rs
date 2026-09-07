@@ -113,6 +113,11 @@ pub(crate) fn prepare(
     };
     let stat = rustix::fs::fstat(&directory)
         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    #[allow(
+        clippy::unnecessary_cast,
+        reason = "device numbers have platform-specific widths"
+    )]
+    let device = stat.st_dev as u64;
     Ok(CheckoutDirectory {
         path,
         dispatch,
@@ -121,7 +126,7 @@ pub(crate) fn prepare(
         staged_name,
         directory,
         identity: CheckoutDirectoryIdentity {
-            device: stat.st_dev,
+            device,
             inode: stat.st_ino,
         },
     })
@@ -329,6 +334,18 @@ fn staging_name(dispatch: RepoWatchDispatchId) -> OsString {
     format!(".checkout-{}", dispatch.into_uuid()).into()
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn remove(
+    _roots: &SessionWorkspaceRoots,
+    _session: SessionId,
+    _dispatch: RepoWatchDispatchId,
+    _created: bool,
+    _identity: Option<CheckoutDirectoryIdentity>,
+) -> Result<(), rustix::io::Errno> {
+    Err(rustix::io::Errno::OPNOTSUPP)
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn remove(
     roots: &SessionWorkspaceRoots,
     session: SessionId,
@@ -377,6 +394,7 @@ pub(crate) fn remove(
     remove_directory_entry(&parent, &name, &directory)
 }
 
+#[cfg(target_os = "linux")]
 fn find_renamed_directory(
     parent: &OwnedFd,
     identity: CheckoutDirectoryIdentity,
@@ -409,6 +427,7 @@ fn find_renamed_directory(
     Ok(None)
 }
 
+#[cfg(target_os = "linux")]
 fn marker_matches(
     directory: &OwnedFd,
     dispatch: RepoWatchDispatchId,
@@ -437,6 +456,7 @@ fn marker_matches(
     Ok(&contents[..count] == dispatch.into_uuid().to_string().as_bytes())
 }
 
+#[cfg(target_os = "linux")]
 fn pin_removal_directory(
     parent: &OwnedFd,
     name: &std::ffi::OsStr,
@@ -450,6 +470,7 @@ fn pin_removal_directory(
     )
 }
 
+#[cfg(target_os = "linux")]
 fn read_removal_directory(directory: &OwnedFd) -> Result<OwnedFd, rustix::io::Errno> {
     let mode = Mode::from_raw_mode(rustix::fs::fstat(directory)?.st_mode);
     if !mode.contains(Mode::RWXU) {
@@ -464,6 +485,7 @@ fn read_removal_directory(directory: &OwnedFd) -> Result<OwnedFd, rustix::io::Er
     openat(directory, ".", DIRECTORY_FLAGS, Mode::empty())
 }
 
+#[cfg(target_os = "linux")]
 fn remove_contents(directory: &OwnedFd, marker_path: &[&str]) -> Result<(), rustix::io::Errno> {
     use rustix::fs::Dir;
     use std::os::unix::ffi::OsStrExt;
@@ -489,6 +511,7 @@ fn remove_contents(directory: &OwnedFd, marker_path: &[&str]) -> Result<(), rust
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn remove_entry(
     directory: &OwnedFd,
     name: &std::ffi::OsStr,
@@ -520,7 +543,7 @@ fn remove_directory_entry(
     unlinkat(parent, name, AtFlags::REMOVEDIR)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::{

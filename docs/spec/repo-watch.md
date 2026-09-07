@@ -227,10 +227,11 @@ session parent for the retained device/inode and matching dispatch marker;
 without a matching marker it settles without deleting. The parent is retained.
 The removal migration settles existing provisioned rows without a retained
 location. Removal restores owner directory permissions and refuses mount
-crossings. Pending submission follow-ups remain retryable after core command
-settlement, including interruption of a live turn whose session is closing.
-Synchronous command-identity conflicts settle as rejected before submission
-continues to the next action.
+crossings; it reports unsupported outside Linux and leaves cleanup pending.
+Pending submission follow-ups remain retryable after core command settlement,
+including interruption of a live turn whose session is closing. Synchronous
+command-identity conflicts settle as rejected before submission continues to the
+next action.
 
 ## Boundary contracts
 
