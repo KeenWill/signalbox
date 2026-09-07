@@ -3579,6 +3579,7 @@ fn configuration_validates_undelivered_oauth_before_refusing_it() {
         r#"delivery = "oauth"
 client_id = "synthetic-client"
 token_url = "http://example.test/token"
+refresh_token_url = "https://example.test/oauth/token"
 device_authorization_url = "https://example.test/device"
 scopes = ["model:invoke"]"#,
     );
@@ -3601,6 +3602,7 @@ fn assert_oauth_scope_rejected(scope: &str) {
             "delivery = \"oauth\"\n\
                  client_id = \"synthetic-client\"\n\
                  token_url = \"https://example.test/token\"\n\
+                 refresh_token_url = \"https://example.test/oauth/token\"\n\
                  device_authorization_url = \"https://example.test/device\"\n\
                  scopes = ['{scope}']"
         ),
@@ -3641,6 +3643,7 @@ fn configuration_rejects_an_oauth_endpoint_holding_a_fragment() {
         r#"delivery = "oauth"
 client_id = "synthetic-client"
 token_url = "https://example.test/token#stale"
+refresh_token_url = "https://example.test/oauth/token"
 device_authorization_url = "https://example.test/device"
 scopes = ["model:invoke"]"#,
     );
@@ -3666,6 +3669,7 @@ fn assert_oauth_token_url_rejected(token_url: &str) {
             r#"delivery = "oauth"
 client_id = "synthetic-client"
 token_url = "{token_url}"
+refresh_token_url = "https://example.test/oauth/token"
 device_authorization_url = "https://example.test/device"
 scopes = ["model:invoke"]"#
         ),
@@ -3723,6 +3727,7 @@ billing_kind = "api_metered""#,
             r#"delivery = "oauth"
 client_id = "synthetic-client"
 token_url = "https://example.test/token"
+refresh_token_url = "https://example.test/oauth/token"
 device_authorization_url = "https://example.test/device"
 scopes = ["model:invoke"]"#,
         );
@@ -3746,6 +3751,7 @@ fn configuration_admits_a_subscription_oauth_profile() {
         r#"delivery = "oauth"
 client_id = "synthetic-client"
 token_url = "https://example.test/token"
+refresh_token_url = "https://example.test/oauth/token"
 device_authorization_url = "https://example.test/device"
 scopes = ["model:invoke"]"#,
     );
@@ -3799,6 +3805,7 @@ fn configuration_rejects_a_device_endpoint_holding_user_information() {
         r#"delivery = "oauth"
 client_id = "synthetic-client"
 token_url = "https://example.test/token"
+refresh_token_url = "https://example.test/oauth/token"
 device_authorization_url = "https://alice:secret@example.test/device"
 scopes = ["model:invoke"]"#,
     );
@@ -3816,12 +3823,54 @@ fn configuration_parses_valid_oauth() {
         r#"delivery = "oauth"
 client_id = "synthetic-client"
 token_url = "https://example.test/token"
+refresh_token_url = "https://example.test/oauth/token"
 device_authorization_url = "https://example.test/device"
 scopes = ["model:invoke"]"#,
     );
 
     let configuration = HubModelConfiguration::parse(&oauth).expect("valid OAuth profile");
     assert_eq!(configuration.oauth_registrations().len(), 1);
+}
+
+#[test]
+fn configuration_requires_a_valid_https_refresh_endpoint() {
+    let oauth = CONFIGURATION.replace(
+        "delivery = \"ambient\"",
+        r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "https://example.test/token"
+refresh_token_url = "https://EXAMPLE.test:443/oauth/token?audience=codex"
+device_authorization_url = "https://example.test/device"
+scopes = ["model:invoke"]"#,
+    );
+    let configuration = HubModelConfiguration::parse(&oauth).expect("valid OAuth profile");
+    assert_eq!(
+        configuration.oauth_registrations()[0].1.refresh_token_url,
+        "https://example.test/oauth/token?audience=codex"
+    );
+    for endpoint in [
+        "http://example.test/oauth/token",
+        "https://example.test/oauth/token#fragment",
+        "https://secret@example.test/oauth/token",
+        "/oauth/token",
+    ] {
+        let invalid = oauth.replace(
+            "https://EXAMPLE.test:443/oauth/token?audience=codex",
+            endpoint,
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&invalid).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+    let missing = oauth.replace(
+        "refresh_token_url = \"https://EXAMPLE.test:443/oauth/token?audience=codex\"\n",
+        "",
+    );
+    assert_eq!(
+        HubModelConfiguration::parse(&missing).err(),
+        Some(HubModelConfigurationError::InvalidField)
+    );
 }
 
 #[test]

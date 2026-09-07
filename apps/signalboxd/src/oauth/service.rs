@@ -375,6 +375,7 @@ mod tests {
         let registration = OauthRegistration {
             client_id: "fixture-client".into(),
             token_url: "https://authorization.example/token".into(),
+            refresh_token_url: "https://authorization.example/oauth/token".into(),
             device_authorization_url: "https://authorization.example/device".into(),
             scopes: vec!["openid".into()],
         };
@@ -432,6 +433,7 @@ mod tests {
         let registration = OauthRegistration {
             client_id: "fixture-client".into(),
             token_url: "https://authorization.example/token".into(),
+            refresh_token_url: "https://authorization.example/oauth/token".into(),
             device_authorization_url: "https://authorization.example/device".into(),
             scopes: vec!["openid".into()],
         };

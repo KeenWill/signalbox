@@ -181,6 +181,7 @@ impl oauth_credential::OauthCredentialRepository {
 pub struct OauthRegistration {
     pub client_id: string::String,
     pub token_url: string::String,
+    pub refresh_token_url: string::String,
     pub device_authorization_url: string::String,
     pub scopes: vec::Vec<string::String>,
 }

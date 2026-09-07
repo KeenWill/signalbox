@@ -35,20 +35,17 @@ impl OauthClient {
         if cancellation.is_cancelled() {
             return Err(CancelledBeforeSend);
         }
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("grant_type", "refresh_token")
-            .append_pair("refresh_token", &stored.refresh_token)
-            .append_pair("client_id", &registration.client_id)
-            .finish();
+        let body = serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": &stored.refresh_token,
+            "client_id": &registration.client_id,
+        });
         let attempt = async {
             let response = self
                 .client
-                .post(&registration.token_url)
-                .header(
-                    reqwest::header::CONTENT_TYPE,
-                    "application/x-www-form-urlencoded",
-                )
-                .body(body)
+                .post(&registration.refresh_token_url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.to_string())
                 .send()
                 .await
                 .map_err(|error| {

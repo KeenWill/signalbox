@@ -457,6 +457,7 @@ fn registration() -> OauthRegistration {
     OauthRegistration {
         client_id: "test-client".into(),
         token_url: "https://authorization.example/token".into(),
+        refresh_token_url: "https://authorization.example/oauth/token".into(),
         device_authorization_url: "https://authorization.example/device".into(),
         scopes: vec!["openid".into(), "offline_access".into()],
     }
@@ -581,7 +582,13 @@ async fn oauth_provisioning_rejects_superseded_generations_and_changed_registrat
     else {
         panic!("replacement exchange");
     };
-    repository.replace_registrations(&[]).await?;
+    let changed_registration = OauthRegistration {
+        refresh_token_url: "https://other-authorization.example/oauth/token".into(),
+        ..registration
+    };
+    repository
+        .replace_registrations(&[(first.profile.clone(), changed_registration)])
+        .await?;
     assert_eq!(
         repository
             .complete_exchange(&replacement_exchange, Ok(&authorization()))
