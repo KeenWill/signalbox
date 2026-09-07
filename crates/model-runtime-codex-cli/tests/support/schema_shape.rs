@@ -159,24 +159,35 @@ fn integer_bounds(value: &Value) -> (i128, i128) {
         })
         .unwrap_or((i128::MIN, i128::MAX));
     let bound = |field: &str, fallback: i128| {
-        value[field]
+        let exact = value[field]
             .as_i64()
             .map(i128::from)
-            .or_else(|| value[field].as_u64().map(i128::from))
-            .or_else(|| {
-                value[field].as_f64().map(|number| {
-                    if field == "minimum" {
-                        number.ceil() as i128
-                    } else {
-                        number.floor() as i128
-                    }
-                })
+            .or_else(|| value[field].as_u64().map(i128::from));
+        if let Some(number) = exact {
+            return match field {
+                "exclusiveMinimum" => number.saturating_add(1),
+                "exclusiveMaximum" => number.saturating_sub(1),
+                _ => number,
+            };
+        }
+        value[field]
+            .as_f64()
+            .map(|number| match field {
+                "minimum" => number.ceil() as i128,
+                "maximum" => number.floor() as i128,
+                "exclusiveMinimum" => (number.floor() as i128).saturating_add(1),
+                "exclusiveMaximum" => (number.ceil() as i128).saturating_sub(1),
+                _ => fallback,
             })
             .unwrap_or(fallback)
     };
     (
-        bound("minimum", format_bounds.0).max(format_bounds.0),
-        bound("maximum", format_bounds.1).min(format_bounds.1),
+        bound("minimum", format_bounds.0)
+            .max(format_bounds.0)
+            .max(bound("exclusiveMinimum", i128::MIN)),
+        bound("maximum", format_bounds.1)
+            .min(format_bounds.1)
+            .min(bound("exclusiveMaximum", i128::MAX)),
     )
 }
 
@@ -192,6 +203,23 @@ pub(super) fn compatible(
         || expected.as_object().is_some_and(|fields| fields.is_empty())
     {
         return true;
+    }
+    if expected["x-codex-started-turn"] == true {
+        let mut turn = expected.clone();
+        turn.as_object_mut()
+            .expect("turn schema object")
+            .remove("x-codex-started-turn");
+        // Startup inspects item discriminators without decoding agent-message payloads.
+        turn["properties"]["items"]["items"] = Value::Bool(true);
+        return compatible(&turn, expected_root, actual, actual_root);
+    }
+    if expected["x-codex-consumed-item"] == true {
+        let mut message = expected.clone();
+        message
+            .as_object_mut()
+            .expect("item schema object")
+            .remove("x-codex-consumed-item");
+        return turn_items(&message, expected_root, actual, actual_root) == Ok(true);
     }
     if expected["x-codex-consumed-items"] == true {
         return actual["type"] == "array"
@@ -376,13 +404,18 @@ fn turn_items(
         return Ok(found);
     }
     let tag = dereference(&actual["properties"]["type"], actual_root);
-    let consumed_tags = ["agentMessage", "userMessage", "hookPrompt"];
+    let decode_agent = expected != &Value::Bool(true);
+    let consumed_tags: &[&str] = if decode_agent {
+        &["agentMessage", "userMessage", "hookPrompt"]
+    } else {
+        &["userMessage", "hookPrompt"]
+    };
     if tag
         .get("not")
         .and_then(|excluded| string_members(excluded, actual_root))
         .is_some_and(|excluded| consumed_tags.iter().all(|tag| excluded.contains(*tag)))
     {
-        return Ok(false);
+        return Ok(!decode_agent);
     }
     let tags = tag["enum"]
         .as_array()
@@ -400,6 +433,9 @@ fn turn_items(
         if !compatible(&discriminator, &discriminator, actual, actual_root) {
             return Err("consumed item discriminator must remain a required string".into());
         }
+    }
+    if !decode_agent {
+        return Ok(true);
     }
     if !tags.iter().any(|tag| tag == "agentMessage") {
         return Ok(false);

@@ -195,6 +195,7 @@ pub(crate) struct ErrorNotification {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct UsageBreakdown {
     pub(crate) input_tokens: Option<i64>,
     pub(crate) cached_input_tokens: Option<i64>,
@@ -206,12 +207,14 @@ pub(crate) struct UsageBreakdown {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct ThreadTokenUsage {
     pub(crate) total: UsageBreakdown,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct TokenUsageUpdated {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
@@ -220,6 +223,7 @@ pub(crate) struct TokenUsageUpdated {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct ItemTextDelta {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
@@ -229,9 +233,11 @@ pub(crate) struct ItemTextDelta {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct ItemNotification {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
+    #[cfg_attr(test, schemars(schema_with = "consumed_item_schema"))]
     pub(crate) item: Value,
 }
 
@@ -243,21 +249,26 @@ pub(crate) struct AgentMessage {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct ThreadStartResponse {
     pub(crate) thread: Thread,
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct Thread {
     pub(crate) id: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct TurnStartResponse {
+    #[cfg_attr(test, schemars(schema_with = "started_turn_schema"))]
     pub(crate) turn: Turn,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct RpcError {
     pub(crate) code: i64,
     pub(crate) data: Option<Value>,
@@ -349,5 +360,19 @@ impl RateLimits {
 fn consumed_turn_items_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let mut schema = <Vec<AgentMessage> as schemars::JsonSchema>::json_schema(generator);
     schema.insert("x-codex-consumed-items".into(), true.into());
+    schema
+}
+
+#[cfg(test)]
+fn consumed_item_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = <AgentMessage as schemars::JsonSchema>::json_schema(generator);
+    schema.insert("x-codex-consumed-item".into(), true.into());
+    schema
+}
+
+#[cfg(test)]
+fn started_turn_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = <Turn as schemars::JsonSchema>::json_schema(generator);
+    schema.insert("x-codex-started-turn".into(), true.into());
     schema
 }

@@ -54,29 +54,86 @@ fn derived<T: schemars::JsonSchema>() -> Value {
     serde_json::to_value(schemars::schema_for!(T)).expect("derived schema serializes")
 }
 
+// Protocol envelopes are read as JSON in Client::receive; payloads use the wire types.
+fn consumed_schemas() -> Vec<(&'static str, Value)> {
+    let request_id = serde_json::json!({"anyOf":[
+        {"type":"string"},
+        {"type":"integer","minimum":i64::MIN,"maximum":u64::MAX}
+    ]});
+    vec![
+        ("ErrorNotification", derived::<frame::ErrorNotification>()),
+        (
+            "TurnCompletedNotification",
+            derived::<frame::TurnCompleted>(),
+        ),
+        (
+            "AccountRateLimitsUpdatedNotification",
+            derived::<frame::AccountRateLimitsUpdated>(),
+        ),
+        (
+            "ItemStartedNotification",
+            derived::<frame::ItemNotification>(),
+        ),
+        (
+            "ItemCompletedNotification",
+            derived::<frame::ItemNotification>(),
+        ),
+        (
+            "ThreadTokenUsageUpdatedNotification",
+            derived::<frame::TokenUsageUpdated>(),
+        ),
+        (
+            "AgentMessageDeltaNotification",
+            derived::<frame::ItemTextDelta>(),
+        ),
+        (
+            "ReasoningTextDeltaNotification",
+            derived::<frame::ItemTextDelta>(),
+        ),
+        (
+            "ReasoningSummaryTextDeltaNotification",
+            derived::<frame::ItemTextDelta>(),
+        ),
+        (
+            "ThreadStartResponse",
+            derived::<frame::ThreadStartResponse>(),
+        ),
+        ("TurnStartResponse", derived::<frame::TurnStartResponse>()),
+        ("InitializeResponse", serde_json::json!({"type":"object"})),
+        ("JSONRPCErrorError", derived::<frame::RpcError>()),
+        (
+            "JSONRPCResponse",
+            serde_json::json!({
+                "type":"object", "required":["id","result"], "properties":{"id":request_id,"result":{}}
+            }),
+        ),
+        (
+            "JSONRPCError",
+            serde_json::json!({
+                "type":"object", "required":["id","error"], "properties":{"id":request_id,"error":derived::<frame::RpcError>()}
+            }),
+        ),
+        (
+            "JSONRPCNotification",
+            serde_json::json!({
+                "type":"object", "required":["method"], "properties":{"method":{"type":"string"},"params":{}}
+            }),
+        ),
+        (
+            "JSONRPCRequest",
+            serde_json::json!({
+                "type":"object", "required":["id","method"], "properties":{"id":request_id,"method":{"type":"string"},"params":{}}
+            }),
+        ),
+    ]
+}
+
 #[test]
-fn pinned_notifications_preserve_consumed_and_adapter_required_fields() {
-    let errors = schema("ErrorNotification");
-    let turns = schema("TurnCompletedNotification");
-    let rates = schema("AccountRateLimitsUpdatedNotification");
-    check_object(
-        "ErrorNotification",
-        derived::<frame::ErrorNotification>(),
-        &errors,
-        &errors,
-    );
-    check_object(
-        "TurnCompletedNotification",
-        derived::<frame::TurnCompleted>(),
-        &turns,
-        &turns,
-    );
-    check_object(
-        "AccountRateLimitsUpdatedNotification",
-        derived::<frame::AccountRateLimitsUpdated>(),
-        &rates,
-        &rates,
-    );
+fn pinned_envelopes_preserve_consumed_and_adapter_required_fields() {
+    for (name, expected) in consumed_schemas() {
+        let actual = schema(name);
+        check_object(name, expected, &actual, &actual);
+    }
 }
 
 use schema_shape::{enum_members, variants};
@@ -410,17 +467,7 @@ fn consumed_item_discriminators_remain_required_strings() {
 
 #[test]
 fn notification_roots_cannot_become_nullable() {
-    for (name, expected) in [
-        ("ErrorNotification", derived::<frame::ErrorNotification>()),
-        (
-            "TurnCompletedNotification",
-            derived::<frame::TurnCompleted>(),
-        ),
-        (
-            "AccountRateLimitsUpdatedNotification",
-            derived::<frame::AccountRateLimitsUpdated>(),
-        ),
-    ] {
+    for (name, expected) in consumed_schemas() {
         let mut actual = schema(name);
         actual["type"] = serde_json::json!(["object", "null"]);
         assert!(
@@ -577,5 +624,103 @@ fn all_of_wrappers_ignore_annotations_but_preserve_value_constraints() {
     assert!(schema_shape::object_shape(&expected, &actual, &actual).is_ok());
     actual["definitions"]["Turn"]["properties"]["status"]["enum"] =
         serde_json::json!(["completed"]);
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
+}
+
+#[test]
+fn decoded_notification_correlation_fields_stay_required() {
+    for (name, expected) in consumed_schemas() {
+        if !strings(&expected["required"]).contains("turnId") {
+            continue;
+        }
+        let mut actual = schema(name);
+        actual["required"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|field| field != "turnId");
+        assert!(
+            schema_shape::object_shape(&expected, &actual, &actual).is_err(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn lifecycle_items_and_start_responses_check_only_nested_decoded_fields() {
+    for name in [
+        "ItemStartedNotification",
+        "ItemCompletedNotification",
+        "TurnStartResponse",
+    ] {
+        let expected = consumed_schemas()
+            .into_iter()
+            .find(|(candidate, _)| *candidate == name)
+            .unwrap()
+            .1;
+        let mut actual = schema(name);
+        let agent = actual["definitions"]["ThreadItem"]["oneOf"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| strings(&item["properties"]["type"]["enum"]).contains("agentMessage"))
+            .unwrap();
+        agent["properties"]["text"]["type"] = serde_json::json!(["string", "null"]);
+        assert_eq!(
+            schema_shape::object_shape(&expected, &actual, &actual).is_ok(),
+            name == "TurnStartResponse",
+            "{name}"
+        );
+    }
+    let mut actual = schema("ThreadStartResponse");
+    actual["definitions"]["Thread"]["required"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|field| field != "id");
+    assert!(
+        schema_shape::object_shape(&derived::<frame::ThreadStartResponse>(), &actual, &actual)
+            .is_err()
+    );
+}
+
+#[test]
+fn exclusive_integer_bounds_accept_equivalent_ranges_and_reject_widening() {
+    for (low, high, compatible) in [
+        (serde_json::json!(-1), serde_json::json!(65536), true),
+        (serde_json::json!(-0.5), serde_json::json!(65535.5), true),
+        (serde_json::json!(-2), serde_json::json!(65536), false),
+        (serde_json::json!(-1), serde_json::json!(65537), false),
+    ] {
+        let mut actual = schema("ErrorNotification");
+        let error = actual["definitions"]["CodexErrorInfo"]["oneOf"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|shape| shape["properties"]["httpConnectionFailed"].is_object())
+            .unwrap();
+        error["properties"]["httpConnectionFailed"]["properties"]["httpStatusCode"] = serde_json::json!({
+            "type":["integer","null"], "exclusiveMinimum":low, "exclusiveMaximum":high
+        });
+        assert_eq!(
+            check_errors(&actual).is_ok(),
+            compatible,
+            "{low} < status < {high}"
+        );
+    }
+}
+
+#[test]
+fn startup_items_preserve_the_non_output_discriminators() {
+    let expected = derived::<frame::TurnStartResponse>();
+    let mut actual = schema("TurnStartResponse");
+    let item = actual["definitions"]["ThreadItem"]["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|item| strings(&item["properties"]["type"]["enum"]).contains("userMessage"))
+        .unwrap();
+    item["required"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|field| field != "type");
     assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
 }

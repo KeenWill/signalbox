@@ -6,10 +6,16 @@ cd "${repo_root}"
 release=$(python3 -c 'import json; print(json.load(open("tooling/codex-cli/release.json"))["release"])')
 schema_dir=$(mktemp -d)
 trap 'rm -rf "${schema_dir}"' EXIT
-for name in ErrorNotification AccountRateLimitsUpdatedNotification TurnCompletedNotification; do
+for fixture in tooling/codex-cli/schema/*.json; do
+  name=$(basename "${fixture}")
+  case "${name}" in
+    InitializeResponse.json) schema_path="v1/${name}" ;;
+    JSONRPC*.json) schema_path="${name}" ;;
+    *) schema_path="v2/${name}" ;;
+  esac
   curl --fail --silent --show-error --location \
-    "https://raw.githubusercontent.com/KeenWill/codex/${release}/codex-rs/app-server-protocol/schema/json/v2/${name}.json" \
-    --output "${schema_dir}/${name}.json"
+    "https://raw.githubusercontent.com/KeenWill/codex/${release}/codex-rs/app-server-protocol/schema/json/${schema_path}" \
+    --output "${schema_dir}/${name}"
 done
 python3 - "${schema_dir}" <<'PYTHON'
 from pathlib import Path
