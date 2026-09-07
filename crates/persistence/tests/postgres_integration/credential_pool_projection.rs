@@ -229,6 +229,27 @@ async fn pool_projection_prefers_quarantine_over_transient_exclusion() -> Result
     );
     assert_eq!(captured.members[0].reset_at_unix_ms, Some(reset_ms));
     drop(connection);
+    sqlx::query("ALTER TABLE credential_pool_exhaustion_member DISABLE TRIGGER credential_pool_exhaustion_member_immutable").execute(&pool).await?;
+    for forged_reset in [reset_ms - 1, reset_ms + 1] {
+        sqlx::query("UPDATE credential_pool_exhaustion_member SET evidence = jsonb_set(evidence, '{reset_at_unix_ms}', to_jsonb($2::bigint)) WHERE terminal_attempt_id = $1")
+            .bind(captured.terminal_attempt_id).bind(forged_reset).execute(&pool).await?;
+        let mut connection = pool.acquire().await?;
+        assert!(
+            matches!(
+                evidence::load(
+                    &mut connection,
+                    transient_session.into_uuid(),
+                    transient_turn.into_uuid()
+                )
+                .await,
+                Err(evidence::CredentialPoolEvidenceError::Corruption)
+            ),
+            "forged reset {forged_reset} must fail closed"
+        );
+    }
+    sqlx::query("UPDATE credential_pool_exhaustion_member SET evidence = jsonb_set(evidence, '{reset_at_unix_ms}', to_jsonb($2::bigint)) WHERE terminal_attempt_id = $1")
+        .bind(captured.terminal_attempt_id).bind(reset_ms).execute(&pool).await?;
+    sqlx::query("ALTER TABLE credential_pool_exhaustion_member ENABLE TRIGGER credential_pool_exhaustion_member_immutable").execute(&pool).await?;
     let generation: i64 = sqlx::query_scalar("INSERT INTO credential_exclusion (kind,profile,origin) VALUES ('profile_quarantine',$1,'codex_home') RETURNING record_generation").bind(PROFILE).fetch_one(&pool).await?;
     let (session, turn, repository) = active_credential_pool_fixture(
         &pool,
@@ -424,6 +445,31 @@ async fn pool_projection_records_the_observed_headroom_reserve() -> Result<(), B
         }
     );
     assert_eq!(captured.members[0].reset_at_unix_ms, Some(reset_ms));
+    drop(connection);
+    sqlx::query("ALTER TABLE credential_pool_exhaustion_member DISABLE TRIGGER credential_pool_exhaustion_member_immutable").execute(&pool).await?;
+    for forged_reset in [reset_ms - 1, reset_ms + 1] {
+        sqlx::query("UPDATE credential_pool_exhaustion_member SET evidence = jsonb_set(evidence, '{reset_at_unix_ms}', to_jsonb($2::bigint)) WHERE terminal_attempt_id = $1")
+            .bind(captured.terminal_attempt_id).bind(forged_reset).execute(&pool).await?;
+        let mut connection = pool.acquire().await?;
+        assert!(
+            matches!(
+                evidence::load(&mut connection, session.into_uuid(), turn.into_uuid()).await,
+                Err(evidence::CredentialPoolEvidenceError::Corruption)
+            ),
+            "forged reset {forged_reset} must fail closed"
+        );
+    }
+    sqlx::query("UPDATE credential_pool_exhaustion_member SET evidence = jsonb_set(evidence, '{reset_at_unix_ms}', to_jsonb($2::bigint)) WHERE terminal_attempt_id = $1")
+        .bind(captured.terminal_attempt_id).bind(reset_ms).execute(&pool).await?;
+    sqlx::query("ALTER TABLE credential_pool_exhaustion_member ENABLE TRIGGER credential_pool_exhaustion_member_immutable").execute(&pool).await?;
+    sqlx::query("UPDATE credential_rate_limit_snapshot SET windows = '[]'::jsonb WHERE credential_reference = $1")
+        .bind(PROFILE).execute(&pool).await?;
+    let mut connection = pool.acquire().await?;
+    assert_eq!(
+        evidence::load(&mut connection, session.into_uuid(), turn.into_uuid()).await?,
+        Some(captured),
+        "later capacity observations cannot rewrite the captured reset"
+    );
     drop(connection);
     pool.close().await;
     drop(container);

@@ -40,6 +40,7 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
 
   private let requester: any SignalboxProcessRequesting
   private let sessionID: SignalboxCanonicalUUID
+  private let snapshotCapacity: SignalboxSynchronizationSnapshotCapacity
   private let updates: @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
   private var machine: SignalboxSessionSynchronizationMachine
 
@@ -62,6 +63,7 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
   ) {
     self.requester = requester
     self.sessionID = sessionID
+    self.snapshotCapacity = policy.snapshotCapacity
     self.machine = SignalboxSessionSynchronizationMachine(
       sessionID: sessionID,
       policy: policy
@@ -196,6 +198,7 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
       guard case .turnCredentialPoolExhausted(let turn, let captured) = event.event else { return }
       turnID = turn
       evidence = captured
+      try await validatePoolEvent(event, turnID: turn, evidence: captured)
     default: return
     }
     let exchange = try await requester.open(.readCredentialPoolPolicy(sessionID: sessionID, turnID: turnID, poolPolicyID: evidence.poolPolicyID))
@@ -207,6 +210,47 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
       else { throw SignalboxProcessServiceError.unexpectedMessage("Exhaustion does not match its immutable pool policy.") }
       try Task.checkCancellation()
       await exchange.close()
+    } catch {
+      await exchange.close()
+      throw error
+    }
+  }
+
+  private func validatePoolEvent(
+    _ event: SignalboxFollowedSessionEvent,
+    turnID: SignalboxCanonicalUUID,
+    evidence: SignalboxCredentialPoolExhaustion
+  ) async throws {
+    let mismatch = SignalboxProcessServiceError.unexpectedMessage(
+      "Pool exhaustion event disagrees with its authoritative transcript."
+    )
+    guard event.sessionID == sessionID else { throw mismatch }
+    let exchange = try await requester.open(.readTranscript(sessionID: sessionID))
+    do {
+      guard let first = try await exchange.next(),
+        case .transcriptSnapshotStart(let boundary) = first.message,
+        boundary.sessionID == sessionID, boundary.cursor >= event.cursor
+      else { throw mismatch }
+      var accumulator = SignalboxSnapshotAccumulator(boundary: boundary, capacity: snapshotCapacity)
+      while let frame = try await exchange.next() {
+        try Task.checkCancellation()
+        switch accumulator.ingest(frame.message, expectedSessionID: sessionID) {
+        case .accepted, .diagnostic(_, nil): continue
+        case .completed(let snapshot):
+          guard snapshot.records.contains(where: { record in
+            guard case .turn(let turn) = record, turn.turnID == turnID,
+              case .failedCredentialPoolExhausted(let actual) = turn.state
+            else { return false }
+            return actual == evidence
+              && actual.policyMembers.map({ Data($0.utf8) })
+                == evidence.policyMembers.map({ Data($0.utf8) })
+          }) else { throw mismatch }
+          await exchange.close()
+          return
+        case .diagnostic, .remoteFailure, .invalid: throw mismatch
+        }
+      }
+      throw mismatch
     } catch {
       await exchange.close()
       throw error

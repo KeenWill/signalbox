@@ -12473,3 +12473,111 @@ private enum ProcessTimelineFixtureKind: Equatable {
   case turnFailure
   case unknown
 }
+
+extension ProcessServiceIntegrationTests {
+  func testPoolEventPublishesOnlyAfterExactTranscriptEvidenceMatches() async throws {
+    let fields = PoolEventValidationFixture.fields
+    for (name, eventFields, expectedEvents) in [
+      ("matching", fields, 1),
+      ("members", fields.replacingOccurrences(of: #""record_generation":"7""#, with: #""record_generation":"8""#), 0),
+      ("attempt", fields.replacingOccurrences(of: ProcessDriverFixture.attempt, with: ProcessDriverFixture.modelCall), 0),
+      ("frontier", fields.replacingOccurrences(of: ProcessDriverFixture.frontier, with: ProcessDriverFixture.modelCall), 0),
+      ("failure entry", fields.replacingOccurrences(of: ProcessDriverFixture.completionEntry, with: ProcessDriverFixture.modelCall), 0),
+    ] {
+      let requester = try PoolEventValidationRequester(eventFields: eventFields)
+      let recorder = PoolEventValidationRecorder()
+      let defaults = SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+      let driver = SignalboxSessionSynchronizationDriver(
+        requester: requester,
+        sessionID: try ProcessDriverFixture.sessionID(),
+        policy: .init(
+          deadlines: defaults.deadlines, retry: .init(delays: []),
+          snapshotCapacity: defaults.snapshotCapacity, eventBufferCapacity: defaults.eventBufferCapacity
+        )
+      ) { await recorder.append($0) }
+      await driver.start()
+      let published = try await recorder.eventsAfterTransportEnds()
+      await driver.stop()
+      XCTAssertEqual(published, expectedEvents, name)
+    }
+  }
+}
+
+private enum PoolEventValidationFixture {
+  // Arbitrary distinct correlations; each mismatch changes one retained terminal fact.
+  static let fields = """
+    "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+    "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+    "failure_entry_id":"\(ProcessDriverFixture.completionEntry)",
+    "pool_policy_id":"77777777-7777-4777-8777-777777777777",
+    "policy_members":["only"],
+    "members":[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":"7"}}]
+    """
+
+  static func frame(_ message: String) throws -> SignalboxProcessServerFrame {
+    try SignalboxProcessServerFrame.decode(
+      from: Data("{\"version\":1,\"request_id\":\"1\",\"message\":\(message)}".utf8)
+    )
+  }
+}
+
+private struct PoolEventValidationRequester: SignalboxProcessRequesting {
+  let follow: [SignalboxProcessServerFrame]
+  let transcript: [SignalboxProcessServerFrame]
+  let policy: SignalboxProcessServerFrame
+
+  init(eventFields: String) throws {
+    follow = [
+      try ProcessDriverFixture.snapshotStart(cursor: 0),
+      try ProcessDriverFixture.modelCallsEnd(),
+      try ProcessDriverFixture.snapshotEnd(cursor: 0),
+      try PoolEventValidationFixture.frame("""
+        {"type":"session_event","session_id":"\(ProcessDriverFixture.session)","cursor":"1",
+         "event":{"type":"turn_credential_pool_exhausted","turn_id":"\(ProcessDriverFixture.turn)",\(eventFields)}}
+        """),
+    ]
+    transcript = [
+      try ProcessDriverFixture.snapshotStart(cursor: 1),
+      try PoolEventValidationFixture.frame("""
+        {"type":"transcript_turn","turn_id":"\(ProcessDriverFixture.turn)","acceptance_position":"1",
+         "state":{"type":"failed_credential_pool_exhausted",\(PoolEventValidationFixture.fields)}}
+        """),
+      try ProcessDriverFixture.modelCallsEnd(),
+      try PoolEventValidationFixture.frame("""
+        {"type":"transcript_snapshot_end","session_id":"\(ProcessDriverFixture.session)",
+         "cursor":"1","turn_count":"1","entry_count":"0"}
+        """),
+    ]
+    policy = try PoolEventValidationFixture.frame(#"{"type":"credential_pool_policy","pool_policy_id":"77777777-7777-4777-8777-777777777777","policy_members":["only"]}"#)
+  }
+
+  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
+    switch request {
+    case .followSession: return StaticProcessExchange(frames: follow)
+    case .readTranscript: return StaticProcessExchange(frames: transcript)
+    case .readCredentialPoolPolicy: return StaticProcessExchange(frames: [policy])
+    default: throw ProcessDriverUpdateRecorderError.unexpectedRequest
+    }
+  }
+}
+
+private actor PoolEventValidationRecorder {
+  private var events = 0
+  private var ended = false
+
+  func append(_ update: SignalboxSessionSynchronizationDriverUpdate) {
+    switch update {
+    case .event: events += 1
+    case .retryLimitReached, .terminalFailure: ended = true
+    default: break
+    }
+  }
+
+  func eventsAfterTransportEnds() async throws -> Int {
+    for _ in 0..<100 {
+      if ended { return events }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    throw ProcessDriverUpdateRecorderError.eventTimeout
+  }
+}

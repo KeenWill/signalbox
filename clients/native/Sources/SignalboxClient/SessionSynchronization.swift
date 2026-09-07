@@ -1354,7 +1354,7 @@ private enum SignalboxBufferedFollowMessage: Sendable {
   }
 }
 
-private enum SignalboxSnapshotAccumulatorOutcome {
+enum SignalboxSnapshotAccumulatorOutcome {
   case accepted
   case diagnostic(kind: String, decodingDiagnostic: SignalboxDecodingDiagnostic?)
   case completed(SignalboxSynchronizationSnapshot)
@@ -1382,7 +1382,7 @@ private enum SignalboxSnapshotRequiredModelCallOwnership {
   case owner
 }
 
-private struct SignalboxSnapshotAccumulator: Sendable {
+struct SignalboxSnapshotAccumulator: Sendable {
   let boundary: SignalboxTranscriptSnapshotBoundary
   let capacity: SignalboxSynchronizationSnapshotCapacity
   private var records: [SignalboxSynchronizationSnapshot.Record] = []
