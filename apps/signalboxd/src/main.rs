@@ -434,35 +434,6 @@ fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) ->
     error
 }
 
-/// Converts Anthropic construction evidence to a closed classification.
-///
-/// The adapter's dynamic parser/client detail is deliberately excluded because
-/// an adapter-owned string is not admitted to operator telemetry.
-#[cfg(test)]
-const fn anthropic_construction_cause(error: &AnthropicConstructionError) -> &'static str {
-    match error {
-        AnthropicConstructionError::InvalidBaseUrl { .. } => "anthropic_invalid_base_url",
-        AnthropicConstructionError::InvalidVersion => "anthropic_invalid_version",
-        AnthropicConstructionError::InvalidExchangeTimeout => "anthropic_invalid_timeout",
-        AnthropicConstructionError::InvalidSseRecordLimit => "anthropic_invalid_record_limit",
-        AnthropicConstructionError::ClientConstruction { .. } => "anthropic_client_construction",
-    }
-}
-
-/// Converts OpenAI construction evidence to a closed classification.
-///
-/// The adapter's dynamic parser/client detail is deliberately excluded because
-/// an adapter-owned string is not admitted to operator telemetry.
-#[cfg(test)]
-const fn openai_construction_cause(error: &OpenAiConstructionError) -> &'static str {
-    match error {
-        OpenAiConstructionError::InvalidBaseUrl { .. } => "openai_invalid_base_url",
-        OpenAiConstructionError::InvalidExchangeTimeout => "openai_invalid_timeout",
-        OpenAiConstructionError::InvalidSseRecordLimit => "openai_invalid_record_limit",
-        OpenAiConstructionError::ClientConstruction { .. } => "openai_client_construction",
-    }
-}
-
 const fn configured_approval_posture_cause(error: &ConfiguredApprovalPostureError) -> &'static str {
     match error {
         ConfiguredApprovalPostureError::UnknownTool { .. } => {
@@ -1426,12 +1397,14 @@ async fn run_hub(
         post_kill_reap_bound,
         native_message_limit,
     );
-    runtime_factory.build(&model_configuration).map_err(|_| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("model_runtime_composition_failed"),
-        )
-    })?;
+    runtime_factory
+        .build(&model_configuration)
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static(error.cause_code()),
+            )
+        })?;
     let credential_reference =
         ModelCallCredentialReference::new(model_configuration.fallback_credential_profile());
     let code_host_credentials = FileCredentialAccess::new(
@@ -2092,10 +2065,10 @@ async fn run_hub(
             ),
         )
     };
-    let baseline_pass = compose_pass(&model_configuration).map_err(|_| {
+    let baseline_pass = compose_pass(&model_configuration).map_err(|error| {
         erase_startup_cause(
             RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("model_runtime_composition_failed"),
+            SanitizedStartupCause::Static(error.cause_code()),
         )
     })?;
     let activated_pass = signalboxd::model_catalog_runtime::CatalogEligibilityPass::new(
@@ -2709,11 +2682,10 @@ mod tests {
         ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RequiredSettingFailure,
         RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
         RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
-        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
-        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
-        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
-        fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
-        migrate_scan_then_schedule, openai_construction_cause, operator_filter,
+        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, combine_runtime_stop_cause,
+        completed_runtime_outcome, credential_files_conflict, database_close_failure_outcome,
+        drain_runtime_tasks, erase_startup_cause, fenced_pool_floor_reconciliation_policy,
+        graceful_shutdown_window, migrate_scan_then_schedule, operator_filter,
         process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
         runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
         validate_fenced_pool_min_connections,
@@ -2909,7 +2881,8 @@ mod tests {
         let error = AnthropicConstructionError::InvalidBaseUrl {
             detail: adapter_detail.to_owned(),
         };
-        let cause_code = anthropic_construction_cause(&error);
+        let cause_code =
+            signalboxd::model_catalog_runtime::ModelRuntimeBuildError::from(error).cause_code();
         let encoded = capture_startup_cause(SanitizedStartupCause::Static(cause_code));
         assert!(encoded.contains("anthropic_invalid_base_url"));
         assert!(!encoded.contains(adapter_detail));
@@ -2922,7 +2895,8 @@ mod tests {
             detail: adapter_detail.to_owned(),
         };
 
-        let cause_code = openai_construction_cause(&error);
+        let cause_code =
+            signalboxd::model_catalog_runtime::ModelRuntimeBuildError::from(error).cause_code();
         let encoded = capture_startup_cause(SanitizedStartupCause::Static(cause_code));
 
         assert!(encoded.contains("openai_invalid_base_url"));

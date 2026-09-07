@@ -130,6 +130,14 @@ impl From<sqlx::Error> for ReloadRepositoryError {
     }
 }
 
+fn classify_commit_failure(error: sqlx::Error) -> ReloadRepositoryError {
+    if crate::commit_failure_is_ambiguous(&error) {
+        ReloadRepositoryError::CommitAmbiguous(error)
+    } else {
+        ReloadRepositoryError::Database(error)
+    }
+}
+
 /// Append-only reload command repository.
 #[derive(Clone, Debug)]
 pub struct ReloadConfigurationRepository {
@@ -201,9 +209,7 @@ impl ReloadConfigurationRepository {
                 ReloadClaim::Settled(ReloadLookup::Recorded(result.clone()))
             }
         };
-        tx.commit()
-            .await
-            .map_err(ReloadRepositoryError::CommitAmbiguous)?;
+        tx.commit().await.map_err(classify_commit_failure)?;
         Ok(outcome)
     }
 
@@ -220,9 +226,7 @@ impl ReloadConfigurationRepository {
                 "conflicting terminal reload result",
             ));
         }
-        tx.commit()
-            .await
-            .map_err(ReloadRepositoryError::CommitAmbiguous)?;
+        tx.commit().await.map_err(classify_commit_failure)?;
         Ok(())
     }
 
@@ -320,6 +324,15 @@ async fn record_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reload_commit_transport_failure_remains_ambiguous() {
+        let error = sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into());
+        assert!(matches!(
+            classify_commit_failure(error),
+            ReloadRepositoryError::CommitAmbiguous(_)
+        ));
+    }
 
     #[test]
     fn reload_payload_equality_excludes_the_command_identity() {
