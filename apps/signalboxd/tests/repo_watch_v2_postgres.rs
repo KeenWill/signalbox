@@ -53,6 +53,9 @@ use testcontainers_modules::{
 };
 use uuid::Uuid;
 
+// The configured merged-subject retention window is seven days.
+const MERGED_RETENTION: Duration = Duration::from_secs(604_800);
+
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 
 fn event_candidate<'a>(
@@ -1973,6 +1976,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(empty_baseline.generation, 0);
     assert!(empty_baseline.observation.is_none());
     let observed = signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        merged_at: std::collections::BTreeMap::new(),
         repository: runtime_repository.clone(),
         default_branch: default_branch.clone(),
         default_head: default_head.clone(),
@@ -1981,7 +1985,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     };
     assert!(matches!(
         store
-            .ingest_observation(&empty_baseline, &observed, EventProducer::Webhook)
+            .ingest_observation(
+                &empty_baseline,
+                &observed,
+                EventProducer::Webhook,
+                MERGED_RETENTION
+            )
             .await?,
         FrontierEventAdmission::Committed { generation: 1, .. }
     ));
@@ -1993,12 +2002,22 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     );
     assert_eq!(
         restarted
-            .ingest_observation(&restart_baseline, &observed, EventProducer::Poll)
+            .ingest_observation(
+                &restart_baseline,
+                &observed,
+                EventProducer::Poll,
+                MERGED_RETENTION
+            )
             .await?,
         FrontierEventAdmission::Unchanged
     );
     let retry = restarted
-        .ingest_observation(&empty_baseline, &observed, EventProducer::Poll)
+        .ingest_observation(
+            &empty_baseline,
+            &observed,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
         .await?;
     let FrontierEventAdmission::Committed { generation, events } = retry else {
         panic!("an identical retry must recover its committed frontier");
@@ -2021,6 +2040,109 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert!(lineage.0 > 0);
     assert!(lineage.1);
 
+    for (repository_name, lifecycle, expected_kind, expected_compact_count) in [
+        (
+            "terminal-closed/project",
+            RepoWatchPullRequestLifecycle::Closed,
+            "pull_request_closed",
+            0,
+        ),
+        (
+            "terminal-merged/project",
+            RepoWatchPullRequestLifecycle::Merged,
+            "pull_request_merged",
+            1,
+        ),
+    ] {
+        let repository = RepositorySlug::try_new(repository_name.to_owned())?;
+        let mut terminal_observation = observed.clone();
+        terminal_observation.repository = repository.clone();
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &terminal_observation,
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+        let source = &terminal_observation.observation.state().pull_requests()[0];
+        let terminal = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            context: source.context().clone(),
+            lifecycle,
+            mergeable_state: source.mergeable_state(),
+            completed_check_suites: source.completed_check_suites().to_vec(),
+            completed_check_runs: source.completed_check_runs().to_vec(),
+            reviews: source.reviews().to_vec(),
+            threads: source.threads().to_vec(),
+            reactions: source.reactions().to_vec(),
+        })?;
+        terminal_observation.merged_at.insert(
+            terminal.context().number(),
+            observed_at.replace_nanosecond(0)?,
+        );
+        terminal_observation.observation = RepoWatchObservation::new(
+            terminal_observation.observation.signal_reviewers().to_vec(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests: vec![terminal],
+                workflow_runs: terminal_observation
+                    .observation
+                    .state()
+                    .workflow_runs()
+                    .to_vec(),
+                branch_heads: terminal_observation
+                    .observation
+                    .state()
+                    .branch_heads()
+                    .to_vec(),
+            })?,
+        );
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &terminal_observation,
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+        let retained = RepoWatchStore::new(module_pool.clone())
+            .ingest_baseline(&repository)
+            .await?;
+        assert!(
+            retained
+                .observation
+                .as_ref()
+                .expect("retained observation")
+                .state()
+                .pull_requests()
+                .is_empty(),
+            "{repository_name}: terminal subjects leave the ordinary baseline"
+        );
+        assert_eq!(
+            retained.merged_baselines.len(),
+            expected_compact_count,
+            "{repository_name}"
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM gh_event WHERE repository = $1 AND event_kind = $2",
+        )
+        .bind(repository.as_str())
+        .bind(expected_kind)
+        .fetch_one(&module_pool)
+        .await?;
+        assert_eq!(
+            count, 1,
+            "{repository_name}: retirement preserves its terminal fact"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pr_state WHERE repository = $1")
+            .bind(repository.as_str())
+            .fetch_one(&module_pool)
+            .await?;
+        assert_eq!(
+            count, 0,
+            "{repository_name}: retirement deletes the ordinary projection"
+        );
+    }
+
     let compact_repository = RepositorySlug::try_new(String::from("compacted-restart/project"))?;
     let source = &comparison_baseline.state().pull_requests()[0];
     let merged = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
@@ -2039,6 +2161,11 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             comparison_baseline.signal_reviewers(),
         )?
         .expect("merged baseline");
+    let merge_time = observed_at.replace_nanosecond(0)?;
+    let compacted = signalbox_module_repo_watch_v2::ingest::MergedPullRequestBaseline {
+        state: compacted,
+        merged_at: merge_time,
+    };
     let compact_observation = RepoWatchObservation::new(
         comparison_baseline.signal_reviewers().to_vec(),
         RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
@@ -2093,6 +2220,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         reactions: merged.reactions().to_vec(),
     })?;
     let next = signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        merged_at: std::collections::BTreeMap::from([(merged.context().number(), merge_time)]),
         repository: compact_repository.clone(),
         default_branch: default_branch.clone(),
         default_head: default_head.clone(),
@@ -2107,7 +2235,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         ),
     };
     reopened
-        .ingest_observation(&restored, &next, EventProducer::Poll)
+        .ingest_observation(&restored, &next, EventProducer::Poll, MERGED_RETENTION)
         .await?;
     let kinds: Vec<String> = sqlx::query_scalar(
         "SELECT event_kind FROM gh_event WHERE repository = $1 ORDER BY repository_event_ordinal",
@@ -2138,14 +2266,63 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     );
     assert_eq!(retained.merged_baselines.len(), 1);
     assert_eq!(
-        retained.merged_baselines[0].completed_check_runs().len(),
+        retained.merged_baselines[0]
+            .state
+            .completed_check_runs()
+            .len(),
         merged.completed_check_runs().len() + 1
     );
     assert_eq!(
         reopened
-            .ingest_observation(&retained, &next, EventProducer::Poll)
+            .ingest_observation(&retained, &next, EventProducer::Poll, MERGED_RETENTION)
             .await?,
         FrontierEventAdmission::Unchanged
+    );
+
+    let mut expiry_observation = next.clone();
+    expiry_observation.observation = compact_observation.clone();
+    expiry_observation.merged_at.clear();
+    expiry_observation.observed_at = merge_time + MERGED_RETENTION - Duration::from_secs(1);
+    reopened
+        .ingest_observation(
+            &retained,
+            &expiry_observation,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let before_expiry = RepoWatchStore::new(module_pool.clone())
+        .ingest_baseline(&compact_repository)
+        .await?;
+    assert_eq!(
+        before_expiry.merged_baselines.len(),
+        1,
+        "the compact baseline survives until its merge-time deadline"
+    );
+    expiry_observation.observed_at = merge_time + MERGED_RETENTION;
+    reopened
+        .ingest_observation(
+            &before_expiry,
+            &expiry_observation,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let at_expiry = RepoWatchStore::new(module_pool.clone())
+        .ingest_baseline(&compact_repository)
+        .await?;
+    assert!(
+        at_expiry.merged_baselines.is_empty(),
+        "the compact baseline expires at merge time plus the configured bound"
+    );
+    let event_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE repository = $1")
+            .bind(compact_repository.as_str())
+            .fetch_one(&module_pool)
+            .await?;
+    assert_eq!(
+        event_count, 1,
+        "compaction expiry does not delete immutable events"
     );
 
     module_pool.close().await;
@@ -2176,6 +2353,7 @@ fn dispatch_observation(
     let head =
         CommitSha::try_new(String::from("1111111111111111111111111111111111111111")).expect("head");
     signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        merged_at: std::collections::BTreeMap::new(),
         repository: repository.clone(),
         default_branch: branch.clone(),
         default_head: head.clone(),
@@ -2231,6 +2409,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
             &store.ingest_baseline(&repository).await?,
             &initial,
             EventProducer::Poll,
+            MERGED_RETENTION,
         )
         .await?;
     let rule = RepoWatchRule::try_new(
@@ -2276,6 +2455,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
                 &store.ingest_baseline(&repository).await?,
                 &observation,
                 EventProducer::Poll,
+                MERGED_RETENTION,
             )
             .await?;
         assert!(
@@ -2384,6 +2564,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
                 &restarted.ingest_baseline(&repository).await?,
                 &observation,
                 EventProducer::Poll,
+                MERGED_RETENTION,
             )
             .await?;
         assert!(
@@ -2898,6 +3079,7 @@ system_prompt = "Inspect repository activity."
                 &store.ingest_baseline(&repository).await?,
                 &dispatch_observation(&repository, run, OffsetDateTime::now_utc()),
                 EventProducer::Poll,
+                MERGED_RETENTION,
             )
             .await?;
     }
@@ -3314,6 +3496,7 @@ system_prompt = "Inspect workflow failures."
             &store.ingest_baseline(&repository).await?,
             &dispatch_observation(&repository, 1, OffsetDateTime::now_utc()),
             EventProducer::Poll,
+            MERGED_RETENTION,
         )
         .await?;
     for run in [2, 3] {
@@ -3347,6 +3530,7 @@ system_prompt = "Inspect workflow failures."
                 &store.ingest_baseline(&repository).await?,
                 &dispatch_observation(&repository, run, OffsetDateTime::now_utc()),
                 EventProducer::Poll,
+                MERGED_RETENTION,
             )
             .await?;
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -3771,7 +3955,15 @@ async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the
     store.prepare_poll_cache(&repository, &reviewers).await?;
     let first = ConditionalPollFixture::new();
     assert!(matches!(
-        poll_with_cache(&first, &store, &repository, &reviewers, EventProducer::Poll).await?,
+        poll_with_cache(
+            &first,
+            &store,
+            &repository,
+            &reviewers,
+            EventProducer::Poll,
+            MERGED_RETENTION
+        )
+        .await?,
         FrontierEventAdmission::Committed { .. }
     ));
     let original = store.ingest_baseline(&repository).await?.observation;
@@ -3797,8 +3989,7 @@ async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the
             &restarted,
             &repository,
             &reviewers,
-            EventProducer::Poll
-        )
+            EventProducer::Poll, MERGED_RETENTION)
         .await?,
         FrontierEventAdmission::Committed { events, .. } if events.is_empty()
     ));
@@ -3839,7 +4030,8 @@ async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the
             &restarted,
             &repository,
             &replacement_reviewers,
-            EventProducer::Poll
+            EventProducer::Poll,
+            MERGED_RETENTION
         )
         .await?,
         FrontierEventAdmission::Committed { .. }
@@ -3886,7 +4078,8 @@ async fn incomplete_poll_does_not_retain_validators_from_partial_pages()
             &store,
             &repository,
             &reviewers,
-            EventProducer::Poll
+            EventProducer::Poll,
+            MERGED_RETENTION
         )
         .await
         .is_err()
@@ -3911,7 +4104,8 @@ async fn incomplete_poll_does_not_retain_validators_from_partial_pages()
             &store,
             &repository,
             &reviewers,
-            EventProducer::Poll
+            EventProducer::Poll,
+            MERGED_RETENTION
         )
         .await?,
         FrontierEventAdmission::Committed { .. }

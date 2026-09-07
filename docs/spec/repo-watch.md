@@ -110,9 +110,10 @@ ordinal and records its producer, frontier generation, and position within that
 frontier batch.
 
 Every table is derived or module-local state and its migration declares its
-growth class and release condition. The code implements no pruning pass. The
-required `numeric_bounds.repository_watch_webhook_retention` duration governs
-each webhook delivery's `expires_at`, measured from `received_at`. The example
+growth class and release condition. Observation commits prune expired compact
+merged baselines. The required
+`numeric_bounds.repository_watch_webhook_retention` duration governs each
+webhook delivery's `expires_at`, measured from `received_at`. The example
 configuration sets this bound to seven days; the daemon supplies no code
 default.
 
@@ -137,16 +138,19 @@ attempt to finish and does not postpone the periodic poll deadline. Each attempt
 reloads its committed comparison baseline and frontier, including compacted
 merged pull requests and their head repository identities, fetches a complete
 observation, and commits the differ's facts with their poll or webhook lineage.
-Workflow reads query completed runs by distinct current head SHA for the default
-branch and retained pull-request base and same-repository head branches; prior
-completions for those branches remain comparison input. Each observation admits
-at most 1,000 REST and GraphQL requests combined; exhausting that budget rejects
-the incomplete observation. Check inventories exceeding GitHub's 1,000-suite
-commit limit and workflow searches exceeding GitHub's 1,000-result cap also
-reject the observation. Failed observations leave the prior committed state
-intact. The daemon starts these tasks, the configured webhook listener, and one
-serialized command worker beside the convergence sweep, and drains them before
-closing its database.
+Terminal pull requests leave the ordinary baseline when observed; merged
+subjects retain a compact baseline until
+`numeric_bounds.repository_watch_webhook_retention` elapses from their merge
+time, and discussion reads run only for open subjects. Workflow reads query
+completed runs by distinct current head SHA for the default branch and open
+pull-request same-repository head branches; prior completions for those branches
+remain comparison input. Each observation admits at most 1,000 REST and GraphQL
+requests combined; exhausting that budget rejects the incomplete observation.
+Check inventories exceeding GitHub's 1,000-suite commit limit and workflow
+searches exceeding GitHub's 1,000-result cap also reject the observation. Failed
+observations leave the prior committed state intact. The daemon starts these
+tasks, the configured webhook listener, and one serialized command worker beside
+the convergence sweep, and drains them before closing its database.
 
 The webhook listener authenticates the configured hook identity, secret, and
 repository before accepting a delivery. An empty resolved webhook secret is

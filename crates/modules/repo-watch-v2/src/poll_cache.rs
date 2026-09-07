@@ -201,7 +201,7 @@ struct PullSnapshot {
     author: Option<String>,
     labels: Vec<String>,
     open: bool,
-    merged: bool,
+    merged_at: Option<String>,
     mergeable: Option<bool>,
     head: HeadSnapshot,
 }
@@ -215,7 +215,7 @@ impl PullSnapshot {
             "author": self.author,
             "labels": self.labels,
             "open": self.open,
-            "merged": self.merged,
+            "merged_at": self.merged_at,
             "mergeable": self.mergeable,
             "head": self.head.encode(),
         })
@@ -229,7 +229,7 @@ impl PullSnapshot {
             author: serde_json::from_value(value.get("author")?.clone()).ok()?,
             labels: serde_json::from_value(value.get("labels")?.clone()).ok()?,
             open: serde_json::from_value(value.get("open")?.clone()).ok()?,
-            merged: serde_json::from_value(value.get("merged")?.clone()).ok()?,
+            merged_at: serde_json::from_value(value.get("merged_at")?.clone()).ok()?,
             mergeable: serde_json::from_value(value.get("mergeable")?.clone()).ok()?,
             head: HeadSnapshot::decode(value.get("head")?)?,
         })
@@ -477,7 +477,13 @@ impl Snapshot {
                     "closed" => false,
                     _ => return None,
                 },
-                merged: value["merged_at"].is_string(),
+                merged_at: if value["merged_at"].is_null() {
+                    None
+                } else {
+                    let timestamp = string(&value["merged_at"])?;
+                    crate::provider::github_timestamp(&timestamp)?;
+                    Some(timestamp)
+                },
                 mergeable: value["mergeable"].as_bool(),
                 head: HeadSnapshot {
                     sha: string(&value["head"]["sha"])?,
@@ -680,9 +686,9 @@ impl Snapshot {
             Self::Metadata(branch) => json!({"default_branch":branch}),
             Self::Branches(items) => json!(items.iter().map(|BranchSnapshot { branch: name, head: sha }| json!({"name":name,"commit":{"sha":sha}})).collect::<Vec<_>>()),
             Self::Pulls(items) => json!(items.iter().map(|number| json!({"number":number})).collect::<Vec<_>>()),
-            Self::Pull(PullSnapshot { number,title,body,draft,author,labels,open,merged,mergeable,head:HeadSnapshot { sha,branch:head,repository:head_repository,base } }) => json!({
+            Self::Pull(PullSnapshot { number,title,body,draft,author,labels,open,merged_at,mergeable,head:HeadSnapshot { sha,branch:head,repository:head_repository,base } }) => json!({
                 "number":number,"title":title,"body":body,"draft":draft,"user":author.as_ref().map(|login| json!({"login":login})),"labels":labels.iter().map(|name| json!({"name":name})).collect::<Vec<_>>(),
-                "state":if *open {"open"} else {"closed"},"merged_at":merged.then_some("merged"),"mergeable":mergeable,
+                "state":if *open {"open"} else {"closed"},"merged_at":merged_at,"mergeable":mergeable,
                 "head":{"sha":sha,"ref":head,"repo":head_repository.as_ref().map(|name| json!({"full_name":name}))},"base":{"ref":base},
             }),
             Self::Suites(items) => json!({"check_suites":items.iter().map(|SuiteSnapshot { id,completion }| match completion { Some(CompletionSnapshot { generation,conclusion }) => json!({"id":id,"status":"completed","updated_at":generation,"conclusion":conclusion}),None => json!({"id":id,"status":"pending"}) }).collect::<Vec<_>>() }),
@@ -908,6 +914,7 @@ pub async fn poll_with_cache(
     repository: &RepositorySlug,
     reviewers: &[RepoWatchAuthorLogin],
     producer: EventProducer,
+    retention: std::time::Duration,
 ) -> Result<FrontierEventAdmission, ObservationError> {
     let started = std::time::Instant::now();
     let baseline = store
@@ -925,11 +932,15 @@ pub async fn poll_with_cache(
         repository,
         reviewers,
         baseline.observation.as_ref(),
-        &baseline.merged_baselines,
+        &baseline
+            .merged_baselines
+            .iter()
+            .map(|entry| entry.state.clone())
+            .collect::<Vec<_>>(),
     )
     .await?;
     let admission = store
-        .ingest_observation(&baseline, &observed, producer)
+        .ingest_observation(&baseline, &observed, producer, retention)
         .await
         .map_err(ObservationError::Cache)?;
     if matches!(
@@ -946,6 +957,12 @@ pub async fn poll_with_cache(
                 .iter()
                 .filter(|p| p.lifecycle() == RepoWatchPullRequestLifecycle::Open)
                 .count(),
+            terminal_pull_requests = state
+                .pull_requests()
+                .iter()
+                .filter(|p| p.lifecycle() != RepoWatchPullRequestLifecycle::Open)
+                .count(),
+            previous_merged_baselines = baseline.merged_baselines.len(),
             branches = state.branch_heads().len(),
             workflow_runs = state.workflow_runs().len(),
             requests = counted.requests.load(std::sync::atomic::Ordering::Relaxed),
@@ -1004,6 +1021,26 @@ mod tests {
         ] {
             assert!(Resource::parse(&repository, path).is_none(), "{path}");
         }
+    }
+
+    #[test]
+    fn cached_pull_details_preserve_the_provider_merge_time() {
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let resource = Resource::Pull(NonZeroU64::new(1).expect("fixture PR"));
+        let response = json!({
+            "number": 1, "title": "Merged change", "body": "", "draft": false, "user": null, "labels": [],
+            "state": "closed", "merged_at": "2026-09-06T12:34:56Z", "mergeable": null,
+            "head": {"sha": "1111111111111111111111111111111111111111", "ref": "feature", "repo": {"full_name": "example/project"}},
+            "base": {"ref": "main"}
+        });
+        let captured = Snapshot::capture(&resource, &response, &repository, &[]).expect("snapshot");
+        let restarted = Snapshot::decode(&resource, captured.encode()).expect("restart");
+        assert_eq!(
+            restarted.provider_value(&repository)["merged_at"],
+            response["merged_at"],
+            "a conditional response must retain the merge-time expiration anchor"
+        );
     }
 
     #[test]
