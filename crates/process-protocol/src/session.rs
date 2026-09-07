@@ -5,7 +5,7 @@ use crate::scalars::{
     MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
     deserialize_required_nullable,
 };
-use crate::validate_imported_display_title;
+use crate::shared_validation::validate_imported_display_title;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
