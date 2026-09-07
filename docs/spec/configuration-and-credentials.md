@@ -662,6 +662,11 @@ before it crosses into evidence. An `ambient` or `codex_home` profile gives the
 daemon no value, so a CLI child's output receives only the credential-shape
 redaction owned by [runtime substrate](runtime-substrate.md).
 
+The optional `[repository_watch]` section composes the
+[repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
+true; false disables module polling, webhook listening, and command dispatch,
+including convergence-sweep target enrollment and session commissioning.
+
 The optional `[convergence]` table deserializes the
 [shared convergence policy](../../crates/convergence/README.md), including its
 validation of nonempty reviewer identities after bot-suffix normalization.

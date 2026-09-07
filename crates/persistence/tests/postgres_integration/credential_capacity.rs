@@ -101,7 +101,8 @@ async fn credential_capacity_older_call_completion_cannot_replace_newer_evidence
 async fn credential_capacity_newer_snapshot_replaces_all_prior_windows()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let observed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    let observed_at =
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000) + Duration::from_nanos(111);
     let older = ProviderRateLimitSnapshot::new(
         observed_at,
         vec![
@@ -110,7 +111,7 @@ async fn credential_capacity_newer_snapshot_replaces_all_prior_windows()
         ],
     );
     let recent = ProviderRateLimitSnapshot::new(
-        observed_at + Duration::from_secs(1),
+        observed_at + Duration::from_nanos(1),
         vec![ProviderRateLimitWindow::new(0, None, None)],
     );
     commit_capacity_call(&pool, 0xcf00, Some(older)).await?;

@@ -2,30 +2,6 @@
 
 # root: functions
 
-## MAX_USER_INPUT_PARTS
-
-```rust
-pub const MAX_USER_INPUT_PARTS: usize;
-```
-
-## MAX_USER_INPUT_TEXT_BYTES
-
-```rust
-pub const MAX_USER_INPUT_TEXT_BYTES: usize;
-```
-
-## MAX_USER_INPUT_MEDIA_TYPE_BYTES
-
-```rust
-pub const MAX_USER_INPUT_MEDIA_TYPE_BYTES: usize;
-```
-
-## MAX_USER_INPUT_DISPLAY_FILENAME_BYTES
-
-```rust
-pub const MAX_USER_INPUT_DISPLAY_FILENAME_BYTES: usize;
-```
-
 ## decode_client_line
 
 ```rust

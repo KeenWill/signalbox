@@ -82,6 +82,7 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
             "pr_state",
             "repository_state",
             "rule",
+            "rule_evaluation_cursor",
             "rule_field_fingerprint",
             "rule_revision",
             "webhook_body",
