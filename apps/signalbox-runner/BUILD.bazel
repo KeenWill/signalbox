@@ -2,18 +2,20 @@ load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_unit_test")
 
+CRATE_COMPILE_DATA = ["//:config/signalbox-runner.example.toml"]
+
 rust_package()
 
 rust_library(
     name = "signalbox_runner",
-    compile_data = ["//:config/signalbox-runner.example.toml"],
+    compile_data = CRATE_COMPILE_DATA,
     crate_root = "src/lib.rs",
     deps = ["//crates/runner-wire:signalbox_runner_wire"],
 )
 
 rust_binary(
     name = "signalbox-runner",
-    compile_data = ["//:config/signalbox-runner.example.toml"],
+    compile_data = CRATE_COMPILE_DATA,
     crate_root = "src/main.rs",
     deps = [
         ":signalbox_runner",

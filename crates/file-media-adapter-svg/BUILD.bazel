@@ -2,6 +2,12 @@ load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_integration_test", "rust_unit_test")
 
+CRATE_DEPS = [
+    ":signalbox_file_media_adapter_svg",
+    "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
+    "//crates/file-media-runtime:signalbox_file_media_runtime",
+]
+
 rust_package()
 
 rust_library(
@@ -16,11 +22,7 @@ rust_library(
 rust_binary(
     name = "signalbox-file-media-svg-worker",
     crate_root = "src/bin/signalbox-file-media-svg-worker.rs",
-    deps = [
-        ":signalbox_file_media_adapter_svg",
-        "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
-        "//crates/file-media-runtime:signalbox_file_media_runtime",
-    ],
+    deps = CRATE_DEPS,
 )
 
 rust_unit_test(
@@ -38,9 +40,5 @@ rust_integration_test(
     size = "small",
     srcs = glob(["tests/**/*.rs"]),
     crate_root = "tests/svg_adapter.rs",
-    deps = [
-        ":signalbox_file_media_adapter_svg",
-        "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
-        "//crates/file-media-runtime:signalbox_file_media_runtime",
-    ],
+    deps = CRATE_DEPS,
 )

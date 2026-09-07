@@ -2,11 +2,13 @@ load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_unit_test")
 
+CRATE_FEATURES = ["test-support"]
+
 rust_package()
 
 rust_library(
     name = "signalbox_module_repo_watch_v2",
-    crate_features = ["test-support"],
+    crate_features = CRATE_FEATURES,
     crate_root = "src/lib.rs",
     deps = ["//crates/ownership-seam:signalbox_ownership_seam"],
 )
@@ -14,5 +16,5 @@ rust_library(
 rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_module_repo_watch_v2",
-    crate_features = ["test-support"],
+    crate_features = CRATE_FEATURES,
 )

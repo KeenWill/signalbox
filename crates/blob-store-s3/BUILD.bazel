@@ -22,10 +22,7 @@ rust_library(
 rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_blob_store_s3",
-    crate_features = [
-        "default",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     deps = ["//crates/blob-store:signalbox_blob_store"],
 )
 

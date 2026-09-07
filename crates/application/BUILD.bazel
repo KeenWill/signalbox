@@ -16,7 +16,7 @@ rust_library(
 rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_application",
-    crate_features = ["test-support"],
+    crate_features = CRATE_FEATURES,
 )
 
 rust_api_json(

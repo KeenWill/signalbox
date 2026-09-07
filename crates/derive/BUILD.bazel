@@ -2,6 +2,8 @@ load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_proc_macro")
 load("//tooling/bazel:testing.bzl", "rust_integration_test", "rust_unit_test")
 
+TEST_PROC_MACRO_DEPS = [":signalbox_derive"]
+
 rust_package()
 
 rust_proc_macro(
@@ -17,12 +19,12 @@ rust_integration_test(
     name = "accessors",
     size = "small",
     crate_root = "tests/accessors.rs",
-    proc_macro_deps = [":signalbox_derive"],
+    proc_macro_deps = TEST_PROC_MACRO_DEPS,
 )
 
 rust_integration_test(
     name = "operator_error",
     size = "small",
     crate_root = "tests/operator_error.rs",
-    proc_macro_deps = [":signalbox_derive"],
+    proc_macro_deps = TEST_PROC_MACRO_DEPS,
 )

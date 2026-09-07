@@ -31,7 +31,8 @@ defaults; their `deps` and `proc_macro_deps` arguments list first-party targets.
 Rule attributes can override shared defaults. `tooling/bazel/testing.bzl`
 provides unit, standalone integration, PostgreSQL, and Rustdoc JSON helpers.
 Tests retain explicit source roots, features, fixtures, and execution
-exceptions.
+exceptions. Repeated dependency and feature lists are shared within each
+package.
 
 The syscall crate is a Cargo workspace member with its own unsafe-code lint
 policy. This lets the importer treat all in-repository crates as first-party

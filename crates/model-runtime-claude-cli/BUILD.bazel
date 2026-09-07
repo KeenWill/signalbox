@@ -4,6 +4,12 @@ load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
 
+CRATE_DEPS = [
+    ":build_script",
+    ":signalbox_model_runtime_claude_cli",
+    "//crates/model-runtime:signalbox_model_runtime",
+]
+
 rust_package()
 
 cargo_build_script(
@@ -34,22 +40,14 @@ rust_library(
 rust_binary(
     name = "signalbox-claude-mcp-bridge",
     crate_root = "src/bin/signalbox-claude-mcp-bridge.rs",
-    deps = [
-        ":build_script",
-        ":signalbox_model_runtime_claude_cli",
-        "//crates/model-runtime:signalbox_model_runtime",
-    ],
+    deps = CRATE_DEPS,
 )
 
 rust_binary(
     name = "signalbox-fake-claude-cli",
     srcs = glob(["tests/support/**/*.rs"]),
     crate_root = "tests/support/fake_claude_cli.rs",
-    deps = [
-        ":build_script",
-        ":signalbox_model_runtime_claude_cli",
-        "//crates/model-runtime:signalbox_model_runtime",
-    ],
+    deps = CRATE_DEPS,
 )
 
 rust_unit_test(

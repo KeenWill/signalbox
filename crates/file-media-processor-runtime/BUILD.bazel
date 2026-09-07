@@ -18,7 +18,7 @@ rust_library(
 
 rust_binary(
     name = "signalbox-file-media-synthetic-worker",
-    crate_features = ["test-worker"],
+    crate_features = CRATE_FEATURES,
     crate_root = "src/bin/signalbox-file-media-synthetic-worker.rs",
     deps = [
         ":signalbox_file_media_processor_runtime",
@@ -30,13 +30,13 @@ rust_binary(
 rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_file_media_processor_runtime",
-    crate_features = ["test-worker"],
+    crate_features = CRATE_FEATURES,
 )
 
 rust_unit_test(
     name = "signalbox_file_media_synthetic_worker_unit_tests",
     crate = ":signalbox-file-media-synthetic-worker",
-    crate_features = ["test-worker"],
+    crate_features = CRATE_FEATURES,
 )
 
 rust_api_json(
