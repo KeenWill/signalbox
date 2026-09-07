@@ -278,12 +278,12 @@ impl LifecycleEventSource {
         }
     }
 
-    /// Checks whether a session has a durable terminal fact, including unread events.
-    pub async fn has_session_terminal_fact(
+    /// Reads a session's durable terminal time, including unread events.
+    pub async fn session_terminal_at(
         &self,
         session: SessionId,
-    ) -> Result<bool, OutboxDispatchError> {
-        self.reader.has_session_terminal_fact(session).await
+    ) -> Result<Option<OffsetDateTime>, OutboxDispatchError> {
+        self.reader.session_terminal_at(session).await
     }
 
     /// Reads the next module-visible event without advancing its cursor.

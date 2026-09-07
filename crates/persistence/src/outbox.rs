@@ -841,16 +841,16 @@ impl OutboxConsumerReader {
         Self { pool, consumer }
     }
 
-    /// Checks the durable terminal fact independently of the consumer cursor.
-    pub async fn has_session_terminal_fact(
+    /// Reads the durable terminal time independently of the consumer cursor.
+    pub async fn session_terminal_at(
         &self,
         session: SessionId,
-    ) -> Result<bool, OutboxDispatchError> {
+    ) -> Result<Option<OffsetDateTime>, OutboxDispatchError> {
         Ok(sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM session_terminal_outbox_event WHERE session_id = $1)",
+            "SELECT ended_at FROM session_terminal_outbox_event WHERE session_id = $1",
         )
         .bind(session_id_to_uuid(session))
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await?)
     }
 

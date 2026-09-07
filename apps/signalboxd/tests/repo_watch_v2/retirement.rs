@@ -213,13 +213,16 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
             )
             .await?;
         close_in_core(&core_pool, terminal_session).await?;
-        assert!(source.has_session_terminal_fact(terminal_session).await?);
+        let terminal_at = source
+            .session_terminal_at(terminal_session)
+            .await?
+            .expect("durable terminal time");
         if lifecycle == RepoWatchPullRequestLifecycle::Closed {
             store
                 .react_to_lifecycle(
                     &LifecycleEvent::for_test(
                         2,
-                        now,
+                        terminal_at,
                         Some(terminal_session),
                         LifecycleEventKind::SessionTerminal(SessionTerminal {
                             prior: SessionStateKind::Created,
@@ -280,6 +283,17 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
         store
             .react_to_pull_request_lifecycle(&mut factory, &mut codec, &source)
             .await?;
+        let retained_terminal_at: Option<OffsetDateTime> = sqlx::query_scalar(
+            "SELECT session_terminal_at FROM dispatch_ledger WHERE created_session_id = $1",
+        )
+        .bind(terminal_session.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            retained_terminal_at,
+            Some(terminal_at),
+            "durable terminal facts leave the live retirement scan even before cursor delivery"
+        );
         let before: i64 = sqlx::query_scalar("SELECT count(*) FROM dispatch_ledger WHERE repository = $1 AND retirement_reason IS NOT NULL").bind(name).fetch_one(&pool).await?;
         assert_eq!(before, 0, "unsettled creation is left pending");
         store
@@ -317,7 +331,7 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
             "restart and replay retain one exact stop and reason after rule removal"
         );
         close_in_core(&core_pool, session).await?;
-        assert!(source.has_session_terminal_fact(session).await?);
+        assert!(source.session_terminal_at(session).await?.is_some());
         restarted
             .submit_pending(&mut codec, &mut NoSubmission, &source)
             .await
@@ -465,7 +479,7 @@ async fn terminal_triggered_dispatches_do_not_retire_themselves() -> Result<(), 
                 .await?
                 .is_empty()
         );
-        assert!(!source.has_session_terminal_fact(session).await?);
+        assert!(source.session_terminal_at(session).await?.is_none());
     }
     pool.close().await;
     core_pool.close().await;

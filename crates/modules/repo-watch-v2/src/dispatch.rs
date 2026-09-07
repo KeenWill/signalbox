@@ -262,11 +262,14 @@ impl RepoWatchStore {
         .fetch_all(&mut *transaction)
         .await?;
         for retirement in retirements {
-            if source
-                .has_session_terminal_fact(SessionId::from_uuid(retirement.created_session_id))
+            if let Some(terminal_at) = source
+                .session_terminal_at(SessionId::from_uuid(retirement.created_session_id))
                 .await
                 .map_err(StoreError::Lifecycle)?
             {
+                sqlx::query("UPDATE dispatch_ledger SET session_terminal_at = $2 WHERE created_session_id = $1 AND session_terminal_at IS NULL")
+                    .bind(retirement.created_session_id).bind(terminal_at)
+                    .execute(&mut *transaction).await?;
                 continue;
             }
             let command = SessionCommand::lifecycle(factory.lifecycle(
@@ -324,10 +327,11 @@ impl RepoWatchStore {
             .map_err(SubmissionError::Store)?;
             if let Some(session) = retirement_session
                 && source
-                    .has_session_terminal_fact(SessionId::from_uuid(session))
+                    .session_terminal_at(SessionId::from_uuid(session))
                     .await
                     .map_err(StoreError::Lifecycle)
                     .map_err(SubmissionError::Store)?
+                    .is_some()
             {
                 sqlx::query("UPDATE dispatch_ledger SET status = 'rejected', rejection_kind = 'session_already_terminal',
                     settled_at = $2, submission_pending = false WHERE command_id = $1 AND status = 'pending'")

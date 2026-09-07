@@ -943,10 +943,13 @@ pub struct LifecycleEventSource {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl LifecycleEventSource {
     pub const fn new(core_pool: sqlx_postgres::PgPool) -> Self;
-    pub async fn has_session_terminal_fact(
+    pub async fn session_terminal_at(
         &self,
         session: signalbox_domain::SessionId,
-    ) -> result::Result<bool, signalbox_persistence::outbox::OutboxDispatchError>;
+    ) -> result::Result<
+        option::Option<offset_date_time::OffsetDateTime>,
+        signalbox_persistence::outbox::OutboxDispatchError,
+    >;
     pub async fn next(
         &self,
     ) -> result::Result<
