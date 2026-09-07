@@ -1,5 +1,7 @@
 """Run Linux test binaries with the native toolchain's declared runtime."""
 
+load(":linux_runtime.bzl", "linux_runtime")
+
 def _runfile_path(file):
     if not file.short_path.startswith("../"):
         fail("The native runtime must come from an external toolchain")
@@ -7,13 +9,10 @@ def _runfile_path(file):
 
 def _native_runtime_impl(ctx):
     files = ctx.attr.libraries[DefaultInfo].files.to_list()
-    loader = [file for file in files if file.basename == "ld-linux-x86-64.so.2"]
-    if len(loader) != 1:
-        fail("Expected one x86-64 Linux dynamic loader")
+    runtime = linux_runtime(files)
     directories = sorted({
         _runfile_path(file).rsplit("/", 1)[0]: True
-        for file in files
-        if file.basename in ["libc.so.6", "libgcc_s.so.1"]
+        for file in runtime.libraries
     }.keys())
     executable = ctx.actions.declare_file(ctx.label.name + ".sh")
     ctx.actions.write(
@@ -27,7 +26,7 @@ def _native_runtime_impl(ctx):
             "patch_binary() {",
             '  "${RUNFILES_DIR:?}/%s" --set-interpreter "${RUNFILES_DIR}/%s" --set-rpath "%s" --output "$2" "$1"' % (
                 _runfile_path(ctx.file.patchelf),
-                _runfile_path(loader[0]),
+                _runfile_path(runtime.loader),
                 ":".join(["${RUNFILES_DIR}/" + directory for directory in directories]),
             ),
             "}",

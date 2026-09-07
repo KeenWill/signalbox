@@ -20,11 +20,12 @@ MAX_LINES = 2000
 MAX_BYTES = 120_000
 
 
-def configuration():
-    return tomllib.loads((ROOT / 'docs/api/crates.toml').read_text())
+def configuration(source_root=None):
+    return tomllib.loads(((source_root or ROOT) / 'docs/api/crates.toml').read_text())
 
 
-def build_json(crate, *, workspace=ROOT, target=None):
+def build_json(crate, *, workspace=ROOT, target=None, toolchain=None):
+    toolchain = toolchain or configuration()['rustdoc_toolchain']
     target = target or Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
     target = target.resolve()
     # Cargo rejects feature selection for this dependency outside the workspace.
@@ -35,7 +36,7 @@ def build_json(crate, *, workspace=ROOT, target=None):
     }:
         features += ['--features', 'tokio/macros']
     subprocess.run([
-        'cargo', '+' + configuration()['rustdoc_toolchain'], 'rustdoc', '--locked', '--manifest-path',
+        'cargo', '+' + toolchain, 'rustdoc', '--locked', '--manifest-path',
         str(workspace / 'Cargo.toml'), '--target-dir', str(target),
         '-p', crate, '--lib', *features, '--',
         '-Z', 'unstable-options', '--output-format', 'json',
@@ -126,11 +127,11 @@ def item_cfg(item):
                  for condition in cfg_attributes(attribute.get('other', '')))
 
 
-def has_complementary_export(item):
+def has_complementary_export(item, source_root):
     conditions = item_cfg(item)
     if len(conditions) != 1 or not item['span']:
         return False
-    source = ROOT / item['span']['filename']
+    source = source_root / item['span']['filename']
     if not source.is_file():
         return False
     condition = re.sub(r'\s+', '', conditions[0])
@@ -168,7 +169,8 @@ def format_rust(code):
 
 
 class Renderer:
-    def __init__(self, document, public_exports=None):
+    def __init__(self, document, public_exports=None, *, source_root=None):
+        self.source_root = source_root or ROOT
         self.index = document['index']
         self.paths = document['paths']
         self.root = self.item(document['root'])
@@ -206,7 +208,7 @@ class Renderer:
                 target = self.index.get(str(body['use']['id']))
                 if target and target['crate_id'] == self.crate_id:
                     visit(target['id'], conditions, ancestors + (identity,))
-                    if has_complementary_export(item):
+                    if has_complementary_export(item, self.source_root):
                         visit(target['id'], inherited, ancestors + (identity,))
 
         visit(self.root['id'])
@@ -570,14 +572,14 @@ class Renderer:
         visit(self.root['id'])
         return {name: sorted(items, key=self.source_order) for name, items in result.items()}
 
-    def files(self, crate):
+    def files(self, crate, source_root=None):
         files = {}
         rows = []
         for module, items in self.modules().items():
             blocks = [self.block(item) for item in items]
             whole = page(module, blocks)
             links = []
-            previous = list((ROOT / 'docs/api' / crate / module).glob('*.md'))
+            previous = list(((source_root or ROOT) / 'docs/api' / crate / module).glob('*.md'))
             if not items or (fits(whole) and not previous):
                 files[f'{module}.md'] = whole
                 links.append(f'[{module}]({module}.md)')
@@ -631,18 +633,31 @@ def write_files(directory, files):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--json-dir', type=Path, help='Read already-built rustdoc JSON instead of building')
+    parser.add_argument('--json-dir', type=Path, nargs='+', help='Read already-built rustdoc JSON instead of building')
+    parser.add_argument('--source-root', type=Path, default=ROOT, help='Read configuration and page boundaries from this tree')
+    parser.add_argument('--output-dir', type=Path, help='Write API pages to this directory')
     args = parser.parse_args()
-    paths = {crate: args.json_dir / f"{crate.replace('-', '_')}.json" if args.json_dir else build_json(crate)
-             for crate in configuration()['crates']}
+    paths = {}
+    selected_configuration = configuration(args.source_root)
+    for crate in selected_configuration['crates']:
+        if args.json_dir:
+            filename = f"{crate.replace('-', '_')}.json"
+            candidates = [directory / filename for directory in args.json_dir
+                          if (directory / filename).is_file()]
+            if len(candidates) != 1:
+                raise ValueError(f'{crate}: expected one rustdoc JSON input, found {len(candidates)}')
+            paths[crate] = candidates[0]
+        else:
+            paths[crate] = build_json(crate, workspace=args.source_root,
+                                      toolchain=selected_configuration['rustdoc_toolchain'])
     public_exports = {}
     for path in paths.values():
-        renderer = Renderer(json.loads(path.read_text()))
+        renderer = Renderer(json.loads(path.read_text()), source_root=args.source_root)
         public_exports.update(renderer.exports())
     for crate, path in paths.items():
-        renderer = Renderer(json.loads(path.read_text()), public_exports)
-        files = renderer.files(crate)
-        write_files(ROOT / 'docs/api' / crate, files)
+        renderer = Renderer(json.loads(path.read_text()), public_exports, source_root=args.source_root)
+        files = renderer.files(crate, source_root=args.source_root)
+        write_files((args.output_dir or args.source_root / 'docs/api') / crate, files)
         print(f'{crate}: {len(files)} Markdown files')
 
 

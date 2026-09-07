@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from render_domain_spine import HEADER, MAX_LINES, Renderer, build_json, format_rust, write_files
+from render_domain_spine import HEADER, MAX_LINES, Renderer, build_json, format_rust, main, write_files
 
 
 EMPTY_GENERICS = {'params': [], 'where_predicates': []}
@@ -171,8 +171,8 @@ class RenderDomainSpineTests(unittest.TestCase):
                     (root / 'src/lib.rs').write_text(
                         '#[cfg(target_os = "linux")]\npub use sandbox::Record;\n'
                         '#[cfg(not(target_os = "linux"))]\npub use ' + counterpart + ';\n')
-                    with patch('render_domain_spine.ROOT', root):
-                        block = Renderer(document).block(document['index']['1'])
+                    with patch('render_domain_spine.ROOT', root / 'unavailable'):
+                        block = Renderer(document, source_root=root).block(document['index']['1'])
                     self.assertEqual('#[cfg(target_os = "linux")]' not in block, unconditional)
                     self.assertIn('pub struct Record', block)
                     self.assertIn('pub fn new', block)
@@ -357,6 +357,33 @@ impl Read for Record {
         self.assertEqual(command[:3], ['cargo', '+test-toolchain', 'rustdoc'])
         self.assertEqual(command[command.index('--manifest-path') + 1], '/tmp/baseline/Cargo.toml')
         self.assertEqual(result, Path('/tmp/output/doc/sample_crate.json'))
+
+    def test_source_root_selects_its_own_toolchain_for_cargo_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            invoking = root / 'invoking'
+            selected = root / 'selected'
+            for directory, toolchain in [(invoking, 'nightly-2026-08-01'),
+                                         (selected, 'nightly-2026-09-01')]:
+                (directory / 'docs/api').mkdir(parents=True)
+                (directory / 'docs/api/crates.toml').write_text(
+                    f'crates = ["sample"]\nrustdoc_toolchain = "{toolchain}"\n')
+            target = root / 'target'
+            (target / 'doc').mkdir(parents=True)
+            (target / 'doc/sample.json').write_text(json.dumps(fixture()))
+            arguments = ['render', '--source-root', str(selected)]
+            with patch('sys.argv', arguments), \
+                    patch('render_domain_spine.ROOT', invoking), \
+                    patch.dict('os.environ', {'CARGO_TARGET_DIR': str(target)}), \
+                    patch('render_domain_spine.subprocess.run') as run, \
+                    patch('render_domain_spine.format_rust', side_effect=lambda code: code):
+                main()
+            command = run.call_args.args[0]
+            self.assertEqual(command[:3], ['cargo', '+nightly-2026-09-01', 'rustdoc'])
+            self.assertEqual(command[command.index('--manifest-path') + 1],
+                             str(selected / 'Cargo.toml'))
+            self.assertTrue((selected / 'docs/api/sample/README.md').is_file())
+            self.assertFalse((invoking / 'docs/api/sample').exists())
 
     def test_conversion_impl_stays_with_its_subject_or_local_argument(self):
         document = fixture()
@@ -633,6 +660,30 @@ pub struct Token;
         self.assertIn('example/types-2.md', files)
         self.assertIn('[types-2](example/types-2.md)', files['README.md'])
         self.assertTrue(all(len(content.splitlines()) < MAX_LINES for content in files.values()))
+
+    def test_prebuilt_json_renders_to_separate_output_and_preserves_page_boundaries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source'
+            page_directory = source / 'docs/api/sample/example'
+            page_directory.mkdir(parents=True)
+            boundary = page_directory / 'types.md'
+            previous = '# example: types\n\n## Record\n'
+            boundary.write_text(previous)
+            (source / 'docs/api/crates.toml').write_text('crates = ["sample", "second"]\n')
+            json_directories = [root / 'first-json', root / 'second-json']
+            for directory, crate in zip(json_directories, ['sample', 'second']):
+                directory.mkdir()
+                (directory / f'{crate}.json').write_text(json.dumps(fixture()))
+            output = root / 'output'
+            arguments = ['render', '--source-root', str(source), '--output-dir', str(output),
+                         '--json-dir', *map(str, json_directories)]
+            with patch('sys.argv', arguments), patch('render_domain_spine.build_json') as build:
+                main()
+            build.assert_not_called()
+            self.assertEqual(boundary.read_text(), previous)
+            self.assertIn('## Record', (output / 'sample/example/types.md').read_text())
+            self.assertTrue((output / 'second/README.md').is_file())
 
     def test_regeneration_removes_obsolete_pages(self):
         with tempfile.TemporaryDirectory() as temporary:

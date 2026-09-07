@@ -201,16 +201,29 @@ async fn prepare<A: CredentialAccess>(
 #[tokio::test]
 async fn buffered_completion_end_to_end_sends_the_documented_request_shape() {
     let body = br#"{
-        "id": "chatcmpl_loop_1",
-        "object": "chat.completion",
-        "model": "model-exact-1",
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": "hi"},
-            "finish_reason": "stop"
-        }],
-        "usage": {"prompt_tokens": 4, "completion_tokens": 2}
-    }"#;
+  "object": "response",
+  "id": "chatcmpl_loop_1",
+  "model": "model-exact-1",
+  "status": "completed",
+  "output": [
+    {
+      "type": "message",
+      "status": "completed",
+      "id": "msg_fixture",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "hi"
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 4,
+    "output_tokens": 2
+  }
+}"#;
     let server = CannedServer::serving(vec![http_response(
         "200 OK",
         &[
@@ -247,14 +260,14 @@ async fn buffered_completion_end_to_end_sends_the_documented_request_shape() {
         "one authorized operation is exactly one request"
     );
     let request = &requests[0];
-    assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
+    assert!(request.starts_with("POST /v1/responses HTTP/1.1\r\n"));
     assert!(request.contains("authorization: Bearer key_loop\r\n"));
     assert!(request.contains("content-type: application/json\r\n"));
     let json_start = request.find("\r\n\r\n").expect("request has a body") + 4;
     let sent: serde_json::Value =
         serde_json::from_str(&request[json_start..]).expect("request body is JSON");
     assert_eq!(sent["model"], serde_json::json!("model-exact-1"));
-    assert_eq!(sent["max_completion_tokens"], serde_json::json!(64));
+    assert_eq!(sent["max_output_tokens"], serde_json::json!(64));
     assert_eq!(sent["stream"], serde_json::json!(false));
 
     assert!(observations.iter().any(|observation| matches!(
@@ -266,13 +279,14 @@ async fn buffered_completion_end_to_end_sends_the_documented_request_shape() {
 }
 
 #[tokio::test]
-async fn streamed_completion_end_to_end_emits_deltas_and_gates_on_done() {
-    let sse: &[u8] = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_loop_2\",\"model\":\"model-exact-1\",\
-        \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_loop_2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_loop_2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_loop_2\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n\
-        data: [DONE]\n\n";
+async fn streamed_completion_end_to_end_emits_deltas_and_gates_on_response_completed() {
+    let sse: &[u8] = br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl_loop_2","model":"model-exact-1","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"hi"}
+
+data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl_loop_2","model":"model-exact-1","status":"completed","output":[{"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":4,"output_tokens":2}}}
+
+"#;
     let server = CannedServer::serving(vec![http_response(
         "200 OK",
         &[
@@ -289,7 +303,7 @@ async fn streamed_completion_end_to_end_emits_deltas_and_gates_on_done() {
     let (report, observations) = execute(&runtime, streamed, CancellationSignal::never()).await;
 
     let TerminalEvidence::Completed(completion) = report.evidence else {
-        panic!("a [DONE]-gated canned stream must classify as completed");
+        panic!("a response.completed-gated canned stream must classify as completed");
     };
     assert_eq!(
         completion.content,
@@ -308,19 +322,18 @@ async fn streamed_completion_end_to_end_emits_deltas_and_gates_on_done() {
     let body: serde_json::Value =
         serde_json::from_str(&sent[json_start..]).expect("request body is JSON");
     assert_eq!(body["stream"], serde_json::json!(true));
-    assert_eq!(
-        body["stream_options"],
-        serde_json::json!({"include_usage": true})
-    );
+    assert_eq!(body["store"], serde_json::json!(false));
 }
 
 #[tokio::test]
 async fn prepared_capability_keeps_its_originating_stream_settings() {
-    let sse: &[u8] = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_origin\",\"model\":\"model-exact-1\",\
-        \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_origin\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_origin\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n\
-        data: [DONE]\n\n";
+    let sse: &[u8] = br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl_origin","model":"model-exact-1","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"hi"}
+
+data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl_origin","model":"model-exact-1","status":"completed","output":[{"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#;
     let server = CannedServer::serving(vec![http_response(
         "200 OK",
         &[("content-type", "text/event-stream")],
@@ -358,24 +371,19 @@ async fn prepared_capability_keeps_its_originating_stream_settings() {
 }
 
 #[tokio::test]
-async fn declared_stop_sequence_keeps_the_stop_finish_ambiguous() {
-    let body = br#"{"id":"chatcmpl-stop","object":"chat.completion","model":"model-exact-1",
-        "choices":[{"index":0,"message":{"role":"assistant","content":"partial"},
-        "finish_reason":"stop"}]}"#;
-    let server = CannedServer::serving(vec![http_response("200 OK", &[], body)]).await;
+async fn declared_stop_sequence_is_rejected_before_send() {
+    let server = CannedServer::serving(Vec::new()).await;
     let runtime = runtime_for(&server.base_url);
-    let mut stopped = operation("call-stop-ambiguity");
+    let mut stopped = operation("call-stop");
     stopped.settings.stop_sequences = vec!["END".to_string()];
-
-    let (report, _) = execute(&runtime, stopped, CancellationSignal::never()).await;
-
-    let TerminalEvidence::BoundaryLoss(loss) = report.evidence else {
-        panic!("the provider does not distinguish natural and caller-declared stops");
-    };
     assert!(matches!(
-        loss.cause,
-        LossCause::ResponseUnintelligible { .. }
+        runtime.prepare(stopped, CancellationSignal::never()).await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::UnsupportedOperation { .. },
+            ..
+        }
     ));
+    assert!(server.recorded_requests().is_empty());
 }
 
 #[tokio::test]
@@ -506,7 +514,7 @@ async fn a_redirect_is_never_followed_and_surfaces_as_evidence() {
         http_response(
             "307 Temporary Redirect",
             &[
-                ("location", "/v1/chat/completions"),
+                ("location", "/v1/responses"),
                 ("x-request-id", "redirect-key_loop"),
             ],
             b"",
@@ -585,8 +593,11 @@ async fn stream_cut_before_done_is_explicit_incomplete_stream_evidence() {
     let mut response =
         b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n".to_vec();
     response.extend_from_slice(
-        b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_cut\",\"model\":\"model-exact-1\",\
-          \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"par\"}}]}\n\n",
+        br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl_cut","model":"model-exact-1","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"par"}
+
+"#,
     );
     let server = CannedServer::serving(vec![response]).await;
     let runtime = runtime_for(&server.base_url);
@@ -952,9 +963,26 @@ async fn api_key_rotation_is_visible_to_the_next_preparation() {
 
 #[tokio::test]
 async fn execution_redacts_with_the_exact_credential_captured_by_preparation() {
-    let body = br#"{"id":"chatcmpl-captured","object":"chat.completion","model":"model-exact-1","choices":[{
-        "index":0,"message":{"role":"assistant","content":"echo key_before"},
-        "finish_reason":"stop"}]}"#;
+    let body = br#"{
+  "object": "response",
+  "id": "chatcmpl-captured",
+  "model": "model-exact-1",
+  "status": "completed",
+  "output": [
+    {
+      "type": "message",
+      "status": "completed",
+      "id": "msg_fixture",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "echo key_before"
+        }
+      ]
+    }
+  ]
+}"#;
     let server = CannedServer::serving(vec![http_response("200 OK", &[], body)]).await;
     let value = Arc::new(Mutex::new("key_before".to_string()));
     let mut config = OpenAiConfig::new(None);
@@ -1072,10 +1100,26 @@ async fn credential_rejection_status_precedes_a_contradictory_error_type() {
 
 #[tokio::test]
 async fn successful_content_reflecting_the_key_is_redacted() {
-    let body = br#"{"id":"chatcmpl_key_loop","object":"chat.completion",
-        "model":"model-key_loop","choices":[{
-        "index":0,"message":{"role":"assistant","content":"reflected key_loop"},
-        "finish_reason":"stop"}]}"#;
+    let body = br#"{
+  "object": "response",
+  "id": "chatcmpl_key_loop",
+  "model": "model-key_loop",
+  "status": "completed",
+  "output": [
+    {
+      "type": "message",
+      "status": "completed",
+      "id": "msg_fixture",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "reflected key_loop"
+        }
+      ]
+    }
+  ]
+}"#;
     let server = CannedServer::serving(vec![http_response(
         "200 OK",
         &[
@@ -1101,11 +1145,13 @@ async fn successful_content_reflecting_the_key_is_redacted() {
 
 #[tokio::test]
 async fn streamed_observations_reflecting_the_key_are_redacted() {
-    let body: &[u8] = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl-key_loop\",\"model\":\"model-key_loop\",\
-        \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"key_loop\"}}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl-key_loop\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl-key_loop\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n\
-        data: [DONE]\n\n";
+    let body: &[u8] = br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl-key_loop","model":"model-key_loop","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"key_loop"}
+
+data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl-key_loop","model":"model-key_loop","status":"completed","output":[{"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"key_loop"}]}],"usage":{"input_tokens":4,"output_tokens":2}}}
+
+"#;
     let server = CannedServer::serving(vec![http_response(
         "200 OK",
         &[("content-type", "text/event-stream")],
@@ -1124,15 +1170,15 @@ async fn streamed_observations_reflecting_the_key_are_redacted() {
 
 #[tokio::test]
 async fn json_escaped_streamed_tool_arguments_are_redacted_before_observation() {
-    let body: &[u8] = br#"data: {"object":"chat.completion.chunk","id":"chatcmpl-tool","model":"model-exact-1","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"token\":\"key_\\u00"}}]}}]}
+    let body: &[u8] = br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl-tool","model":"model-exact-1","status":"in_progress","output":[]}}
 
-data: {"object":"chat.completion.chunk","id":"chatcmpl-tool","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"6coop\"}"}}]}}]}
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_fixture","status":"in_progress","call_id":"call_1","name":"lookup","arguments":""}}
 
-data: {"object":"chat.completion.chunk","id":"chatcmpl-tool","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_fixture","delta":"{\"token\":\"key_\\u00"}
 
-data: {"object":"chat.completion.chunk","id":"chatcmpl-tool","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}
+data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_fixture","delta":"6coop\"}"}
 
-data: [DONE]
+data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl-tool","model":"model-exact-1","status":"completed","output":[{"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_1","name":"lookup","arguments":"{\"token\":\"key_\\u006coop\"}"}],"usage":{"input_tokens":4,"output_tokens":2}}}
 
 "#;
     let server = CannedServer::serving(vec![http_response(
@@ -1202,7 +1248,7 @@ async fn a_base_url_path_is_preserved_when_the_endpoint_is_appended() {
 
     let requests = server.recorded_requests();
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].starts_with("POST /proxy/v1/chat/completions HTTP/1.1\r\n"));
+    assert!(requests[0].starts_with("POST /proxy/v1/responses HTTP/1.1\r\n"));
 }
 
 #[test]
@@ -1217,4 +1263,109 @@ fn a_non_http_base_url_scheme_fails_construction() {
         error,
         OpenAiConstructionError::InvalidBaseUrl { .. }
     ));
+}
+
+#[tokio::test]
+async fn streamed_reasoning_replays_exact_completed_bytes_between_two_tool_calls() {
+    use signalbox_model_runtime::{
+        ConversationRole, MessagePart, ToolDefinition, ToolResultRecord,
+    };
+    // Whitespace, field order, escaped text, and an unknown field make reserialization observable.
+    let complete = r#"{ "type":"reasoning", "id":"rs_continuation", "status":"completed", "encrypted_content":"complete\u002dopaque", "summary":[], "provider_extension": {"b":2,"a":1} }"#;
+    let first_call = r#"{"type":"function_call","id":"fc_first","status":"completed","call_id":"call_first","name":"lookup","arguments":"{}"}"#;
+    let second_call = r#"{"type":"function_call","id":"fc_second","status":"completed","call_id":"call_second","name":"lookup","arguments":"{}"}"#;
+    let stream = format!(
+        "data: {{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{{\"type\":\"reasoning\",\"id\":\"rs_continuation\",\"status\":\"in_progress\",\"encrypted_content\":\"truncated\",\"summary\":[]}}}}\n\n\
+         data: {{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{complete}}}\n\n\
+         data: {{\"type\":\"response.completed\",\"response\":{{\"object\":\"response\",\"id\":\"resp_first\",\"model\":\"model-exact-1\",\"status\":\"completed\",\"output\":[{first_call},{complete},{second_call}],\"usage\":{{\"input_tokens\":4,\"output_tokens\":8}}}}}}\n\n"
+    );
+    let final_body = br#"{"object":"response","id":"resp_second","model":"model-exact-1","status":"completed","output":[{"type":"message","id":"msg_final","status":"completed","role":"assistant","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":12,"output_tokens":2}}"#;
+    let server = CannedServer::serving(vec![
+        http_response(
+            "200 OK",
+            &[("content-type", "text/event-stream")],
+            stream.as_bytes(),
+        ),
+        http_response(
+            "200 OK",
+            &[("content-type", "application/json")],
+            final_body,
+        ),
+    ])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+    let mut first = operation("reasoning-first");
+    first.delivery = DeliveryMode::Streamed;
+    first.tools = vec![ToolDefinition::with_schema(
+        "lookup",
+        "Lookup.",
+        serde_json::json!({"type":"object"}),
+    )];
+    let (report, observations) = execute(&runtime, first, CancellationSignal::never()).await;
+    let TerminalEvidence::Completed(completion) = report.evidence else {
+        panic!("streamed reasoning and tools complete");
+    };
+    assert_eq!(completion.finish, CompletionFinish::ToolUse);
+    assert_eq!(completion.content.len(), 3);
+    assert_eq!(
+        completion.content[1],
+        AssistantPart::ProviderReasoning {
+            item_json: complete.to_string()
+        }
+    );
+    assert!(
+        !observations
+            .iter()
+            .any(|observation| matches!(observation.fact, ObservationFact::ThinkingDelta { .. }))
+    );
+    let mut second = operation("reasoning-second");
+    let mut replay = Vec::new();
+    let mut results = Vec::new();
+    for part in completion.content {
+        match part {
+            AssistantPart::ProviderReasoning { item_json } => {
+                replay.push(MessagePart::ProviderReasoning {
+                    item_json,
+                    producing_target: ResolvedTarget::new("model-exact-1"),
+                    producing_credential: CredentialReference::new("openai-primary"),
+                })
+            }
+            AssistantPart::ToolCall(call) => {
+                results.push(MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: call.id.clone(),
+                    content: "found".to_string(),
+                    is_error: false,
+                }));
+                replay.push(MessagePart::ToolCall(call));
+            }
+            _ => panic!("fixture contains only reasoning and calls"),
+        }
+    }
+    second.messages.push(ConversationMessage {
+        role: ConversationRole::Assistant,
+        parts: replay,
+    });
+    second.messages.push(ConversationMessage {
+        role: ConversationRole::User,
+        parts: results,
+    });
+    let (report, _) = execute(&runtime, second, CancellationSignal::never()).await;
+    assert!(matches!(report.evidence, TerminalEvidence::Completed(_)));
+    let requests = server.recorded_requests();
+    let body = requests[1].split_once("\r\n\r\n").expect("request body").1;
+    #[derive(serde::Deserialize)]
+    struct RequestInput {
+        input: Vec<Box<serde_json::value::RawValue>>,
+    }
+    let parsed: RequestInput = serde_json::from_str(body).expect("request JSON");
+    assert_eq!(parsed.input[2].get(), complete);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(parsed.input[1].get()).unwrap()["call_id"],
+        "call_first"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(parsed.input[3].get()).unwrap()["call_id"],
+        "call_second"
+    );
+    assert!(!body.contains("truncated"));
 }

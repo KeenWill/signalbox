@@ -23,6 +23,17 @@ generate third-party dependency targets. Change dependencies with Cargo as
 usual; the next Bazel invocation refreshes their generated definitions. The
 Cargo host tools use the same Rust version constant as compilation and rustfmt.
 
+Workspace packages call `rust_package()` from `tooling/bazel/package.bzl` for
+Cargo metadata, lint settings, and Rust source inputs. Extra exported fixtures
+are listed in its `exports` argument. The build macros in
+`tooling/bazel/rust.bzl` add Cargo-managed third-party dependencies and compiler
+defaults; their `deps` and `proc_macro_deps` arguments list first-party targets.
+Rule attributes can override shared defaults. `tooling/bazel/testing.bzl`
+provides unit, standalone integration, PostgreSQL, and Rustdoc JSON helpers.
+Tests retain explicit source roots, features, fixtures, and execution
+exceptions. Repeated dependency and feature lists are shared within each
+package.
+
 The syscall crate is a Cargo workspace member with its own unsafe-code lint
 policy. This lets the importer treat all in-repository crates as first-party
 packages rather than generating machine-specific external path dependencies.
@@ -108,3 +119,11 @@ and comparisons use the shared cache. The output trees are available from
 
 The generator CLIs also accept an optional output directory after their existing
 arguments. Omitting it retains their Cargo regeneration behavior.
+
+`bazel test --config=api //:api_documentation_current` builds Rustdoc JSON for
+all 36 configured API crates, renders Markdown into `bazel-bin/api_pages`, and
+compares it with the committed API snapshots. Rustdoc, rendering, and the
+comparison are separate cacheable actions. The API configuration selects the
+pinned nightly toolchain; Renovate groups its Cargo renderer and Bazel pins. The
+required contract check uses this target. The optional baseline API digest runs
+separately and still uses Cargo to document historical revisions.

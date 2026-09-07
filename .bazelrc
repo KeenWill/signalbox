@@ -3,3 +3,5 @@ test --test_output=errors
 test --run_under=//tooling/bazel:native_runtime
 
 try-import %workspace%/.bazelrc.local
+
+build:api --@rules_rust//rust/toolchain/channel=nightly

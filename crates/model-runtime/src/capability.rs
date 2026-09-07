@@ -19,6 +19,7 @@ pub struct ModelCapabilities {
     reasoning_levels: BTreeSet<ReasoningLevel>,
     fast_mode: Option<FastModeTarget>,
     service_tiers: BTreeSet<ServiceTier>,
+    reasoning_replay_family: Option<String>,
 }
 
 impl ModelCapabilities {
@@ -32,7 +33,19 @@ impl ModelCapabilities {
             reasoning_levels,
             fast_mode,
             service_tiers,
+            reasoning_replay_family: None,
         }
+    }
+
+    /// Declares the operator-configured family for opaque reasoning replay.
+    pub fn with_reasoning_replay_family(mut self, family: Option<String>) -> Self {
+        self.reasoning_replay_family = family;
+        self
+    }
+
+    /// Borrows the declared reasoning replay family, if any.
+    pub fn reasoning_replay_family(&self) -> Option<&str> {
+        self.reasoning_replay_family.as_deref()
     }
 
     /// Borrows supported reasoning levels.

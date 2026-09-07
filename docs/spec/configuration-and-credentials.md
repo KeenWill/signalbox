@@ -77,10 +77,16 @@ reservation, not the raw advertised window, and is not smaller than
 per-target Anthropic capability on `[[models]]` and `[[serving_targets]]`;
 omission is false, another adapter cannot declare it true, and the effective
 target after fast-target resolution controls both compaction enablement and
-opaque-block replay. `[model_settings]` is the deployment global default and
-each `[[model_settings_profiles]]` entry is a named profile a model's optional
-`settings_profile` selects; a selected profile outranks the global default, and
-both sit below the session and per-call layers of
+opaque-block replay. An OpenAI target may declare a nonempty, unpadded
+`reasoning_replay_family` string on `[[models]]` or `[[serving_targets]]`. Two
+targets replay each other's reasoning items only when both declare the same
+family. A target that declares none does not replay reasoning items. Family
+configuration does not suppress durable reasoning retention. Every configured
+entry naming one `provider_model` must declare the same value; other adapters
+cannot declare this capability. `[model_settings]` is the deployment global
+default and each `[[model_settings_profiles]]` entry is a named profile a
+model's optional `settings_profile` selects; a selected profile outranks the
+global default, and both sit below the session and per-call layers of
 [model session settings](model-session-settings.md). An adapter mapping that
 names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
 `executable`, `mcp_bridge_executable`, and `working_directory`. The required
