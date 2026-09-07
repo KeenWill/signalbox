@@ -86,10 +86,10 @@ requirements.
 The shared image digest, migrations, and example configuration are declared
 compilation inputs. PostgreSQL targets are manual and external: compilation is
 cacheable, tests always execute. The runtime partitions libtest's ignored-test
-inventory across each target's manifest-derived shards. CI runs one binary shard
-at a time with 16 test threads. The Rust workflow calls `bazel.yml` and binds
-its ordinary and PostgreSQL results to `validate` under the Rust change-scope
-gate.
+inventory across each target's manifest-derived shards. CI gives each manifest
+shard its own matrix worker; each worker runs one partition per binary at a time
+with 16 test threads. The Rust workflow calls `bazel.yml` and binds its ordinary
+and PostgreSQL results to `validate` under the Rust change-scope gate.
 
 The checker job runs its eight Python suites with
 `bazel test //:python_checker_tests`. Bazel supplies Python 3.14, packages from
