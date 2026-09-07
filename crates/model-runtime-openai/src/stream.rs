@@ -165,6 +165,7 @@ pub(crate) struct StreamDecoder {
     later_records: LaterRecords,
     item_ids: BTreeMap<u32, String>,
     item_parts: BTreeMap<u32, ItemParts>,
+    completed_reasoning: BTreeMap<u32, Box<serde_json::value::RawValue>>,
     pending_deltas: Vec<PendingDelta>,
     argument_nesting: BTreeMap<u32, ProviderJsonNestingValidator>,
 }
@@ -182,6 +183,7 @@ impl StreamDecoder {
             later_records: LaterRecords::AllApplied,
             item_ids: BTreeMap::new(),
             item_parts: BTreeMap::new(),
+            completed_reasoning: BTreeMap::new(),
             pending_deltas: Vec::new(),
             argument_nesting: BTreeMap::new(),
         }
@@ -300,6 +302,9 @@ impl StreamDecoder {
                 {
                     return self.violation("terminal response lacks usage");
                 }
+                if let Err(detail) = self.restore_completed_reasoning(&mut response) {
+                    return self.violation(detail);
+                }
                 self.flush_deltas(correlation, sink);
                 let evidence = decode_response(
                     response,
@@ -359,6 +364,16 @@ impl StreamDecoder {
                 }
                 if event.kind == "response.output_item.done" {
                     self.item_parts.entry(index).or_default().item_done = true;
+                    if item.kind == "reasoning" {
+                        if self
+                            .completed_reasoning
+                            .get(&index)
+                            .is_some_and(|previous| previous.get() != raw.get())
+                        {
+                            return self.violation("completed reasoning item changed its bytes");
+                        }
+                        self.completed_reasoning.insert(index, raw);
+                    }
                 }
                 StreamStep::Continue
             }
@@ -539,15 +554,62 @@ impl StreamDecoder {
             let id = item.id.as_deref().ok_or("response output item lacks id")?;
             let index = u32::try_from(index).map_err(|error| error.to_string())?;
             self.observe_item(index, id)?;
-            self.observe_item_parts(
-                index,
-                &item,
-                matches!(
-                    response.status.as_deref(),
-                    Some("completed" | "incomplete" | "failed")
-                ),
-            )?;
+            let terminal = matches!(
+                response.status.as_deref(),
+                Some("completed" | "incomplete" | "failed")
+            );
+            if item.kind == "reasoning" && terminal {
+                if let Some(status) = item.status.as_deref()
+                    && status != "completed"
+                    && !(response.status.as_deref() == Some("incomplete") && status == "incomplete")
+                {
+                    if response.error.is_none()
+                        && !(response.status.as_deref() == Some("completed")
+                            && response.incomplete_details.is_some())
+                    {
+                        let finish = map_terminal(
+                            response.status.as_deref().unwrap_or_default(),
+                            response
+                                .incomplete_details
+                                .as_ref()
+                                .map(|details| details.reason.as_str()),
+                            output_tool_calls(output.as_deref()),
+                        );
+                        if !matches!(finish, FinishReason::Unrecognized { .. }) {
+                            self.finish_reported = Some(finish);
+                        }
+                    }
+                    return Err(
+                        "reasoning item status disagrees with its terminal response".to_string()
+                    );
+                }
+                if let Some(raw) = self.completed_reasoning.get(&index) {
+                    let completed: WireOutputItem =
+                        serde_json::from_str(raw.get()).map_err(|error| error.to_string())?;
+                    self.observe_item_parts(index, &completed, true)?;
+                    continue;
+                }
+            }
+            self.observe_item_parts(index, &item, terminal)?;
         }
+        Ok(())
+    }
+
+    fn restore_completed_reasoning(&self, response: &mut Response) -> Result<(), String> {
+        if self.completed_reasoning.is_empty() {
+            return Ok(());
+        }
+        let Some(mut output) = response.output_items().map_err(|error| error.to_string())? else {
+            return Ok(());
+        };
+        for (&index, raw) in &self.completed_reasoning {
+            let item = output
+                .get_mut(usize::try_from(index).map_err(|error| error.to_string())?)
+                .ok_or("terminal response omits completed reasoning")?;
+            *item = raw.clone();
+        }
+        response.output =
+            Some(serde_json::value::to_raw_value(&output).map_err(|error| error.to_string())?);
         Ok(())
     }
 
@@ -631,7 +693,11 @@ impl StreamDecoder {
         self.observe_item_kind(index, &item.kind)?;
         let layout = self.item_parts.entry(index).or_default();
         match item.kind.as_str() {
-            "reasoning" => layout.finish(BTreeMap::new())?,
+            "reasoning" => {
+                if complete {
+                    layout.finish(BTreeMap::from([(0, item.encrypted_content.is_some())]))?;
+                }
+            }
             "function_call" => {
                 if let Some(arguments) = item.arguments.as_deref() {
                     layout.observe_snapshot(0, "function_call_arguments", arguments, complete)?;
@@ -1995,7 +2061,7 @@ mod tests {
         );
     }
     #[test]
-    fn incomplete_added_reasoning_never_becomes_visible_content() {
+    fn reasoning_replay_uses_the_completed_item_instead_of_the_added_snapshot() {
         let mut decoder = StreamDecoder::new(ExchangeFacts::default());
         let mut sink = Vec::new();
         for (kind, ciphertext) in [
@@ -2007,8 +2073,23 @@ mod tests {
                 json!({"type":kind,"output_index":0,"item":{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":ciphertext}}),
                 &mut sink,
             );
+            if kind == "response.output_item.added" {
+                apply(
+                    &mut decoder,
+                    json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"msg_fixture","delta":"ready"}),
+                    &mut sink,
+                );
+                assert!(sink.is_empty());
+            }
         }
-        assert!(sink.is_empty());
+        assert_eq!(sink.len(), 1);
+        assert_eq!(
+            sink[0].fact,
+            ObservationFact::TextDelta {
+                index: 1,
+                text: "ready".to_string()
+            }
+        );
         let mut event = terminal();
         event["response"]["output"].as_array_mut().unwrap().insert(
             0,
@@ -2020,7 +2101,16 @@ mod tests {
         let TerminalEvidence::Completed(completion) = *evidence else {
             panic!("matching item identities must complete");
         };
-        assert_eq!(completion.content.len(), 1);
+        assert_eq!(completion.content.len(), 2);
+        assert_eq!(completion.content[0], signalbox_model_runtime::AssistantPart::ProviderReasoning {
+            item_json: json!({"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"complete"}).to_string(),
+        });
+        assert!(
+            !sink.iter().any(|observation| matches!(
+                observation.fact,
+                ObservationFact::ThinkingDelta { .. }
+            ))
+        );
     }
     #[test]
     fn indexed_content_and_reasoning_events_must_preserve_the_established_item_id() {

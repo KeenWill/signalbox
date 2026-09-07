@@ -5,8 +5,8 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn omitted_provider_reasoning_contributes_no_content_allowance() -> Result<(), Box<dyn Error>>
-{
+async fn replayed_provider_reasoning_is_counted_only_without_output_coverage()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     for (offset, compacted, output_tokens) in [
         (0, false, Some(8)),
@@ -76,7 +76,14 @@ async fn omitted_provider_reasoning_contributes_no_content_allowance() -> Result
             )
             .await?
             .expect("provider input usage retained");
-        assert_eq!(reported.projected_unreported_content_bytes(), 0);
+        assert_eq!(
+            reported.projected_unreported_content_bytes(),
+            if compacted || output_tokens.is_some() {
+                0
+            } else {
+                u64::try_from(raw.len())?
+            }
+        );
     }
     pool.close().await;
     drop(container);
@@ -181,6 +188,106 @@ async fn completed_provider_reasoning_retains_order_and_projects_a_marker()
     assert!(snapshot.entries().iter().any(|entry| matches!(entry,
         ProcessTranscriptEntry::ProviderReasoning { entry, turn, model_call, .. }
             if *entry == reasoning_entry && *turn == fixture.turn && *model_call == fixture.call
+    )));
+
+    let later_credential = ModelCallCredentialReference::new("later-primary");
+    let producer_target = authorized.observation_correlation().target();
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+        producer_target,
+    )])
+    .expect("the later call uses the same configured model");
+    let later_repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, later_credential.clone());
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 40,
+                seed + 1,
+                "continue with another credential",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 42))),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 43),
+            starting_frontier: Uuid::from_u128(seed + 44),
+            initial_attempt: Uuid::from_u128(seed + 45),
+        },
+    )
+    .await?;
+    let later_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 46));
+    let outcome = later_repository
+        .prepare_initial_call(
+            fixture.session,
+            later_call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 47)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 48)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 49)),
+            |_| panic!("no pending steering"),
+        )
+        .await?;
+    assert!(
+        matches!(outcome, PrepareInitialModelCallOutcome::Checkpointed(call) if call == later_call)
+    );
+    let PrepareInitialModelCallOutcome::Ready {
+        request,
+        credential_reference,
+        system_prompt,
+        tool_entries,
+        reasoning_provenance,
+        ..
+    } = later_repository
+        .prepare_initial_call(
+            fixture.session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 50)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 51)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 52)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 53)),
+            |_| panic!("no pending steering"),
+        )
+        .await?
+    else {
+        panic!("the checkpoint reloads with producer facts");
+    };
+    assert_eq!(credential_reference, later_credential);
+    assert_eq!(
+        reasoning_provenance.as_ref(),
+        &[signalbox_application::ProviderReasoningProvenance {
+            source: SemanticTranscriptEntryRef::from_source(fixture.session, reasoning_entry),
+            producing_call: fixture.call,
+            producing_target: producer_target,
+            producing_credential: model_credential_reference(),
+        }]
+    );
+    assert!(matches!(signalbox_application::PreparedModelOperation::render(
+        (*request).clone(), credential_reference.clone(), system_prompt.clone(), Box::new([]), &tool_entries, &[],
+    ), Err(signalbox_application::ModelFrontierRenderingError::MissingOrMismatchedReasoningProvenance { .. })));
+    let operation = signalbox_application::PreparedModelOperation::render(
+        *request,
+        credential_reference,
+        system_prompt,
+        Box::new([]),
+        &tool_entries,
+        &reasoning_provenance,
+    )
+    .expect("producer-qualified reasoning renders");
+    assert_eq!(
+        operation.reasoning_provenance(),
+        reasoning_provenance.as_ref()
+    );
+    assert!(operation.messages().iter().any(|message| matches!(message,
+        signalbox_application::ModelConversationMessage::ProviderReasoning { producing_call, .. } if *producing_call == fixture.call
     )));
 
     let mut corruption = pool.begin().await?;
@@ -1542,8 +1649,7 @@ async fn latest_reported_usage_excludes_unreplayed_provider_compaction_bytes()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn unreported_tool_round_omits_provider_reasoning_from_content_allowance()
--> Result<(), Box<dyn Error>> {
+async fn unreported_tool_round_counts_replayed_provider_reasoning() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x6e7b;
     let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
@@ -1634,9 +1740,9 @@ async fn unreported_tool_round_omits_provider_reasoning_from_content_allowance()
     else {
         panic!("the retained second call authorizes");
     };
-    let reasoning = signalbox_domain::ProviderReasoningItem::try_new(String::from(
-        r#"{"type":"reasoning","id":"rs_unreported","summary":[],"encrypted_content":"opaque continuation"}"#,
-    )).expect("complete reasoning fixture");
+    let raw_reasoning = r#"{"type":"reasoning","id":"rs_unreported","summary":[],"encrypted_content":"opaque continuation"}"#;
+    let reasoning = signalbox_domain::ProviderReasoningItem::try_new(String::from(raw_reasoning))
+        .expect("complete reasoning fixture");
     let response = ToolUsingAssistantResponse::try_from_parts(vec![
         AssistantResponsePart::ProviderReasoning(reasoning),
         AssistantResponsePart::ToolCall(ToolCallProposal::new(
@@ -1688,7 +1794,10 @@ async fn unreported_tool_round_omits_provider_reasoning_from_content_allowance()
     assert_eq!(
         reported.projected_unreported_content_bytes(),
         u64::try_from(
-            "request before unreported tool round".len() + "current_time".len() + "{}".len()
+            "request before unreported tool round".len()
+                + "current_time".len()
+                + "{}".len()
+                + raw_reasoning.len()
         )?
     );
     pool.close().await;
