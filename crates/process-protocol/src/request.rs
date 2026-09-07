@@ -38,6 +38,15 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
+    /// Reads the immutable policy referenced by one session turn.
+    ReadCredentialPoolPolicy {
+        /// Session the caller is reading.
+        session_id: CanonicalUuid,
+        /// Turn that must reference the policy.
+        turn_id: CanonicalUuid,
+        /// Exact retained policy identity.
+        pool_policy_id: CanonicalUuid,
+    },
     /// Cancel a retained program run through its journal.
     CancelProgramRun {
         command_id: CommandId,
@@ -814,6 +823,7 @@ impl ClientRequest {
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
             | Self::DecideToolRequest { .. }
+            | Self::ReadCredentialPoolPolicy { .. }
             | Self::CancelProgramRun { .. }
             | Self::OverrideDeniedToolRequest { .. } => {}
         }

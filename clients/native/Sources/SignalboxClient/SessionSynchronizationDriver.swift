@@ -184,6 +184,35 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
     }
   }
 
+  private func validatePoolEvidence(_ message: SignalboxProcessServerMessage) async throws {
+    let turnID: SignalboxCanonicalUUID
+    let evidence: SignalboxCredentialPoolExhaustion
+    switch message {
+    case .transcriptTurn(let turn):
+      guard case .failedCredentialPoolExhausted(let captured) = turn.state else { return }
+      turnID = turn.turnID
+      evidence = captured
+    case .sessionEvent(let event):
+      guard case .turnCredentialPoolExhausted(let turn, let captured) = event.event else { return }
+      turnID = turn
+      evidence = captured
+    default: return
+    }
+    let exchange = try await requester.open(.readCredentialPoolPolicy(sessionID: sessionID, turnID: turnID, poolPolicyID: evidence.poolPolicyID))
+    do {
+      guard let frame = try await exchange.next(),
+        case .credentialPoolPolicy(let policy) = frame.message,
+        policy.poolPolicyID == evidence.poolPolicyID,
+        policy.policyMembers.map({ Data($0.utf8) }) == evidence.policyMembers.map({ Data($0.utf8) })
+      else { throw SignalboxProcessServiceError.unexpectedMessage("Exhaustion does not match its immutable pool policy.") }
+      try Task.checkCancellation()
+      await exchange.close()
+    } catch {
+      await exchange.close()
+      throw error
+    }
+  }
+
   private func openFollow(generation: UInt64) {
     primaryTask?.cancel()
     primaryTask = Task { [weak self] in
@@ -201,6 +230,7 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
       primaryExchange = exchange
       await process(.connected(generation: generation))
       while !Task.isCancelled, let frame = try await exchange.next() {
+        try await validatePoolEvidence(frame.message)
         await process(.frame(generation: generation, message: frame.message))
       }
       guard !Task.isCancelled, isStarted else {
@@ -252,6 +282,7 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
       }
       sideExchange = exchange
       while !Task.isCancelled, let frame = try await exchange.next() {
+        try await validatePoolEvidence(frame.message)
         let isTerminalBoundary: Bool
         if case .transcriptSnapshotEnd = frame.message {
           isTerminalBoundary = true

@@ -138,6 +138,8 @@ pub enum ProcessModelCallRecoveryPrecondition {
 /// Authoritative lifecycle state for one projected turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTurnState {
+    /// Frozen pre-call exhaustion evidence and terminal correlations.
+    FailedCredentialPoolExhausted(Box<crate::credential_pool_exhaustion::CredentialPoolExhaustion>),
     /// Accepted work has not activated.
     Queued {
         /// Accepted input that created the queued turn.

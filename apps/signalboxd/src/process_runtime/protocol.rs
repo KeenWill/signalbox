@@ -1491,6 +1491,9 @@ impl ProcessUpdate {
 
 #[derive(Clone, Debug)]
 pub(super) enum ProcessUpdateEvent {
+    CredentialPoolExhausted(
+        Box<signalbox_persistence::credential_pool_exhaustion::CredentialPoolExhaustion>,
+    ),
     SessionCreated,
     SessionModelSettingsChanged(DomainSessionModelSettingsChanged),
     TurnModelSettingsResolved(DomainTurnModelSettingsResolved),
@@ -1593,6 +1596,9 @@ impl ProcessUpdateEvent {
                 acceptance_position: acceptance_position.as_u64(),
                 content: content.clone(),
             },
+            DispatchedOutboxEventKind::CredentialPoolExhausted(evidence) => {
+                Self::CredentialPoolExhausted(evidence.clone())
+            }
             DispatchedOutboxEventKind::TurnTerminal { turn, disposition } => match disposition {
                 DispatchedTurnTerminalDisposition::Completed {
                     call,
@@ -1896,6 +1902,15 @@ impl ProcessUpdateEvent {
                 model_call_id: wire_uuid(call.into_uuid()),
                 completion_entry_id: wire_uuid(completion_entry.into_uuid()),
                 terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+            },
+            Self::CredentialPoolExhausted(evidence) => SessionEvent::TurnCredentialPoolExhausted {
+                turn_id: wire_uuid(evidence.turn_id),
+                terminal_frontier_id: wire_uuid(evidence.terminal_frontier_id),
+                terminal_attempt_id: wire_uuid(evidence.terminal_attempt_id),
+                failure_entry_id: wire_uuid(evidence.failure_entry_id),
+                pool_policy_id: wire_uuid(evidence.pool_policy_id),
+                policy_members: evidence.policy_members.clone(),
+                members: super::credential_pool::wire_members(&evidence.members),
             },
             Self::TurnFailed {
                 turn,

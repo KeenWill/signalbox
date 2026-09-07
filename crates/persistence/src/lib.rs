@@ -718,3 +718,5 @@ mod tests {
         assert!(unbounded.tmpfs_options().is_none());
     }
 }
+
+pub mod credential_pool_exhaustion;

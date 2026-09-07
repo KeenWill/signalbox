@@ -7098,11 +7098,14 @@ async fn load_availability_successor_backoff(
 
 /// Every member one pool currently excludes, with the rows a call would satisfy.
 struct DurablePoolExclusions {
+    observed_at: sqlx::types::time::OffsetDateTime,
     excluded: HashSet<String>,
     pending_consumed_actions: Vec<i64>,
     headroom: HashMap<String, Option<i64>>,
 }
 
+#[path = "credential_pool_evidence.rs"]
+mod credential_pool_evidence;
 #[path = "credential_pool_records.rs"]
 mod credential_pool_records;
 
@@ -7173,6 +7176,8 @@ async fn load_durable_pool_exclusions(
     let members = credential_pool_member_references(policy);
     lock_credential_pool_action_heads(connection, policy).await?;
     let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
+    let now = std::time::SystemTime::now();
+    let observed_at = sqlx::types::time::OffsetDateTime::from(now);
     let mut excluded = sqlx::query_scalar::<_, String>(
         "SELECT credential_reference
            FROM credential_pool_chain_exclusion
@@ -7195,9 +7200,10 @@ async fn load_durable_pool_exclusions(
             "SELECT DISTINCT credential_reference
               FROM credential_pool_transient_exclusion
               WHERE credential_reference = ANY($1)
-                AND reset_at > clock_timestamp()",
+                AND reset_at > $2",
         )
         .bind(&member_references)
+        .bind(observed_at)
         .fetch_all(&mut *connection)
         .await?,
     );
@@ -7265,7 +7271,6 @@ async fn load_durable_pool_exclusions(
         "SELECT profile FROM credential_exclusion_state WHERE active AND kind = 'profile_quarantine' AND origin <> 'pool_trigger' AND profile = ANY($1)")
         .bind(&member_references).fetch_all(&mut *connection).await?);
     let mut headroom = HashMap::new();
-    let now = std::time::SystemTime::now();
     for member in policy.members().iter().filter(|member| {
         policy.tie_break == CredentialPoolRuntimeTieBreak::LeastUsed
             || member
@@ -7292,6 +7297,7 @@ async fn load_durable_pool_exclusions(
         headroom.insert(member.credential_reference().to_owned(), remaining);
     }
     Ok(DurablePoolExclusions {
+        observed_at,
         excluded,
         pending_consumed_actions,
         headroom,
@@ -7410,6 +7416,7 @@ async fn select_runtime_pool_credential(
         });
     };
     let DurablePoolExclusions {
+        observed_at,
         excluded,
         pending_consumed_actions: next_turn_actions,
         headroom,
@@ -7474,6 +7481,18 @@ async fn select_runtime_pool_credential(
                 })
         })
         .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
+    if selected.is_none() {
+        credential_pool_evidence::record(
+            connection,
+            session,
+            turn,
+            attempt,
+            &policy,
+            observed_at,
+            &headroom,
+        )
+        .await?;
+    }
     let pending_consumed_actions = if selected.is_some() {
         next_turn_actions
     } else {
@@ -9362,8 +9381,8 @@ async fn insert_credential_pool_terminal_exhaustion(
     sqlx::query(
         "INSERT INTO credential_pool_terminal_exhaustion
             (terminal_attempt_id, terminal_model_call_id,
-             session_id, turn_id, pool_name, cause_kind)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+             session_id, turn_id, pool_name, cause_kind, pool_policy_id)
+         VALUES ($1, $2, $3, $4, $5, $6, (SELECT pool_policy_id FROM credential_pool_exhaustion_member WHERE terminal_attempt_id = $1 AND ordinal = 0))",
     )
     .bind(attempt.into_uuid())
     .bind(last_call.map(ModelCallId::into_uuid))
@@ -9398,7 +9417,10 @@ async fn persist_credential_pool_exhaustion(
         None,
         None,
     )
-    .await
+    .await?;
+    sqlx::query("WITH header AS (INSERT INTO outbox_event (event_kind, storage_version, session_id) VALUES ('turn_credential_pool_exhausted', 1, $1) RETURNING event_sequence, event_kind, storage_version, session_id) INSERT INTO credential_pool_exhaustion_outbox_event SELECT event_sequence, event_kind, storage_version, session_id, $2 FROM header")
+        .bind(exhausted.failed().session().into_uuid()).bind(exhausted.failed().attempt().id().into_uuid()).execute(connection).await?;
+    Ok(())
 }
 
 async fn persist_tool_continuation_headroom_exhaustion(

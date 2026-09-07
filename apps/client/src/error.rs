@@ -403,6 +403,14 @@ impl fmt::Display for RejectionDisplay {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
             RejectionDetail::StaleGeneration {} => formatter.write_str("stale_generation"),
+            RejectionDetail::UnknownPoolPolicy {
+                session_id,
+                turn_id,
+                pool_policy_id,
+            } => write!(
+                formatter,
+                "unknown pool policy {pool_policy_id} for session {session_id} turn {turn_id}"
+            ),
             RejectionDetail::UnknownCredentialExclusion {} => {
                 formatter.write_str("unknown_credential_exclusion")
             }

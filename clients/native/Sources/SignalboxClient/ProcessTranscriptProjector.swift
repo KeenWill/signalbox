@@ -207,7 +207,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       )
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition, .toolBatchTransition,
-      .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed, .turnRefused,
+      .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnCredentialPoolExhausted, .turnFailed, .turnRefused,
       .turnCancelled, .turnReconciliationRequired, .turnToolReconciliationRequired,
       .runnerStateTransition:
       content = nil
@@ -644,7 +644,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return terminalModelCallID
     case .cancelled(_, _, let terminalModelCallID):
       return terminalModelCallID
-    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
+    case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
       .activeAwaitingChild, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .refused,
       .reconciliationRequired, .toolReconciliationRequired, .unknown:
@@ -662,7 +662,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         .refused(_, _, let modelCallID),
         .reconciliationRequired(_, _, let modelCallID):
         modelCallIDs.insert(modelCallID.rawValue)
-      case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
+      case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
         .activeAwaitingChild, .activeAwaitingToolApproval,
         .activeAwaitingToolRecovery, .failed, .completed, .cancelled,
         .toolReconciliationRequired, .unknown:
@@ -1179,7 +1179,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .cancelled:
         content = nil
       }
-    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+    case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
       .activeAwaitingChild,
       .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
@@ -1230,7 +1230,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .contextCompacted(_, let modelCallID, _, _, _):
         return modelCallID == evidence.modelCallID
       case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
-        .inputAccepted, .turnActivated, .turnFailed, .turnRefused, .turnCancelled,
+        .inputAccepted, .turnActivated, .turnCredentialPoolExhausted, .turnFailed, .turnRefused, .turnCancelled,
         .toolApprovalDecided, .turnReconciliationRequired,
         .turnToolReconciliationRequired, .runnerStateTransition, .unknown:
         return false
@@ -1282,7 +1282,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery, .reconciliationRequired,
       .toolReconciliationRequired:
       return true
-    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .failed,
+    case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .failed,
       .completed, .refused, .cancelled, .unknown:
       return false
     }
@@ -1342,7 +1342,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         for: trigger,
         nativeSourceSessionID: nativeSourceSessionID
       )
-    case .turnFailed, .turnCancelled:
+    case .turnCredentialPoolExhausted, .turnFailed, .turnCancelled:
       return isExactTerminalMarker(
         message,
         for: trigger,
@@ -1407,7 +1407,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   ) -> Set<SignalboxCanonicalUUID> {
     let turnID: SignalboxCanonicalUUID
     switch trigger {
-    case .turnFailed(let triggerTurnID, _, _):
+    case .turnCredentialPoolExhausted(let triggerTurnID, _), .turnFailed(let triggerTurnID, _, _):
       turnID = triggerTurnID
     case .turnCancelled(let triggerTurnID, _, _):
       turnID = triggerTurnID
@@ -1662,6 +1662,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return message.entryID == completionEntryID && entryTurnID == turnID
+    case .turnCredentialPoolExhausted(let turnID, let evidence):
+      guard case .turnFailed(let entryTurnID) = message.entry else { return false }
+      return message.entryID == evidence.failureEntryID && entryTurnID == turnID
     case .turnFailed(let turnID, let failureEntryID, _):
       guard case .turnFailed(let entryTurnID) = message.entry else {
         return false
@@ -1773,6 +1776,17 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         )
       }
       return hasCompletionMarker && hasAssistantText
+    case .turnCredentialPoolExhausted(let turnID, let evidence):
+      return snapshot.records.contains {
+        guard case .turn(let turn) = $0,
+          turn.turnID == turnID,
+          case .failedCredentialPoolExhausted(let snapshotEvidence) = turn.state
+        else { return false }
+        return snapshotEvidence == evidence
+      } && snapshot.records.contains {
+        guard case .entry(let message) = $0 else { return false }
+        return isExactTerminalMarker(message, for: trigger, nativeSourceSessionID: snapshot.sessionID)
+      }
     case .turnFailed:
       return snapshot.records.contains {
         guard case .entry(let message) = $0 else {
@@ -1940,6 +1954,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery,
       .reconciliationRequired, .toolReconciliationRequired:
       return .init(state: .recoveryRequired, label: "Recovery required")
+    case .failedCredentialPoolExhausted:
+      return .init(state: .failed, label: "Credential pool exhausted")
     case .failed(_, _, let terminalModelCall):
       if let terminalModelCall, case .unknown(let value) = terminalModelCall.disposition {
         let label = SignalboxProcessPresentation.retainedLabel(

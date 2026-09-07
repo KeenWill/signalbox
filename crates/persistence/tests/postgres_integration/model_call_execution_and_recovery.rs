@@ -4676,3 +4676,6 @@ async fn target_unavailable_reclassifies_steering() -> Result<(), Box<dyn Error>
     drop(container);
     Ok(())
 }
+
+#[path = "credential_pool_projection.rs"]
+mod credential_pool_projection;

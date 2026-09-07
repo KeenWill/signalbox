@@ -284,6 +284,21 @@ pub enum TurnState {
         tool_attempt_id: Option<CanonicalUuid>,
     },
     /// The turn terminalized as failed.
+    /// The turn failed before a call because every pool member was excluded.
+    FailedCredentialPoolExhausted {
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+        /// Terminal physical attempt.
+        terminal_attempt_id: CanonicalUuid,
+        /// Semantic failure marker.
+        failure_entry_id: CanonicalUuid,
+        /// Frozen pool policy identity.
+        pool_policy_id: CanonicalUuid,
+        /// Complete policy inventory in configuration order.
+        policy_members: Vec<String>,
+        /// Exactly one evidence item per policy member.
+        members: Vec<crate::CredentialPoolMemberEvidence>,
+    },
     Failed {
         /// Exact terminal frontier.
         terminal_frontier_id: CanonicalUuid,
@@ -393,6 +408,20 @@ enum RawTurnState {
         placement_revision: CanonicalU64,
         #[serde(deserialize_with = "deserialize_required_nullable")]
         tool_attempt_id: Option<CanonicalUuid>,
+    },
+    FailedCredentialPoolExhausted {
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+        /// Terminal physical attempt.
+        terminal_attempt_id: CanonicalUuid,
+        /// Semantic failure marker.
+        failure_entry_id: CanonicalUuid,
+        /// Frozen pool policy identity.
+        pool_policy_id: CanonicalUuid,
+        /// Complete policy inventory in configuration order.
+        policy_members: Vec<String>,
+        /// Exactly one evidence item per policy member.
+        members: Vec<crate::CredentialPoolMemberEvidence>,
     },
     Failed {
         terminal_frontier_id: CanonicalUuid,
@@ -547,6 +576,26 @@ impl<'de> Deserialize<'de> for TurnState {
                     })?,
                 tool_attempt_id,
             },
+            RawTurnState::FailedCredentialPoolExhausted {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                failure_entry_id,
+                pool_policy_id,
+                policy_members,
+                members,
+            } => {
+                if !crate::valid_credential_pool_evidence(&policy_members, &members) {
+                    return Err(serde::de::Error::custom("invalid pool exhaustion evidence"));
+                }
+                Self::FailedCredentialPoolExhausted {
+                    terminal_frontier_id,
+                    terminal_attempt_id,
+                    failure_entry_id,
+                    pool_policy_id,
+                    policy_members,
+                    members,
+                }
+            }
             RawTurnState::Failed {
                 terminal_frontier_id,
                 terminal_attempt_id,
@@ -615,6 +664,15 @@ impl<'de> Deserialize<'de> for TurnState {
 
 impl TurnState {
     pub(crate) fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::FailedCredentialPoolExhausted {
+            policy_members,
+            members,
+            ..
+        } = self
+            && !crate::valid_credential_pool_evidence(policy_members, members)
+        {
+            return Err(FrameValidationError::TurnStateShape);
+        }
         if let Self::QueuedDelegationWake {
             first_delivery_sequence,
             through_delivery_sequence,

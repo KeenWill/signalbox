@@ -59,4 +59,5 @@
 | turn_liveness | 5 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | usage | 3 | 0 | 1 | [usage](usage.md) |
 | workspace_instructions | 6 | 0 | 0 | [workspace_instructions](workspace_instructions.md) |
+| credential_pool_exhaustion | 4 | 0 | 3 | [credential_pool_exhaustion](credential_pool_exhaustion.md) |
 | root | 0 | 0 | 10 | [root](root.md) |

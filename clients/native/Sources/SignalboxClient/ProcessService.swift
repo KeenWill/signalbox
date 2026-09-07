@@ -729,7 +729,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
           .conversationImportAlreadyImported, .conversationPageStart,
           .conversationSummary, .conversationPageEnd, .importedConversationStart,
           .importedConversationEntry, .importedConversationEnd, .modelAliasesStart,
-          .modelAliasSummary, .modelAliasesEnd, .transcriptSnapshotStart,
+          .modelAliasSummary, .modelAliasesEnd, .credentialPoolPolicy, .transcriptSnapshotStart,
           .transcriptTurn, .transcriptModelCallUsage, .transcriptModelCallsEnd,
           .transcriptEntry, .transcriptUserEntry, .transcriptTextEntry, .transcriptContent,
           .transcriptSnapshotEnd, .sessionEvent, .providerTextDelta:

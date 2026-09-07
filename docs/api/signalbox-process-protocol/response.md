@@ -60,6 +60,10 @@ pub fn validate_oauth_authorization(
 
 ```rust
 pub enum ServerMessage {
+    CredentialPoolPolicy {
+        pool_policy_id: CanonicalUuid,
+        policy_members: vec::Vec<string::String>,
+    },
     ProgramRunCancellationReceipt {
         command_id: CommandId,
         run_id: CanonicalUuid,

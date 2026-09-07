@@ -466,7 +466,7 @@ pub(crate) async fn await_turn_terminal(
         let mut connection = client
             .request(ClientRequest::FollowSession { session_id })
             .await?;
-        let mut snapshot = read_snapshot(&mut connection, session_id).await?;
+        let mut snapshot = read_snapshot(client, &mut connection, session_id).await?;
         let state = snapshot.turn_state(turn_id)?;
         if let Some(terminal) = terminal_snapshot_state(state.as_ref())? {
             return Ok(terminal);
@@ -504,8 +504,16 @@ pub(crate) async fn await_turn_terminal(
                     if cursor.value() <= observed_cursor {
                         continue;
                     }
+                    crate::credential_pool::validate_event(client, session_id, &event).await?;
                     observed_cursor = cursor.value();
                     if let Some(terminal) = terminal_event_state(&event, turn_id) {
+                        if matches!(event, SessionEvent::TurnFailed { .. }) {
+                            let mut refreshed = transcript_command(client, session_id).await?;
+                            let state = refreshed.turn_state(turn_id)?;
+                            return terminal_snapshot_state(state.as_ref())?.ok_or(
+                                ClientError::Protocol("a failure event lacks a terminal snapshot"),
+                            );
+                        }
                         return Ok(terminal);
                     }
                     if selected_turn_recovery_transition(&event, turn_id) {
@@ -667,6 +675,7 @@ pub(crate) fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), C
         | TurnState::ActiveAwaitingToolApproval { .. }
         | TurnState::ActiveAwaitingChild { .. }
         | TurnState::Completed { .. }
+        | TurnState::FailedCredentialPoolExhausted { .. }
         | TurnState::Failed { .. }
         | TurnState::Refused { .. }
         | TurnState::Cancelled { .. }
@@ -784,7 +793,9 @@ pub(crate) fn terminal_snapshot_state(
 ) -> Result<Option<TurnTerminal>, ClientError> {
     match state {
         Some(TurnState::Completed { .. }) => Ok(Some(TurnTerminal::Completed)),
-        Some(TurnState::Failed { .. }) => Ok(Some(TurnTerminal::Failed)),
+        Some(TurnState::FailedCredentialPoolExhausted { .. }) | Some(TurnState::Failed { .. }) => {
+            Ok(Some(TurnTerminal::Failed))
+        }
         Some(TurnState::Refused { .. }) => Ok(Some(TurnTerminal::Refused)),
         Some(TurnState::Cancelled { .. }) => Ok(Some(TurnTerminal::Cancelled)),
         Some(TurnState::DelegationTerminated { .. }) => Ok(Some(TurnTerminal::Cancelled)),
@@ -836,7 +847,10 @@ pub(crate) fn terminal_event_state(
         SessionEvent::TurnCompleted { turn_id, .. } if *turn_id == selected_turn => {
             Some(TurnTerminal::Completed)
         }
-        SessionEvent::TurnFailed { turn_id, .. } if *turn_id == selected_turn => {
+        SessionEvent::TurnCredentialPoolExhausted { turn_id, .. }
+        | SessionEvent::TurnFailed { turn_id, .. }
+            if *turn_id == selected_turn =>
+        {
             Some(TurnTerminal::Failed)
         }
         SessionEvent::TurnRefused { turn_id, .. } if *turn_id == selected_turn => {
@@ -865,6 +879,7 @@ pub(crate) fn terminal_event_state(
         | SessionEvent::ToolBatchTransition { .. }
         | SessionEvent::RunnerStateTransition { .. }
         | SessionEvent::TurnCompleted { .. }
+        | SessionEvent::TurnCredentialPoolExhausted { .. }
         | SessionEvent::TurnFailed { .. }
         | SessionEvent::TurnRefused { .. }
         | SessionEvent::TurnCancelled { .. }

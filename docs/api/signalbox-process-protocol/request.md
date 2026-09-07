@@ -6,6 +6,11 @@
 
 ```rust
 pub enum ClientRequest {
+    ReadCredentialPoolPolicy {
+        session_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        pool_policy_id: CanonicalUuid,
+    },
     CancelProgramRun {
         command_id: CommandId,
         run_id: CanonicalUuid,

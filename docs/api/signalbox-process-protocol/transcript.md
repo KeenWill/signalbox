@@ -134,6 +134,14 @@ pub enum TurnState {
         placement_revision: PositiveCanonicalU64,
         tool_attempt_id: option::Option<CanonicalUuid>,
     },
+    FailedCredentialPoolExhausted {
+        terminal_frontier_id: CanonicalUuid,
+        terminal_attempt_id: CanonicalUuid,
+        failure_entry_id: CanonicalUuid,
+        pool_policy_id: CanonicalUuid,
+        policy_members: vec::Vec<string::String>,
+        members: vec::Vec<CredentialPoolMemberEvidence>,
+    },
     Failed {
         terminal_frontier_id: CanonicalUuid,
         terminal_attempt_id: option::Option<CanonicalUuid>,

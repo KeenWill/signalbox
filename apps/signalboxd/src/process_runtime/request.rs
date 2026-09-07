@@ -200,6 +200,22 @@ where
             )
             .await
         }
+        ClientRequest::ReadCredentialPoolPolicy {
+            session_id,
+            turn_id,
+            pool_policy_id,
+        } => {
+            credential_pool::handle_read_policy(
+                writer,
+                version,
+                request_id,
+                session_id,
+                turn_id,
+                pool_policy_id,
+                services,
+            )
+            .await
+        }
         ClientRequest::CancelProgramRun { command_id, run_id } => {
             handle_cancel_program_run(writer, version, request_id, command_id, run_id, services)
                 .await

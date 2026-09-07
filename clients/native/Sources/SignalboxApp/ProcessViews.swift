@@ -2122,6 +2122,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         at: followed.cursor,
         terminalActivity: .init(state: .completed, label: "Completed")
       )
+    case .turnCredentialPoolExhausted(let turnID, _):
+      applyTerminalTurn(turnID: turnID, at: followed.cursor, terminalActivity: .init(state: .failed, label: "Credential pool exhausted"))
     case .turnFailed(let turnID, _, _):
       applyTerminalTurn(
         turnID: turnID,

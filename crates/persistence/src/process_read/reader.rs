@@ -73,8 +73,29 @@ impl ProcessTranscriptReader {
             let row = load_next_transcript_turn(self.transaction_mut()?, session, next_turn_after)
                 .await?;
             if let Some(row) = row {
-                let decoded =
+                let mut decoded =
                     decode_transcript_turn(&row, self.automatic_reconciliation_attempt_budget)?;
+                if let Some(evidence) = crate::credential_pool_exhaustion::load(
+                    &mut **self.transaction_mut()?,
+                    session.into_uuid(),
+                    decoded.turn.turn().into_uuid(),
+                )
+                .await
+                .map_err(|error| match error {
+                    crate::credential_pool_exhaustion::CredentialPoolEvidenceError::Database(
+                        error,
+                    ) => ProcessReadError::from(error),
+                    crate::credential_pool_exhaustion::CredentialPoolEvidenceError::Corruption => {
+                        ProcessReadError::from(ProcessReadCorruption::Inconsistent(
+                            "pool exhaustion evidence",
+                        ))
+                    }
+                })? {
+                    decoded.turn.state =
+                        super::transcript_types::ProcessTurnState::FailedCredentialPoolExhausted(
+                            Box::new(evidence),
+                        );
+                }
                 match (decoded.start_lineage, decoded.latest_frontier) {
                     (None, None) => {}
                     (Some(_), Some(frontier)) => {

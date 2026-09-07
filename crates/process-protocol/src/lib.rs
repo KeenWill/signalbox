@@ -46,3 +46,9 @@ mod tests;
 pub use program::{
     ProgramRunCancellationOutcome, ProgramRunCancelledState, ProgramRunTerminalState,
 };
+
+mod credential_pool;
+pub use credential_pool::{
+    CredentialPoolExclusion, CredentialPoolMemberEvidence, valid_credential_pool_evidence,
+    valid_credential_pool_members,
+};

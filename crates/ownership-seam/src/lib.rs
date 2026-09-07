@@ -375,6 +375,7 @@ fn project_lifecycle_event(event: DispatchedOutboxEvent) -> Option<LifecycleEven
         | DispatchedOutboxEventKind::ContextCompacted { .. }
         | DispatchedOutboxEventKind::RunnerStateTransition { .. }
         | DispatchedOutboxEventKind::DelegationUpdate(_)
+        | DispatchedOutboxEventKind::CredentialPoolExhausted(_)
         | DispatchedOutboxEventKind::DelegationWake(_) => return None,
     };
     Some(LifecycleEvent {

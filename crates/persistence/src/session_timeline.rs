@@ -964,7 +964,8 @@ async fn project_detail_event(
                     turn,
                     disposition: DispatchedTurnTerminalDisposition::ReconciliationRequired { .. },
                 } => terminal_turn_body(*turn, "reconciliation_required", cursor)?,
-                DispatchedOutboxEventKind::SessionCreated(_)
+                DispatchedOutboxEventKind::CredentialPoolExhausted(_)
+                | DispatchedOutboxEventKind::SessionCreated(_)
                 | DispatchedOutboxEventKind::SessionStateChanged(_)
                 | DispatchedOutboxEventKind::SessionTerminal(_)
                 | DispatchedOutboxEventKind::GoalChanged(_)
@@ -1358,6 +1359,9 @@ fn response_excerpt(
 
 fn dispatched_event_kind(kind: &DispatchedOutboxEventKind) -> SessionTimelineEventKind {
     match kind {
+        DispatchedOutboxEventKind::CredentialPoolExhausted(_) => {
+            SessionTimelineEventKind::TurnFailed
+        }
         DispatchedOutboxEventKind::SessionCreated(_) => SessionTimelineEventKind::SessionCreated,
         DispatchedOutboxEventKind::SessionStateChanged(_) => {
             SessionTimelineEventKind::SessionStateChanged
@@ -1635,6 +1639,9 @@ fn decode_kind(
         (_, None) => None,
     };
     let kind = match (discriminator, disposition) {
+        (OutboxEventDiscriminator::CredentialPoolExhausted, _) => {
+            SessionTimelineEventKind::TurnFailed
+        }
         (OutboxEventDiscriminator::SessionCreated, _) => SessionTimelineEventKind::SessionCreated,
         (OutboxEventDiscriminator::SessionStateChanged, _) => {
             SessionTimelineEventKind::SessionStateChanged

@@ -3720,3 +3720,48 @@ private enum ProcessProtocolFixtureError: Error {
   case missingProviderFailureCause
   case missingUnknownDiagnostic
 }
+
+extension ProcessProtocolTests {
+  func testPoolExhaustionDecodesUnprojectedActionEvidence() throws {
+    let state = try SignalboxJSONCoding.decoder().decode(
+      SignalboxTranscriptTurnState.self,
+      from: poolExhaustionStateJSON(
+        members: #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":null}}]"#
+      )
+    )
+    guard case .failedCredentialPoolExhausted(let evidence) = state else {
+      return XCTFail("Expected typed exhaustion.")
+    }
+    XCTAssertEqual(evidence.policyMembers, ["only"])
+    XCTAssertEqual(evidence.members.count, 1)
+    XCTAssertEqual(evidence.members[0].exclusion, .profileQuarantine(recordGeneration: nil))
+    XCTAssertNil(evidence.members[0].resetAtUnixMS)
+  }
+
+  func testPoolExhaustionInvalidEvidenceProducesADiagnostic() throws {
+    for members in [
+      #"[]"#,
+      #"[{"profile":"foreign","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":null}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine"}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":"0"}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"unknown"}}]"#,
+    ] {
+      let state = try SignalboxJSONCoding.decoder().decode(
+        SignalboxTranscriptTurnState.self, from: poolExhaustionStateJSON(members: members)
+      )
+      guard case .unknown(let kind, _, let diagnostic) = state else {
+        XCTFail("Malformed evidence became a terminal state: \(members)")
+        continue
+      }
+      XCTAssertEqual(kind, "failed_credential_pool_exhausted")
+      XCTAssertNotNil(diagnostic)
+    }
+  }
+
+  /// Arbitrary distinct correlations; the evidence shape is the test input.
+  private func poolExhaustionStateJSON(members: String) -> Data {
+    Data(
+      #"{"type":"failed_credential_pool_exhausted","terminal_frontier_id":"11111111-1111-4111-8111-111111111111","terminal_attempt_id":"22222222-2222-4222-8222-222222222222","failure_entry_id":"33333333-3333-4333-8333-333333333333","pool_policy_id":"44444444-4444-4444-8444-444444444444","policy_members":["only"],"members":\#(members)}"#.utf8
+    )
+  }
+}

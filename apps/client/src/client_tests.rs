@@ -5349,3 +5349,60 @@ async fn program_cancellation_rejects_a_receipt_for_another_run() -> Result<(), 
     server.await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn pool_projection_rejects_a_foreign_policy_read() -> Result<(), Box<dyn Error>> {
+    use signalbox_process_protocol::{CredentialPoolExclusion, CredentialPoolMemberEvidence};
+    let session_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let turn_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let pool_policy_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let policy_members = vec![String::from("excluded-member")];
+    let members = vec![CredentialPoolMemberEvidence {
+        profile: policy_members[0].clone(),
+        reset_at_unix_ms: None,
+        exclusion: CredentialPoolExclusion::ProfileQuarantine {
+            record_generation: None,
+        },
+    }];
+    for response in [
+        ServerMessage::CredentialPoolPolicy {
+            pool_policy_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
+            policy_members: policy_members.clone(),
+        },
+        ServerMessage::CredentialPoolPolicy {
+            pool_policy_id,
+            policy_members: vec![String::from("foreign-member")],
+        },
+    ] {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            accept_request_and_reply(
+                &listener,
+                &ClientRequest::ReadCredentialPoolPolicy {
+                    session_id,
+                    turn_id,
+                    pool_policy_id,
+                },
+                response,
+            )
+            .await
+        });
+        let mut client = ProcessClient::new(socket);
+        assert!(matches!(
+            crate::credential_pool::validate(
+                &mut client,
+                session_id,
+                turn_id,
+                pool_policy_id,
+                &policy_members,
+                &members
+            )
+            .await,
+            Err(ClientError::Protocol(_))
+        ));
+        server.await??;
+    }
+    Ok(())
+}

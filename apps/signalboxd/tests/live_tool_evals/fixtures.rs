@@ -1992,6 +1992,9 @@ impl SnapshotTurnDisposition {
     pub(crate) fn from_process_state(state: &ProcessTurnState) -> Self {
         match state {
             ProcessTurnState::Completed { .. } => Self::Completed,
+            ProcessTurnState::FailedCredentialPoolExhausted(_) => {
+                Self::from_failed_model_call(None)
+            }
             ProcessTurnState::Failed {
                 terminal_model_call,
                 ..
