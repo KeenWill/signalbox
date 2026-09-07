@@ -245,7 +245,8 @@ where
             statement,
             content,
         } => {
-            handle_commission_session(
+            // Box the composed commission future to reduce the dispatcher's poll frame.
+            Box::pin(handle_commission_session(
                 writer,
                 version,
                 request_id,
@@ -257,7 +258,7 @@ where
                     content,
                 },
                 services,
-            )
+            ))
             .await
         }
         ClientRequest::CreateSessionFromImportedFrontier {
