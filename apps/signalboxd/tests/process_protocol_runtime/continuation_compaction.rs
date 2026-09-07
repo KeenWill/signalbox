@@ -17,6 +17,8 @@ enum ContinuationSession {
     RepositoryWatch,
     /// Created held with an external finish gate, commissioned before release.
     CommissionedRepositoryWatch,
+    /// Commissioned with the fixture alias, which is removed before execution recovery.
+    CommissionedRepositoryWatchViaRemovedAlias,
 }
 
 async fn queued_continuation_session(
@@ -35,18 +37,31 @@ async fn queued_continuation_session(
     let creation = CreateSession::new(
         DurableCommandId::from_uuid(Uuid::now_v7()),
         provenance,
-        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
-            DirectModelSelection::from_uuid(Uuid::from_u128(1)),
-        )),
+        SessionConfigurationDefaults::new(match kind {
+            ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias => {
+                ModelSelectionRequest::Alias(signalbox_domain::ModelAlias::from_uuid(
+                    Uuid::from_u128(2),
+                ))
+            }
+            _ => ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(1))),
+        }),
     )
     .with_lifecycle(
-        if matches!(kind, ContinuationSession::CommissionedRepositoryWatch) {
+        if matches!(
+            kind,
+            ContinuationSession::CommissionedRepositoryWatch
+                | ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias
+        ) {
             StartGate::Held
         } else {
             StartGate::Open
         },
         SessionOwnership::Owned,
-        if matches!(kind, ContinuationSession::CommissionedRepositoryWatch) {
+        if matches!(
+            kind,
+            ContinuationSession::CommissionedRepositoryWatch
+                | ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias
+        ) {
             Some(signalbox_domain::FinishCondition::ExternalGate)
         } else {
             None
@@ -60,7 +75,8 @@ async fn queued_continuation_session(
     let mut connection = Connection::connect(runtime.socket()).await?;
     let wire_session = CanonicalUuid::from_uuid(session.into_uuid());
     let turn = match kind {
-        ContinuationSession::CommissionedRepositoryWatch => {
+        ContinuationSession::CommissionedRepositoryWatch
+        | ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias => {
             use signalbox_domain::{
                 AcceptedInputId, CommandPrincipal, GoalStatement, GoalUserAction, GoalUserCommand,
                 SessionLifecycleCommand, SessionLifecycleOperation,
@@ -83,7 +99,7 @@ async fn queued_continuation_session(
                         )?),
                     ),
                     Some(candidates),
-                    |_| None,
+                    |alias| configuration.resolve_alias(alias),
                 )
                 .await?;
             assert!(matches!(
@@ -218,6 +234,14 @@ fn continuation_compaction(
     summary: ScriptedModel<ModelCallId>,
 ) -> Result<ReportedUsageCompaction, Box<dyn Error>> {
     let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    continuation_compaction_with_configuration(runtime, summary, configuration)
+}
+
+fn continuation_compaction_with_configuration(
+    runtime: &RunningRuntime,
+    summary: ScriptedModel<ModelCallId>,
+    configuration: signalboxd::HubModelConfiguration,
+) -> Result<ReportedUsageCompaction, Box<dyn Error>> {
     let runtime_models = configuration.runtime_model_catalog();
     let calls = PostgresModelCallRepository::new(
         runtime.pool.clone(),
@@ -417,20 +441,48 @@ async fn failed_continuation_compaction_closes_the_successor_without_retrying()
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn held_repository_watch_compaction_successor_completes_its_commissioned_goal()
 -> Result<(), Box<dyn Error>> {
+    commissioned_compaction_completes_goal(ContinuationSession::CommissionedRepositoryWatch).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn a_removed_alias_does_not_block_commissioned_compaction_recovery()
+-> Result<(), Box<dyn Error>> {
+    commissioned_compaction_completes_goal(
+        ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias,
+    )
+    .await
+}
+
+async fn commissioned_compaction_completes_goal(
+    kind: ContinuationSession,
+) -> Result<(), Box<dyn Error>> {
     let runtime = Box::pin(RunningRuntime::start()).await?;
-    let (session, original) = Box::pin(queued_continuation_session(
-        &runtime,
-        ContinuationSession::CommissionedRepositoryWatch,
-    ))
-    .await?;
+    let (session, original) = Box::pin(queued_continuation_session(&runtime, kind)).await?;
     let summary = ScriptedModel::single(completed_script(
         "fixture-model",
         "The repository change remains unfinished.",
         TokenUsage::default(),
     ));
     let probe = summary.clone();
-    let compaction = continuation_compaction(&runtime, summary)?;
-    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let configuration = match kind {
+        ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias => {
+            // This is the alias frozen when the fixture commissions its goal.
+            let retired_alias = "[[aliases]]\nalias_id = \"00000000-0000-0000-0000-000000000002\"\nselection_id = \"00000000-0000-0000-0000-000000000001\"\n";
+            let configuration = support::parse_model_configuration(
+                &MODEL_CONFIGURATION.replace(retired_alias, ""),
+            )?;
+            assert!(
+                configuration
+                    .resolve_alias(signalbox_domain::ModelAlias::from_uuid(Uuid::from_u128(2)))
+                    .is_none()
+            );
+            configuration
+        }
+        _ => support::parse_model_configuration(MODEL_CONFIGURATION)?,
+    };
+    let compaction =
+        continuation_compaction_with_configuration(&runtime, summary, configuration.clone())?;
     let runtime_models = configuration.runtime_model_catalog();
     let ordinary = compaction::RecordingCountedScriptedModel::following(
         [
@@ -553,6 +605,11 @@ async fn held_repository_watch_compaction_successor_completes_its_commissioned_g
     tokio::spawn(pass.run(session)).await??;
     assert_eq!(ordinary_probe.prepared_operations().len(), 3);
     assert_eq!(probe.received_operations().len(), 1);
+    assert_eq!(
+        probe.received_operations()[0].resolved_target.as_str(),
+        "fixture-model",
+        "compaction uses the direct model frozen by goal admission"
+    );
     let repository = signalbox_persistence::goal::GoalRepository::new(runtime.pool.clone());
     let goal = repository
         .load_goal(session)

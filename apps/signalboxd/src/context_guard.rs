@@ -10,9 +10,9 @@ use signalbox_application::{
     ModelCallInputTokenCounter, OperatorFailureClass, SchedulerPassExpiryHandler, ToolCatalog,
 };
 use signalbox_domain::{
-    AcceptedInputTurnActivationIdentities, ContextFrontierId, FailedModelCallTurnIdentities,
-    ModelCallId, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId, SessionId,
-    TurnAttemptId, TurnId, TurnTerminalCause,
+    AcceptedInputTurnActivationIdentities, ContextFrontierId, DirectModelSelection,
+    FailedModelCallTurnIdentities, ModelCallId, ResolvedContextFrontierSnapshot,
+    SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId, TurnTerminalCause,
 };
 use signalbox_model_provider_runtime::{ContextCompactionModel, RuntimeModelCatalog};
 use signalbox_persistence::{
@@ -154,6 +154,7 @@ pub struct ReportedUsageCompaction {
 struct ReportedUsageCompactionCandidate {
     preview: PreparedActivationPreview,
     turn: TurnId,
+    continuation_selection: Option<DirectModelSelection>,
 }
 
 impl fmt::Debug for ReportedUsageCompaction {
@@ -237,13 +238,18 @@ impl ReportedUsageCompaction {
         else {
             return Ok(());
         };
-        let ReportedUsageCompactionCandidate { preview, turn } = candidate;
+        let ReportedUsageCompactionCandidate {
+            preview,
+            turn,
+            continuation_selection,
+        } = candidate;
         let applied = match compact_automatically(
             &self.model_calls,
             &self.model_configuration,
             &self.compaction_model,
             session,
             turn,
+            continuation_selection,
             observe_prepared,
         )
         .await
@@ -371,7 +377,18 @@ impl ReportedUsageCompaction {
                 .await
                 .map_err(ReportedUsageCompactionError::Continuation)?
         {
-            return Ok(Some(ReportedUsageCompactionCandidate { preview, turn }));
+            let selection = preview
+                .prepared()
+                .turn()
+                .configuration()
+                .effective()
+                .model()
+                .selected_direct();
+            return Ok(Some(ReportedUsageCompactionCandidate {
+                preview,
+                turn,
+                continuation_selection: Some(selection),
+            }));
         }
         let prospective = self
             .model_calls
@@ -453,7 +470,11 @@ impl ReportedUsageCompaction {
         if !reported_requires_compaction && !failure_requires_compaction {
             return Ok(None);
         }
-        Ok(Some(ReportedUsageCompactionCandidate { preview, turn }))
+        Ok(Some(ReportedUsageCompactionCandidate {
+            preview,
+            turn,
+            continuation_selection: None,
+        }))
     }
 }
 
@@ -1018,6 +1039,7 @@ where
                             &compaction_model,
                             session,
                             turn,
+                            None,
                             observe_prepared.as_deref(),
                         )
                         .await;

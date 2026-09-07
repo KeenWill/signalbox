@@ -64,8 +64,9 @@ a headroom record. For a repository-watch-created session, the daemon queues at
 most one successor per such terminalization with the fixed input
 `Continue the unfinished repository-watch task from the compacted context.` and
 compacts the terminal frontier through the existing automatic compaction path
-before activating that successor, which remains in the commissioned goal lineage
-when the terminal turn belongs to a goal.
+using that successor's frozen direct model selection before activating it; the
+successor remains in the commissioned goal lineage when the terminal turn
+belongs to a goal.
 
 Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen

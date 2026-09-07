@@ -558,6 +558,7 @@ pub(crate) async fn compact_automatically(
     model: &Arc<dyn ContextCompactionModel>,
     session: SessionId,
     turn: TurnId,
+    frozen_selection: Option<DirectModelSelection>,
     observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
 ) -> Result<AppliedContextCompaction, AutomaticContextCompactionError> {
     let defaults = match ProcessReadRepository::new(model_calls.pool().clone())
@@ -571,12 +572,15 @@ pub(crate) async fn compact_automatically(
         }
         Err(error) => return Err(AutomaticContextCompactionError::Read(error)),
     };
-    let selection = match defaults.defaults().model() {
-        ModelSelectionRequest::Direct(selection) => selection,
-        ModelSelectionRequest::Alias(alias) => model_configuration
-            .resolve_alias(alias)
-            .ok_or(AutomaticContextCompactionError::Configuration)?
-            .selected(),
+    let selection = match frozen_selection {
+        Some(selection) => selection,
+        None => match defaults.defaults().model() {
+            ModelSelectionRequest::Direct(selection) => selection,
+            ModelSelectionRequest::Alias(alias) => model_configuration
+                .resolve_alias(alias)
+                .ok_or(AutomaticContextCompactionError::Configuration)?
+                .selected(),
+        },
     };
     let target = model_configuration
         .target_catalog()
