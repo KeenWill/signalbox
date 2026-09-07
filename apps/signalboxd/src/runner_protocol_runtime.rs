@@ -238,9 +238,7 @@ impl PostgresRunnerRegistrationService {
                         && nudge.nudge(*session)
                             == signalbox_application::EligibilityNudgeOutcome::DroppedAtCapacity
                     {
-                        let nudge = nudge.clone();
-                        let session = *session;
-                        tokio::spawn(async move { nudge.nudge_when_ready(session).await });
+                        nudge.nudge_when_ready(*session).await;
                     }
                     tracing::info!(
                         enrollment_id = %loss.enrollment().into_uuid(),
@@ -3563,15 +3561,19 @@ mod tests {
             );
         }
         let service = service.with_eligibility_nudge(nudge);
-        service
-            .transition_connection(
-                enrolled.enrollment_id,
-                enrolled.connection_epoch,
-                RunnerConnectionTransition::TransportClosed,
-            )
-            .await
-            .expect("the terminal transition propagates its durable loss cursor");
+        let propagation = service.transition_connection(
+            enrolled.enrollment_id,
+            enrolled.connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        );
+        tokio::pin!(propagation);
         if saturated {
+            assert!(
+                timeout(EMPTY_SWEEP_OBSERVATION_WINDOW, &mut propagation)
+                    .await
+                    .is_err(),
+                "loss propagation waits for capacity instead of spawning unbounded delivery tasks"
+            );
             assert_eq!(
                 timeout(NUDGE_DEADLINE, work_source.next())
                     .await
@@ -3580,6 +3582,9 @@ mod tests {
                 earlier_hint
             );
         }
+        propagation
+            .await
+            .expect("the terminal transition propagates its durable loss cursor");
         assert_eq!(
             timeout(NUDGE_DEADLINE, work_source.next())
                 .await
