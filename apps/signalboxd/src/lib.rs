@@ -70,6 +70,7 @@ pub use oauth::OauthCredentialService;
 mod process_runtime;
 mod repo_watch_checkout;
 mod repo_watch_credentials;
+pub use repo_watch_credentials::credential_files_conflict;
 pub mod repo_watch_dispatch;
 pub mod repo_watch_runtime;
 mod repo_watch_webhook;
@@ -531,6 +532,15 @@ impl<Execution> FatalExecutionSupervisor<Execution> {
     pub fn recovery_reporter(&self) -> FatalRecoveryReporter {
         FatalRecoveryReporter {
             fatal_signal: self.fatal_signal.clone(),
+        }
+    }
+
+    /// Shares recovery and occupancy authority with a freshly composed execution snapshot.
+    pub fn with_execution<E>(&self, execution: E) -> FatalExecutionSupervisor<E> {
+        FatalExecutionSupervisor {
+            execution,
+            fatal_signal: self.fatal_signal.clone(),
+            bounded_expirations: self.bounded_expirations.clone(),
         }
     }
 
@@ -5293,3 +5303,7 @@ mod tests {
         ));
     }
 }
+
+/// Durable configuration reload composition.
+pub mod configuration_reload;
+pub mod model_catalog_runtime;
