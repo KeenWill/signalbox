@@ -18,13 +18,30 @@ impl OauthCredentialRepository {
             provisioning::commit(transaction).await?;
             return Ok(outcome);
         }
+        provisioning::read_catalog(&mut transaction).await?;
         let generation: Option<i64> = sqlx::query_scalar(
             "SELECT generation FROM oauth_credential_profile WHERE profile = $1 FOR UPDATE",
         )
         .bind(&command.profile)
         .fetch_optional(&mut *transaction)
         .await?;
-        let outcome = if generation.is_some() {
+        let retained: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM oauth_credential_registration WHERE profile = $1)
+                OR EXISTS (SELECT 1 FROM oauth_credential_authorization WHERE profile = $1)
+                OR EXISTS (SELECT 1 FROM oauth_credential_exchange WHERE profile = $1)
+                OR EXISTS (
+                    SELECT 1 FROM delete_oauth_credential_command c
+                    JOIN delete_oauth_credential_result r USING (command_id)
+                    WHERE c.profile = $1 AND r.outcome IN ('deleted', 'already_deleted'))
+                OR EXISTS (
+                    SELECT 1 FROM reprovision_oauth_credential_command c
+                    JOIN reprovision_oauth_credential_result r USING (command_id)
+                    WHERE c.profile = $1 AND r.outcome = 'not_provisioned')",
+        )
+        .bind(&command.profile)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let outcome = if generation.is_some() && retained {
             sqlx::query("UPDATE oauth_credential_profile SET generation = generation + 1 WHERE profile = $1")
                 .bind(&command.profile).execute(&mut *transaction).await?;
             let removed =

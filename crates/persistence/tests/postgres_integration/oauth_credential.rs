@@ -100,6 +100,91 @@ fn command(operation: OauthCredentialOperation) -> OauthCredentialCommand {
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn oauth_delete_rejects_pool_only_rows_and_retains_real_administration_history()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let profile = "pool-only";
+    super::credential_capacity_policy::prepare_capacity_call(&pool, 43000, oauth_pool(&[profile]))
+        .await?;
+    let repository = OauthCredentialRepository::new(pool.clone());
+    for reason in [
+        OauthCredentialFailure::NonOauthProfile,
+        OauthCredentialFailure::UnknownProfile,
+    ] {
+        let command = OauthCredentialCommand {
+            profile: profile.into(),
+            ..command(OauthCredentialOperation::Delete)
+        };
+        assert_eq!(
+            repository
+                .delete(&command, reason, || panic!(
+                    "a rejected deletion cannot discard cache"
+                ))
+                .await?,
+            OauthCredentialHandlingOutcome::Recorded(OauthCredentialOutcome::Failed(reason))
+        );
+    }
+    let generation: i64 =
+        sqlx::query_scalar("SELECT generation FROM oauth_credential_profile WHERE profile = $1")
+            .bind(profile)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(generation, 0);
+    let registration = registration();
+    repository
+        .replace_registrations(&[
+            ("registered-only".into(), registration.clone()),
+            ("reprovision-only".into(), registration.clone()),
+        ])
+        .await?;
+    assert_eq!(
+        repository
+            .delete(
+                &OauthCredentialCommand {
+                    profile: "registered-only".into(),
+                    ..command(OauthCredentialOperation::Delete)
+                },
+                OauthCredentialFailure::UnknownProfile,
+                || {}
+            )
+            .await?,
+        OauthCredentialHandlingOutcome::Recorded(OauthCredentialOutcome::AlreadyDeleted)
+    );
+    assert!(matches!(
+        repository
+            .begin_exchange(
+                &OauthCredentialCommand {
+                    profile: "reprovision-only".into(),
+                    ..command(OauthCredentialOperation::Reprovision)
+                },
+                Ok(&registration)
+            )
+            .await?,
+        OauthStartOutcome::Existing(OauthCredentialHandlingOutcome::Recorded(
+            OauthCredentialOutcome::NotProvisioned
+        ))
+    ));
+    repository.replace_registrations(&[]).await?;
+    for profile in ["registered-only", "reprovision-only"] {
+        assert_eq!(
+            repository
+                .delete(
+                    &OauthCredentialCommand {
+                        profile: profile.into(),
+                        ..command(OauthCredentialOperation::Delete)
+                    },
+                    OauthCredentialFailure::UnknownProfile,
+                    || {}
+                )
+                .await?,
+            OauthCredentialHandlingOutcome::Recorded(OauthCredentialOutcome::AlreadyDeleted)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn oauth_delete_serializes_copy_advances_generation_and_preserves_replay_and_history()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool, _) = migrated_postgres().await?;

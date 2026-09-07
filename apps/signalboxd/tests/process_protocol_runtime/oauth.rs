@@ -9,6 +9,18 @@ async fn oauth_delete_uses_retained_identity_without_a_current_declaration()
 -> Result<(), Box<dyn Error>> {
     use signalbox_persistence::oauth_credential::{OauthCredentialRepository, OauthRegistration};
     let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request(1, ClientRequest::ListSessions {})
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::SessionsStart {}
+    );
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionsEnd { .. }
+    ));
     let repository = OauthCredentialRepository::new(runtime.pool.clone());
     repository
         .replace_registrations(&[(
@@ -21,15 +33,32 @@ async fn oauth_delete_uses_retained_identity_without_a_current_declaration()
             },
         )])
         .await?;
+    use signalbox_persistence::oauth_credential as stored;
+    let initial = repository
+        .delete(
+            &stored::OauthCredentialCommand {
+                command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+                operation: stored::OauthCredentialOperation::Delete,
+                profile: "retired-oauth".into(),
+            },
+            stored::OauthCredentialFailure::UnknownProfile,
+            || {},
+        )
+        .await?;
+    assert_eq!(
+        initial,
+        stored::OauthCredentialHandlingOutcome::Recorded(
+            stored::OauthCredentialOutcome::AlreadyDeleted
+        )
+    );
     repository.replace_registrations(&[]).await?;
-    let mut connection = Connection::connect(runtime.socket()).await?;
     let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
     let request = ClientRequest::DeleteOauthCredential {
         command_id,
         profile: "retired-oauth".into(),
     };
     for _ in 0..2 {
-        connection.request(1, request.clone()).await?;
+        connection.request(2, request.clone()).await?;
         assert_eq!(
             response_within(&mut connection).await?.message(),
             &ServerMessage::OauthCredentialReceipt {
@@ -44,7 +73,7 @@ async fn oauth_delete_uses_retained_identity_without_a_current_declaration()
     )
     .fetch_one(&runtime.pool)
     .await?;
-    assert_eq!(generation, 1);
+    assert_eq!(generation, 2);
     drop(connection);
     runtime.stop().await
 }

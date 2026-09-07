@@ -401,15 +401,16 @@ yield `superseded`, and changed registrations yield
 authorization returns `already_provisioned` without an exchange; re-provisioning
 without authorization returns `not_provisioned`.
 
-Deletion uses retained profile identity even without a current OAuth
-declaration; without retained identity it records the same unknown-profile or
-non-OAuth failure. A new deletion holds the dispatch profile lock, advances the
-generation, removes authorization and cached access, and returns `deleted` or
-`already_deleted` when no authorization was stored; equal replay changes
-nothing. Current registration and referenced history remain, and a child already
-holding a copied token finishes. Successful re-provisioning replaces
-authorization and clears every OAuth delivery-origin quarantine and cached
-access; failed re-provisioning clears none.
+Deletion uses OAuth registration or administration history even without a
+current declaration; a pool-lock row alone does not qualify. Without retained
+identity it records the same unknown-profile or non-OAuth failure. A new
+deletion holds the dispatch profile lock, advances the generation, removes
+authorization and cached access, and returns `deleted` or `already_deleted` when
+no authorization was stored; equal replay changes nothing. Current registration
+and referenced history remain, and a child already holding a copied token
+finishes. Successful re-provisioning replaces authorization and clears every
+OAuth delivery-origin quarantine and cached access; failed re-provisioning
+clears none.
 
 ## Planned
 
