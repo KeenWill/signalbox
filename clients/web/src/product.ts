@@ -994,24 +994,37 @@ export class SameOriginProductTransport implements ProductTransport {
 
 export const productTransport = new SameOriginProductTransport()
 
+// A draft is bounded before decoding, JSON escaping, or UTF-8 allocation.
+export const MAX_SESSION_MESSAGE_LENGTH = MAX_PRODUCT_JSON_BYTES
+const SESSION_INPUT_DEADLINE_MS = 30_000
+
 export async function submitSessionInput(sessionId: string, input: WebSubmitInputRequest) {
+  if (input.message.length > MAX_SESSION_MESSAGE_LENGTH)
+    throw new ProductInputError('Message exceeds the browser draft length limit.')
   const body = JSON.stringify(decodeWebSubmitInputRequest(input))
   if (new TextEncoder().encode(body).byteLength > MAX_PRODUCT_JSON_BYTES) {
     throw new ProductInputError('Message exceeds the browser request byte limit.')
   }
-  const response = await request(`/api/sessions/${sessionId}/input`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    credentials: 'same-origin',
-    body,
-  })
-  if (response.status === 204) return
-  if (!response.ok)
-    throw new ProductRequestError(
-      response.status,
-      decodeWebApiErrorResponse(await readBoundedJson(response)),
-    )
-  throw new TypeError('Input response did not acknowledge durable acceptance.')
+  const controller = new AbortController()
+  const deadline = setTimeout(() => controller.abort(), SESSION_INPUT_DEADLINE_MS)
+  try {
+    const response = await request(`/api/sessions/${sessionId}/input`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      credentials: 'same-origin',
+      body,
+      signal: controller.signal,
+    })
+    if (response.status === 204) return
+    if (!response.ok)
+      throw new ProductRequestError(
+        response.status,
+        decodeWebApiErrorResponse(await readBoundedJson(response)),
+      )
+    throw new TypeError('Input response did not acknowledge durable acceptance.')
+  } finally {
+    clearTimeout(deadline)
+  }
 }
 
 export async function readSessionLive(sessionId: string, signal?: AbortSignal) {
@@ -1046,11 +1059,12 @@ export async function* followSession(
         response.status,
         decodeWebApiErrorResponse(await readBoundedJson(response)),
       )
-    if (
-      !response.body ||
-      response.headers.get('content-type')?.split(';')[0] !== 'application/x-ndjson'
-    )
+    const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
+    if (mediaType !== 'application/x-ndjson') {
+      await response.body?.cancel().catch(() => undefined)
       throw new TypeError('Session follow requires NDJSON')
+    }
+    if (!response.body) throw new TypeError('Session follow response has no body')
     const reader = response.body.getReader()
     const decoder = new TextDecoder('utf-8', { fatal: true })
     let line: number[] = []
@@ -1123,18 +1137,26 @@ export async function* followSession(
 const SESSION_TRANSCRIPT_MAX_ITEMS = 8
 const SESSION_TRANSCRIPT_MAX_BYTES = 65536
 
+export type SessionTranscriptLimits = Pick<
+  WebContractBootstrap['limits'],
+  'max_timeline_detail_items' | 'max_timeline_detail_bytes'
+>
+
 export async function readSessionTranscript(
   sessionId: string,
   first: string,
   through: string,
   continuation: WebTimelineDetailContinuation | null,
+  limits: SessionTranscriptLimits,
   signal?: AbortSignal,
 ) {
+  const maxItems = Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items)
+  const maxBytes = Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
   const query = new URLSearchParams({
     first,
     through,
-    max_items: String(SESSION_TRANSCRIPT_MAX_ITEMS),
-    max_bytes: String(SESSION_TRANSCRIPT_MAX_BYTES),
+    max_items: String(maxItems),
+    max_bytes: String(maxBytes),
   })
   if (continuation?.type === 'more_at')
     query.set('cursor_address', continuation.address.event_sequence)
@@ -1148,21 +1170,15 @@ export async function readSessionTranscript(
     credentials: 'same-origin',
     signal,
   })
-  // Eight items can each carry 256 references. Each reference fits in 1 KiB:
+  // Each selected item can carry 256 references. Each reference fits in 1 KiB:
   // a 71-byte blob ID, a 20-digit length, and 255 visible ASCII media-type
   // bytes (at most doubled by JSON escaping), plus JSON keys and punctuation.
   // The remaining budget covers escaped text and non-attachment envelopes.
-  const payload = await readBoundedJson(
-    response,
-    SESSION_TRANSCRIPT_MAX_BYTES * 7 + SESSION_TRANSCRIPT_MAX_ITEMS * 256 * 1024,
-  )
+  const payload = await readBoundedJson(response, maxBytes * 7 + maxItems * 256 * 1024)
   if (!response.ok)
     throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
   const page = decodeWebSessionTimelineDetailPage(payload)
-  if (
-    page.items.length > SESSION_TRANSCRIPT_MAX_ITEMS ||
-    page.projected_body_bytes > SESSION_TRANSCRIPT_MAX_BYTES
-  )
+  if (page.items.length > maxItems || page.projected_body_bytes > maxBytes)
     throw new TypeError('Transcript detail exceeds the selected page limits')
   if (
     page.session_id !== sessionId ||
@@ -1173,6 +1189,24 @@ export async function readSessionTranscript(
     )
   )
     throw new TypeError('Transcript detail belongs to another window')
+  if (continuation !== null) {
+    const initial = page.items[0]
+    const address =
+      continuation.type === 'more_at' ? continuation.address : continuation.body.address
+    if (initial?.address.event_sequence !== address.event_sequence)
+      throw new TypeError('Transcript detail does not match the requested continuation address')
+    if (continuation.type === 'more_body') {
+      const cursor = continuation.body
+      const excerpt =
+        cursor.field === 'input_text' && initial.body.type === 'user_input'
+          ? initial.body.text
+          : cursor.field === 'model_response' && initial.body.type === 'model_call'
+            ? initial.body.response
+            : null
+      if (cursor.member_index !== 0 || excerpt?.offset_bytes !== cursor.offset_bytes)
+        throw new TypeError('Transcript detail does not match the requested body continuation')
+    }
+  }
   return page
 }
 

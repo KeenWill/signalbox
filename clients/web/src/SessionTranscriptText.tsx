@@ -4,7 +4,7 @@ import type {
   WebSessionTimelineDetailBody,
   WebTimelineDetailContinuation,
 } from './generated/web-contract.mjs'
-import { readSessionTranscript } from './product'
+import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 
 function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
   const excerpt =
@@ -23,21 +23,44 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
   )
 }
 
-export function SessionTranscriptText({
-  sessionId,
-  first,
-  through,
-  observed,
-}: {
+interface SessionTranscriptTextProps {
   sessionId: string
   first: string
   through: string
   observed: string
-}) {
+  limits: SessionTranscriptLimits
+}
+
+export function SessionTranscriptText(props: SessionTranscriptTextProps) {
+  return (
+    <TranscriptWindow
+      key={`${props.sessionId}:${props.first}:${props.through}:${props.observed}`}
+      {...props}
+    />
+  )
+}
+
+function TranscriptWindow({
+  sessionId,
+  first,
+  through,
+  observed,
+  limits,
+}: SessionTranscriptTextProps) {
   const [continuation, setContinuation] = useState<WebTimelineDetailContinuation | null>(null)
   const transcript = useQuery({
-    queryKey: ['production', 'session-text', sessionId, first, through, observed, continuation],
-    queryFn: ({ signal }) => readSessionTranscript(sessionId, first, through, continuation, signal),
+    queryKey: [
+      'production',
+      'session-text',
+      sessionId,
+      first,
+      through,
+      observed,
+      limits,
+      continuation,
+    ],
+    queryFn: ({ signal }) =>
+      readSessionTranscript(sessionId, first, through, continuation, limits, signal),
     gcTime: 0,
   })
   return (

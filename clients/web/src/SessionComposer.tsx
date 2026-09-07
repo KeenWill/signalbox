@@ -2,7 +2,12 @@ import { useMutation } from '@tanstack/react-query'
 import { useState } from 'react'
 import { invokeCommand } from './commands'
 import type { WebSubmitInputRequest } from './generated/web-contract.mjs'
-import { ProductInputError, ProductRequestError, submitSessionInput } from './product'
+import {
+  MAX_SESSION_MESSAGE_LENGTH,
+  ProductInputError,
+  ProductRequestError,
+  submitSessionInput,
+} from './product'
 import {
   actions,
   selectPendingSessionInput,
@@ -112,9 +117,12 @@ export function SessionComposer({
       <textarea
         id="session-message"
         rows={3}
+        maxLength={MAX_SESSION_MESSAGE_LENGTH}
         value={retained?.message ?? text}
         readOnly={retained !== null}
-        onChange={(event) => setText(event.target.value)}
+        onChange={(event) => {
+          if (event.target.value.length <= MAX_SESSION_MESSAGE_LENGTH) setText(event.target.value)
+        }}
       />
       <div className="session-composer-actions">
         <button type="submit" disabled={!canSend}>

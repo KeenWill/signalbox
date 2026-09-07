@@ -1,5 +1,19 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { followSession, readSessionTranscript, submitSessionInput } from './product'
+import type { WebTimelineDetailContinuation } from './generated/web-contract.mjs'
+import {
+  followSession,
+  MAX_SESSION_MESSAGE_LENGTH,
+  readSessionTranscript as readTranscript,
+  submitSessionInput,
+} from './product'
+
+const limits = { max_timeline_detail_items: 128, max_timeline_detail_bytes: 65536 }
+const readSessionTranscript = (
+  sessionId: string,
+  first: string,
+  through: string,
+  continuation: WebTimelineDetailContinuation | null,
+) => readTranscript(sessionId, first, through, continuation, limits)
 
 const sessionId = '00000000-0000-0000-0000-000000000991'
 const snapshot = (cursor: string) => ({
@@ -131,7 +145,7 @@ it('uses the exact command identity and text on every explicit submission attemp
   }
   await submitSessionInput(sessionId, input)
   await submitSessionInput(sessionId, input)
-  expect(fetch.mock.calls[0]).toEqual(fetch.mock.calls[1])
+  expect(fetch.mock.calls[0]?.[1].body).toEqual(fetch.mock.calls[1]?.[1].body)
   expect(fetch.mock.calls[0]?.[1]).toMatchObject({ method: 'POST', body: JSON.stringify(input) })
 })
 
@@ -139,8 +153,19 @@ it('uses body continuations to replace one bounded transcript region', async () 
   const fetch = vi.fn().mockResolvedValue(
     Response.json({
       session_id: sessionId,
-      items: [],
-      projected_body_bytes: 0,
+      items: [
+        {
+          ...inputPage(1).items[0],
+          address: { event_sequence: '44' },
+          body: {
+            type: 'user_input',
+            turn_id: sessionId,
+            text: { text: 'x', offset_bytes: '65000', total_bytes: '65001', continuation: null },
+            attachments: [],
+          },
+        },
+      ],
+      projected_body_bytes: 129,
       continuation: null,
     }),
   )
@@ -149,7 +174,7 @@ it('uses body continuations to replace one bounded transcript region', async () 
     type: 'more_body',
     body: {
       address: { event_sequence: '44' },
-      field: 'model_response',
+      field: 'input_text',
       member_index: 0,
       offset_bytes: '65000',
     },
@@ -161,7 +186,7 @@ it('uses body continuations to replace one bounded transcript region', async () 
     max_items: '8',
     max_bytes: '65536',
     cursor_address: '44',
-    cursor_field: 'model_response',
+    cursor_field: 'input_text',
     cursor_member: '0',
     cursor_offset: '65000',
   })
@@ -239,4 +264,151 @@ it('rejects contradictory transcript byte accounting through the generated decod
   await expect(readSessionTranscript(sessionId, '1', '1', null)).rejects.toThrow(
     'computed 129 bytes',
   )
+})
+
+it.each([null, 'text/plain'])(
+  'cancels a follow body with rejected media type %s',
+  async (mediaType) => {
+    const cancel = vi.fn()
+    const response = new Response(new ReadableStream({ cancel }), {
+      headers: mediaType ? { 'content-type': mediaType } : {},
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(Response.json(snapshot('41')))
+        .mockResolvedValueOnce(response),
+    )
+    const follow = followSession(sessionId, new AbortController().signal)
+    await follow.next()
+    await expect(follow.next()).rejects.toThrow('NDJSON')
+    expect(cancel).toHaveBeenCalledOnce()
+  },
+)
+
+it('normalizes the follow media type before adopting the stream', async () => {
+  const response = stream({ kind: 'snapshot', snapshot: snapshot('41') })
+  response.headers.set('content-type', ' Application/X-NDJSON ; charset=utf-8 ')
+  vi.stubGlobal(
+    'fetch',
+    vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(snapshot('41')))
+      .mockResolvedValueOnce(response),
+  )
+  const follow = followSession(sessionId, new AbortController().signal)
+  await follow.next()
+  expect((await follow.next()).value).toMatchObject({ kind: 'snapshot' })
+  await follow.return(undefined)
+})
+
+it('aborts a stalled submission at its deadline without changing the retry payload', async () => {
+  vi.useFakeTimers()
+  const fetch = vi.fn(
+    (_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('Deadline elapsed', 'AbortError')),
+          { once: true },
+        )
+      }),
+  )
+  vi.stubGlobal('fetch', fetch)
+  const input = {
+    command_id: '00000000-0000-0000-0000-000000000992',
+    message: 'Retain the timed-out message.',
+  }
+  const result = expect(submitSessionInput(sessionId, input)).rejects.toThrow()
+  await vi.advanceTimersByTimeAsync(30_000)
+  await result
+  expect(fetch.mock.calls[0]?.[1].signal?.aborted).toBe(true)
+  expect(vi.getTimerCount()).toBe(0)
+  fetch.mockResolvedValueOnce(new Response(null, { status: 204 }))
+  await submitSessionInput(sessionId, input)
+  expect(fetch.mock.calls[1]?.[1].body).toEqual(fetch.mock.calls[0]?.[1].body)
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it('rejects an oversized draft before serialization or network I/O', async () => {
+  const fetch = vi.fn()
+  vi.stubGlobal('fetch', fetch)
+  const stringify = vi.spyOn(JSON, 'stringify')
+  try {
+    await expect(
+      submitSessionInput(sessionId, {
+        command_id: '00000000-0000-0000-0000-000000000992',
+        message: 'x'.repeat(MAX_SESSION_MESSAGE_LENGTH * 100),
+      }),
+    ).rejects.toThrow('draft length limit')
+    expect(stringify).not.toHaveBeenCalled()
+    expect(fetch).not.toHaveBeenCalled()
+  } finally {
+    stringify.mockRestore()
+  }
+})
+
+it('clamps transcript requests and response validation to advertised limits', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json(inputPage(1)))
+    .mockResolvedValueOnce(Response.json(inputPage(2)))
+    .mockResolvedValueOnce(Response.json(inputPage(1, 1000)))
+  vi.stubGlobal('fetch', fetch)
+  const advertised = { max_timeline_detail_items: 1, max_timeline_detail_bytes: 1024 }
+  await readTranscript(sessionId, '1', '9', null, advertised)
+  const url = new URL(fetch.mock.calls[0]?.[0], 'http://localhost')
+  expect(url.searchParams.get('max_items')).toBe('1')
+  expect(url.searchParams.get('max_bytes')).toBe('1024')
+  await expect(readTranscript(sessionId, '1', '9', null, advertised)).rejects.toThrow(
+    'selected page limits',
+  )
+  await expect(readTranscript(sessionId, '1', '9', null, advertised)).rejects.toThrow(
+    'selected page limits',
+  )
+})
+
+it('requires a continuation page to start at the requested address', async () => {
+  const page = inputPage(1)
+  vi.stubGlobal(
+    'fetch',
+    vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(page))
+      .mockResolvedValueOnce(Response.json(page))
+      .mockResolvedValueOnce(Response.json(inputPage(0))),
+  )
+  await expect(
+    readSessionTranscript(sessionId, '1', '9', {
+      type: 'more_at',
+      address: { event_sequence: '1' },
+    }),
+  ).resolves.toEqual(page)
+  await expect(
+    readSessionTranscript(sessionId, '1', '9', {
+      type: 'more_at',
+      address: { event_sequence: '2' },
+    }),
+  ).rejects.toThrow('continuation address')
+  await expect(
+    readSessionTranscript(sessionId, '1', '9', {
+      type: 'more_at',
+      address: { event_sequence: '1' },
+    }),
+  ).rejects.toThrow('continuation address')
+})
+
+it.each([
+  { field: 'input_text', member_index: 0, offset_bytes: '1' },
+  { field: 'model_response', member_index: 0, offset_bytes: '0' },
+  { field: 'input_text', member_index: 1, offset_bytes: '0' },
+] as const)('rejects mismatched body continuation %j', async (body) => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(inputPage(1))))
+  await expect(
+    readSessionTranscript(sessionId, '1', '9', {
+      type: 'more_body',
+      body: { ...body, address: { event_sequence: '1' } },
+    }),
+  ).rejects.toThrow('body continuation')
 })

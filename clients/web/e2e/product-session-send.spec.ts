@@ -14,14 +14,18 @@ const excerpt = (text: string) => ({
 })
 
 async function sessionApi(page: Page, busy = false, selectedSessionId = sessionId) {
-  const state = { grown: false, submissions: [] as Array<{ command_id: string; message: string }> }
+  const state = {
+    grown: false,
+    observed: false,
+    submissions: [] as Array<{ command_id: string; message: string }>,
+  }
   let releaseFollow = () => {}
   const followReady = new Promise<void>((resolve) => {
     releaseFollow = resolve
   })
   const snapshot = () => ({
     session_id: selectedSessionId,
-    observed_through: state.grown ? '44' : '43',
+    observed_through: state.grown || state.observed ? '44' : '43',
     active: busy ? { turn_id: turnId, state: { kind: 'running', model_call_id: null } } : null,
     queued_turn_count: '0',
     queued_turn_ids: [],
@@ -137,13 +141,17 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
         },
         first_address: { event_sequence: '41' },
         latest_address: { event_sequence: latest },
-        observed_through: latest,
+        observed_through: state.observed ? '44' : latest,
         work: { active_turn_count: busy ? '1' : '0', queued_turn_count: '0' },
       },
     })
   })
   return {
     state,
+    advanceObservation: () => {
+      state.observed = true
+      releaseFollow()
+    },
     grow: () => {
       state.grown = true
       releaseFollow()
@@ -392,4 +400,113 @@ test('refuses new session input at the retained-command limit while allowing exa
     .fill('Capacity is available again.')
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeEnabled()
   for (const api of apis) api.grow()
+})
+
+test('times out an unanswered send and retries its retained identity', async ({ page }) => {
+  const api = await sessionApi(page)
+  await page.clock.install()
+  const attempts: Array<{ command_id: string; message: string }> = []
+  let release = () => {}
+  const stalled = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route(`**/api/sessions/${sessionId}/input`, async (route) => {
+    attempts.push(route.request().postDataJSON())
+    if (attempts.length === 1) {
+      await stalled
+      return route.abort()
+    }
+    return route.fulfill({ status: 204 })
+  })
+  await openSession(page)
+  const draft = page.getByRole('textbox', { name: 'Message to session' })
+  await expect(draft).toHaveAttribute('maxlength', '65536')
+  await draft.fill('Keep the deadline identity.')
+  await page.getByRole('button', { name: 'Send message', exact: true }).click()
+  await expect.poll(() => attempts.length).toBe(1)
+  await page.clock.fastForward(30_001)
+  await expect(
+    page.getByText('Acceptance is unconfirmed. Retry sends the same command and message.'),
+  ).toBeVisible()
+  await page.getByRole('button', { name: 'Retry message' }).click()
+  await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
+  expect(attempts[1]).toEqual(attempts[0])
+  release()
+  api.grow()
+})
+
+test('uses smaller advertised transcript limits in the workspace', async ({ page }) => {
+  const api = await sessionApi(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        limits: {
+          ...bootstrapFixture.limits,
+          max_timeline_detail_items: 1,
+          max_timeline_detail_bytes: 1024,
+        },
+      },
+    }),
+  )
+  const requests: URL[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/timeline-detail')) requests.push(new URL(request.url()))
+  })
+  await openSession(page)
+  expect(requests.length).toBeGreaterThan(0)
+  expect(
+    requests.every(
+      (url) =>
+        url.searchParams.get('max_items') === '1' && url.searchParams.get('max_bytes') === '1024',
+    ),
+  ).toBe(true)
+  api.advanceObservation()
+})
+
+test('resets text pagination when only the window observation changes', async ({ page }) => {
+  const api = await sessionApi(page)
+  const cursors: Array<string | null> = []
+  await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get('cursor_address')
+    cursors.push(cursor)
+    const item: WebSessionTimelineDetail =
+      cursor === null
+        ? {
+            address: { event_sequence: '41' },
+            kind: 'input_accepted',
+            projected_body_bytes: 128 + initialMessage.length,
+            body: {
+              type: 'user_input',
+              turn_id: turnId,
+              text: excerpt(initialMessage),
+              attachments: [],
+            },
+          }
+        : {
+            address: { event_sequence: '43' },
+            kind: 'turn_completed',
+            projected_body_bytes: 128,
+            body: { type: 'event_fact', kind: 'turn_completed' },
+          }
+    return route.fulfill({
+      json: {
+        session_id: sessionId,
+        items: [item],
+        projected_body_bytes: item.projected_body_bytes,
+        continuation:
+          cursor === null ? { type: 'more_at', address: { event_sequence: '43' } } : null,
+      },
+    })
+  })
+  await openSession(page)
+  await page.getByRole('button', { name: 'Next text page' }).click()
+  await expect(page.getByRole('button', { name: 'First text page' })).toBeVisible()
+  expect(cursors).toEqual([null, '43'])
+  api.advanceObservation()
+  await expect(page.getByText('Live updates unavailable.')).toBeVisible()
+  await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'First text page' })).toHaveCount(0)
+  expect(cursors.slice(2).length).toBeGreaterThan(0)
+  expect(cursors.slice(2).every((cursor) => cursor === null)).toBe(true)
 })

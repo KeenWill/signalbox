@@ -13,6 +13,7 @@ import {
 import { invokeCommand } from './commands'
 import { MissingAttachmentState } from './features/artifacts/ArtifactAttachments'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
+import type { SessionTranscriptLimits } from './product'
 import { SessionComposer } from './SessionComposer'
 import { SessionTranscriptText } from './SessionTranscriptText'
 import {
@@ -125,6 +126,7 @@ export function SessionWorkspaceSurface({
   onWindowRequestConsumed,
   timelineCapability,
   transcriptAvailable,
+  transcriptLimits,
   timelineRef,
   windowRequest,
 }: {
@@ -135,6 +137,7 @@ export function SessionWorkspaceSurface({
   onWindowRequestConsumed: () => void
   timelineCapability: TimelineCapability
   transcriptAvailable: boolean
+  transcriptLimits: SessionTranscriptLimits
   timelineRef: RefObject<HTMLDivElement | null>
   windowRequest: { anchor: 'first' | 'latest'; attempt: number } | null
 }) {
@@ -582,7 +585,6 @@ export function SessionWorkspaceSurface({
           {transcriptAvailable &&
             displayedSession.descriptor.sizes.projected_text_bytes !== '0' && (
               <SessionTranscriptText
-                key={`${sessionId}:${displayedSession.window.items[0]?.address.event_sequence}:${displayedSession.window.items.at(-1)?.address.event_sequence}`}
                 sessionId={sessionId ?? ''}
                 first={
                   displayedSession.window.items[0]?.address.event_sequence ??
@@ -593,6 +595,7 @@ export function SessionWorkspaceSurface({
                   displayedSession.descriptor.latest_address.event_sequence
                 }
                 observed={displayedSession.descriptor.observed_through}
+                limits={transcriptLimits}
               />
             )}
           <div
