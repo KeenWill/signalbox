@@ -205,8 +205,8 @@ A smoke's required aggregate gates merge for a pull request that changes the
 paths its gate names, an exception to the repository default that a credentialed
 live smoke never gates merge. The Anthropic, OpenAI and Claude Code gates name
 their adapter crate and workflow file, the Claude Code gate also the shared CLI
-supervision module; the Codex gate names only the `tooling/codex-cli` pin
-directory and its workflow file, so an adapter-only change runs no Codex smoke.
+supervision module; the Codex gate names its adapter crate, the shared CLI
+supervision module, the `tooling/codex-cli` pin directory and its workflow file.
 
 A twice-daily schedule runs each smoke as a provider-drift canary between
 adapter-touching changes, spending one paid exchange per run.
