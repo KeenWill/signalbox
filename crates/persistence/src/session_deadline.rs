@@ -105,7 +105,6 @@ impl PostgresSessionDeadlineRepository {
     ) -> Result<SessionDeadlinePassOutcome, SessionDeadlineRepositoryError> {
         let admission_millis = stored_millis(self.bounds.admission)?;
         let waiting_millis = stored_millis(self.bounds.waiting)?;
-        let mut transaction = self.pool.begin().await.map_err(database_failure("begin"))?;
         let candidate: Option<Uuid> = sqlx::query_scalar(
             "SELECT session_id
                FROM session_deadline
@@ -133,16 +132,13 @@ impl PostgresSessionDeadlineRepository {
         )
         .bind(admission_millis)
         .bind(waiting_millis)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&self.pool)
         .await
         .map_err(database_failure("select_deadline_candidate"))?;
         let Some(candidate) = candidate else {
-            transaction
-                .rollback()
-                .await
-                .map_err(database_failure("rollback_idle"))?;
             return Ok(SessionDeadlinePassOutcome::Idle);
         };
+        let mut transaction = self.pool.begin().await.map_err(database_failure("begin"))?;
         let session = session_id_from_uuid(candidate);
         let held = session_lifecycle::load_locked(&mut transaction, session)
             .await

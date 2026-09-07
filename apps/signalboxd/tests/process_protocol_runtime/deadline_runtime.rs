@@ -67,6 +67,9 @@ async fn deadline_warning_names_the_failed_operation_and_database_error() {
         warning.contains("session deadline pass produced no decision"),
         "{warning}"
     );
-    assert!(warning.contains("query: \"begin\""), "{warning}");
+    assert!(
+        warning.contains("query: \"select_deadline_candidate\""),
+        "{warning}"
+    );
     assert!(warning.contains("PoolClosed"), "{warning}");
 }
