@@ -242,10 +242,18 @@ its server; same-address reload swaps routing atomically, and an address change
 binds the replacement before retiring the old listener. Bind refusal leaves the
 running listener intact.
 
+Each bounded canonical poll resource or page key retains its HTTP validators and
+an accepted typed snapshot sufficient to reconstruct its normalized contribution
+and nested-fetch identities. This transport state is separate from events and
+rules and contains no raw provider JSON, credential values, or reactions from
+actors outside the configured signal-reviewer set. Before every poller
+composition, including startup and re-enablement, the runtime compares the
+persisted reviewer set with configured signal reviewers and invalidates both
+validators and snapshots when they differ. After restart with an unchanged set,
+the first complete poll sends conditional requests for every resource with a
+persisted validator.
+
 ## Planned
 
 Repository-watch dispatch provenance is planned in the
-[repository watch design](../design/repo-watch.md).
-
-Restart-persistent poll caching is planned in the
 [repository watch design](../design/repo-watch.md).

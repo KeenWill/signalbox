@@ -24,7 +24,7 @@ use crate::{
 };
 
 // GitHub's maximum REST page size, used only to select complete provider pages.
-const PAGE_SIZE: u16 = 100;
+pub(crate) const PAGE_SIZE: u16 = 100;
 // One attempt may consume at most one fifth of the authenticated user's
 // 5,000-request REST allowance, counting GraphQL requests against the same ceiling.
 const MAX_OBSERVATION_REQUESTS: usize = 1_000;
@@ -49,6 +49,7 @@ query RepositoryWatchReviewThreads($owner: String!, $name: String!, $number: Int
 /// Provider failures retain request context without response bodies or credentials.
 #[derive(Debug)]
 pub enum ObservationError {
+    Cache(StoreError),
     Transport(GitHubClientError),
     InvalidResponse,
     InvalidState {
@@ -83,6 +84,7 @@ impl ObservationError {
 impl fmt::Display for ObservationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cache(error) => write!(f, "{error}"),
             Self::Transport(error) => write!(f, "{error}"),
             Self::InvalidState {
                 repository,
@@ -116,6 +118,7 @@ impl Error for ObservationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Transport(error) => Some(error),
+            Self::Cache(error) => Some(error),
             Self::InvalidState { source, .. } => Some(source),
             Self::Request { source, .. } => Some(source),
             Self::InvalidResponse
@@ -198,36 +201,6 @@ impl GitHubObservationRead for GitHubClient {
     }
 }
 
-struct ObservationReadCounts<'a, T> {
-    io: &'a T,
-    requests: std::sync::atomic::AtomicUsize,
-    comments: std::sync::atomic::AtomicUsize,
-}
-
-impl<T: GitHubObservationRead> GitHubObservationRead for ObservationReadCounts<'_, T> {
-    async fn page(&self, path: &str) -> Result<(Value, bool), ObservationError> {
-        self.requests
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let result = self.io.page(path).await?;
-        if path
-            .split('?')
-            .next()
-            .is_some_and(|path| path.ends_with("/comments"))
-        {
-            self.comments.fetch_add(
-                result.0.as_array().map_or(0, Vec::len),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        }
-        Ok(result)
-    }
-    async fn threads(&self, request: Value) -> Result<Value, ObservationError> {
-        self.requests
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.io.threads(request).await
-    }
-}
-
 struct ObservationReadBudget<'a, T> {
     io: &'a T,
     requests: std::sync::atomic::AtomicUsize,
@@ -292,56 +265,25 @@ where
     type Error = RepositoryAttemptError<Loader::Error>;
 
     async fn poll(&mut self, producer: EventProducer) -> Result<(), Self::Error> {
-        let started = std::time::Instant::now();
-        let baseline = self
-            .store
-            .ingest_baseline(&self.repository)
-            .await
-            .map_err(RepositoryAttemptError::Store)?;
         let client = self
             .clients
             .load_client()
             .await
             .map_err(RepositoryAttemptError::Client)?;
-        let counted = ObservationReadCounts {
-            io: &client,
-            requests: std::sync::atomic::AtomicUsize::new(0),
-            comments: std::sync::atomic::AtomicUsize::new(0),
-        };
-        let observed = fetch_observation(
-            &counted,
+        let admission = crate::poll_cache::poll_with_cache(
+            &client,
+            &self.store,
             &self.repository,
             &self.signal_reviewers,
-            baseline.observation.as_ref(),
-            &baseline.merged_baselines,
+            producer,
         )
         .await
-        .map_err(RepositoryAttemptError::Observation)?;
-        match self
-            .store
-            .ingest_observation(&baseline, &observed, producer)
-            .await
-            .map_err(RepositoryAttemptError::Store)?
-        {
-            FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged => {
-                let state = observed.observation.state();
-                tracing::info!(
-                    repository = self.repository.as_str(),
-                    ?producer,
-                    open_pull_requests = state
-                        .pull_requests()
-                        .iter()
-                        .filter(|p| p.lifecycle() == RepoWatchPullRequestLifecycle::Open)
-                        .count(),
-                    branches = state.branch_heads().len(),
-                    workflow_runs = state.workflow_runs().len(),
-                    requests = counted.requests.load(std::sync::atomic::Ordering::Relaxed),
-                    comments = counted.comments.load(std::sync::atomic::Ordering::Relaxed),
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "repository-watch observation completed"
-                );
-                Ok(())
-            }
+        .map_err(|error| match error {
+            ObservationError::Cache(error) => RepositoryAttemptError::Store(error),
+            error => RepositoryAttemptError::Observation(error),
+        })?;
+        match admission {
+            FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged => Ok(()),
             FrontierEventAdmission::Stale | FrontierEventAdmission::ConflictingReuse => {
                 Err(RepositoryAttemptError::FrontierConflict)
             }

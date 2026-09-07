@@ -180,7 +180,9 @@ impl ConfigurationReload {
                         ReloadRepositoryError::Corruption("startup rule activation failed")
                     })?;
                 self.reconcile(&catalogs).await?;
-                watch.install_reload(prepared).await;
+                watch.install_reload(prepared).await.map_err(|_| {
+                    ReloadRepositoryError::Corruption("reload worker installation failed")
+                })?;
             }
         } else {
             for (request, intent) in pending {
@@ -333,7 +335,9 @@ impl ConfigurationReload {
                     ReloadRepositoryError::Corruption("prior reload worker preparation failed")
                 })?;
                 self.reconcile(&prior).await?;
-                watch.install_reload(prepared).await;
+                watch.install_reload(prepared).await.map_err(|_| {
+                    ReloadRepositoryError::Corruption("reload worker installation failed")
+                })?;
                 *self
                     .current
                     .write()
@@ -342,7 +346,9 @@ impl ConfigurationReload {
                 return Ok(ReloadLookup::Recorded(refusal));
             }
             self.reconcile(&replacement).await?;
-            watch.install_reload(prepared).await;
+            watch.install_reload(prepared).await.map_err(|_| {
+                ReloadRepositoryError::Corruption("reload worker installation failed")
+            })?;
         }
         *self
             .current

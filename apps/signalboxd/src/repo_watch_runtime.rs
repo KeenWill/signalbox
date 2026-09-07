@@ -290,7 +290,10 @@ impl RepositoryWatchRuntime {
             .map_err(|_| RepositoryWatchRuntimeError::Rules)
     }
 
-    pub(crate) async fn install_reload(&self, prepared: PreparedRepositoryWatchReload) {
+    pub(crate) async fn install_reload(
+        &self,
+        prepared: PreparedRepositoryWatchReload,
+    ) -> Result<(), RepositoryWatchRuntimeError> {
         let mut state = self.state.lock().await;
         state.factory.0 = prepared.catalogs.templates;
         state.sink.models = prepared.catalogs.models;
@@ -301,7 +304,7 @@ impl RepositoryWatchRuntime {
         if matches!(state.workers, WorkerState::Running) {
             state.listener.resume().await;
             state.listener.start();
-            state.start_repositories();
+            state.start_repositories().await?;
             state.start_commands(self.clone());
             state.start_sweep(prepared.sweep);
         } else {
@@ -309,6 +312,7 @@ impl RepositoryWatchRuntime {
             state.prepared_sweep = prepared.sweep;
         }
         state.changed.notify_one();
+        Ok(())
     }
 
     /// Reconciles rules and changes the listener inside the serialized reload.
@@ -372,7 +376,7 @@ impl RepositoryWatchRuntime {
             )
             | Err(_) => {
                 if matches!(state.workers, WorkerState::Running) {
-                    state.start_repositories();
+                    state.start_repositories().await?;
                     state.start_commands(self.clone());
                 }
                 return Err(RepositoryWatchRuntimeError::Rules);
@@ -385,28 +389,29 @@ impl RepositoryWatchRuntime {
         state.listener.apply(listener).await;
         if matches!(state.workers, WorkerState::Running) {
             state.listener.start();
-            state.start_repositories();
+            state.start_repositories().await?;
             state.start_commands(self.clone());
         }
         Ok(())
     }
 
-    async fn begin(&self) {
+    async fn begin(&self) -> Result<(), RepositoryWatchRuntimeError> {
         {
             let mut state = self.state.lock().await;
             if matches!(state.workers, WorkerState::Running) {
-                return;
+                return Ok(());
             }
             state.workers = WorkerState::Running;
             if !state.paused {
                 state.listener.resume().await;
                 state.listener.start();
-                state.start_repositories();
+                state.start_repositories().await?;
                 state.start_commands(self.clone());
                 let sweep = state.prepared_sweep.take();
                 state.start_sweep(sweep);
             }
         }
+        Ok(())
     }
 
     /// Starts idle supervision before recovery so resumed workers precede terminal receipts.
@@ -414,8 +419,11 @@ impl RepositoryWatchRuntime {
         self,
         shutdown: watch::Receiver<bool>,
     ) -> JoinHandle<Result<(), RepositoryWatchRuntimeError>> {
-        self.begin().await;
-        tokio::spawn(self.run(shutdown))
+        let begun = self.begin().await;
+        tokio::spawn(async move {
+            begun?;
+            self.run(shutdown).await
+        })
     }
 
     async fn run_commands(self, mut shutdown: watch::Receiver<bool>) {
@@ -443,7 +451,7 @@ impl RepositoryWatchRuntime {
         self,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), RepositoryWatchRuntimeError> {
-        self.begin().await;
+        self.begin().await?;
         let outcome = loop {
             if *shutdown.borrow() {
                 break Ok(());
@@ -542,7 +550,7 @@ impl RuntimeState {
         while self.repositories.join_next().await.is_some() {}
     }
 
-    fn start_repositories(&mut self) {
+    async fn start_repositories(&mut self) -> Result<(), RepositoryWatchRuntimeError> {
         let (shutdown, _) = watch::channel(false);
         self.repository_shutdown = shutdown;
         if let Some(configuration) = self
@@ -550,6 +558,12 @@ impl RuntimeState {
             .as_ref()
             .filter(|configuration| configuration.enabled())
         {
+            for repository in configuration.repositories() {
+                self.store
+                    .prepare_poll_cache(repository.repository(), configuration.signal_reviewers())
+                    .await
+                    .map_err(|_| RepositoryWatchRuntimeError::RepositoryWorker)?;
+            }
             for repository in configuration.repositories() {
                 let Some(wake) = self.wakes.get(repository.repository()).cloned() else {
                     continue;
@@ -568,6 +582,7 @@ impl RuntimeState {
                 ));
             }
         }
+        Ok(())
     }
 
     async fn tick(&mut self) -> Result<(), RepositoryWatchRuntimeError> {
