@@ -310,12 +310,6 @@ impl RateLimits {
             .into_iter()
             .flatten()
         {
-            // The pinned wire protocol reports i32 percentages; do not truncate
-            // wider numeric shapes accepted by the retry-delay decoder.
-            let used_percent = window.used_percent as i32;
-            if f64::from(used_percent) != window.used_percent {
-                return None;
-            }
             let resets_at = window.resets_at.and_then(|seconds| {
                 let duration = std::time::Duration::from_secs(seconds.unsigned_abs());
                 if seconds < 0 {
@@ -330,7 +324,7 @@ impl RateLimits {
                 .and_then(|minutes| minutes.checked_mul(60))
                 .map(std::time::Duration::from_secs);
             windows.push(signalbox_model_runtime::RateLimitWindow {
-                remaining_percent: 100 - i64::from(used_percent),
+                remaining_percent: (100.0 - window.used_percent).floor() as i64,
                 window_duration,
                 resets_at,
             });

@@ -990,18 +990,44 @@ fn capacity_windows_preserve_unknown_duration_and_signed_reset_time() {
 }
 
 #[test]
-fn absent_or_non_integer_native_capacity_does_not_emit_a_snapshot() {
-    for value in [
-        json!({}),
-        json!({"primary":null,"secondary":null}),
-        json!({"primary":{"usedPercent":99.5}}),
-    ] {
+fn absent_capacity_does_not_emit_a_snapshot() {
+    for value in [json!({}), json!({"primary":null,"secondary":null})] {
         let limits: super::frame::RateLimits =
             serde_json::from_value(value.clone()).expect("rate-limit fixture");
         assert_eq!(
             limits.capacity_snapshot(std::time::UNIX_EPOCH),
             None,
             "{value}"
+        );
+    }
+}
+
+#[test]
+fn fractional_capacity_rounds_remaining_percentage_down() {
+    for (used_percent, remaining_percent) in [(0.25, 99), (99.5, 0), (100.25, -1)] {
+        let limits: super::frame::RateLimits = serde_json::from_value(json!({
+            "primary":{"usedPercent":used_percent},
+            "secondary":{"usedPercent":61}
+        }))
+        .expect("fractional rate-limit fixture");
+        let snapshot = limits
+            .capacity_snapshot(std::time::UNIX_EPOCH)
+            .expect("fractional usage retains the snapshot");
+        assert_eq!(
+            snapshot.windows,
+            vec![
+                signalbox_model_runtime::RateLimitWindow {
+                    remaining_percent,
+                    window_duration: None,
+                    resets_at: None,
+                },
+                signalbox_model_runtime::RateLimitWindow {
+                    remaining_percent: 39,
+                    window_duration: None,
+                    resets_at: None,
+                },
+            ],
+            "usedPercent={used_percent}"
         );
     }
 }

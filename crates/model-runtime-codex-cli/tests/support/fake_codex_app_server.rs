@@ -62,6 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let read_limits = read_frame()?;
     assert_eq!(read_limits["method"], "account/rateLimits/read");
     let rate_limits = match selected.as_deref() {
+        Some("capacity_fractional") => json!({
+            "primary":{"usedPercent":99.5,"windowDurationMins":300,"resetsAt":1800000700},
+            "secondary":{"usedPercent":105.25,"windowDurationMins":10080,"resetsAt":1800001400}
+        }),
         Some(
             "capacity_read"
             | "capacity_sparse"
@@ -178,6 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     match scenario.as_str() {
         "capacity_read"
+        | "capacity_fractional"
         | "capacity_read_error"
         | "capacity_sparse"
         | "capacity_read_pending"

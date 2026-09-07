@@ -473,6 +473,39 @@ async fn account_read_emits_capacity_for_the_current_call() {
 }
 
 #[tokio::test]
+async fn fractional_usage_emits_both_capacity_windows() {
+    let scenario = "capacity_fractional";
+    let result = execute_scenario(
+        scenario,
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    completed(&result.evidence);
+    let [(correlation, snapshot)] = result.rate_limits.as_slice() else {
+        panic!("the fractional account read emits one snapshot");
+    };
+    assert_eq!(correlation, scenario);
+    // The peer reports 99.5% and 105.25% used; remaining capacity rounds down.
+    assert_eq!(
+        snapshot.windows,
+        vec![
+            signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: 0,
+                window_duration: Some(Duration::from_secs(18000)),
+                resets_at: Some(UNIX_EPOCH + Duration::from_secs(1800000700)),
+            },
+            signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: -6,
+                window_duration: Some(Duration::from_secs(604800)),
+                resets_at: Some(UNIX_EPOCH + Duration::from_secs(1800001400)),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn sparse_capacity_update_preserves_the_account_reads_primary_window() {
     let scenario = "capacity_sparse";
     let result = execute_scenario(
