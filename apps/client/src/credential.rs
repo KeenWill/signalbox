@@ -52,7 +52,16 @@ pub(crate) async fn credential(
                 output.oauth_credential(&message)?;
                 return Ok(());
             }
-            _ => return Err(ClientError::Protocol("OAuth receipt correlation mismatch")),
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => {
+                return Err(ClientError::remote(*code, message.clone(), *detail).mutation());
+            }
+            _ => {
+                return Err(ClientError::Protocol("OAuth receipt correlation mismatch").mutation());
+            }
         }
     }
 }
@@ -61,8 +70,111 @@ pub(crate) async fn credential(
 mod tests {
     use super::*;
     use crate::arguments::CredentialTarget;
-    use signalbox_process_protocol::{OauthCredentialOutcome, decode_client_line};
+    use signalbox_process_protocol::{
+        ErrorCode, ErrorDetail, OauthCredentialOutcome, decode_client_line,
+    };
     use tokio::{io::AsyncBufReadExt, net::UnixListener};
+
+    #[tokio::test]
+    async fn credential_commit_ambiguous_requires_mutation_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let result = credential_with_reply(
+            CommandId::try_from_uuid(Uuid::now_v7())?,
+            ServerMessage::Error {
+                code: ErrorCode::CommitAmbiguous,
+                message: "credential command commit outcome is ambiguous".into(),
+                detail: ErrorDetail::none(),
+            },
+        )
+        .await?;
+        assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn credential_preserves_definitive_remote_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for code in [ErrorCode::ConflictingReuse, ErrorCode::Unavailable] {
+            const DIAGNOSTIC: &str = "credential command rejected";
+            let result = credential_with_reply(
+                CommandId::try_from_uuid(Uuid::now_v7())?,
+                ServerMessage::Error {
+                    code,
+                    message: DIAGNOSTIC.into(),
+                    detail: ErrorDetail::none(),
+                },
+            )
+            .await?;
+            assert!(
+                matches!(result, Err(ClientError::Remote {
+                    code: actual_code, ref message, ref detail,
+                }) if actual_code == code && message == DIAGNOSTIC && detail == &ErrorDetail::none()),
+                "remote diagnostic must survive OAuth handling for {code:?}: {result:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn credential_unexpected_post_send_frames_require_mutation_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
+        for message in [
+            ServerMessage::ReviewFindingsEnd {
+                finding_count: CanonicalU64::new(0),
+            },
+            ServerMessage::OauthCredentialReceipt {
+                command_id,
+                profile: "different".into(),
+                outcome: OauthCredentialOutcome::Provisioned {},
+            },
+        ] {
+            let result = credential_with_reply(command_id, message.clone()).await?;
+            assert!(
+                matches!(result, Err(ClientError::AmbiguousMutation)),
+                "unexpected reply must preserve mutation ambiguity: {message:?}: {result:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Exchanges a provision request for the supplied reply over a local socket.
+    async fn credential_with_reply(
+        command_id: CommandId,
+        message: ServerMessage,
+    ) -> Result<Result<(), ClientError>, Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(std::io::Error::other)?;
+            let frame = ServerFrame::try_new(request.request_id(), message)
+                .map_err(std::io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&frame).map_err(std::io::Error::other)?)
+                .await
+        });
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let result = credential(
+            &mut client,
+            &mut output,
+            CredentialCommand::Provision(CredentialTarget {
+                profile: "subscription".into(),
+                command_id: Some(command_id),
+            }),
+        )
+        .await;
+        server.await??;
+        Ok(result)
+    }
 
     #[tokio::test]
     async fn credential_client_prints_progress_then_receipt_and_checks_correlation()
