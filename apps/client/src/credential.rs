@@ -41,8 +41,14 @@ pub(crate) async fn credential(
                 profile: actual_profile,
                 ..
             } if *actual_id == command_id && *actual_profile == profile => {
-                output.oauth_credential(&message)?;
-                output.flush()?;
+                output
+                    .oauth_credential(&message)
+                    .map_err(ClientError::from)
+                    .map_err(ClientError::mutation)?;
+                output
+                    .flush()
+                    .map_err(ClientError::from)
+                    .map_err(ClientError::mutation)?;
             }
             ServerMessage::OauthCredentialReceipt {
                 command_id: actual_id,
@@ -143,6 +149,14 @@ mod tests {
         command_id: CommandId,
         message: ServerMessage,
     ) -> Result<Result<(), ClientError>, Box<dyn std::error::Error>> {
+        credential_with_reply_and_output(command_id, message, &mut Vec::new()).await
+    }
+
+    async fn credential_with_reply_and_output(
+        command_id: CommandId,
+        message: ServerMessage,
+        stdout: &mut dyn std::io::Write,
+    ) -> Result<Result<(), ClientError>, Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let listener = UnixListener::bind(&socket)?;
@@ -160,9 +174,8 @@ mod tests {
                 .await
         });
         let mut client = ProcessClient::new(socket);
-        let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let mut output = Output::new(stdout, &mut stderr, false);
         let result = credential(
             &mut client,
             &mut output,
@@ -174,6 +187,49 @@ mod tests {
         .await;
         server.await??;
         Ok(result)
+    }
+
+    #[derive(Debug)]
+    enum ProgressOutputFailure {
+        Write,
+        Flush,
+    }
+
+    impl std::io::Write for ProgressOutputFailure {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            match self {
+                Self::Write => Err(std::io::ErrorKind::BrokenPipe.into()),
+                Self::Flush => Ok(bytes.len()),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_progress_output_failures_require_mutation_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for mut output in [ProgressOutputFailure::Write, ProgressOutputFailure::Flush] {
+            let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
+            let result = credential_with_reply_and_output(
+                command_id,
+                ServerMessage::OauthCredentialAuthorization {
+                    command_id,
+                    profile: "subscription".into(),
+                    user_code: "OPERATOR-CODE".into(),
+                    verification_uri: "https://authorization.example/verify".into(),
+                },
+                &mut output,
+            )
+            .await?;
+            assert!(
+                matches!(result, Err(ClientError::AmbiguousMutation)),
+                "post-send progress output failure must preserve mutation ambiguity: {output:?}: {result:?}"
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]
