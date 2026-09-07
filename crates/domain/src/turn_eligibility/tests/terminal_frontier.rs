@@ -1326,3 +1326,102 @@ fn incomplete_failed_terminal_frontier_fails_closed() {
         }
     );
 }
+
+fn completed_reasoning_suffix() -> AcceptedInputSchedulingReconstitutionInput {
+    let session = current_session();
+    let origin = accepted_origin(1);
+    let origin_entry = semantic_entry(30);
+    let before = semantic_entry(31);
+    let reasoning = semantic_entry(32);
+    let after = semantic_entry(33);
+    let completion = semantic_entry(34);
+    let starting = frontier(40);
+    let terminal = frontier(41);
+    let call_id = model_call_id(50);
+    let attempt = turn_attempt_id(60);
+    let record = origin.record(
+        &session,
+        AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
+            starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+            starting_frontier: starting.id(),
+            completing_attempt: attempt,
+            completing_attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(
+                UnstoppedAttemptDisposition::TurnCompleted,
+            ),
+            completing_call: call_id,
+            terminal_frontier: terminal.id(),
+        },
+    );
+    let call = ModelCallReconstitutionInput::new(
+        call_id,
+        origin.turn(),
+        attempt,
+        FrozenModelSelection::Direct(direct(1)),
+        ResolvedProviderTarget::naming(provider_model_identity(51)),
+        starting.id(),
+        ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
+    );
+    AcceptedInputSchedulingReconstitutionInput::new(session.clone(), vec![record], vec![
+        origin.entry(&session, origin_entry),
+        SemanticTranscriptEntryReconstitutionInput::new(before.id(), session.id(), InitialSemanticTranscriptEntryPayload::AssistantText {
+            producing_call: call_id, value: AssistantText::try_new("before".to_string()).unwrap(),
+        }),
+        SemanticTranscriptEntryReconstitutionInput::new(reasoning.id(), session.id(), InitialSemanticTranscriptEntryPayload::ProviderReasoning {
+            producing_call: call_id, item: crate::ProviderReasoningItem::try_new(
+                r#"{ "type":"reasoning", "id":"rs_fixture", "summary":[], "encrypted_content":"opaque" }"#.to_string()).unwrap(),
+        }),
+        SemanticTranscriptEntryReconstitutionInput::new(after.id(), session.id(), InitialSemanticTranscriptEntryPayload::AssistantText {
+            producing_call: call_id, value: AssistantText::try_new("after".to_string()).unwrap(),
+        }),
+        SemanticTranscriptEntryReconstitutionInput::new(completion.id(), session.id(), InitialSemanticTranscriptEntryPayload::TurnCompleted { turn: origin.turn() }),
+    ], vec![starting.snapshot(&session, &[origin_entry]), terminal.snapshot(&session, &[origin_entry, before, reasoning, after, completion])], None)
+    .with_model_call_facts(vec![crate::PinnedProviderTargetReconstitutionInput::new(call.turn(), call.target())], vec![call])
+}
+
+#[test]
+fn completed_reasoning_suffix_reconstitutes_in_provider_order() {
+    let input = completed_reasoning_suffix();
+    let expected: Vec<_> = input
+        .semantic_entries
+        .iter()
+        .map(|entry| {
+            SemanticTranscriptEntryRef::from_source(entry.source_session(), entry.identity())
+        })
+        .collect();
+    let reasoning = input.semantic_entries[2].clone();
+    let projection = input
+        .reconstitute()
+        .expect("interleaved reasoning and text retain their completing call");
+    let terminal = projection
+        .turns()
+        .next()
+        .unwrap()
+        .terminal_frontier()
+        .unwrap();
+    assert_eq!(terminal.ordered_entries().collect::<Vec<_>>(), expected);
+    assert_eq!(
+        projection.semantic_entry(expected[2]).unwrap().payload(),
+        reasoning.payload()
+    );
+}
+
+#[test]
+fn completed_reasoning_suffix_rejects_a_different_producing_call() {
+    let mut input = completed_reasoning_suffix();
+    let entry = &input.semantic_entries[2];
+    let InitialSemanticTranscriptEntryPayload::ProviderReasoning { item, .. } = entry.payload()
+    else {
+        panic!("fixture puts reasoning between its two text parts");
+    };
+    input.semantic_entries[2] = SemanticTranscriptEntryReconstitutionInput::new(
+        entry.identity(),
+        entry.source_session(),
+        InitialSemanticTranscriptEntryPayload::ProviderReasoning {
+            producing_call: model_call_id(999),
+            item: item.clone(),
+        },
+    );
+    input
+        .reconstitute()
+        .expect_err("reasoning from another call cannot occupy the completed suffix");
+}

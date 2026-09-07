@@ -582,6 +582,9 @@ pub enum ToolResponsePartIdentity {
     ProviderCompaction {
         entry: SemanticTranscriptEntryId,
     },
+    ProviderReasoning {
+        entry: SemanticTranscriptEntryId,
+    },
     ToolCall {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -592,6 +595,7 @@ pub enum ToolResponsePartIdentity {
 impl ToolResponsePartIdentity {
     pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self;
+    pub const fn provider_reasoning(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn tool_call(
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -627,6 +631,9 @@ pub enum StoppedToolResponsePartIdentity {
     ProviderCompaction {
         entry: SemanticTranscriptEntryId,
     },
+    ProviderReasoning {
+        entry: SemanticTranscriptEntryId,
+    },
     ToolCall {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -638,6 +645,7 @@ pub enum StoppedToolResponsePartIdentity {
 impl StoppedToolResponsePartIdentity {
     pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self;
+    pub const fn provider_reasoning(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn tool_call(
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,

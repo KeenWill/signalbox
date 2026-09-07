@@ -3,6 +3,207 @@
 
 use crate::*;
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn completed_provider_reasoning_retains_order_and_projects_a_marker()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6da0;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let item_json = String::from(
+        " { \"encrypted_content\": \"opaque continuation\", \"id\": \"rs_1\", \"type\": \"reasoning\", \"summary\": [] } ",
+    );
+    let item = signalbox_domain::ProviderReasoningItem::try_new(item_json.clone())
+        .expect("the fixture carries a complete reasoning item");
+    let reasoning_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21));
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(
+            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                response: vec![
+                    AssistantResponsePart::Text(
+                        AssistantText::try_new(String::from("before"))
+                            .expect("nonempty fixture text"),
+                    ),
+                    AssistantResponsePart::ProviderReasoning(item),
+                    AssistantResponsePart::Text(
+                        AssistantText::try_new(String::from("after"))
+                            .expect("nonempty fixture text"),
+                    ),
+                ],
+                retained_input_tokens: 19,
+                retained_output_tokens: 3,
+            },
+        );
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation.clone(),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 20)),
+                    reasoning_entry,
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
+                ],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+            )),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?;
+    assert_eq!(
+        repository
+            .reread_terminal_observation(fixture.session, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted,
+    );
+    let stored: Vec<(String, String, Decimal, Option<Decimal>)> = sqlx::query_as(
+        "SELECT payload_kind, assistant_text_value, assistant_response_part_ordinal,
+                assistant_response_text_start_bytes
+           FROM semantic_transcript_entry WHERE producing_model_call_id = $1
+          ORDER BY assistant_response_part_ordinal",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        stored,
+        vec![
+            (
+                String::from("assistant_text"),
+                String::from("before"),
+                Decimal::ZERO,
+                Some(Decimal::ZERO)
+            ),
+            (
+                String::from("provider_reasoning"),
+                item_json,
+                Decimal::ONE,
+                None
+            ),
+            (
+                String::from("assistant_text"),
+                String::from("after"),
+                Decimal::from(2),
+                Some(Decimal::from(6))
+            ),
+        ]
+    );
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the completed turn remains readable");
+    assert!(snapshot.entries().iter().any(|entry| matches!(entry,
+        ProcessTranscriptEntry::ProviderReasoning { entry, turn, model_call, .. }
+            if *entry == reasoning_entry && *turn == fixture.turn && *model_call == fixture.call
+    )));
+
+    let mut corruption = pool.begin().await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER USER")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query("UPDATE semantic_transcript_entry SET assistant_text_value = $1 WHERE semantic_entry_id = $2")
+        .bind(r#"{"type":"reasoning","id":"rs_1","encrypted_content":null}"#)
+        .bind(reasoning_entry.into_uuid()).execute(&mut *corruption).await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ENABLE TRIGGER USER")
+        .execute(&mut *corruption)
+        .await?;
+    corruption.commit().await?;
+    assert!(
+        ProcessReadRepository::new(pool.clone())
+            .read_transcript(fixture.session)
+            .await
+            .is_err()
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn steered_completion_accepts_interleaved_provider_reasoning() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6db0;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 30));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 29)),
+                fixture.session,
+                UserContent::try_text(String::from("steer after this response"))
+                    .expect("valid steering text"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.turn,
+                },
+            ),
+            steering_input,
+            None,
+        )
+        .await?;
+    let item = signalbox_domain::ProviderReasoningItem::try_new(String::from(
+        r#"{"type":"reasoning","id":"rs_steered","encrypted_content":"opaque"}"#,
+    ))
+    .expect("the fixture carries encrypted reasoning");
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 32));
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(
+            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                response: vec![
+                    AssistantResponsePart::Text(
+                        AssistantText::try_new(String::from("before"))
+                            .expect("nonempty fixture text"),
+                    ),
+                    AssistantResponsePart::ProviderReasoning(item),
+                    AssistantResponsePart::Text(
+                        AssistantText::try_new(String::from("after"))
+                            .expect("nonempty fixture text"),
+                    ),
+                ],
+                retained_input_tokens: 19,
+                retained_output_tokens: 3,
+            },
+        );
+    let outcome = repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 20)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
+                ],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+            )),
+            |accepted| {
+                assert_eq!(accepted, steering_input);
+                successor
+            },
+        )
+        .await?;
+    let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+        panic!("the steered response completes");
+    };
+    assert_eq!(
+        completed.reclassified_pending_steering()[0].turn(),
+        successor
+    );
+    assert!(
+        ProcessReadRepository::new(pool.clone())
+            .read_transcript(fixture.session)
+            .await?
+            .is_some()
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 fn expect_ready_model_call(
     outcome: PrepareInitialModelCallOutcome,
 ) -> Box<PreparedModelCallRequest> {
