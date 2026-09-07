@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 pub struct OauthRegistration {
     /// Exact configured client identifier.
     pub client_id: String,
-    /// Canonical HTTPS token endpoint.
+    /// Canonical HTTPS device-poll token endpoint.
     pub token_url: String,
+    /// Canonical HTTPS refresh endpoint.
+    pub refresh_token_url: String,
     /// Canonical HTTPS device endpoint.
     pub device_authorization_url: String,
     /// Exact scopes in declared order.

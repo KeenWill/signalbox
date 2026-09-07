@@ -3204,6 +3204,7 @@ mod tests {
         let registration = signalbox_persistence::oauth_credential::OauthRegistration {
             client_id: "startup-client".into(),
             token_url: "https://authorization.example/token".into(),
+            refresh_token_url: "https://authorization.example/oauth/token".into(),
             device_authorization_url: "https://authorization.example/device".into(),
             scopes: vec!["openid".into()],
         };

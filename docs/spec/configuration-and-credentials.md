@@ -697,17 +697,21 @@ authorization when the response lacks an identity token. Authorization commits
 and pool-policy membership insertion serialize account-independence checks
 against every retained co-membership.
 
-`oauth` is spelled `delivery = "oauth"` with exactly four required fields:
-`client_id`, `token_url`, `device_authorization_url`, and the string array
-`scopes`. These are configuration, never build-provided constants. `client_id`
-is 1 through 1,024 NUL-free UTF-8 bytes preserved exactly. `scopes` holds 1
-through 64 strings of 1 through 256 bytes, each byte an RFC 6749 scope-token
-character, declared order is request order, exact duplicates are rejected, and
-no normalization occurs. Both endpoints are absolute `https` URLs with no
-fragment and no user information; every other scheme is rejected with no
-plaintext or local-host exception. The tuple is compared by parsed canonical
-components, scheme, lowercased host, effective port, path, and query, never by
-configured bytes. The delivery admits only `billing_kind = "subscription"`.
+`oauth` is spelled `delivery = "oauth"` with exactly five required fields:
+`client_id`, `token_url`, `refresh_token_url`, `device_authorization_url`, and
+the string array `scopes`. These are configuration, never build-provided
+constants. `client_id` is 1 through 1,024 NUL-free UTF-8 bytes preserved
+exactly. `scopes` holds 1 through 64 strings of 1 through 256 bytes, each byte
+an RFC 6749 scope-token character, declared order is request order, exact
+duplicates are rejected, and no normalization occurs. All endpoints are absolute
+`https` URLs with no fragment and no user information; every other scheme is
+rejected with no plaintext or local-host exception. The tuple is compared by
+parsed canonical components, scheme, lowercased host, effective port, path, and
+query, never by configured bytes. The delivery admits only
+`billing_kind = "subscription"`.
+
+Refresh sends JSON `{ client_id, grant_type: "refresh_token", refresh_token }`
+to `refresh_token_url`; device polling uses `token_url`.
 
 Refresh and dispatch compare the stored tuple with the current registration
 under the profile row lock; mismatch quarantines the generation before any token

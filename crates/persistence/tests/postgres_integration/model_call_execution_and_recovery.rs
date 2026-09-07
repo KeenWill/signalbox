@@ -143,6 +143,7 @@ async fn oauth_quarantine_committing_during_selection_prevents_a_call_checkpoint
     let registration = OauthRegistration {
         client_id: "fixture-client".into(),
         token_url: "https://oauth.example/token".into(),
+        refresh_token_url: "https://oauth.example/oauth/token".into(),
         device_authorization_url: "https://oauth.example/device".into(),
         scopes: vec!["openid".into()],
     };

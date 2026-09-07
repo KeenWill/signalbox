@@ -29,9 +29,25 @@ async fn oauth_refresh_rotates_once_and_preserves_identity_when_omitted()
     assert_eq!(result.authorization.refresh_token, "replacement-refresh");
     assert_eq!(result.authorization.identity_token, stored.identity_token);
     assert!(result.expires_at.is_some());
+    let requests = server.join().map_err(|_| "TLS server panicked")??;
+    assert_eq!(requests.len(), 1);
     assert_eq!(
-        server.join().map_err(|_| "TLS server panicked")??,
-        vec!["grant_type=refresh_token&refresh_token=initial-refresh&client_id=local-client"]
+        requests[0].headers.lines().next(),
+        Some("POST /oauth/token HTTP/1.1")
+    );
+    assert!(
+        requests[0]
+            .headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("content-type: application/json"))
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[0].body)?,
+        serde_json::json!({
+            "client_id": "local-client",
+            "grant_type": "refresh_token",
+            "refresh_token": "initial-refresh",
+        })
     );
     Ok(())
 }
@@ -93,6 +109,7 @@ async fn oauth_refresh_cancellation_before_send_is_cancelled() {
     let registration = OauthRegistration {
         client_id: "local-client".into(),
         token_url: "https://unused.invalid/token".into(),
+        refresh_token_url: "https://unused.invalid/oauth/token".into(),
         device_authorization_url: "https://unused.invalid/device".into(),
         scopes: vec!["openid".into()],
     };
@@ -164,10 +181,15 @@ QL93rV0esr1cPToEJKhHapwR
 -----END PRIVATE KEY-----
 "#;
 
+pub(super) struct HttpsRequest {
+    headers: String,
+    body: String,
+}
+
 type HttpsFixture = (
     OauthClient,
     OauthRegistration,
-    std::thread::JoinHandle<std::io::Result<Vec<String>>>,
+    std::thread::JoinHandle<std::io::Result<Vec<HttpsRequest>>>,
 );
 
 pub(super) fn https_server(
@@ -213,7 +235,10 @@ pub(super) fn https_server(
                 .map_err(std::io::Error::other)?;
             let mut body_bytes = vec![0; length];
             stream.read_exact(&mut body_bytes)?;
-            requests.push(String::from_utf8(body_bytes).map_err(std::io::Error::other)?);
+            requests.push(HttpsRequest {
+                headers,
+                body: String::from_utf8(body_bytes).map_err(std::io::Error::other)?,
+            });
             let body = body.to_string();
             write!(
                 stream,
@@ -234,6 +259,7 @@ pub(super) fn https_server(
     let registration = OauthRegistration {
         client_id: "local-client".into(),
         token_url: format!("https://localhost:{port}/token"),
+        refresh_token_url: format!("https://localhost:{port}/oauth/token"),
         device_authorization_url: format!("https://localhost:{port}/device"),
         scopes: vec!["openid".into(), "offline_access".into()],
     };
@@ -274,7 +300,10 @@ async fn oauth_device_polling_preserves_scope_order_and_harvests_identity()
     );
     let requests = server.join().map_err(|_| "TLS server panicked")??;
     assert_eq!(
-        requests,
+        requests
+            .iter()
+            .map(|request| request.body.as_str())
+            .collect::<Vec<_>>(),
         vec![
             "client_id=local-client&scope=openid+offline_access",
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=secret-device-code&client_id=local-client",
