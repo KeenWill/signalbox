@@ -128,6 +128,9 @@ these shapes project belong to
 
 ## Compatibility constraints
 
+A retry-bound failure with an admissible fallback keeps the generic failed
+projection.
+
 A headroom-only exclusion reports
 `headroom_reserve { observed_headroom_percent, reserve_percent }` without a
 generation, last.

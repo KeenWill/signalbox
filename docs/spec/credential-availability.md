@@ -130,7 +130,9 @@ preparation skips that credential until the reset passes; after it passes, the
 member is admitted again. A chain exclusion is written when a failure rotates
 the pool and removes that member for the remainder of the turn. If another
 durable action excludes a retry successor's credential before preparation, that
-successor exhausts instead of selecting another member.
+successor fails instead of selecting another member; when a fallback member
+remains admissible, the failure keeps the generic failed projection and records
+no pool exhaustion.
 
 A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially

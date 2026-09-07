@@ -1299,7 +1299,7 @@ async fn excluded_failed_credential_with_stay_terminalizes_instead_of_retrying()
 /// durable action excludes its credential before preparation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn transient_retry_exhausts_if_its_credential_is_quarantined_before_preparation()
+async fn quarantined_retry_with_an_eligible_fallback_keeps_the_generic_failure()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x1534_1000_u128;
@@ -1388,6 +1388,28 @@ async fn transient_retry_exhausts_if_its_credential_is_quarantined_before_prepar
     .fetch_one(&pool)
     .await?;
     assert_eq!(calls, 1);
+    let snapshot = signalbox_persistence::process_read::ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("failed session snapshot");
+    assert!(matches!(
+        snapshot.turns()[0].state(),
+        signalbox_persistence::process_read::ProcessTurnState::Failed {
+            terminal_model_call: None,
+            ..
+        }
+    ));
+    let exhaustion_records: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM credential_pool_terminal_exhaustion WHERE session_id = $1 AND turn_id = $2",
+    ).bind(session.into_uuid()).bind(turn.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(exhaustion_records, 0);
+    let typed_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM credential_pool_exhaustion_outbox_event WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(typed_events, 0);
 
     pool.close().await;
     drop(container);

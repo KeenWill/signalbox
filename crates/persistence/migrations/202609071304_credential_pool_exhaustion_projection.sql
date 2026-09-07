@@ -247,3 +247,65 @@ BEGIN
     RETURN NULL;
 END;
 $$;
+
+CREATE OR REPLACE FUNCTION assert_failed_terminal_execution_before_context_headroom(checked_turn_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM credential_pool_terminal_exhaustion AS exhausted
+          JOIN turn_lifecycle AS lifecycle
+            ON lifecycle.turn_id = exhausted.turn_id
+           AND lifecycle.session_id = exhausted.session_id
+          JOIN turn_attempt AS attempt
+            ON attempt.turn_attempt_id = exhausted.terminal_attempt_id
+           AND attempt.turn_id = exhausted.turn_id
+           AND attempt.session_id = exhausted.session_id
+          LEFT JOIN model_call AS call
+            ON call.model_call_id = exhausted.terminal_model_call_id
+           AND call.turn_attempt_id = exhausted.terminal_attempt_id
+           AND call.turn_id = exhausted.turn_id
+           AND call.session_id = exhausted.session_id
+         WHERE exhausted.turn_id = checked_turn_id
+           AND lifecycle.state_kind = 'terminal'
+           AND lifecycle.terminal_disposition_kind = 'failed'
+           AND lifecycle.terminal_attempt_id = exhausted.terminal_attempt_id
+           AND lifecycle.terminal_model_call_id IS NOT DISTINCT FROM
+               exhausted.terminal_model_call_id
+           AND attempt.state_kind = 'ended'
+           AND attempt.end_disposition = 'known_failure'
+           AND (
+                exhausted.terminal_model_call_id IS NULL
+                OR (
+                    call.state_kind = 'terminal'
+                    AND call.terminal_disposition_kind = 'known_failed'
+                )
+           )
+    ) OR EXISTS (
+        SELECT 1 FROM turn_lifecycle lifecycle
+        JOIN turn_attempt attempt ON attempt.turn_attempt_id = lifecycle.terminal_attempt_id
+            AND attempt.session_id = lifecycle.session_id AND attempt.turn_id = lifecycle.turn_id
+        JOIN credential_pool_availability_successor successor
+            ON successor.successor_turn_attempt_id = attempt.turn_attempt_id
+        JOIN model_call predecessor ON predecessor.model_call_id = successor.predecessor_model_call_id
+            AND predecessor.session_id = lifecycle.session_id AND predecessor.turn_id = lifecycle.turn_id
+        WHERE lifecycle.turn_id = checked_turn_id AND lifecycle.state_kind = 'terminal'
+            AND lifecycle.terminal_disposition_kind = 'failed'
+            AND lifecycle.terminal_cause_kind = 'model_call_failed'
+            AND lifecycle.terminal_model_call_id IS NULL
+            AND attempt.state_kind = 'ended' AND attempt.end_variant = 'without_stop'
+            AND attempt.end_disposition = 'known_failure'
+            AND predecessor.state_kind = 'terminal' AND predecessor.terminal_disposition_kind = 'known_failed'
+            AND NOT EXISTS (SELECT 1 FROM model_call WHERE turn_attempt_id = attempt.turn_attempt_id)
+            AND NOT EXISTS (SELECT 1 FROM credential_pool_chain_exclusion
+                WHERE predecessor_model_call_id = predecessor.model_call_id)
+    ) THEN
+        RETURN;
+    END IF;
+
+    PERFORM assert_failed_terminal_execution_before_credential_pools(
+        checked_turn_id
+    );
+END;
+$$;

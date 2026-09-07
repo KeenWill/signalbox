@@ -7481,7 +7481,12 @@ async fn select_runtime_pool_credential(
                 })
         })
         .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
-    if selected.is_none() {
+    if selected.is_none()
+        && policy
+            .members()
+            .iter()
+            .all(|member| excluded.contains(member.credential_reference()))
+    {
         credential_pool_evidence::record(
             connection,
             session,
@@ -9399,15 +9404,28 @@ async fn persist_credential_pool_exhaustion(
     connection: &mut PgConnection,
     exhausted: &CredentialPoolExhaustedModelCallTurn,
 ) -> Result<(), ModelCallRepositoryError> {
+    let pool_exhausted: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM credential_pool_exhaustion_member WHERE terminal_attempt_id = $1)",
+    )
+    .bind(exhausted.failed().attempt().id().into_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
     persist_failed_with_delegated_child_result(
         connection,
         exhausted.failed(),
-        TurnTerminalCause::CredentialPoolExhausted,
+        if pool_exhausted {
+            TurnTerminalCause::CredentialPoolExhausted
+        } else {
+            TurnTerminalCause::ModelCallFailed
+        },
         ProviderReportedTokenUsage::unreported(),
         None,
         None,
     )
     .await?;
+    if !pool_exhausted {
+        return Ok(());
+    }
     insert_credential_pool_terminal_exhaustion(
         connection,
         exhausted.failed().attempt().id(),
