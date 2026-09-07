@@ -1,0 +1,6 @@
+--- a/cargo/private/cargo_build_script_wrapper.bzl
++++ b/cargo/private/cargo_build_script_wrapper.bzl
+@@ -50,0 +51 @@
++        lint_config = None,
+@@ -223,0 +225 @@
++        lint_config = lint_config,

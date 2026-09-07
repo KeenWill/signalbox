@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_COMPILE_DATA = ["corpora/seed-v1.json"]
 
@@ -49,3 +49,8 @@ rust_doc_test(
     name = "doc_tests",
     crate = ":signalbox_approval_judge_eval",
 )
+
+rust_quality_tests(documented_crates = [
+    ":signalbox_approval_judge_eval",
+    ":signalbox-approval-judge-eval",
+])

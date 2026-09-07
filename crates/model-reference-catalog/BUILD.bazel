@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_COMPILE_DATA = ["data/reference-catalog.json"]
 
@@ -87,3 +87,8 @@ rust_integration_test(
     ],
     deps = ["//crates/model-reference-catalog:signalbox_model_reference_catalog"],
 )
+
+rust_quality_tests(documented_crates = [
+    ":signalbox_model_reference_catalog",
+    ":generate-reference-projections",
+])
