@@ -1,9 +1,9 @@
 # Compatibility smoke for the Codex CLI wrapped by
 # crates/model-runtime-codex-cli. It installs the exact version pinned in
-# tooling/codex-cli/package.json. It spends one real, cheapest-model exchange
+# tooling/codex-cli/release.json. It spends one real, cheapest-model exchange
 # through the adapter and another through the app-server protocol probe, so a
-# Renovate pin bump is proven against the live CLI. The discipline it implements is specified in the Codex
-# CLI provider adapter section of docs/spec/runtime-substrate.md.
+# Renovate pin bump is proven against the live CLI. The discipline is specified
+# in the Codex CLI provider adapter section of docs/spec/runtime-substrate.md.
 #
 # Accepted trust boundary. The live exchange must execute the proposed
 # repository adapter code against the pinned CLI; that is the purpose of this
@@ -25,10 +25,10 @@
 #
 # The credential is referenced only in the authentication step, piped to the
 # CLI login command on stdin, and never echoed or passed in argv or a child
-# environment. npm lifecycle scripts are disabled, and repository code is
-# compiled and the credential-free real-CLI probes run before the credential
-# store exists. The later live test's access to that store is intentional under
-# the accepted same-repository-writer boundary above.
+# environment. Repository code is compiled and the credential-free real-CLI
+# probes run before the credential store exists. The later live test's access
+# to that store is intentional under the accepted same-repository-writer
+# boundary above.
 name: Codex CLI smoke
 
 on:
@@ -157,20 +157,15 @@ jobs:
       # nothing survives into a later step.
       CODEX_HOME: ${{ github.workspace }}/.codex-smoke-home
       SIGNALBOX_CODEX_SMOKE_EXECUTABLE: >-
-        ${{ github.workspace }}/tooling/codex-cli/node_modules/.bin/codex
+        ${{ github.workspace }}/tooling/codex-cli/bin/codex
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
-      # The runner image ships Node, and the pinned package is a thin launcher
-      # around a prebuilt native binary, so no Node toolchain setup is needed.
-      # `npm ci` installs the lockfile's integrity-checked artifact exactly.
-      # The package ships its platform binary as an optional dependency and
-      # needs no lifecycle script, so installation disables scripts entirely.
       - name: Install the pinned Codex CLI
-        run: npm ci --ignore-scripts --prefix tooling/codex-cli
+        run: bash tooling/codex-cli/install.sh
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -222,7 +217,7 @@ jobs:
           printenv CODEX_SMOKE_API_KEY \
             | env -u CODEX_SMOKE_API_KEY timeout --signal=TERM --kill-after=5s 30s \
                 sh -c 'trap "while :; do sleep 1; done" TERM; "$@"' sh \
-                tooling/codex-cli/node_modules/.bin/codex login --with-api-key
+                tooling/codex-cli/bin/codex login --with-api-key
       # The test repeats the pre-spend assertions immediately before the model
       # operation, then spends one exchange through the adapter. The following
       # protocol probe performs another live exchange plus rejected-login probes.

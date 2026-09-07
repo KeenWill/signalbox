@@ -10,7 +10,7 @@ exports_files([
     "__subpackages__",
     "config/session-templates.example.toml",
     "config/signalbox-runner.example.toml",
-    "tooling/codex-cli/package.json",
+    "tooling/codex-cli/release.json",
     "tooling/postgres_test_image.rs",
     "tooling/requirements-mdformat.txt",
     "config/signalboxd.example.toml",

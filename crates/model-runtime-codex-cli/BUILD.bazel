@@ -25,7 +25,7 @@ cargo_build_script(
     crate_root = "build.rs",
     data = [
         "Cargo.toml",
-        "//:tooling/codex-cli/package.json",
+        "//:tooling/codex-cli/release.json",
     ],
     edition = crate_edition(),
     rustc_env_files = [":cargo_environment"],
