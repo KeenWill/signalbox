@@ -214,7 +214,9 @@ impl ConfigurationReload {
                         ReloadRepositoryError::Corruption("startup rule activation failed")
                     })?;
                 let restored = self.reconcile(&catalogs).await?;
-                watch.install_reload(prepared).await;
+                watch.install_reload(prepared).await.map_err(|_| {
+                    ReloadRepositoryError::Corruption("reload worker installation failed")
+                })?;
                 watch.nudge_restored(restored).await;
             }
         } else {
@@ -367,7 +369,9 @@ impl ConfigurationReload {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = prior.clone();
                 let restored = self.reconcile(&prior).await?;
-                watch.install_reload(prepared).await;
+                watch.install_reload(prepared).await.map_err(|_| {
+                    ReloadRepositoryError::Corruption("reload worker installation failed")
+                })?;
                 watch.nudge_restored(restored).await;
                 self.repository.finish(request, &refusal).await?;
                 return Ok(ReloadLookup::Recorded(refusal));
@@ -382,7 +386,9 @@ impl ConfigurationReload {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = replacement.clone();
         if let Some((watch, prepared)) = prepared_watch {
             let restored = self.reconcile(&replacement).await?;
-            watch.install_reload(prepared).await;
+            watch.install_reload(prepared).await.map_err(|_| {
+                ReloadRepositoryError::Corruption("reload worker installation failed")
+            })?;
             watch.nudge_restored(restored).await;
         }
         self.repository

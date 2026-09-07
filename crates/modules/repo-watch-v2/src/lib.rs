@@ -35,6 +35,7 @@ mod event_decode;
 pub mod github;
 pub mod ingest;
 mod observation_decode;
+pub mod poll_cache;
 pub mod provider;
 
 use baseline::observation_payload;
@@ -546,6 +547,8 @@ impl WebhookDisposition {
 /// Module-local storage failure.
 #[derive(Debug)]
 pub enum StoreError {
+    /// Persisted poll transport state is malformed or belongs to another reviewer set.
+    InvalidPollCache,
     /// A retained reload activation cannot be encoded.
     InvalidReloadIntent,
     /// A retained normalized event cannot be decoded.
@@ -581,6 +584,7 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::InvalidPollCache => "repository-watch poll cache is invalid",
             Self::InvalidReloadIntent => "repository-watch reload intent is invalid",
             Self::InvalidComparisonBaseline => "repository-watch comparison baseline is invalid",
             Self::InvalidRetainedEvent => "repository-watch retained event is invalid",
@@ -617,7 +621,8 @@ impl fmt::Display for StoreError {
 impl Error for StoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::InvalidReloadIntent
+            Self::InvalidPollCache
+            | Self::InvalidReloadIntent
             | Self::InvalidComparisonBaseline
             | Self::InvalidRetainedEvent => None,
             Self::Database(error) => Some(error),

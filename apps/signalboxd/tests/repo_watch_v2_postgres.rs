@@ -3573,8 +3573,17 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
             .await
             .is_err()
     );
+    let watched_repository = RepositorySlug::try_new(String::from("runtime/project"))?;
+    let obsolete_reviewers = [RepoWatchAuthorLogin::try_new(String::from(
+        "obsolete-reviewer",
+    ))?];
+    store
+        .prepare_poll_cache(&watched_repository, &obsolete_reviewers)
+        .await?;
+    sqlx::query("INSERT INTO poll_cache_page(repository,resource_key,etag,has_next,snapshot) VALUES ('runtime/project','/repos/runtime/project','old',false,'[\"metadata\",\"main\"]'::jsonb)")
+        .execute(&module_pool).await?;
     let (shutdown, stopped) = tokio::sync::watch::channel(false);
-    let worker = tokio::spawn(runtime.run(stopped));
+    let worker = runtime.spawn(stopped).await;
     for _ in 0..100 {
         if tokio::net::TcpStream::connect(hook.address).await.is_ok() {
             break;
@@ -3584,6 +3593,20 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     assert_eq!(
         webhook_status(&hook, b"wrong-secret").await?,
         reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cache_page")
+            .fetch_one(&module_pool)
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT reviewers::text FROM poll_cache_reviewers WHERE repository='runtime/project'"
+        )
+        .fetch_one(&module_pool)
+        .await?,
+        "[]"
     );
     // Pause after delivery admission starts, while rule activation remains blocked.
     let delivery = RuntimeWebhookDelivery {
@@ -3731,7 +3754,301 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
         active_count, 0,
         "replaying an older activation cannot undo a later disable"
     );
+    store
+        .prepare_poll_cache(&watched_repository, &obsolete_reviewers)
+        .await?;
+    sqlx::query("INSERT INTO poll_cache_page(repository,resource_key,etag,has_next,snapshot) VALUES ('runtime/project','/repos/runtime/project','old',false,'[\"metadata\",\"main\"]'::jsonb)")
+        .execute(&module_pool).await?;
+    hook.enabled = true;
+    hook.rule_version = 2;
+    std::fs::write(&model_path, runtime_configuration_source(&hook)?)?;
+    let reenable = ReloadConfiguration {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+    };
+    assert_eq!(
+        reload.reload(reenable).await?,
+        ReloadLookup::Recorded(ReloadResult::Reloaded)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cache_page")
+            .fetch_one(&module_pool)
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT reviewers::text FROM poll_cache_reviewers WHERE repository='runtime/project'"
+        )
+        .fetch_one(&module_pool)
+        .await?,
+        "[]"
+    );
     shutdown.send(true)?;
     worker.await?.expect("clean worker shutdown");
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ConditionalRequest {
+    path: String,
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
+struct ConditionalPollFixture {
+    pages: std::collections::BTreeMap<String, (serde_json::Value, bool)>,
+    requests: std::sync::Mutex<Vec<ConditionalRequest>>,
+}
+
+impl ConditionalPollFixture {
+    fn new() -> Self {
+        use serde_json::json;
+        // Provider numbers, revisions, and validator text are arbitrary fixture identities.
+        let root = "/repos/example/project";
+        let head = "1111111111111111111111111111111111111111";
+        let pages = [
+            (root.to_owned(), json!({"default_branch":"main","private_provider_field":"discard-me"}),false),
+            (format!("{root}/branches?per_page=100&page=1"),json!([{"name":"main","commit":{"sha":head}}]),false),
+            (format!("{root}/pulls?state=open&per_page=100&page=1"),json!([]),true),
+            (format!("{root}/pulls?state=open&per_page=100&page=2"),json!([{"number":1}]),false),
+            (format!("{root}/pulls/1"),json!({"number":1,"title":"change","body":null,"draft":false,"user":{"login":"author"},"labels":[],"state":"open","merged_at":null,"mergeable":true,"head":{"sha":head,"ref":"topic","repo":{"full_name":"example/project"}},"base":{"ref":"main"}}),false),
+            (format!("{root}/commits/{head}/check-suites?filter=all&per_page=100&page=1"),json!({"check_suites":[{"id":2,"status":"completed","updated_at":"generation","conclusion":"success"},{"id":3,"status":"pending"}]}),false),
+            (format!("{root}/commits/{head}/check-runs?filter=all&per_page=100&page=1"),json!({"check_runs":[{"id":4,"status":"completed","completed_at":"generation","name":"test","conclusion":"success"}]}),false),
+            (format!("{root}/pulls/1/reviews?per_page=100&page=1"),json!([{"id":5,"user":{"login":"reviewer"},"state":"APPROVED","commit_id":head},{"state":"PENDING"}]),false),
+            (format!("{root}/issues/1/comments?per_page=100&page=1"),json!([{"id":6,"body":"discard-me"}]),false),
+            (format!("{root}/pulls/1/comments?per_page=100&page=1"),json!([{"id":7,"body":"discard-me"}]),false),
+            (format!("{root}/issues/1/reactions?per_page=100&page=1"),json!([{"user":{"login":"reviewer"},"content":"+1"},{"user":{"login":"outsider"},"content":"-1"}]),false),
+            (format!("{root}/issues/comments/6/reactions?per_page=100&page=1"),json!([{"user":{"login":"reviewer"},"content":"heart"}]),false),
+            (format!("{root}/pulls/comments/7/reactions?per_page=100&page=1"),json!([{"user":{"login":"reviewer"},"content":"eyes"}]),false),
+            (format!("{root}/actions/runs?head_sha={head}&status=completed&per_page=100&page=1"),json!({"total_count":1,"workflow_runs":[{"id":8,"workflow_id":9,"run_attempt":1,"head_branch":"main","head_repository":{"full_name":"example/project"},"name":"build","conclusion":"success","status":"completed"}]}),false),
+        ].into_iter().map(|(path,value,next)| (path,(value,next))).collect();
+        Self {
+            pages,
+            requests: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl signalbox_module_repo_watch_v2::poll_cache::ConditionalObservationRead
+    for ConditionalPollFixture
+{
+    async fn conditional_page(
+        &self,
+        path: &str,
+        validators: Option<&signalbox_module_repo_watch_v2::github::HttpValidators>,
+    ) -> Result<
+        signalbox_module_repo_watch_v2::github::ConditionalPage,
+        signalbox_module_repo_watch_v2::provider::ObservationError,
+    > {
+        use signalbox_module_repo_watch_v2::{
+            github::{ConditionalPage, HttpValidators},
+            provider::ObservationError,
+        };
+        self.requests
+            .lock()
+            .expect("request log")
+            .push(ConditionalRequest {
+                path: path.to_owned(),
+                etag: validators.and_then(|v| v.etag.clone()),
+                last_modified: validators.and_then(|v| v.last_modified.clone()),
+            });
+        let (value, next) = self
+            .pages
+            .get(path)
+            .ok_or(ObservationError::InvalidResponse)?;
+        if validators.is_some() {
+            return Ok(ConditionalPage::Unchanged);
+        }
+        Ok(ConditionalPage::Modified {
+            body: value.to_string().into_bytes(),
+            has_next: *next,
+            validators: HttpValidators {
+                etag: Some(String::from("\"fixture-etag\"")),
+                last_modified: Some(String::from("Mon, 07 Sep 2026 12:00:00 GMT")),
+            },
+        })
+    }
+    async fn threads(
+        &self,
+        _: serde_json::Value,
+    ) -> Result<serde_json::Value, signalbox_module_repo_watch_v2::provider::ObservationError> {
+        Ok(
+            serde_json::json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}),
+        )
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the_cache()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    let reviewers = [RepoWatchAuthorLogin::try_new(String::from("reviewer"))?];
+    store.prepare_poll_cache(&repository, &reviewers).await?;
+    let first = ConditionalPollFixture::new();
+    assert!(matches!(
+        poll_with_cache(&first, &store, &repository, &reviewers, EventProducer::Poll).await?,
+        FrontierEventAdmission::Committed { .. }
+    ));
+    let original = store.ingest_baseline(&repository).await?.observation;
+    let snapshots: Vec<String> =
+        sqlx::query_scalar("SELECT snapshot::text FROM poll_cache_page ORDER BY resource_key")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(snapshots.len(), first.pages.len());
+    assert!(!snapshots.join(" ").contains("discard-me"));
+    assert!(!snapshots.join(" ").contains("outsider"));
+    drop(store);
+    pool.close().await;
+    let restarted_pool = module_pool(&url).await?;
+    let restarted = RepoWatchStore::new(restarted_pool.clone());
+    let same_set_different_case = [RepoWatchAuthorLogin::try_new(String::from("REVIEWER"))?];
+    restarted
+        .prepare_poll_cache(&repository, &same_set_different_case)
+        .await?;
+    let second = ConditionalPollFixture::new();
+    assert!(matches!(
+        poll_with_cache(
+            &second,
+            &restarted,
+            &repository,
+            &reviewers,
+            EventProducer::Poll
+        )
+        .await?,
+        FrontierEventAdmission::Committed { events, .. } if events.is_empty()
+    ));
+    assert_eq!(
+        restarted.ingest_baseline(&repository).await?.observation,
+        original
+    );
+    let requests = second.requests.lock().expect("request log").clone();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.path.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        second.pages.keys().map(String::as_str).collect()
+    );
+    assert!(requests.iter().all(
+        |ConditionalRequest {
+             etag,
+             last_modified: modified,
+             ..
+         }| etag.as_deref() == Some("\"fixture-etag\"")
+            && modified.as_deref() == Some("Mon, 07 Sep 2026 12:00:00 GMT")
+    ));
+    let replacement_reviewers = [RepoWatchAuthorLogin::try_new(String::from("outsider"))?];
+    restarted
+        .prepare_poll_cache(&repository, &replacement_reviewers)
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cache_page")
+            .fetch_one(&restarted_pool)
+            .await?,
+        0
+    );
+    let third = ConditionalPollFixture::new();
+    assert!(matches!(
+        poll_with_cache(
+            &third,
+            &restarted,
+            &repository,
+            &replacement_reviewers,
+            EventProducer::Poll
+        )
+        .await?,
+        FrontierEventAdmission::Committed { .. }
+    ));
+    assert!(third.requests.lock().expect("request log").iter().all(
+        |ConditionalRequest {
+             etag,
+             last_modified: modified,
+             ..
+         }| etag.is_none() && modified.is_none()
+    ));
+    let reaction_actors: Vec<String> = sqlx::query_scalar("SELECT DISTINCT item->>'reviewer' FROM poll_cache_page CROSS JOIN LATERAL jsonb_array_elements(snapshot->1) item WHERE resource_key LIKE '%/reactions?%'")
+        .fetch_all(&restarted_pool).await?;
+    assert_eq!(
+        reaction_actors,
+        vec![replacement_reviewers[0].as_str().to_owned()]
+    );
+    restarted_pool.close().await;
+    core_pool.close().await;
+    container.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn incomplete_poll_does_not_retain_validators_from_partial_pages()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    let reviewers = [RepoWatchAuthorLogin::try_new(String::from("reviewer"))?];
+    store.prepare_poll_cache(&repository, &reviewers).await?;
+    let mut incomplete = ConditionalPollFixture::new();
+    incomplete.pages.remove("/repos/example/project/pulls/1");
+    assert!(
+        poll_with_cache(
+            &incomplete,
+            &store,
+            &repository,
+            &reviewers,
+            EventProducer::Poll
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cache_page")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    assert!(
+        store
+            .ingest_baseline(&repository)
+            .await?
+            .observation
+            .is_none()
+    );
+    let complete = ConditionalPollFixture::new();
+    assert!(matches!(
+        poll_with_cache(
+            &complete,
+            &store,
+            &repository,
+            &reviewers,
+            EventProducer::Poll
+        )
+        .await?,
+        FrontierEventAdmission::Committed { .. }
+    ));
+    assert!(complete.requests.lock().expect("request log").iter().all(
+        |ConditionalRequest {
+             etag,
+             last_modified: modified,
+             ..
+         }| etag.is_none() && modified.is_none()
+    ));
+    pool.close().await;
+    core_pool.close().await;
+    container.stop().await?;
     Ok(())
 }
