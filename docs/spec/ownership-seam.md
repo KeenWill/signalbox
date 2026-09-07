@@ -26,3 +26,7 @@ or persistence crates. The ownership-seam checker rejects those dependency and
 import edges, module SQL that names `public` relations, and core SQL that names
 `mod_` relations. PostgreSQL grants independently deny direct core-table reads,
 core-function execution, and cross-schema references.
+
+## Planned
+
+- Reload-intent input: [design](../design/ownership-seam.md).

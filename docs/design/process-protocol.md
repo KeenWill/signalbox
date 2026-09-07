@@ -41,15 +41,15 @@ access tokens, preventing future dispatches while retaining the configured
 registration and referenced history; a child already holding a copied token
 finishes its invocation. Each profile retains a generation that every deletion
 advances. Provisioning and re-provisioning commit authorization and advance that
-generation atomically only when their starting generation is current; otherwise
-the transaction records `superseded` without storing authorization. An equal
-request with the same `command_id` reports busy while pending or returns its
-stored receipt without repeating the exchange or deletion; conflicting reuse is
-rejected. Startup terminalizes each pending provisioning or re-provisioning
-claim with an `abandoned` receipt; another provisioning attempt requires a new
-`command_id`. The credential mutation and terminal receipt commit atomically
-under the command claim protocol in
-[identity and commands](../spec/identity-and-commands.md).
+generation atomically only when their starting generation is current and the
+registration still exists at its starting revision; otherwise the transaction
+records `superseded` without storing authorization. An equal request with the
+same `command_id` reports busy while pending or returns its stored receipt
+without repeating the exchange or deletion; conflicting reuse is rejected.
+Startup terminalizes each pending provisioning or re-provisioning claim with an
+`abandoned` receipt; another provisioning attempt requires a new `command_id`.
+The credential mutation and terminal receipt commit atomically under the command
+claim protocol in [identity and commands](../spec/identity-and-commands.md).
 
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
@@ -89,12 +89,13 @@ Configuration reload is one `reload_configuration { command_id }` request
 carrying a user-global command identity. An equal command retry reports busy
 while pending or replays its stored result without re-reading configuration.
 Core first commits the reload command with the checked per-repository rule sets
-and convergence targets the reload validated, plus the new rule-set digest and
-event tail, as durable intent; the [ownership seam](../spec/ownership-seam.md)
-delivers that intent, and the module activates the rules atomically and
-idempotently, keyed by that digest and event tail. Startup replays any
-undelivered intent from its retained payload even if the configuration files
-changed, before terminalizing its claim. Success returns
+and convergence targets the reload validated, plus the new rule-set digest, as
+durable intent; the [reload-intent input](ownership-seam.md) delivers that
+intent, and the module activates the rules atomically and idempotently by
+command identity and digest. The activation transaction captures each
+repository's current event tail and retains it for idempotent replay. Startup
+replays any undelivered intent from its retained payload even if the
+configuration files changed, before terminalizing its claim. Success returns
 `configuration_reloaded { command_id, reloaded_sections }`, whose sections are
 an array of the closed values `model_catalog`, `session_templates`, and
 `repo_watch`. Failure returns

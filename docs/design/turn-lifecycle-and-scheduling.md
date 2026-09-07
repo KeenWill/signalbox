@@ -57,7 +57,9 @@ placement. A runner-locus request whose placement is lost resolves as a
 retryable tool failure recorded in the batch. After every request resolves,
 replacement takes over in the [continuation transaction](../spec/tool-loop.md),
 after all tool results are appended and before the next call is prepared against
-the changed placement. The command claims its identity and provisioning
+the changed placement. When an interrupt or crash-loss reconciliation
+terminalizes the batch, that path completes or retires the staged replacement
+before terminalizing the turn. The command claims its identity and provisioning
 authorization immediately, and its terminal transaction commits only after any
 authorized in-flight daemon-local call for the session reaches its observation
 boundary. A pinned loss installs the successor placement and extends the next
