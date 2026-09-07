@@ -210,7 +210,9 @@ pub(super) fn compatible(
             .any(|branch| compatible(branch, expected_root, actual, actual_root));
     }
     let expected_type = expected["type"].as_str();
-    let actual_type = actual["type"].as_str();
+    let actual_type = actual["type"]
+        .as_str()
+        .or_else(|| string_members(actual, actual_root).map(|_| "string"));
     if expected_type != actual_type
         && !(expected_type == Some("number") && actual_type == Some("integer"))
     {
@@ -263,15 +265,12 @@ fn error_variants(
                 result.entry(tag).or_default().extend(shapes);
             }
         }
-    } else if schema["type"] == "string" {
-        let tags = schema["enum"]
-            .as_array()
-            .ok_or("error string must enumerate its tags")?;
+    } else if let Some(tags) = string_members(schema, root) {
         for tag in tags {
-            let name = tag.as_str().ok_or("error tag must be a string")?;
             let mut shape = schema.clone();
+            shape["type"] = serde_json::json!("string");
             shape["enum"] = serde_json::json!([tag]);
-            result.entry(name.to_owned()).or_default().push(shape);
+            result.entry(tag).or_default().push(shape);
         }
     } else if schema["type"] == "object" {
         let fields = schema["properties"]

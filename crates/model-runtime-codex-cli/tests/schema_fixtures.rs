@@ -488,3 +488,63 @@ fn catch_all_items_can_explicitly_exclude_every_consumed_tag() {
         serde_json::json!(["userMessage", "hookPrompt"]);
     assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
 }
+
+#[test]
+fn a_known_unit_error_can_use_a_singleton_string_constant() {
+    let mut actual = schema("ErrorNotification");
+    let alternatives = actual["definitions"]["CodexErrorInfo"]["oneOf"]
+        .as_array_mut()
+        .unwrap();
+    alternatives
+        .iter_mut()
+        .find(|shape| strings(&shape["enum"]).contains("unauthorized"))
+        .unwrap()["enum"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|tag| tag != "unauthorized");
+    alternatives.push(serde_json::json!({"const":"unauthorized"}));
+    assert_eq!(check_errors(&actual), Ok(()));
+}
+
+#[test]
+fn singleton_string_discriminators_need_no_redundant_type_keyword() {
+    let expected = derived::<frame::TurnCompleted>();
+    for tag in ["userMessage", "hookPrompt", "agentMessage"] {
+        for constant in [false, true] {
+            let mut actual = schema("TurnCompletedNotification");
+            let item = actual["definitions"]["ThreadItem"]["oneOf"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|item| strings(&item["properties"]["type"]["enum"]).contains(tag))
+                .unwrap();
+            let discriminator = item["properties"]["type"].as_object_mut().unwrap();
+            discriminator.remove("type");
+            if constant {
+                discriminator.remove("enum");
+                discriminator.insert("const".into(), serde_json::json!(tag));
+            }
+            assert!(
+                schema_shape::object_shape(&expected, &actual, &actual).is_ok(),
+                "{tag}: constant={constant}"
+            );
+            let item = actual["definitions"]["ThreadItem"]["oneOf"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|item| {
+                    item["properties"]["type"]["const"] == tag
+                        || strings(&item["properties"]["type"]["enum"]).contains(tag)
+                })
+                .unwrap();
+            item["required"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|field| field != "type");
+            assert!(
+                schema_shape::object_shape(&expected, &actual, &actual).is_err(),
+                "{tag}: constant={constant}"
+            );
+        }
+    }
+}
