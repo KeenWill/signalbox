@@ -10,7 +10,14 @@ use signalbox_process_protocol::DelegationPolicy;
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn spawn_session_requires_dispatch_and_replays_its_child() -> Result<(), Box<dyn Error>> {
     const TASK: &str = "Inspect the delegated workspace";
-    let runtime = RunningRuntime::start().await?;
+    use signalbox_application::{EligibilityNudge, EligibilityWorkSource};
+    let mut runtime = RunningRuntime::start_with_options(
+        None,
+        BlobStorageFixtureMode::Disabled,
+        None,
+        std::num::NonZeroUsize::new(1),
+    )
+    .await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     submit_first_input(&mut connection, session_id, TASK.into()).await?;
@@ -74,6 +81,16 @@ async fn spawn_session_requires_dispatch_and_replays_its_child() -> Result<(), B
         .await?
         .expect("spawn is next");
     tools.authorize_attempt(session, turn, attempt).await?;
+    let work_source = runtime.work_source.as_mut().expect("runtime work source");
+    assert_eq!(
+        timeout(Duration::from_secs(5), work_source.next()).await??,
+        session
+    );
+    let unrelated = SessionId::from_uuid(Uuid::now_v7());
+    assert_eq!(
+        runtime.eligibility_nudge.nudge(unrelated),
+        signalbox_application::EligibilityNudgeOutcome::Enqueued
+    );
     connection
         .request_version(ProtocolVersion::One, 4, request.clone())
         .await?;
@@ -88,6 +105,21 @@ async fn spawn_session_requires_dispatch_and_replays_its_child() -> Result<(), B
     else {
         panic!("spawn returns its child");
     };
+    let work_source = runtime.work_source.as_mut().expect("runtime work source");
+    assert_eq!(
+        timeout(Duration::from_secs(5), work_source.next()).await??,
+        unrelated
+    );
+    let first_hint = timeout(Duration::from_secs(5), work_source.next()).await??;
+    let second_hint = timeout(Duration::from_secs(5), work_source.next()).await??;
+    assert_eq!(
+        std::collections::HashSet::from([first_hint, second_hint]),
+        std::collections::HashSet::from([
+            session,
+            SessionId::from_uuid(child_session_id.into_uuid())
+        ]),
+        "both committed spawn participants must become eligible without a sweep",
+    );
     let sessions = signalbox_persistence::session::SessionRepository::new(runtime.pool.clone());
     let child_id = SessionId::from_uuid(child_session_id.into_uuid());
     let child = sessions
@@ -111,6 +143,14 @@ async fn spawn_session_requires_dispatch_and_replays_its_child() -> Result<(), B
         recorded.message(),
         "a retry must return the stored child"
     );
+    assert_eq!(
+        runtime
+            .reconciliation_witness
+            .completed_cycles
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    drop(runtime.work_source.take());
     drop(connection);
     runtime.stop().await
 }
