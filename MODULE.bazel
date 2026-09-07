@@ -3,6 +3,13 @@ module(name = "signalbox")
 bazel_dep(name = "rules_rust", version = "0.74.0")
 bazel_dep(name = "gcc_toolchain", version = "0.12.0")
 bazel_dep(name = "rules_python", version = "2.3.3")
+bazel_dep(name = "aspect_rules_js", version = "3.4.1")
+bazel_dep(name = "rules_nodejs", version = "6.7.5")
+
+node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
+node.toolchain(node_version = "26.8.1")
+use_repo(node, "nodejs_toolchains")
+register_toolchains("@nodejs_toolchains//:all")
 
 python_config = use_extension("@rules_python//python/extensions:config.bzl", "config")
 python_config.explicit_init_py(default = True)
@@ -30,7 +37,7 @@ register_toolchains("@gcc_linux_x86_64//:all")
 
 RUST_VERSION = "1.98.1"
 
-RUSTDOC_TOOLCHAIN = "nightly-2026-09-01"
+RUSTDOC_TOOLCHAIN = "nightly-2026-09-07"
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(

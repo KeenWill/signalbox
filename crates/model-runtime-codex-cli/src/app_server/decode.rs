@@ -39,7 +39,21 @@ pub(crate) fn fold_uninterpreted<C: Clone>(
         .collect();
     match markers.as_slice() {
         [] => {}
-        [only] => sink.extend_dropped_context(only),
+        [only] => {
+            let prefix = trailing_credential_context(only);
+            let completed_elsewhere = units.iter().any(|unit| {
+                if unit.as_str() == *only {
+                    return false;
+                }
+                let joined = [prefix, unit.as_str()].concat();
+                signalbox_model_runtime::redact_text(&joined) != joined
+            });
+            if completed_elsewhere {
+                sink.suppress_remaining();
+            } else {
+                sink.extend_dropped_context(only);
+            }
+        }
         _ => sink.suppress_remaining(),
     }
 }

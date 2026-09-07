@@ -1,4 +1,4 @@
-use std::{error::Error, num::NonZeroU64, path::PathBuf, sync::Arc};
+use std::{error::Error, num::NonZeroU64, sync::Arc};
 
 use signalbox_file_media_adapters_audio::{AudioFamilyProvider, audio_family_declaration};
 use signalbox_file_media_processor_runtime::{SandboxedFileMediaProcessor, WorkerBinding};
@@ -207,7 +207,7 @@ pub(crate) async fn inspect_sandboxed(
     media_type: &str,
 ) -> Result<FileInspection, Box<dyn Error>> {
     let declaration = audio_family_declaration().map_err(|error| error.to_string())?;
-    let worker = PathBuf::from(env!("CARGO_BIN_EXE_signalbox-file-media-audio-worker"));
+    let worker = signalbox_test_bin::test_bin_path!("signalbox-file-media-audio-worker");
     let binding = WorkerBinding::try_new(worker, declaration)?;
     let processor = SandboxedFileMediaProcessor::try_new(
         "/usr/bin/bwrap",

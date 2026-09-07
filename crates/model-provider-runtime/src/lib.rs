@@ -1106,7 +1106,12 @@ where
             request.model_settings().effective().fast_mode(),
         )
         .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
-        let messages = render_runtime_messages(operation.messages());
+        let messages = render_runtime_messages(
+            operation.messages(),
+            operation.reasoning_provenance(),
+            &self.models,
+        )
+        .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
         let tools = runtime_tool_definitions(operation.tools()).map_err(|error| {
             report_invalid_runtime_tool_schema(telemetry, &error);
             RuntimeInputTokenCountError::InvalidToolSchema
@@ -1210,7 +1215,18 @@ where
             target: call.target(),
             frontier: call.frontier().snapshot(),
         };
-        let messages = render_runtime_messages(operation.messages());
+        let messages = render_runtime_messages(
+            operation.messages(),
+            operation.reasoning_provenance(),
+            &self.models,
+        )
+        .ok_or_else(|| {
+            fail_closed(
+                telemetry,
+                RuntimeModelCallProviderError::UnconfiguredTarget,
+                None,
+            )
+        })?;
         let tools = runtime_tool_definitions(operation.tools()).map_err(|error| {
             report_invalid_runtime_tool_schema(telemetry, &error);
             fail_closed(
@@ -1472,6 +1488,7 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
     match classified.observation {
         ModelCallTerminalObservation::Completed { .. }
         | ModelCallTerminalObservation::CompletedWithProviderCompaction { .. }
+        | ModelCallTerminalObservation::CompletedWithProviderReasoning { .. }
         | ModelCallTerminalObservation::CompletedWithTools { .. } => {
             tracing::debug!(
                 cause_code = classified.cause.as_str(),
@@ -1493,7 +1510,11 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
     }
 }
 
-fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<ConversationMessage> {
+fn render_runtime_messages(
+    messages: &[ModelConversationMessage],
+    provenance: &[signalbox_application::ProviderReasoningProvenance],
+    models: &RuntimeModelCatalog,
+) -> Option<Vec<ConversationMessage>> {
     let mut rendered = Vec::new();
     let mut assistant_call = None;
     let mut collecting_tool_results = false;
@@ -1608,6 +1629,35 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 }
                 collecting_tool_results = false;
             }
+            ModelConversationMessage::ProviderReasoning {
+                source,
+                producing_call,
+                item,
+            } => {
+                let origin = provenance.iter().find(|origin| {
+                    origin.source == *source && origin.producing_call == *producing_call
+                })?;
+                let producer = models.resolve(origin.producing_target)?;
+                let part = MessagePart::ProviderReasoning {
+                    item_json: item.as_json().to_owned(),
+                    producing_target: ResolvedTarget::new(producer.provider_model()),
+                    producing_credential: CredentialReference::new(
+                        origin.producing_credential.as_str(),
+                    ),
+                };
+                if assistant_call == Some(*producing_call) {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    }
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::Assistant,
+                        parts: vec![part],
+                    });
+                    assistant_call = Some(*producing_call);
+                }
+                collecting_tool_results = false;
+            }
             ModelConversationMessage::AssistantToolUse {
                 producing_call,
                 request,
@@ -1675,7 +1725,7 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
             }
         }
     }
-    rendered
+    Some(rendered)
 }
 
 fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
@@ -1981,6 +2031,7 @@ fn classify_terminal(
             let finish = completion.finish;
             let mut response_parts = Vec::new();
             let mut has_provider_compaction = false;
+            let mut has_provider_reasoning = false;
             let mut tool_count = 0usize;
             for part in completion.content {
                 match part {
@@ -1992,6 +2043,16 @@ fn classify_terminal(
                             )
                         })?;
                         response_parts.push(AssistantResponsePart::Text(text));
+                    }
+                    AssistantPart::ProviderReasoning { item_json } => {
+                        let item = signalbox_domain::ProviderReasoningItem::try_new(item_json)
+                            .map_err(|_| {
+                                ClassificationFailure::bare(
+                                    RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                                )
+                            })?;
+                        has_provider_reasoning = true;
+                        response_parts.push(AssistantResponsePart::ProviderReasoning(item));
                     }
                     AssistantPart::ProviderCompaction { block_json } => {
                         let block = ProviderCompactionBlock::try_new(block_json).map_err(|_| {
@@ -2082,12 +2143,20 @@ fn classify_terminal(
                         },
                         ModelCallCauseCode::Completed,
                     )
+                } else if has_provider_reasoning {
+                    classify(
+                        ModelCallTerminalObservation::CompletedWithProviderReasoning {
+                            response: response_parts,
+                        },
+                        ModelCallCauseCode::Completed,
+                    )
                 } else {
                     let assistant_text = response_parts
                         .into_iter()
                         .filter_map(|part| match part {
                             AssistantResponsePart::Text(text) => Some(text),
                             AssistantResponsePart::ProviderCompaction(_)
+                            | AssistantResponsePart::ProviderReasoning(_)
                             | AssistantResponsePart::ToolCall(_) => None,
                         })
                         .collect();
@@ -2137,7 +2206,8 @@ fn classify_terminal(
                 .into_iter()
                 .filter_map(|part| match part {
                     AssistantPart::ProviderCompaction { block_json } => Some(block_json),
-                    AssistantPart::Text(_)
+                    AssistantPart::ProviderReasoning { .. }
+                    | AssistantPart::Text(_)
                     | AssistantPart::Thinking { .. }
                     | AssistantPart::RedactedThinking { .. }
                     | AssistantPart::ToolCall(_)
@@ -2304,8 +2374,9 @@ mod tests {
         RuntimeInputTokenCountError, RuntimeModelCallProviderError, RuntimeModelCatalog,
         RuntimeModelCatalogError, RuntimeModelDefinition, RuntimeModelDefinitionError,
         classify_terminal as classify_terminal_with_limit, decode_checked_raw_json,
-        provider_reported_token_usage, render_runtime_messages, runtime_delivery_definitions,
-        runtime_model_settings,
+        provider_reported_token_usage,
+        render_runtime_messages as render_runtime_messages_with_provenance,
+        runtime_delivery_definitions, runtime_model_settings,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -2444,6 +2515,12 @@ mod tests {
 
     fn target(value: u128) -> ResolvedProviderTarget {
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(value)))
+    }
+
+    fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<ConversationMessage> {
+        let models = RuntimeModelCatalog::try_from_definitions([]).expect("empty fixture catalog");
+        render_runtime_messages_with_provenance(messages, &[], &models)
+            .expect("fixture messages need no producing-target mappings")
     }
 
     fn source(value: u128) -> SemanticTranscriptEntryRef {
@@ -3115,6 +3192,154 @@ mod tests {
                         .expect("fixture text is admitted"),
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn reasoning_completion_enters_the_durable_vocabulary_without_compaction_usage() {
+        let raw = r#"{ "type":"reasoning", "id":"rs_fixture", "summary":[], "encrypted_content":"opaque" }"#;
+        let classified = classify_terminal(
+            completion(
+                "model-exact",
+                vec![
+                    AssistantPart::Text("before".to_string()),
+                    AssistantPart::ProviderReasoning {
+                        item_json: raw.to_string(),
+                    },
+                    AssistantPart::Text("after".to_string()),
+                ],
+            ),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("encrypted reasoning is representable");
+        let ModelCallTerminalObservation::CompletedWithProviderReasoning { response } =
+            classified.observation
+        else {
+            panic!("reasoning does not require compaction iteration counts");
+        };
+        assert_eq!(response.len(), 3);
+        let signalbox_domain::AssistantResponsePart::ProviderReasoning(item) = &response[1] else {
+            panic!("reasoning keeps its response position");
+        };
+        assert_eq!(item.as_json(), raw);
+    }
+
+    #[test]
+    fn reasoning_projection_fails_when_the_current_target_exists_but_the_producer_is_missing() {
+        let current_target = target(41);
+        let producing_target = target(42);
+        let models = RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            current_target,
+            "current-model".to_string(),
+            64,
+            1024,
+        )
+        .expect("current target fixture")])
+        .expect("current target catalog");
+        let provenance = [signalbox_application::ProviderReasoningProvenance {
+            source: source(31),
+            producing_call: call(),
+            producing_target,
+            producing_credential: signalbox_application::ModelCallCredentialReference::new(
+                "producer-primary",
+            ),
+        }];
+        let messages = [
+            ModelConversationMessage::AssistantToolUse {
+                source: source(30),
+                producing_call: call(),
+                request: request(20, "{}"),
+            },
+            ModelConversationMessage::ProviderReasoning {
+                source: source(31),
+                producing_call: call(),
+                item: signalbox_domain::ProviderReasoningItem::try_new(
+                    r#"{"type":"reasoning","id":"rs_required","encrypted_content":"opaque"}"#
+                        .to_string(),
+                )
+                .expect("durable reasoning fixture"),
+            },
+        ];
+        assert_eq!(
+            render_runtime_messages_with_provenance(&messages, &provenance, &models),
+            None
+        );
+    }
+
+    #[test]
+    fn durable_reasoning_replays_between_calls_in_the_same_assistant_message() {
+        let raw = r#"{ "type":"reasoning", "id":"rs_fixture", "summary":[], "encrypted_content":"opaque" }"#;
+        let first = request(20, "{}");
+        let second = request(21, "{}");
+        let models = RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            target(42),
+            "producer-fast-model".to_string(),
+            64,
+            1024,
+        )
+        .expect("producer fixture")])
+        .expect("producer catalog");
+        let provenance = [signalbox_application::ProviderReasoningProvenance {
+            source: source(31),
+            producing_call: call(),
+            producing_target: target(42),
+            producing_credential: signalbox_application::ModelCallCredentialReference::new(
+                "producer-primary",
+            ),
+        }];
+        let rendered = render_runtime_messages_with_provenance(
+            &[
+                ModelConversationMessage::AssistantToolUse {
+                    source: source(30),
+                    producing_call: call(),
+                    request: first.clone(),
+                },
+                ModelConversationMessage::ProviderReasoning {
+                    source: source(31),
+                    producing_call: call(),
+                    item: signalbox_domain::ProviderReasoningItem::try_new(raw.to_string())
+                        .expect("durable fixture"),
+                },
+                ModelConversationMessage::AssistantToolUse {
+                    source: source(32),
+                    producing_call: call(),
+                    request: second.clone(),
+                },
+            ],
+            &provenance,
+            &models,
+        )
+        .expect("the producing target is configured");
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].parts.len(), 3);
+        assert_eq!(
+            rendered[0].parts[1],
+            signalbox_model_runtime::MessagePart::ProviderReasoning {
+                item_json: raw.to_string(),
+                producing_target: signalbox_model_runtime::ResolvedTarget::new(
+                    "producer-fast-model"
+                ),
+                producing_credential: signalbox_model_runtime::CredentialReference::new(
+                    "producer-primary"
+                ),
+            }
+        );
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_first) = &rendered[0].parts[0]
+        else {
+            panic!("first tool retained");
+        };
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_second) = &rendered[0].parts[2]
+        else {
+            panic!("second tool retained");
+        };
+        assert_eq!(
+            replayed_first.id.as_str(),
+            first.id().into_uuid().to_string()
+        );
+        assert_eq!(
+            replayed_second.id.as_str(),
+            second.id().into_uuid().to_string()
         );
     }
 

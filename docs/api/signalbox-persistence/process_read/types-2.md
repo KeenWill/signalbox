@@ -81,6 +81,13 @@ pub enum ProcessTranscriptEntry {
         turn: signalbox_domain::TurnId,
         model_call: signalbox_domain::ModelCallId,
     },
+    ProviderReasoning {
+        entry_index: u64,
+        source_session: signalbox_domain::SessionId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
+        turn: signalbox_domain::TurnId,
+        model_call: signalbox_domain::ModelCallId,
+    },
     AssistantToolUse {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
@@ -208,141 +215,5 @@ impl process_read::ProcessTranscriptSummary {
     pub const fn turn_count(&self) -> u64;
     pub const fn model_call_count(&self) -> u64;
     pub const fn entry_count(&self) -> u64;
-}
-```
-
-## ProcessTranscriptReader
-
-```rust
-pub struct ProcessTranscriptReader {/* private */}
-// derives: fmt::Debug
-impl process_read::ProcessTranscriptReader {
-    pub const fn session(&self) -> signalbox_domain::SessionId;
-    pub const fn runner(&self) -> option::Option<&process_read::ProcessRunnerProjection>;
-    pub const fn cursor(&self) -> u64;
-    pub const fn summary(&self) -> option::Option<process_read::ProcessTranscriptSummary>;
-    pub async fn next_item(
-        &mut self,
-    ) -> result::Result<
-        option::Option<process_read::ProcessTranscriptItem>,
-        process_read::ProcessReadError,
-    >;
-}
-```
-
-## ProcessReadCorruption
-
-```rust
-pub enum ProcessReadCorruption {
-    Missing(&'static str),
-    Unsupported {
-        field: &'static str,
-        value: string::String,
-    },
-    Inconsistent(&'static str),
-    InvalidOrdinal(&'static str),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for process_read::ProcessReadCorruption {
-    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for process_read::ProcessReadCorruption {
-    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
-}
-```
-
-## ProcessReadError
-
-```rust
-pub enum ProcessReadError {
-    Database(error::Error),
-    Corruption(process_read::ProcessReadCorruption),
-}
-// derives: fmt::Debug
-impl fmt::Display for process_read::ProcessReadError {
-    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for process_read::ProcessReadError {
-    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
-}
-impl convert::From<error::Error> for process_read::ProcessReadError {
-    fn from(error: error::Error) -> Self;
-}
-impl convert::From<process_read::ProcessReadCorruption> for process_read::ProcessReadError {
-    fn from(error: process_read::ProcessReadCorruption) -> Self;
-}
-```
-
-## ProcessReadRepository
-
-```rust
-pub struct ProcessReadRepository {/* private */}
-// derives: clone::Clone, fmt::Debug
-impl process_read::ProcessReadRepository {
-    pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
-    pub const fn with_automatic_reconciliation_attempt_budget(
-        self,
-        budget: option::Option<u32>,
-    ) -> Self;
-    pub async fn read_session_defaults(
-        &self,
-        session: signalbox_domain::SessionId,
-        version: option::Option<signalbox_domain::SessionConfigurationDefaultsVersion>,
-    ) -> result::Result<process_read::ProcessSessionDefaultsRead, process_read::ProcessReadError>;
-    pub async fn list_sessions(
-        &self,
-    ) -> result::Result<vec::Vec<process_read::ProcessSessionSummary>, process_read::ProcessReadError>;
-    pub async fn open_session_summaries(
-        &self,
-    ) -> result::Result<process_read::ProcessSessionSummaryReader, process_read::ProcessReadError>;
-    pub async fn session_ancestry(
-        &self,
-        requested_session: signalbox_domain::SessionId,
-    ) -> result::Result<
-        option::Option<process_read::ProcessSessionAncestry>,
-        process_read::ProcessReadError,
-    >;
-    pub async fn session_has_tool_history(
-        &self,
-        requested_session: signalbox_domain::SessionId,
-    ) -> result::Result<bool, process_read::ProcessReadError>;
-    pub async fn tool_request_session(
-        &self,
-        request: signalbox_domain::ToolRequestId,
-    ) -> result::Result<option::Option<signalbox_domain::SessionId>, process_read::ProcessReadError>;
-    pub async fn model_call_recovery_precondition(
-        &self,
-        requested_session: signalbox_domain::SessionId,
-    ) -> result::Result<
-        process_read::ProcessModelCallRecoveryPrecondition,
-        process_read::ProcessReadError,
-    >;
-    pub async fn read_selected_transcript_entries(
-        &self,
-        positions: &[u64],
-        references: &[signalbox_domain::SemanticTranscriptEntryRef],
-    ) -> result::Result<
-        boxed::Box<[process_read::ProcessTranscriptEntry]>,
-        process_read::ProcessReadError,
-    >;
-    pub async fn read_transcript(
-        &self,
-        requested_session: signalbox_domain::SessionId,
-    ) -> result::Result<
-        option::Option<process_read::ProcessTranscriptSnapshot>,
-        process_read::ProcessReadError,
-    >;
-    pub async fn open_transcript(
-        &self,
-        requested_session: signalbox_domain::SessionId,
-    ) -> result::Result<
-        option::Option<process_read::ProcessTranscriptReader>,
-        process_read::ProcessReadError,
-    >;
-    pub async fn open_scoped_transcript(
-        &self,
-        requesting_session: signalbox_domain::SessionId,
-        target_session: signalbox_domain::SessionId,
-    ) -> result::Result<process_read::ProcessScopedTranscriptRead, process_read::ProcessReadError>;
 }
 ```

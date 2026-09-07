@@ -2024,3 +2024,199 @@ async fn late_result_identity_collision_fails_completion_closed() -> Result<(), 
     drop(connection);
     runtime.stop().await
 }
+
+pub(crate) fn reported_usage_compaction(
+    runtime: &RunningRuntime,
+    summary_runtime: ScriptedModel<ModelCallId>,
+    model_configuration: HubModelConfiguration,
+) -> Result<ReportedUsageCompaction, Box<dyn Error>> {
+    let runtime_models = model_configuration.runtime_model_catalog();
+    let model_calls = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        model_configuration.target_catalog(),
+        ModelCallCredentialReference::new("reported-usage-compaction-fixture"),
+    )
+    .with_session_credentials(model_configuration.credential_family_catalog());
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            summary_runtime,
+            runtime_models.clone(),
+        ));
+    Ok(ReportedUsageCompaction::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        model_calls,
+        NoToolCatalog,
+        runtime_models,
+        model_configuration,
+        compaction_model,
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn reported_usage_activation_preview_compacts_once_forward_only() -> Result<(), Box<dyn Error>>
+{
+    const REPORTED_INPUT_TOKENS: u64 = 5_000; // numeric-bound: test - crosses configured context reservation threshold
+    const REPORTED_OUTPUT_TOKENS: u64 = 1; // numeric-bound: test - completed output retained by the next input
+
+    let configuration_text = reported_usage_preflight_configuration_text();
+    let mut runtime = RunningRuntime::start_with_model_configuration(&configuration_text).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, first_turn) = submit_first_input(
+        &mut connection,
+        session_id,
+        String::from("reported usage historical request"),
+    )
+    .await?;
+    let usage = TokenUsage {
+        input_tokens: Some(REPORTED_INPUT_TOKENS),
+        output_tokens: Some(REPORTED_OUTPUT_TOKENS),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    };
+    let first_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "reported usage historical reply",
+        usage,
+    ));
+    let first_probe = execute_streamed_turn_until_with_configuration(
+        &mut runtime,
+        first_runtime,
+        reported_usage_preflight_configuration()?,
+        session_id,
+        first_turn,
+        TurnSettle::Terminal,
+    )
+    .await?;
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::text(String::from("reported usage successor")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let successor = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let summary_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "reported usage summary",
+        TokenUsage::unreported(),
+    ));
+    let compaction = reported_usage_compaction(
+        &runtime,
+        summary_runtime,
+        reported_usage_preflight_configuration()?,
+    )?;
+
+    compaction
+        .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
+        .await?;
+    compaction
+        .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
+        .await?;
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct CompactionLedger {
+        compactions: i64,
+        successor_compactions: i64,
+        roots: i64,
+    }
+    let ledger: CompactionLedger = sqlx::query_as(
+        "SELECT count(*) AS compactions,
+                count(*) FILTER (WHERE command.automatic_for_turn_id = $2) AS successor_compactions,
+                count(*) FILTER (WHERE compaction.predecessor_compaction_id IS NULL) AS roots
+           FROM context_compaction AS compaction
+           JOIN compact_session_command AS command
+             ON command.session_id = compaction.session_id
+            AND command.result_context_compaction_id = compaction.context_compaction_id
+          WHERE compaction.session_id = $1",
+    )
+    .bind(session_id.into_uuid())
+    .bind(successor.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+
+    assert_eq!(first_probe.received_operations().len(), 1);
+    assert_eq!(
+        ledger,
+        CompactionLedger {
+            compactions: 1,
+            successor_compactions: 1,
+            roots: 1
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn reported_usage_activation_preview_never_compacts_without_usage()
+-> Result<(), Box<dyn Error>> {
+    let configuration_text = reported_usage_preflight_configuration_text();
+    let mut runtime = RunningRuntime::start_with_model_configuration(&configuration_text).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, first_turn) = submit_first_input(
+        &mut connection,
+        session_id,
+        String::from("unreported usage historical request"),
+    )
+    .await?;
+    let first_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "unreported usage historical reply",
+        TokenUsage::unreported(),
+    ));
+    let first_probe = execute_streamed_turn_until_with_configuration(
+        &mut runtime,
+        first_runtime,
+        reported_usage_preflight_configuration()?,
+        session_id,
+        first_turn,
+        TurnSettle::Terminal,
+    )
+    .await?;
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::text(String::from("unreported usage successor")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let _successor = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let compaction = reported_usage_compaction(
+        &runtime,
+        ScriptedModel::following(std::iter::empty::<Script>()),
+        reported_usage_preflight_configuration()?,
+    )?;
+
+    compaction
+        .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
+        .await?;
+    let compaction_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM context_compaction WHERE session_id = $1")
+            .bind(session_id.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+
+    assert_eq!(first_probe.received_operations().len(), 1);
+    assert_eq!(compaction_count, 0);
+
+    drop(connection);
+    runtime.stop().await
+}

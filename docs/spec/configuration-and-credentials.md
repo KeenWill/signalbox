@@ -77,10 +77,16 @@ reservation, not the raw advertised window, and is not smaller than
 per-target Anthropic capability on `[[models]]` and `[[serving_targets]]`;
 omission is false, another adapter cannot declare it true, and the effective
 target after fast-target resolution controls both compaction enablement and
-opaque-block replay. `[model_settings]` is the deployment global default and
-each `[[model_settings_profiles]]` entry is a named profile a model's optional
-`settings_profile` selects; a selected profile outranks the global default, and
-both sit below the session and per-call layers of
+opaque-block replay. An OpenAI target may declare a nonempty, unpadded
+`reasoning_replay_family` string on `[[models]]` or `[[serving_targets]]`. Two
+targets replay each other's reasoning items only when both declare the same
+family. A target that declares none does not replay reasoning items. Family
+configuration does not suppress durable reasoning retention. Every configured
+entry naming one `provider_model` must declare the same value; other adapters
+cannot declare this capability. `[model_settings]` is the deployment global
+default and each `[[model_settings_profiles]]` entry is a named profile a
+model's optional `settings_profile` selects; a selected profile outranks the
+global default, and both sit below the session and per-call layers of
 [model session settings](model-session-settings.md). An adapter mapping that
 names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
 `executable`, `mcp_bridge_executable`, and `working_directory`. The required
@@ -135,11 +141,10 @@ rejects `env_key` because it uses no child environment. Each
 `FileCredentialAccess` instance binds one consumer-scoped map of references to
 deployment paths, and a model adapter receives the complete file-profile catalog
 declared for it. `ambient` leaves login resolution to a CLI. `codex_home` names
-the login directory a Codex child receives as `CODEX_HOME`; a configured home is
-admitted only as an existing, readable, nonempty directory, and startup fails
-otherwise. Delivery replaces the child's inherited `CODEX_HOME` with the
-admitted path of the profile the operation's reference names and leaves every
-other profile's path absent.
+the Codex login directory; a configured home is admitted only as an existing,
+readable, nonempty directory, and startup fails otherwise. Delivery links the
+selected profile's `auth.json` into a private per-operation `CODEX_HOME` with an
+empty `config.toml`.
 
 A credential pool is the set of profiles that may substitute for one another for
 one model family. An `[[adapter_mappings]]` entry maps each family to exactly
@@ -367,8 +372,10 @@ An HTTP adapter proves non-acceptance only with a decoded native error envelope
 naming the cause in a pre-stream error response. An SSE error record never
 carries that proof, whatever token it holds, because by then the provider has
 begun processing the request. The Codex CLI proves non-acceptance instead
-through its machine-readable `turn.failed` closure, so a `codex_cli` pool admits
-`switch_now` on all three availability causes.
+through its typed failed `turn/completed` closure under the
+[runtime proof rule](runtime-substrate.md), so a `codex_cli` pool admits
+`switch_now` on all three availability causes; an unproven availability failure
+authorizes no successor.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
 observed it, and nothing ends one. It applies to every session except one that

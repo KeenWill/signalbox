@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_unit_test")
 
 CRATE_COMPILE_DATA = ["data/reference-catalog.json"]
 
@@ -38,4 +38,47 @@ filegroup(
 rust_api_json(
     name = "api_json",
     crate = ":signalbox_model_reference_catalog",
+)
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_model_reference_catalog",
+)
+
+rust_integration_test(
+    name = "catalog",
+    args = ["--test-threads=4"],
+    srcs = glob(["tests/**/*.rs"]),
+    compile_data = [
+        "projections/consumer-equivalence.md",
+        "projections/historical-pricing.md",
+        "projections/models.md",
+        "projections/research-gaps.md",
+        "projections/sources.md",
+    ],
+    crate_root = "tests/catalog.rs",
+    data = ["//:Cargo.toml"] + glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [":generate-reference-projections"],
+    env = {
+        "SIGNALBOX_TEST_MANIFEST": "$(rootpath //:Cargo.toml)",
+        "NEXTEST_BIN_EXE_generate_reference_projections": "$(rootpath :generate-reference-projections)",
+    },
+    env_inherit = [
+        "HOME",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+    ],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/model-reference-catalog",
+        "CARGO_BIN_EXE_generate-reference-projections": "$(rootpath :generate-reference-projections)",
+        "CARGO": "cargo",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = ["//crates/model-reference-catalog:signalbox_model_reference_catalog"],
 )

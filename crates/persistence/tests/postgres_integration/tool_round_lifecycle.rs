@@ -2,6 +2,119 @@
 
 use crate::*;
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn provider_reasoning_commits_in_order_with_tool_proposals() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7efa_0810;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let item = signalbox_domain::ProviderReasoningItem::try_new(String::from(
+        r#"{"type":"reasoning","id":"rs_tool","encrypted_content":"opaque"}"#,
+    ))
+    .expect("the fixture carries a complete reasoning item");
+    let response = ToolUsingAssistantResponse::try_from_parts(vec![
+        AssistantResponsePart::Text(
+            AssistantText::try_new(String::from("before")).expect("nonempty fixture text"),
+        ),
+        AssistantResponsePart::ProviderReasoning(item),
+        AssistantResponsePart::Text(
+            AssistantText::try_new(String::from("after")).expect("nonempty fixture text"),
+        ),
+        AssistantResponsePart::ToolCall(ToolCallProposal::new(
+            ToolName::try_new(String::from("current_time")).expect("valid fixture tool name"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("valid fixture arguments"),
+        )),
+    ])
+    .expect("the response contains a tool proposal");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation.clone(),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![
+                    ToolResponsePartIdentity::text(SemanticTranscriptEntryId::from_uuid(
+                        Uuid::from_u128(seed + 20),
+                    )),
+                    ToolResponsePartIdentity::provider_reasoning(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                    ),
+                    ToolResponsePartIdentity::text(SemanticTranscriptEntryId::from_uuid(
+                        Uuid::from_u128(seed + 22),
+                    )),
+                    ToolResponsePartIdentity::tool_call(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                        signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 24)),
+                        InitialToolApproval::Confirm,
+                    ),
+                ],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 25)),
+                None,
+            )),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?;
+    assert_eq!(
+        repository
+            .reread_terminal_observation(fixture.session, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    let ordered: Vec<String> = sqlx::query_scalar(
+        "SELECT entry.payload_kind FROM tool_round AS round
+           JOIN context_frontier_member AS member
+             ON member.owning_session_id = round.session_id
+            AND member.context_frontier_id = round.boundary_frontier_id
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+          WHERE round.producing_model_call_id = $1 AND entry.producing_model_call_id = $1
+          ORDER BY member.member_position",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        ordered,
+        [
+            "assistant_text",
+            "provider_reasoning",
+            "assistant_text",
+            "assistant_tool_use"
+        ]
+    );
+    assert!(
+        PostgresToolLoopRepository::new(pool.clone())
+            .load_active_batch(fixture.session, fixture.turn)
+            .await?
+            .is_some()
+    );
+    let mut invalid = pool.begin().await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER USER")
+        .execute(&mut *invalid)
+        .await?;
+    let error = sqlx::query("UPDATE semantic_transcript_entry SET payload_kind = 'unknown_provider_kind' WHERE producing_model_call_id = $1")
+        .bind(fixture.call.into_uuid()).execute(&mut *invalid).await.expect_err("the payload vocabulary stays closed");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    invalid.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Registers one verified replica so a fixture attachment names a catalogued blob.
 ///
 /// The attachment part itself travels with the fixture's submit input rather
