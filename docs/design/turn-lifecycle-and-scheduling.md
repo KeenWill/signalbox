@@ -57,18 +57,19 @@ placement. [Tool loop](tool-loop.md) owns lost-placement resolution. After every
 request resolves, replacement takes over in the
 [continuation transaction](../spec/tool-loop.md), after all tool results are
 appended and before the next call is prepared against the changed placement. The
-one exception is an offered pure or idempotent runner attempt that must be
-retried on the successor: after every preceding request resolves, the tool-loop
-design's distinct pre-continuation takeover transaction installs the successor
-and consumes the staged replacement while that request remains recovery-pending.
-That transaction projects no result and prepares no call; result projection and
-continuation remain deferred until the retry and later requests resolve and the
-whole batch is complete. When an interrupt or crash-loss reconciliation
-terminalizes the batch, that path completes or retires the staged replacement
-before terminalizing the turn. If terminalization wins before retry dispatch,
-its transaction resolves the retained attempt and request with the terminal-turn
+one exception is an offered runner attempt, either pure or idempotent or backed
+by durable no-execution proof, that must be retried on the successor: after
+every preceding request resolves, the tool-loop design's distinct
+pre-continuation takeover transaction installs the successor and consumes the
+staged replacement while that request remains recovery-pending. That transaction
+projects no result and prepares no call; result projection and continuation
+remain deferred until the retry and later requests resolve and the whole batch
+is complete. When an interrupt or crash-loss reconciliation terminalizes the
+batch, that path completes or retires the staged replacement before
+terminalizing the turn. If terminalization wins before retry dispatch, its
+transaction resolves the retained attempt and request with the terminal-turn
 outcome, projects `ToolClosed`, and suppresses the retry. If dispatch wins,
-terminalization waits for the fresh attempt's completion or crash classification
+terminalization waits for the retry attempt's completion or crash classification
 and closes the retained dependency before ending the turn. The command claims
 its identity immediately and provisioning authorization only when needed, and
 its terminal transaction commits only after any authorized in-flight
