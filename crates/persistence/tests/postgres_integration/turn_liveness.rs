@@ -513,8 +513,8 @@ async fn an_outstanding_provider_call_moves_from_quiescent_to_slot_held_inventor
     Ok(())
 }
 
-/// slot-held recovery revalidates the exact turn-progress evidence under
-/// the scheduler lock and declines evidence that changed after observation.
+/// slot-held recovery revalidates the exact turn-progress evidence under the scheduler lock and
+/// declines evidence that changed after observation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn slot_held_recovery_declines_changed_progress_evidence() -> Result<(), Box<dyn Error>> {
@@ -557,8 +557,8 @@ async fn slot_held_recovery_declines_changed_progress_evidence() -> Result<(), B
     Ok(())
 }
 
-/// a lock refusal raised by the shared startup transition remains the
-/// typed contention outcome that the detached scheduler recovery can retry.
+/// a lock refusal raised by the shared startup transition remains the typed contention outcome that
+/// the detached scheduler recovery can retry.
 ///
 /// This repository classifies no lock site of its own on this path — it sets
 /// one acquisition bound and hands the observation straight to the shared
@@ -833,9 +833,9 @@ const RECOVERY_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis
 /// The wider bound the write phase is owed once the scheduler row is held.
 const RECOVERY_WRITE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(1_500);
 
-/// slot-held recovery switches to its write budget once the scheduler row
-/// is held, so the outbox sequence row every writer holds until it commits is
-/// ordinary contention rather than a stall refused at the acquisition budget.
+/// slot-held recovery switches to its write budget once the scheduler row is held, so the outbox
+/// sequence row every writer holds until it commits is ordinary contention rather than a stall
+/// refused at the acquisition budget.
 ///
 /// Without the switch every statement after the scheduler row runs at the
 /// narrower acquisition bound, and a busy daemon's ordinary outbox traffic
@@ -964,8 +964,8 @@ async fn abandoned_pre_activation_compaction(
     })
 }
 
-/// the expiry handoff's compaction recovery acts on the abandoned
-/// compaction itself, so a session that holds none is left exactly as found.
+/// the expiry handoff's compaction recovery acts on the abandoned compaction itself, so a session
+/// that holds none is left exactly as found.
 ///
 /// The handoff runs detached, its admission slot is released the moment the
 /// pass expires, and it sleeps between attempts, so a later eligibility sweep
@@ -1004,9 +1004,9 @@ async fn compaction_recovery_spares_a_session_holding_no_abandoned_compaction()
     Ok(())
 }
 
-/// an authorized compaction whose pass expired before it finished is the
-/// evidence the handoff acts on, so recovery terminalizes it and frees the
-/// session boundary that was holding every queued turn out.
+/// an authorized compaction whose pass expired before it finished is the evidence the handoff acts
+/// on, so recovery terminalizes it and frees the session boundary that was holding every queued
+/// turn out.
 ///
 /// This is the wedge itself: the compaction call and its pending command own
 /// the boundary, and nothing else terminalizes them before a daemon restart.
@@ -1056,9 +1056,8 @@ async fn compaction_recovery_terminalizes_the_boundary_its_expired_pass_abandone
     Ok(())
 }
 
-/// compaction recovery installs its lock budget server-side, so a
-/// contended scheduler row is refused inside the budget instead of stranding
-/// the wait on a checked-out pooled connection.
+/// compaction recovery installs its lock budget server-side, so a contended scheduler row is
+/// refused inside the budget instead of stranding the wait on a checked-out pooled connection.
 ///
 /// The handoff drives this detached under a wall-clock deadline, and a deadline
 /// cannot cancel a statement already waiting in the backend: abandoning the
@@ -1100,8 +1099,8 @@ async fn compaction_recovery_refuses_a_contended_scheduler_row_inside_its_budget
     Ok(())
 }
 
-/// compaction recovery names the exact call its expired window made
-/// durable, so a later pass's live compaction is not the one it terminalizes.
+/// compaction recovery names the exact call its expired window made durable, so a later pass's live
+/// compaction is not the one it terminalizes.
 ///
 /// Expiry inside the read-only preflight leaves no durable call at all, and the
 /// handoff waits between attempts, so by the time it reaches the database a

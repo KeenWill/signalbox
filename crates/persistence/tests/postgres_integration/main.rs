@@ -1,4 +1,5 @@
-//! Feature-gated PostgreSQL coverage for migrations, durable invariants, and repository composition.
+//! Feature-gated PostgreSQL coverage for migrations, durable invariants, and repository
+//! composition.
 
 #![allow(
     clippy::expect_used,

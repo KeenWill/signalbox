@@ -1,4 +1,5 @@
-//! Model call usage evidence, credential references, provider failure causes, and interrupt or stop history.
+//! Model call usage evidence, credential references, provider failure causes, and interrupt or stop
+//! history.
 
 use crate::*;
 
@@ -2408,11 +2409,9 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
     Ok(())
 }
 
-/// interrupting
-/// an issued call atomically records its stop proof and cancellation request;
-/// the durable signal resolves, physical cancellation closes the turn with its
-/// exact attempt history, and both command and observation replays converge on
-/// the recorded outcome.
+/// interrupting an issued call atomically records its stop proof and cancellation request; the
+/// durable signal resolves, physical cancellation closes the turn with its exact attempt history,
+/// and both command and observation replays converge on the recorded outcome.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result<(), Box<dyn Error>>
@@ -2654,10 +2653,8 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
     Ok(())
 }
 
-/// ambiguity observed
-/// before or after an applied interrupt terminalizes as exact proof-bearing
-/// reconciliation, and retained observation and origin rereads recognize the
-/// committed closure.
+/// ambiguity observed before or after an applied interrupt terminalizes as exact proof-bearing
+/// reconciliation, and retained observation and origin rereads recognize the committed closure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Result<(), Box<dyn Error>>
@@ -3130,9 +3127,8 @@ async fn provider_failure_cause_round_trips_through_persistence_and_process_read
     Ok(())
 }
 
-/// the stop-request migration keeps
-/// each stopping rejection paired with its immutable delivery and admits only
-/// a known-failed call as failed post-cancellation provenance.
+/// the stop-request migration keeps each stopping rejection paired with its immutable delivery and
+/// admits only a known-failed call as failed post-cancellation provenance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Result<(), Box<dyn Error>>
@@ -3271,10 +3267,9 @@ async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Resul
     Ok(())
 }
 
-/// completion and restart can
-/// win after a durable stop request without erasing the applied interrupt.
-/// Terminal reload accepts the completion race, while restart retains an
-/// ambiguous call in proof-bearing terminal reconciliation.
+/// completion and restart can win after a durable stop request without erasing the applied
+/// interrupt. Terminal reload accepts the completion race, while restart retains an ambiguous call
+/// in proof-bearing terminal reconciliation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<(), Box<dyn Error>>

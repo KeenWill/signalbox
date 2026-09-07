@@ -432,8 +432,8 @@ async fn session_model_credential_publication_rejects_a_concurrent_late_entry()
     Ok(())
 }
 
-/// stored tool arguments use the same exact canonical JSON or
-/// undecodable representation admitted by the domain.
+/// stored tool arguments use the same exact canonical JSON or undecodable representation admitted
+/// by the domain.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn tool_argument_representation_is_database_checked() -> Result<(), Box<dyn Error>> {
@@ -517,8 +517,8 @@ async fn tool_argument_representation_is_database_checked() -> Result<(), Box<dy
     Ok(())
 }
 
-/// user-decision receipts for one batch reconstitute from one identity-set
-/// load instead of one query per approval row.
+/// user-decision receipts for one batch reconstitute from one identity-set load instead of one
+/// query per approval row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn user_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn Error>> {
@@ -595,8 +595,7 @@ async fn user_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// a replayed not-earliest receipt can name only an earlier
-/// request from the same producing round.
+/// a replayed not-earliest receipt can name only an earlier request from the same producing round.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn decision_receipt_rejects_cross_round_earliest_request() -> Result<(), Box<dyn Error>> {
@@ -648,8 +647,8 @@ async fn decision_receipt_rejects_cross_round_earliest_request() -> Result<(), B
     Ok(())
 }
 
-/// durable runner lease binding keeps restart reconstitution from
-/// issuing a second runner capability for the same physical attempt.
+/// durable runner lease binding keeps restart reconstitution from issuing a second runner
+/// capability for the same physical attempt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn active_batch_reload_restores_consumed_runner_issuance() -> Result<(), Box<dyn Error>> {
@@ -721,11 +720,10 @@ async fn active_batch_reload_restores_consumed_runner_issuance() -> Result<(), B
     Ok(())
 }
 
-/// a stored retryable claimed loss leaves its source
-/// attempt in flight, so a restarted process reloads an active batch that
-/// still carries the exact live source the checked claimed replacement
-/// requires, and its retired inventory stays empty until the atomic
-/// replacement commit retires the predecessor.
+/// a stored retryable claimed loss leaves its source attempt in flight, so a restarted process
+/// reloads an active batch that still carries the exact live source the checked claimed replacement
+/// requires, and its retired inventory stays empty until the atomic replacement commit retires the
+/// predecessor.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn batch_reload_preserves_lost_claimed_source_attempt() -> Result<(), Box<dyn Error>> {
@@ -859,9 +857,8 @@ async fn batch_reload_preserves_lost_claimed_source_attempt() -> Result<(), Box<
     Ok(())
 }
 
-/// active-batch reload restores the durable
-/// retired-identity inventory a claimed runner retry leaves behind, so a
-/// restarted process rejects reuse of the retired physical-attempt identity in
+/// active-batch reload restores the durable retired-identity inventory a claimed runner retry
+/// leaves behind, so a restarted process rejects reuse of the retired physical-attempt identity in
 /// the domain instead of failing on the retained database row's key.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -1071,10 +1068,9 @@ async fn observed_tool_batch_frontiers(
     })
 }
 
-/// one confirmed
-/// proposal survives a repository restart, records a replay-safe user
-/// decision, executes through an exact durable fence, and projects one
-/// reference-only result atomically with the same-turn continuation call.
+/// one confirmed proposal survives a repository restart, records a replay-safe user decision,
+/// executes through an exact durable fence, and projects one reference-only result atomically with
+/// the same-turn continuation call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn tool_round_survives_restart_and_projects_result() -> Result<(), Box<dyn Error>> {

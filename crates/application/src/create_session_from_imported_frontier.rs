@@ -546,8 +546,7 @@ mod tests {
         assert!(!candidate.is_max());
     }
 
-    /// reserved identities fail before request
-    /// construction.
+    /// reserved identities fail before request construction.
     #[test]
     fn request_rejects_reserved_command_identifiers() {
         let conversation = imported_conversation();
@@ -564,8 +563,8 @@ mod tests {
         );
     }
 
-    /// the admitted request retains exactly the caller-selected frontier,
-    /// relationship, and initial defaults without a second conversation field.
+    /// the admitted request retains exactly the caller-selected frontier, relationship, and initial
+    /// defaults without a second conversation field.
     #[test]
     fn request_preserves_the_complete_caller_payload() {
         let conversation = imported_conversation();
@@ -587,8 +586,8 @@ mod tests {
         assert_eq!(request.initial_configuration_defaults(), &initial_defaults);
     }
 
-    /// production generation supplies fresh UUIDv7
-    /// values for all three distinct domain identity kinds.
+    /// production generation supplies fresh UUIDv7 values for all three distinct domain identity
+    /// kinds.
     #[test]
     fn production_generator_supplies_fresh_uuid_v7_candidates() {
         let mut generator = UuidV7CreateSessionFromImportedFrontierIdGenerator;
@@ -622,9 +621,8 @@ mod tests {
         assert_uuid_v7(second_frontier);
     }
 
-    /// one invocation passes fixed candidates once
-    /// and semantic identities remain transaction-controlled after prefix
-    /// resolution.
+    /// one invocation passes fixed candidates once and semantic identities remain
+    /// transaction-controlled after prefix resolution.
     #[test]
     fn orchestrates_one_atomic_checked_seed_creation() {
         let conversation = imported_conversation();
@@ -675,8 +673,8 @@ mod tests {
         );
     }
 
-    /// equal replay returns the recorded session and does not
-    /// request variable-cardinality semantic identities.
+    /// equal replay returns the recorded session and does not request variable-cardinality semantic
+    /// identities.
     #[test]
     fn equal_replay_discards_fresh_fixed_candidates() {
         let conversation = imported_conversation();
@@ -730,8 +728,8 @@ mod tests {
         assert_eq!(transaction.observed.len(), 1);
     }
 
-    /// claimed cross-kind or changed-payload reuse passes
-    /// through unchanged before semantic identity generation.
+    /// claimed cross-kind or changed-payload reuse passes through unchanged before semantic
+    /// identity generation.
     #[test]
     fn conflicting_reuse_is_typed_and_not_retried() {
         let conversation = imported_conversation();
@@ -754,8 +752,8 @@ mod tests {
         assert_eq!(transaction.observed.len(), 1);
     }
 
-    /// a missing imported target remains a pre-claim terminal
-    /// result and requests no semantic identities.
+    /// a missing imported target remains a pre-claim terminal result and requests no semantic
+    /// identities.
     #[test]
     fn missing_target_passes_through_without_semantic_generation() {
         let conversation = imported_conversation();

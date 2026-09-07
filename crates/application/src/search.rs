@@ -12,16 +12,20 @@ use signalbox_domain::{
 use uuid::Uuid;
 
 /// Maximum UTF-8 bytes admitted in one product search expression.
-// numeric-bound: guard - prevents one unbounded expression from driving term extraction and index probing without limit
+// numeric-bound: guard - prevents one unbounded expression from driving term extraction and index
+// probing without limit
 const SEARCH_QUERY_BYTE_CEILING: usize = 512;
 /// Maximum records admitted in one search page.
-// numeric-bound: guard - prevents one page read from projecting an unbounded result set into a single response
+// numeric-bound: guard - prevents one page read from projecting an unbounded result set into a
+// single response
 const SEARCH_PAGE_ITEM_CEILING: u16 = 100;
 /// Maximum UTF-8 bytes retained in one result snippet.
-// numeric-bound: guard - prevents one matched projection from carrying unbounded text into every result of every page
+// numeric-bound: guard - prevents one matched projection from carrying unbounded text into every
+// result of every page
 const SEARCH_SNIPPET_BYTE_CEILING: usize = 512;
 /// Maximum UTF-8 bytes admitted in one explicit artifact projection.
-// numeric-bound: guard - prevents one publisher-supplied artifact from writing unbounded text into the durable lexical projection
+// numeric-bound: guard - prevents one publisher-supplied artifact from writing unbounded text into
+// the durable lexical projection
 const SEARCH_PROJECTION_TEXT_BYTE_CEILING: usize = 1_048_576;
 
 /// Returns the hard safety ceiling on one product search expression.

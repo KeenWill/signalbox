@@ -2,8 +2,8 @@
 
 use crate::*;
 
-/// scheduler-row locking serializes concurrent passes for one
-/// session so exactly one service activates and the other observes the winner.
+/// scheduler-row locking serializes concurrent passes for one session so exactly one service
+/// activates and the other observes the winner.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn concurrent_start_eligible_turn_passes_activate_once() -> Result<(), Box<dyn Error>> {
@@ -529,8 +529,8 @@ async fn submit_queued_ahead_of_activation_interleaves() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// nonexistent and empty sessions are false wake-ups that
-/// return `NoEligibleTurn` and create no lifecycle effects.
+/// nonexistent and empty sessions are false wake-ups that return `NoEligibleTurn` and create no
+/// lifecycle effects.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn start_eligible_turn_false_wakeups_are_noops() -> Result<(), Box<dyn Error>> {
@@ -582,9 +582,9 @@ async fn start_eligible_turn_false_wakeups_are_noops() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// once the scheduler lock admits and prepares one exact
-/// queued candidate, a guarded activation that matches no row is durable
-/// divergence, not a stale wake-up, and rolls back every preceding write.
+/// once the scheduler lock admits and prepares one exact queued candidate, a guarded activation
+/// that matches no row is durable divergence, not a stale wake-up, and rolls back every preceding
+/// write.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn start_eligible_turn_zero_row_guard_is_inconsistent() -> Result<(), Box<dyn Error>> {
@@ -883,9 +883,8 @@ async fn start_eligible_turn_corrupt_projection_fails_closed() -> Result<(), Box
     Ok(())
 }
 
-/// after the first queued turn fails, the adapter
-/// activates the next turn with exact predecessor lineage and a
-/// prefix-preserving starting frontier.
+/// after the first queued turn fails, the adapter activates the next turn with exact predecessor
+/// lineage and a prefix-preserving starting frontier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn start_eligible_turn_preserves_failed_predecessor_prefix() -> Result<(), Box<dyn Error>> {
@@ -1035,9 +1034,8 @@ async fn start_eligible_turn_preserves_failed_predecessor_prefix() -> Result<(),
     Ok(())
 }
 
-/// one complete schema-level eligibility
-/// transaction can bind the exact origin frontier and prepared attempt, while
-/// the database independently rejects contradictory lifecycle histories.
+/// one complete schema-level eligibility transaction can bind the exact origin frontier and
+/// prepared attempt, while the database independently rejects contradictory lifecycle histories.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn turn_storage_enforces_lifecycle_consistency() -> Result<(), Box<dyn Error>> {
@@ -1875,12 +1873,10 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
     Ok(())
 }
 
-/// the composed production
-/// chain — CreateSession service, accepted start submission, and
-/// StartEligibleTurn service activation — produces the occupied slot the
-/// seeded occupied-slot tests assume: a matching After request queues at the
-/// next gap-free position, a matching NextSafePoint binds pending steering to
-/// the activated turn, and a start names the activated turn in its typed
+/// the composed production chain — CreateSession service, accepted start submission, and
+/// StartEligibleTurn service activation — produces the occupied slot the seeded occupied-slot tests
+/// assume: a matching After request queues at the next gap-free position, a matching NextSafePoint
+/// binds pending steering to the activated turn, and a start names the activated turn in its typed
 /// rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -2088,15 +2084,12 @@ async fn occupied_slot_handling_composes_with_service_activated_first_turn()
     Ok(())
 }
 
-/// after the production chain
-/// activates the first turn and terminal facts close it, the production
-/// activation service commits the After-lineage successor, and occupied-slot
-/// handling against that successor matches the first-in-session pass: After
-/// queues at the next gap-free position, NextSafePoint binds to the
-/// successor, and a start names it. The predecessor's terminalization uses
-/// this suite's raw terminal seam (the same seam the predecessor-prefix
-/// test uses) because no production terminalization adapter exists yet; every
-/// other step is the production chain.
+/// after the production chain activates the first turn and terminal facts close it, the production
+/// activation service commits the After-lineage successor, and occupied-slot handling against that
+/// successor matches the first-in-session pass: After queues at the next gap-free position,
+/// NextSafePoint binds to the successor, and a start names it. The predecessor's terminalization
+/// uses this suite's raw terminal seam (the same seam the predecessor-prefix test uses) because no
+/// production terminalization adapter exists yet; every other step is the production chain.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn occupied_slot_handling_composes_with_service_activated_after_lineage_turn()
@@ -2201,9 +2194,8 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
     };
     assert_eq!(first_activated.turn(), first_turn);
 
-    // Raw terminal seam: no production terminalization adapter exists yet, so
-    // the predecessor's failure facts commit exactly as in the
-    // predecessor-prefix test.
+    // Raw terminal seam: no production terminalization adapter exists yet, so the predecessor's
+    // failure facts commit exactly as in the predecessor-prefix test.
     let failure_entry = Uuid::from_u128(0xdc2);
     let terminal_frontier = Uuid::from_u128(0xec2);
     let mut terminalize = pool.begin().await?;

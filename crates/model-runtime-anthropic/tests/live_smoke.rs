@@ -204,13 +204,12 @@ struct DecodedResponse {
 /// recognized token classifies as `Unrecognized`. The guard therefore requires
 /// the whole shape `without_unproven_refusal` constructs and nothing else:
 ///
-/// - `native == NativeErrorFacts { error_token: Some("refusal"), .. }` with no
-///   code and no message. A native error event populates its facts from the
-///   provider's own error object, which carries a rendered message.
-/// - An observed `FinishReported(FinishReason::Refusal)`. The decoder emits
-///   that only after the provider reports the refusal stop reason; the
-///   error-event branch returns terminal evidence immediately, emitting no
-///   finish at all.
+/// - `native == NativeErrorFacts { error_token: Some("refusal"), .. }` with no code and no message.
+///   A native error event populates its facts from the provider's own error object, which carries a
+///   rendered message.
+/// - An observed `FinishReported(FinishReason::Refusal)`. The decoder emits that only after the
+///   provider reports the refusal stop reason; the error-event branch returns terminal evidence
+///   immediately, emitting no finish at all.
 ///
 /// Both are checked because either alone is defeatable: an error event whose
 /// type happened to be the token `refusal` and which carried no message would

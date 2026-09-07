@@ -1,4 +1,5 @@
-//! Model call execution transactions, startup scan classification, and steering reclassification after restart.
+//! Model call execution transactions, startup scan classification, and steering reclassification
+//! after restart.
 
 use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
@@ -1256,12 +1257,10 @@ async fn transient_retry_exhausts_if_its_credential_is_quarantined_before_prepar
     Ok(())
 }
 
-/// the production
-/// persistence chain checkpoints Prepared with its credential and input-token
-/// semantics pins, reloads them instead of changed deployment values,
-/// separately authorizes send, and atomically commits exact assistant content,
-/// provider compaction, completion, terminal frontier, lifecycle, call,
-/// attempt, and typed outbox records.
+/// the production persistence chain checkpoints Prepared with its credential and input-token
+/// semantics pins, reloads them instead of changed deployment values, separately authorizes send,
+/// and atomically commits exact assistant content, provider compaction, completion, terminal
+/// frontier, lifecycle, call, attempt, and typed outbox records.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn model_call_transactions_complete_first_reply() -> Result<(), Box<dyn Error>> {
@@ -1946,12 +1945,10 @@ async fn prepared_model_call_remains_scheduler_eligible() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// the scripted
-/// application path consumes multiple steering inputs at preparation, renders
-/// them immediately in the process projection and to the provider in acceptance
-/// order, rejects noncontiguous stored snapshot ordinals before resume,
-/// preserves the staged terminal commits, and replays each immutable
-/// pending-steering receipt after consumption.
+/// the scripted application path consumes multiple steering inputs at preparation, renders them
+/// immediately in the process projection and to the provider in acceptance order, rejects
+/// noncontiguous stored snapshot ordinals before resume, preserves the staged terminal commits, and
+/// replays each immutable pending-steering receipt after consumption.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn application_service_completes_scripted_reply() -> Result<(), Box<dyn Error>> {
@@ -2430,12 +2427,10 @@ async fn application_service_completes_scripted_reply() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// a restart-parked
-/// ambiguous model call wedges the session — the scan classifies nothing, the
-/// wait stays visible across a second restart, and ordinary input is refused —
-/// and the user reconciliation decision then terminalizes the exact ambiguity
-/// without inventing an outcome, releases the slot, and lets the session
-/// activate the accepted successor.
+/// a restart-parked ambiguous model call wedges the session — the scan classifies nothing, the wait
+/// stays visible across a second restart, and ordinary input is refused — and the user
+/// reconciliation decision then terminalizes the exact ambiguity without inventing an outcome,
+/// releases the slot, and lets the session activate the accepted successor.
 ///
 /// This is one restart-and-recovery contract, so it stays one test
 /// (testing-style rule 17): CONTRIBUTING's restart category conjoins the final
@@ -2756,9 +2751,9 @@ async fn spend_automatic_reconciliation_budget(
     Ok(())
 }
 
-/// the daemon claims a typed durable attempt and uses the existing
-/// reconciliation-required transition to release an automatically recovered
-/// ambiguous model-call wait without rewriting the call's unknown outcome.
+/// the daemon claims a typed durable attempt and uses the existing reconciliation-required
+/// transition to release an automatically recovered ambiguous model-call wait without rewriting the
+/// call's unknown outcome.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn automatic_reconciliation_records_the_operator_transition() -> Result<(), Box<dyn Error>> {
@@ -2880,9 +2875,9 @@ async fn automatic_reconciliation_records_the_operator_transition() -> Result<()
     Ok(())
 }
 
-/// PostgreSQL, rather than a dropped client future, ends a recovery
-/// transaction that cannot reach the commit-ordered outbox allocator. The
-/// failed attempt therefore leaves no backend queued behind that allocator.
+/// PostgreSQL, rather than a dropped client future, ends a recovery transaction that cannot reach
+/// the commit-ordered outbox allocator. The failed attempt therefore leaves no backend queued
+/// behind that allocator.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn automatic_reconciliation_server_bound_releases_its_database_work()
@@ -2961,9 +2956,8 @@ async fn automatic_reconciliation_server_bound_releases_its_database_work()
     Ok(())
 }
 
-/// the existing operator reconciliation may win after an automatic
-/// attempt is claimed; that attempt records supersession and never applies a
-/// second terminal transition.
+/// the existing operator reconciliation may win after an automatic attempt is claimed; that attempt
+/// records supersession and never applies a second terminal transition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn operator_reconciliation_supersedes_a_claimed_automatic_attempt()
@@ -3033,10 +3027,9 @@ async fn operator_reconciliation_supersedes_a_claimed_automatic_attempt()
     Ok(())
 }
 
-/// an attempt that meets a held session scheduler row gives the row
-/// up inside the database, so a busy row costs one classified infrastructure
-/// failure with nothing written rather than a pooled connection checked out for
-/// the whole real wait.
+/// an attempt that meets a held session scheduler row gives the row up inside the database, so a
+/// busy row costs one classified infrastructure failure with nothing written rather than a pooled
+/// connection checked out for the whole real wait.
 ///
 /// The attempt's other bound is its caller's client-side timeout, and dropping
 /// that future queues a `ROLLBACK` instead of cancelling the running statement:
@@ -3163,8 +3156,8 @@ fn reconciliation_database_failure(
     }
 }
 
-/// the durable failure record is bounded inside the database too, so
-/// a run of contended attempts cannot strand a pooled connection apiece.
+/// the durable failure record is bounded inside the database too, so a run of contended attempts
+/// cannot strand a pooled connection apiece.
 ///
 /// This transaction updates the attempt row and its recovery row, and both are
 /// rows another daemon's claim scan already writes — it settles abandoned
@@ -3250,10 +3243,9 @@ async fn a_contended_failure_record_gives_the_row_up_inside_the_database()
     Ok(())
 }
 
-/// the acquisition budget bounds reaching a pooled connection and
-/// nothing past it, so a pool with nothing left to hand out costs one
-/// classified infrastructure failure that wrote nothing, rather than a watchdog
-/// wake spent waiting out the driver's own thirty-second acquisition timeout.
+/// the acquisition budget bounds reaching a pooled connection and nothing past it, so a pool with
+/// nothing left to hand out costs one classified infrastructure failure that wrote nothing, rather
+/// than a watchdog wake spent waiting out the driver's own thirty-second acquisition timeout.
 ///
 /// Abandoning an acquisition is the one cancellation on this path that is free:
 /// no transaction has begun and nothing has been sent, so no backend is left
@@ -3345,11 +3337,10 @@ async fn an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_begin
     Ok(())
 }
 
-/// infrastructure failures spend the exact automatic budget; only
-/// then does the still-active ambiguity become a visible operator park.
-/// infrastructure failures spend the exact automatic budget; the
-/// visible operator park can still be interrupted without leaving its durable
-/// automatic record inconsistent with the terminal turn and queued successor.
+/// infrastructure failures spend the exact automatic budget; only then does the still-active
+/// ambiguity become a visible operator park. infrastructure failures spend the exact automatic
+/// budget; the visible operator park can still be interrupted without leaving its durable automatic
+/// record inconsistent with the terminal turn and queued successor.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn exhausted_automatic_reconciliation_is_visible_to_the_operator()
@@ -3450,9 +3441,8 @@ async fn exhausted_automatic_reconciliation_is_visible_to_the_operator()
     Ok(())
 }
 
-/// first-time recovery discovery contends with an accepting operator
-/// interrupt on the turn row instead of racing past its uncommitted
-/// terminalization.
+/// first-time recovery discovery contends with an accepting operator interrupt on the turn row
+/// instead of racing past its uncommitted terminalization.
 ///
 /// Without a lock that either side can see, discovery's `READ COMMITTED` snapshot
 /// could enrol a fresh `scheduled` recovery for a turn the interrupt was
@@ -3524,8 +3514,8 @@ async fn recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<(), Bo
     Ok(())
 }
 
-/// a prepared model call remains discoverable for ordinary
-/// active-turn resumption even when no tool round is active.
+/// a prepared model call remains discoverable for ordinary active-turn resumption even when no tool
+/// round is active.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn prepared_model_call_is_resumable_without_tool_round() -> Result<(), Box<dyn Error>> {
@@ -3554,12 +3544,10 @@ async fn prepared_model_call_is_resumable_without_tool_round() -> Result<(), Box
     Ok(())
 }
 
-/// the production
-/// startup repository applies call-aware recovery under its session lock:
-/// Prepared remains retryable with its steering unchanged, an issued call becomes an exact
-/// ambiguity wait, a stopped call terminalizes as reconciliation while
-/// reclassifying its steering, that successor remains a valid replay origin,
-/// and replay changes neither.
+/// the production startup repository applies call-aware recovery under its session lock: Prepared
+/// remains retryable with its steering unchanged, an issued call becomes an exact ambiguity wait, a
+/// stopped call terminalizes as reconciliation while reclassifying its steering, that successor
+/// remains a valid replay origin, and replay changes neither.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn startup_recovery_leaves_zero_failed_turns() -> Result<(), Box<dyn Error>> {
@@ -3981,9 +3969,8 @@ async fn startup_recovery_leaves_zero_failed_turns() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// restart recovery reconstructs a committed call
-/// from its durable provider target even after deployment configuration remaps
-/// the selected model.
+/// restart recovery reconstructs a committed call from its durable provider target even after
+/// deployment configuration remaps the selected model.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn restart_recovery_preserves_durable_target_after_catalog_remap()
@@ -4033,11 +4020,10 @@ async fn restart_recovery_preserves_durable_target_after_catalog_remap()
     Ok(())
 }
 
-/// steering accepted after send
-/// authorization is atomically reclassified when the source completes. Its
-/// immutable command still replays PendingSteering, while the inherited
-/// successor enters the ordinary scheduler with the source's exact settings
-/// evidence and activates after the terminal source.
+/// steering accepted after send authorization is atomically reclassified when the source completes.
+/// Its immutable command still replays PendingSteering, while the inherited successor enters the
+/// ordinary scheduler with the source's exact settings evidence and activates after the terminal
+/// source.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_call_reclassifies_and_schedules_pending_steering() -> Result<(), Box<dyn Error>> {
@@ -4356,10 +4342,9 @@ async fn terminal_call_reclassifies_and_schedules_pending_steering() -> Result<(
     Ok(())
 }
 
-/// immutable target
-/// resolution failure creates no targetless call, reclassifies the complete
-/// pending steering prefix, and atomically closes the prepared attempt and turn
-/// with its semantic failure boundary and typed outbox event.
+/// immutable target resolution failure creates no targetless call, reclassifies the complete
+/// pending steering prefix, and atomically closes the prepared attempt and turn with its semantic
+/// failure boundary and typed outbox event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn target_unavailable_reclassifies_steering() -> Result<(), Box<dyn Error>> {

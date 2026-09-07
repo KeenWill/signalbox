@@ -199,29 +199,24 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
     /// Per `docs/spec/runtime-substrate.md`, the client is configured so
     /// that a single send is provably a single request:
     ///
-    /// - **TLS uses rustls with the platform verifier and a TLS 1.2 floor.**
-    ///   Certificate and hostname verification remain enabled.
-    /// - **Ambient proxy discovery is disabled** (`no_proxy()`), so provider
-    ///   credentials cannot traverse an environment-selected intermediary.
-    /// - **Redirect following is disabled** ([`Policy::none`]). reqwest's
-    ///   default policy follows up to ten redirects and, on a 307 or 308
-    ///   response, replays the buffered POST body — a hidden second physical
-    ///   provider interaction inside one send, which would corrupt the
-    ///   acceptance-boundary evidence that classification consumes. With
-    ///   redirects disabled, a redirect status surfaces as
-    ///   [`LossCause::UnexpectedHttpStatus`] evidence instead.
-    /// - **Protocol-level retries are disabled** (`reqwest::retry::never()`).
-    ///   reqwest's default retry policy resends requests rejected by
-    ///   protocol NACKs; a second physical POST for one authorized
-    ///   operation is exactly what the one-send discipline prohibits, so
-    ///   the never-retry policy is set explicitly.
-    /// - **Idle-connection reuse is disabled** (`pool_max_idle_per_host(0)`).
-    ///   The underlying HTTP client can transparently resend a request when
-    ///   a *reused* idle connection turns out to be closed before the
-    ///   request was written; with no idle connections every send opens a
-    ///   fresh connection, eliminating that replay path — and making a
-    ///   connect failure provably precede any request byte, which is what
-    ///   lets [`UnsentCause::ConnectFailed`] claim proven-unsent.
+    /// - **TLS uses rustls with the platform verifier and a TLS 1.2 floor.** Certificate and
+    ///   hostname verification remain enabled.
+    /// - **Ambient proxy discovery is disabled** (`no_proxy()`), so provider credentials cannot
+    ///   traverse an environment-selected intermediary.
+    /// - **Redirect following is disabled** ([`Policy::none`]). reqwest's default policy follows up
+    ///   to ten redirects and, on a 307 or 308 response, replays the buffered POST body — a hidden
+    ///   second physical provider interaction inside one send, which would corrupt the
+    ///   acceptance-boundary evidence that classification consumes. With redirects disabled, a
+    ///   redirect status surfaces as [`LossCause::UnexpectedHttpStatus`] evidence instead.
+    /// - **Protocol-level retries are disabled** (`reqwest::retry::never()`). reqwest's default
+    ///   retry policy resends requests rejected by protocol NACKs; a second physical POST for one
+    ///   authorized operation is exactly what the one-send discipline prohibits, so the never-retry
+    ///   policy is set explicitly.
+    /// - **Idle-connection reuse is disabled** (`pool_max_idle_per_host(0)`). The underlying HTTP
+    ///   client can transparently resend a request when a *reused* idle connection turns out to be
+    ///   closed before the request was written; with no idle connections every send opens a fresh
+    ///   connection, eliminating that replay path — and making a connect failure provably precede
+    ///   any request byte, which is what lets [`UnsentCause::ConnectFailed`] claim proven-unsent.
     ///
     /// The caller may leave the connect or whole-exchange timeout unset. A
     /// configured whole-exchange timeout covers connection establishment,

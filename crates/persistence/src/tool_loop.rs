@@ -73,9 +73,11 @@ use crate::{
 /// tool boundary rather than restated there.
 // numeric-bound: guard - prevents one blob_read tool response from exhausting turn memory
 pub const MAX_BLOB_READ_TOOL_BYTES: u64 = 524_288;
-// numeric-bound: guard - prevents accumulated blob_read responses in one turn from exhausting turn memory
+// numeric-bound: guard - prevents accumulated blob_read responses in one turn from exhausting turn
+// memory
 const MAX_BLOB_READ_TURN_BYTES: u64 = 2_097_152;
-// numeric-bound: guard - prevents unbounded blob_read requests in one turn from exhausting turn budget
+// numeric-bound: guard - prevents unbounded blob_read requests in one turn from exhausting turn
+// budget
 const MAX_BLOB_READ_REQUESTS_PER_TURN: i64 = 64;
 
 const BLOB_NOT_VISIBLE_DETAIL: &str = "blob_not_visible";

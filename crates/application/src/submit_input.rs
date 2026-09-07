@@ -786,8 +786,8 @@ mod tests {
         }
     }
 
-    /// reserved command identities fail before
-    /// canonical command construction or any application effect.
+    /// reserved command identities fail before canonical command construction or any application
+    /// effect.
     #[test]
     fn request_rejects_reserved_command_identifiers() {
         assert_eq!(
@@ -938,8 +938,8 @@ mod tests {
         );
     }
 
-    /// production candidates are fresh UUIDv7
-    /// values of their distinct domain kinds without using UUID order.
+    /// production candidates are fresh UUIDv7 values of their distinct domain kinds without using
+    /// UUID order.
     #[test]
     fn production_generator_supplies_fresh_uuid_v7_candidates() {
         let mut generator = UuidV7SubmitInputIdGenerator;
@@ -966,9 +966,8 @@ mod tests {
         assert!(!candidate.is_max());
     }
 
-    /// orchestration
-    /// fixes user attribution and forwards one exact command and candidate
-    /// pair to the atomic port.
+    /// orchestration fixes user attribution and forwards one exact command and candidate pair to
+    /// the atomic port.
     #[test]
     fn orchestrates_one_user_command_and_candidate_pair() {
         let request = request(1);
@@ -1026,8 +1025,8 @@ mod tests {
         assert_eq!(nudge.observed.into_inner(), vec![request.session()]);
     }
 
-    /// safe-point steering supplies no turn
-    /// candidate because successful acceptance initially creates no turn.
+    /// safe-point steering supplies no turn candidate because successful acceptance initially
+    /// creates no turn.
     #[test]
     fn next_safe_point_mints_no_turn() {
         let requested_session = session_id(2);
@@ -1097,8 +1096,8 @@ mod tests {
         );
     }
 
-    /// a recorded applied result passes through unchanged
-    /// without application preparation or translation.
+    /// a recorded applied result passes through unchanged without application preparation or
+    /// translation.
     #[test]
     fn recorded_applied_result_passes_through() {
         assert_recorded_result_passes_through(applied_result(
@@ -1108,8 +1107,8 @@ mod tests {
         ));
     }
 
-    /// every closed rejected result shape passes through
-    /// unchanged without application preparation or translation.
+    /// every closed rejected result shape passes through unchanged without application preparation
+    /// or translation.
     #[test]
     fn recorded_rejected_results_pass_through() {
         assert_recorded_result_passes_through(SubmitInputResult::Rejected(
@@ -1144,8 +1143,8 @@ mod tests {
         ));
     }
 
-    /// equal replay returns original durable identities rather
-    /// than either retransmission's fresh candidates.
+    /// equal replay returns original durable identities rather than either retransmission's fresh
+    /// candidates.
     #[test]
     fn equal_replay_returns_the_recorded_result() {
         let request = request(1);
@@ -1206,9 +1205,8 @@ mod tests {
         assert!(nudge.observed.into_inner().is_empty());
     }
 
-    /// a transaction failure remains nonterminal after exactly
-    /// one call; application orchestration does not retry or fabricate a
-    /// recorded result.
+    /// a transaction failure remains nonterminal after exactly one call; application orchestration
+    /// does not retry or fabricate a recorded result.
     #[test]
     fn transaction_failure_is_returned_without_retry() {
         let mut service = SubmitInputService::new(

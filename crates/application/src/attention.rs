@@ -8,10 +8,12 @@ use signalbox_domain::{SessionId, TurnId};
 // numeric-bound: guard - prevents a growing fleet from projecting an unbounded snapshot response
 const ATTENTION_SNAPSHOT_ITEM_CEILING: u16 = 32;
 /// Maximum Unicode scalar values retained from blocked-goal need text.
-// numeric-bound: guard - prevents one operator-authored goal need from carrying unbounded text into every summary
+// numeric-bound: guard - prevents one operator-authored goal need from carrying unbounded text into
+// every summary
 const ATTENTION_GOAL_SUMMARY_CHARACTER_CEILING: u16 = 128;
 /// Maximum journal records consumed by one incremental follow read.
-// numeric-bound: guard - prevents a change-journal backlog from driving an unbounded follow read and replacement batch
+// numeric-bound: guard - prevents a change-journal backlog from driving an unbounded follow read
+// and replacement batch
 const ATTENTION_CHANGE_ITEM_CEILING: u16 = 32;
 /// Maximum Unicode scalar values carried from one session title.
 // numeric-bound: guard - keeps the hot fleet page within its response byte bound

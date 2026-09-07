@@ -54,7 +54,8 @@ const CLAIM_WINDOW: i64 = 1;
 /// sweep would settle attempts that are still running. Configuration admission
 /// refuses such a budget rather than letting the arity be discovered in
 /// production.
-// numeric-bound: not-a-bound - the claim statement's fixed CASE arity, which the ladder and the configured budget must match
+// numeric-bound: not-a-bound - the claim statement's fixed CASE arity, which the ladder and the
+// configured budget must match
 pub const RETRY_LADDER_ARITY: usize = 5;
 
 /// How long any one reconciliation statement waits for a contended row.
@@ -75,7 +76,8 @@ pub const RETRY_LADDER_ARITY: usize = 5;
 /// It is published because what makes it correct is its relationship to the
 /// caller's deadline: the caller must let this budget expire first, which
 /// [`reconciliation_deadline`] enforces.
-// numeric-bound: guard - prevents a contended statement from holding a pooled connection for the whole real wait
+// numeric-bound: guard - prevents a contended statement from holding a pooled connection for the
+// whole real wait
 pub const RECONCILIATION_LOCK_WAIT: Duration = Duration::from_secs(1);
 
 /// How long one reconciliation transaction waits to reach a pooled connection.
@@ -83,7 +85,8 @@ pub const RECONCILIATION_LOCK_WAIT: Duration = Duration::from_secs(1);
 /// Cancelling an acquisition is safe in a way cancelling a statement is not: no
 /// transaction has begun, nothing has been sent, and so there is no work whose
 /// fate could be unknown.
-// numeric-bound: guard - prevents a saturated pool from consuming the attempt's deadline before it begins
+// numeric-bound: guard - prevents a saturated pool from consuming the attempt's deadline before it
+// begins
 pub const RECONCILIATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
 
 /// Headroom the caller's deadline keeps above the summed database-side budgets.
@@ -96,7 +99,8 @@ pub const RECONCILIATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
 /// stretch outside the deadline, so the deadline could expire in the same
 /// instant PostgreSQL was about to report `55P03`, which is the strand these
 /// bounds exist to prevent rather than a smaller version of it.
-// numeric-bound: guard - keeps the caller deadline above the database-side budgets by more than the uncovered BEGIN stretch
+// numeric-bound: guard - keeps the caller deadline above the database-side budgets by more than the
+// uncovered BEGIN stretch
 pub const RECONCILIATION_DEADLINE_MARGIN: Duration = Duration::from_millis(500);
 
 /// The smallest caller deadline that lets the database-side budgets expire first.
@@ -131,7 +135,8 @@ const _: () = assert!(
 /// An unconfigured deployment keeps the shipped default rather than running
 /// unbounded, and a configured bound below [`RECONCILIATION_DEADLINE_FLOOR`] is
 /// raised to it.
-// numeric-bound: guard - prevents an unconfigured deployment from waiting forever on a backend that stopped answering
+// numeric-bound: guard - prevents an unconfigured deployment from waiting forever on a backend that
+// stopped answering
 pub const RECONCILIATION_DEADLINE_DEFAULT: Duration = Duration::from_secs(5);
 
 /// The margin must hold as an arithmetic fact, not as a comment: a
