@@ -1090,8 +1090,8 @@ async fn append_placement_boundary(
     let session = replacement.placement.session();
     let frontiers: Vec<Uuid> = sqlx::query_scalar(
         "(SELECT turn_lifecycle_effective_terminal_frontier(session_id, turn_id)
-            FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'terminal'
-              AND terminal_frontier_id IS NOT NULL ORDER BY acceptance_position DESC LIMIT 1)
+            FROM turn_lifecycle WHERE session_id = $1
+              AND turn_lifecycle_effective_terminal_frontier(session_id, turn_id) IS NOT NULL ORDER BY acceptance_position DESC LIMIT 1)
          UNION SELECT boundary.context_frontier_id FROM runner_session_placement_frontier AS head
             JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) WHERE head.session_id = $1
          UNION SELECT seed_context_frontier_id FROM imported_session_seed WHERE session_id = $1
