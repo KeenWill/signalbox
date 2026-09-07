@@ -171,7 +171,9 @@ overrides the pool reserve; a known headroom at or below the reserve excludes
 that member from selection. A retained observation at or below the reserve fires
 `on_headroom_low` under the call's frozen policy; with no reserve, the trigger
 threshold is zero. Unknown capacity neither excludes a member nor fires a
-headroom action.
+headroom action. A classified provider failure's configured action, including
+`stay`, takes precedence over `on_headroom_low` from the same observation; the
+capacity snapshot is retained.
 
 The session-template catalog is read after the model catalog. Each template
 binds a name and version to a model or alias, a system prompt, and a
@@ -332,9 +334,10 @@ Settings whose effect the daemon cannot supply are typed startup failures rather
 than retained and inert: `round_robin` and a `switch_now` whose adapter cannot
 prove non-acceptance for that trigger's cause unless it is
 `on_credential_rejected`. Codex pools admit `least_used`, headroom reserves and
-non-`stay` `on_headroom_low`; adapters without capacity evidence reject them.
-Why: a configured protection that silently never fires reads as one the
-deployment has.
+non-`stay` `on_headroom_low`; the other adapters reject them. The Codex adapter
+emits no capacity snapshots, so members without retained evidence have unknown
+capacity: `least_used` falls back to configured order within equal priorities,
+reserves do not exclude them, and headroom actions do not fire.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under

@@ -122,7 +122,8 @@ impl ModelAdapter {
         }
     }
 
-    /// Reports whether this adapter observes remaining provider capacity.
+    /// Reports whether remaining-capacity policy is admitted for this adapter.
+    /// Missing evidence uses the policy's unknown-capacity behavior.
     pub(crate) const fn reports_remaining_capacity(self) -> bool {
         match self {
             Self::CodexCli => true,

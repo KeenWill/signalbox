@@ -402,3 +402,95 @@ async fn credential_capacity_policy_unknown_capacity_neither_excludes_nor_quaran
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_capacity_policy_failure_action_precedes_low_headroom()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let cases = [
+        (
+            CredentialPoolRuntimeAction::SwitchNextTurn,
+            Some("switch_next_turn"),
+        ),
+        (
+            CredentialPoolRuntimeAction::AvoidNewSessions,
+            Some("avoid_new_sessions"),
+        ),
+        (CredentialPoolRuntimeAction::Quarantine, Some("quarantine")),
+        (CredentialPoolRuntimeAction::Stay, None),
+    ];
+    for (index, (failure_action, expected)) in cases.into_iter().enumerate() {
+        // Each collision case owns disjoint identities and one credential reference.
+        let seed = 0xe100_0000 + (index as u128) * 0x1000;
+        let reference = format!("failure-capacity-member-{index}");
+        let mut call = prepare_capacity_call(
+            &pool,
+            seed,
+            CredentialPoolRuntimePolicy::new(
+                POOL,
+                vec![member(&reference, 1)],
+                CredentialPoolRuntimeExhaustion::Fail,
+                failure_action,
+                CredentialPoolRuntimeAction::Stay,
+                CredentialPoolRuntimeAction::Stay,
+                CredentialPoolRuntimeAction::Stay,
+            )
+            .with_capacity_policy(
+                CredentialPoolRuntimeTieBreak::LeastUsed,
+                Some(10),
+                CredentialPoolRuntimeAction::Quarantine,
+            ),
+        )
+        .await?;
+        let AuthorizeModelCallOutcome::Authorized(authorized) = call
+            .repository
+            .authorize_send(call.session, call.call)
+            .await?
+        else {
+            panic!("prepared capacity call authorizes");
+        };
+        let reported = snapshot(5, 80);
+        let outcome = call
+            .repository
+            .commit_observation(
+                call.session,
+                authorized
+                    .observation_correlation()
+                    .bind_provider_failure_observation_with_retry_after(
+                        ProviderModelCallFailureCause::QuotaExhausted,
+                        ProviderReportedTokenUsage::unreported(),
+                        None,
+                        false,
+                    )
+                    .with_rate_limits(Some(reported.clone())),
+                signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                    failed: call.terminal,
+                    successor_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(seed + 19)),
+                },
+                |_| panic!("capacity fixture has no steering"),
+            )
+            .await?;
+        assert!(matches!(
+            outcome,
+            Some(ModelCallObservationCommitOutcome::Terminal(_))
+        ));
+        let action: Option<(String, String)> = sqlx::query_as(
+            "SELECT action_kind, cause_kind FROM credential_pool_member_action WHERE observation_model_call_id = $1")
+            .bind(call.call.into_uuid()).fetch_optional(&pool).await?;
+        assert_eq!(action.as_ref().map(|(action, _)| action.as_str()), expected);
+        assert_eq!(
+            action.as_ref().map(|(_, cause)| cause.as_str()),
+            expected.map(|_| "quota_exhausted")
+        );
+        let retained = signalbox_persistence::credential_capacity::load_credential_rate_limits(
+            &mut *pool.acquire().await?,
+            &reference,
+        )
+        .await?;
+        assert_eq!(retained, Some(reported));
+    }
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

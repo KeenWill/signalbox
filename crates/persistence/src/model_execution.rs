@@ -11497,9 +11497,11 @@ async fn retain_call_capacity_policy_observation(
         snapshot,
     )
     .await?;
-    let Some(policy) = policy
-        .filter(|policy| retained && policy.headroom_low != CredentialPoolRuntimeAction::Stay)
-    else {
+    let Some(policy) = policy.filter(|policy| {
+        retained
+            && observation.provider_failure_cause().is_none()
+            && policy.headroom_low != CredentialPoolRuntimeAction::Stay
+    }) else {
         return Ok(());
     };
     let reference: String =
