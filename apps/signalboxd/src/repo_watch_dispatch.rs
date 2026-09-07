@@ -92,19 +92,27 @@ pub async fn scavenge_checkouts(
     };
     let roots = crate::daemon_tools::SessionWorkspaceRoots::try_new(tools.workspace_root())
         .map_err(|_| RepositoryWatchCommandError::CheckoutRemovalFailed)?;
-    for checkout in store
+    let checkouts = store
         .checkout_removal_candidates()
         .await
-        .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
-    {
-        let terminal: bool = sqlx::query_scalar(
-            "SELECT state_kind = 'terminal' FROM session_lifecycle WHERE session_id = $1",
-        )
-        .bind(checkout.session.into_uuid())
-        .fetch_one(core)
-        .await
         .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
-        if checkout.retired_reason.is_none() && !terminal {
+    let sessions: Vec<Uuid> = checkouts
+        .iter()
+        .filter(|checkout| checkout.retired_reason.is_none())
+        .map(|checkout| checkout.session.into_uuid())
+        .collect();
+    let terminal: std::collections::BTreeSet<Uuid> = if sessions.is_empty() {
+        Default::default()
+    } else {
+        sqlx::query_scalar(
+            "SELECT session_id FROM session_lifecycle WHERE session_id = ANY($1) AND state_kind = 'terminal'",
+        ).bind(&sessions).fetch_all(core)
+        .await
+        .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+        .into_iter().collect()
+    };
+    for checkout in checkouts {
+        if checkout.retired_reason.is_none() && !terminal.contains(&checkout.session.into_uuid()) {
             continue;
         }
         let roots = roots.clone();

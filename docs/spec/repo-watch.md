@@ -209,11 +209,11 @@ unauthenticated. Provisioning failure retires the dispatch as
 `checkout_provisioning_failed` with the failing step and exit status and stops
 the session. Retired dispatches and terminal sessions lose their provisioned
 checkout (at next startup if no runtime exists); startup scavenges retained
-checkouts awaiting removal even without repository-watch configuration. Pending
-submission follow-ups remain retryable after core command settlement, including
-interruption of a live turn whose session is closing. Synchronous
-command-identity conflicts settle as rejected before submission continues to the
-next action.
+checkouts awaiting removal even without repository-watch configuration. Removal
+refuses mount crossings. Pending submission follow-ups remain retryable after
+core command settlement, including interruption of a live turn whose session is
+closing. Synchronous command-identity conflicts settle as rejected before
+submission continues to the next action.
 
 ## Boundary contracts
 

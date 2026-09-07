@@ -251,7 +251,13 @@ pub(crate) fn remove(
         Err(error) => return Err(error),
     };
     let name = path.file_name().ok_or(rustix::io::Errno::INVAL)?;
-    let directory = match openat(&parent, name, DIRECTORY_FLAGS, Mode::empty()) {
+    let directory = match rustix::fs::openat2(
+        &parent,
+        name,
+        DIRECTORY_FLAGS,
+        Mode::empty(),
+        rustix::fs::ResolveFlags::NO_XDEV,
+    ) {
         Ok(directory) => directory,
         Err(rustix::io::Errno::NOENT) => return Ok(()),
         Err(error) => return Err(error),
@@ -271,7 +277,13 @@ fn remove_contents(directory: &OwnedFd) -> Result<(), rustix::io::Errno> {
         }
         let metadata = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
         if FileType::from_raw_mode(metadata.st_mode) == FileType::Directory {
-            let child = openat(directory, name, DIRECTORY_FLAGS, Mode::empty())?;
+            let child = rustix::fs::openat2(
+                directory,
+                name,
+                DIRECTORY_FLAGS,
+                Mode::empty(),
+                rustix::fs::ResolveFlags::NO_XDEV,
+            )?;
             remove_contents(&child)?;
             use std::os::unix::ffi::OsStrExt;
             remove_directory_entry(
@@ -299,4 +311,73 @@ fn remove_directory_entry(
         return Err(rustix::io::Errno::STALE);
     }
     unlinkat(parent, name, AtFlags::REMOVEDIR)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{os::unix::fs::MetadataExt, process::Command};
+
+    #[test]
+    #[ignore = "requires private user and mount namespaces"]
+    fn removal_refuses_mount_crossings() -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "SIGNALBOX_CHECKOUT_MOUNT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let result = Command::new("unshare")
+                .args([
+                    "--user",
+                    "--map-root-user",
+                    "--mount",
+                    "--propagation",
+                    "private",
+                ])
+                .arg(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "repo_watch_checkout::tests::removal_refuses_mount_crossings",
+                    "--include-ignored",
+                ])
+                .env(CHILD, "1")
+                .status()?;
+            assert!(
+                result.success(),
+                "private mount-namespace regression failed"
+            );
+            return Ok(());
+        }
+        let temporary = tempfile::tempdir()?;
+        let roots = SessionWorkspaceRoots::try_new(&temporary.path().join("workspace"))?;
+        let session = SessionId::from_uuid(uuid::Uuid::now_v7());
+        let root = roots.derived_path(session);
+        let nested = root.join("nested");
+        let source = temporary.path().join("source");
+        std::fs::create_dir_all(&nested)?;
+        std::fs::create_dir(&source)?;
+        for bind in [false, true] {
+            let mut mount = Command::new("mount");
+            if bind {
+                mount.arg("--bind").arg(&source);
+            } else {
+                mount.args(["-t", "tmpfs", "tmpfs"]);
+            }
+            assert!(
+                mount.arg(&nested).status()?.success(),
+                "mount test filesystem"
+            );
+            std::fs::write(nested.join("keep"), b"mounted contents")?;
+            if bind {
+                assert_eq!(
+                    std::fs::metadata(&root)?.dev(),
+                    std::fs::metadata(&nested)?.dev()
+                );
+            }
+            assert_eq!(remove(&roots, session), Err(rustix::io::Errno::XDEV));
+            assert_eq!(std::fs::read(nested.join("keep"))?, b"mounted contents");
+            assert!(Command::new("umount").arg(&nested).status()?.success());
+        }
+        remove(&roots, session)?;
+        assert!(!root.exists());
+        assert_eq!(std::fs::read(source.join("keep"))?, b"mounted contents");
+        Ok(())
+    }
 }
