@@ -1014,3 +1014,30 @@ impl fmt::Display for CommandOutsideSeam {
 }
 impl error::Error for CommandOutsideSeam {}
 ```
+
+## RepositoryRuleSet
+
+```rust
+pub struct RepositoryRuleSet<'a> {
+    pub repository: &'a signalbox_domain::RepositorySlug,
+    pub rules: &'a [signalbox_domain::RepoWatchRule],
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug
+impl<'a> RepositoryRuleSet<'a> {
+    pub const fn new(
+        repository: &'a signalbox_domain::RepositorySlug,
+        rules: &'a [signalbox_domain::RepoWatchRule],
+    ) -> Self;
+}
+```
+
+## ReloadIntentInput
+
+```rust
+pub struct ReloadIntentInput<'a> {
+    pub command_id: signalbox_domain::DurableCommandId,
+    pub repositories: &'a [RepositoryRuleSet<'a>],
+    pub rule_set_digest: [u8; 32],
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug
+```

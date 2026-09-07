@@ -716,3 +716,6 @@ mod tests {
         assert!(unbounded.tmpfs_options().is_none());
     }
 }
+
+/// Durable configuration reload intent and receipts.
+pub mod reload_configuration;

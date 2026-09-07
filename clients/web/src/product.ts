@@ -1218,6 +1218,86 @@ export async function readSessionTranscript(
   return page
 }
 
+export interface HeldSessionTranscript {
+  sessionId: string
+  first: string
+  through: string
+  page: Awaited<ReturnType<typeof readSessionTranscript>>
+  continuation: WebTimelineDetailContinuation | null
+  omittedThrough: string | null
+}
+
+export async function readExtendedSessionTranscript(
+  window: Pick<HeldSessionTranscript, 'sessionId' | 'first' | 'through'>,
+  continuation: WebTimelineDetailContinuation | null,
+  limits: SessionTranscriptLimits,
+  held: HeldSessionTranscript | null,
+  signal?: AbortSignal,
+): Promise<HeldSessionTranscript> {
+  const reusableFirstPage =
+    held !== null &&
+    held.page.items.length <=
+      Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items) &&
+    held.page.projected_body_bytes <=
+      Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes) &&
+    held.sessionId === window.sessionId &&
+    held.continuation === null &&
+    continuation === null
+  if (reusableFirstPage && held.first === window.first && held.through === window.through)
+    return held
+  if (
+    reusableFirstPage &&
+    held.first === window.first &&
+    BigInt(held.through) < BigInt(window.through) &&
+    held.page.continuation !== null
+  )
+    return { ...held, through: window.through }
+  const append =
+    reusableFirstPage &&
+    BigInt(window.first) >= BigInt(held.first) &&
+    BigInt(window.first) <= BigInt(held.through) &&
+    BigInt(held.through) <= BigInt(window.through) &&
+    held.page.continuation === null
+  const page =
+    append && held.through === window.through
+      ? { ...held.page, items: [], projected_body_bytes: 0 }
+      : await readSessionTranscript(
+          window.sessionId,
+          append ? String(BigInt(held.through) + 1n) : window.first,
+          window.through,
+          continuation,
+          limits,
+          signal,
+        )
+  if (!append) return { ...window, page, continuation, omittedThrough: null }
+  const items = [
+    ...held.page.items.filter(
+      (item) => BigInt(item.address.event_sequence) >= BigInt(window.first),
+    ),
+    ...page.items,
+  ]
+  let bytes = items.reduce((sum, item) => sum + item.projected_body_bytes, 0)
+  let omittedThrough = held.omittedThrough
+  while (
+    items.length > Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items) ||
+    bytes > Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
+  ) {
+    const omitted = items.shift()
+    if (omitted) {
+      bytes -= omitted.projected_body_bytes
+      omittedThrough = omitted.address.event_sequence
+    }
+  }
+  if (omittedThrough !== null && BigInt(omittedThrough) < BigInt(window.first))
+    omittedThrough = null
+  return {
+    ...window,
+    continuation,
+    omittedThrough,
+    page: { ...page, items, projected_body_bytes: bytes },
+  }
+}
+
 export async function readSessionRates(sessionIds: readonly string[], signal?: AbortSignal) {
   if (sessionIds.length === 0) return decodeWebSessionRates({ sessions: [] })
   const query = new URLSearchParams(sessionIds.map((id) => ['session_id', id]))

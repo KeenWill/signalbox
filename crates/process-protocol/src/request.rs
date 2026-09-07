@@ -52,6 +52,11 @@ pub enum ClientRequest {
         command_id: CommandId,
         mint_id: CanonicalUuid,
     },
+    /// Re-read and atomically install the reloadable configuration sections.
+    ReloadConfiguration {
+        /// User-global durable mutation identity.
+        command_id: CommandId,
+    },
     /// Recover the named session on its pending successor runner.
     ReplaceLostRunner {
         /// User-global mutation identity.
@@ -768,6 +773,7 @@ impl ClientRequest {
             | Self::RegisterWorkspace { .. }
             | Self::MintGitRemote { .. }
             | Self::WithdrawGitRemote { .. }
+            | Self::ReloadConfiguration { .. }
             | Self::UpdateSessionPlacement { .. }
             | Self::ReadGoal { .. }
             | Self::ResumeGoal { guidance: None, .. }

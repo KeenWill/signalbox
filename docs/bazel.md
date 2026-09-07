@@ -69,26 +69,33 @@ compile-fail sealing proofs. The standalone integration targets include the
 compile-fail diagnostic fixtures, which use the host Cargo environment and
 always execute.
 
-The PostgreSQL suites cover persistence and the JavaScript program host. They
-share the image digest in `tooling/postgres_test_image.rs`, which Renovate
-updates. The image pin, migrations, and example configuration are declared
-compilation inputs. With Docker:
+The PostgreSQL suites read packages, features, skipped test names, binary
+partitions, and shard counts from `.github/postgres-integration-suites.toml`.
+They include ignored library tests and standalone integration binaries. With
+Docker, run a suite by its manifest name (hyphens become underscores):
 
 ```bash
-bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //crates/persistence:postgres_tests
-bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //crates/program-runtime:postgres_tests
+bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //:postgres_persistence
+bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //:postgres_program_runtime
 ```
 
-Each test binary has its own cached result. PostgreSQL targets are manual so
-`//:bazel_tests` remains the non-PostgreSQL suite. The additive `bazel-postgres`
-CI job runs one binary at a time, with 16 test threads per binary; Cargo retains
-the full PostgreSQL gate.
+Daemon PostgreSQL targets use Cargo's sorted JSON map feature selection; the
+workspace dependency graph also serves the program host's insertion-ordered JSON
+requirements.
 
-The checker job runs its eight Python suites with
+The shared image digest, migrations, and example configuration are declared
+compilation inputs. PostgreSQL targets are manual and external: compilation is
+cacheable, tests always execute. The runtime partitions libtest's ignored-test
+inventory across each target's manifest-derived shards. CI gives each manifest
+shard its own matrix worker; each worker runs one partition per binary at a time
+with 16 test threads. The Rust workflow calls `bazel.yml` and binds its ordinary
+and PostgreSQL results to `validate` under the Rust change-scope gate.
+
+The checker job runs its Python suites with
 `bazel test //:python_checker_tests`. Bazel supplies Python 3.14, packages from
 `tooling/requirements-mdformat.txt`, and the shared Rustfmt toolchain. The Git
 fixture suite and two shell-script suites carry `external` because they execute
-host utilities; their results always run. The other five results are cacheable.
+host utilities; their results always run. The remaining results are cacheable.
 
 `bazel test //:markdown_format` checks repository Markdown with the same pinned
 mdformat and GFM plugin as devenv. Its inputs include the Markdown files and
@@ -130,10 +137,31 @@ all 36 configured API crates, renders Markdown into `bazel-bin/api_pages`, and
 compares it with the committed API snapshots. Rustdoc, rendering, and the
 comparison are separate cacheable actions. The API configuration selects the
 pinned nightly toolchain; Renovate groups its Cargo renderer and Bazel pins. The
-required contract check uses this target. The optional baseline API digest runs
-separately and still uses Cargo to document historical revisions.
+required contract check uses this target. The report-only API digest reads
+current JSON from `//:api_json` and uses Cargo to document its historical event
+base.
 
 `//crates/web-contract:generated_roundtrip` runs the generated JavaScript
 contract tests with a pinned Node.js toolchain and declared JSON fixtures.
 Ordinary PostgreSQL selections reuse the ignored suites’ compiled binaries; the
 non-PostgreSQL suite does not execute their ignored tests.
+
+`//:rust_clippy_tests` runs Clippy with `clippy.toml` and warnings denied.
+`//:rust_format_tests` checks native workspace crate roots, Cargo build scripts,
+and their modules, matching Cargo formatting. `//:rust_documentation` builds
+Cargo's documentation entrypoints with warnings denied. These actions use the
+declared Rust toolchain and remote cache.
+
+`coverage.yml` runs `bazel coverage` for the workspace and the persistence,
+daemon, and terminal-client PostgreSQL selections. It retains their named
+exclusions and reports each suite's outcome without gating merges. LCOV merges
+hits across binaries and declared subprocess fixtures; the report excludes
+dedicated test and benchmark files and marks region coverage unavailable.
+Instrumented binaries keep a relative path to the declared runtime libraries.
+
+`bazel test //clients/web/...` runs Biome, TypeScript, Vitest, the Vite build,
+and the existing Chromium, Firefox, and WebKit Playwright assertions. The npm
+lockfile supplies package versions; its pnpm translation is generated input. The
+browser runtime follows the locked Playwright package, with image checksums
+retained in the Bazel lockfile and declared DejaVu fonts. Browser evidence is
+retained in the test's undeclared outputs. The web CI job uses the shared cache.

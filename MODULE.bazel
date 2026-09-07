@@ -1,14 +1,31 @@
 module(name = "signalbox")
 
 bazel_dep(name = "rules_rust", version = "0.74.0")
+
+# Match Cargo formatting and build-script lint policy.
+single_version_override(
+    module_name = "rules_rust",
+    patch_strip = 1,
+    patches = [
+        "//tooling/bazel:patches/rustfmt-crate-roots.patch",
+        "//tooling/bazel:patches/build-script-lints.patch",
+        "//tooling/bazel:patches/coverage-subprocesses.patch",
+    ],
+)
+
 bazel_dep(name = "gcc_toolchain", version = "0.12.0")
 bazel_dep(name = "rules_python", version = "2.3.3")
 bazel_dep(name = "aspect_rules_js", version = "3.4.1")
 bazel_dep(name = "rules_nodejs", version = "6.7.5")
+bazel_dep(name = "toml.bzl", version = "0.4.1")
+
+postgres = use_extension("//tooling/bazel:postgres_suites.bzl", "postgres_suites")
+use_repo(postgres, "postgres_suites")
 
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(node_version = "26.8.1")
 use_repo(node, "nodejs_toolchains")
+
 register_toolchains("@nodejs_toolchains//:all")
 
 python_config = use_extension("@rules_python//python/extensions:config.bzl", "config")
@@ -66,6 +83,11 @@ use_repo(v8, "rusty_v8_archive")
 
 # Cached binaries cannot load JavaScript from a previous compilation sandbox.
 crate.annotation(
+    crate = "serde_json",
+    patch_args = ["-p1"],
+    patches = ["//tooling/bazel:patches/serde-json-suite-order.patch"],
+)
+crate.annotation(
     crate = "deno_core",
     patch_args = ["-p1"],
     patches = ["//tooling/bazel:patches/deno-embedded-javascript.patch"],
@@ -110,3 +132,31 @@ http_archive(
     sha256 = "c1e67ef7b17a6300e136118bd1dc04725009cb376c1aad10abcf8cd453628d58",
     urls = ["https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.4-base-amd64.tar.gz"],
 )
+
+bazel_dep(name = "aspect_rules_ts", version = "3.10.1")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+
+pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
+pnpm.pnpm(pnpm_version = "10.34.5")
+use_repo(pnpm, "pnpm")
+
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
+npm.npm_translate_lock(
+    name = "npm",
+    data = [
+        "//clients/web:package.json",
+        "//clients/web:pnpm-workspace.yaml",
+    ],
+    npm_package_lock = "//clients/web:package-lock.json",
+    pnpm_lock = "//clients/web:pnpm-lock.yaml",
+    update_pnpm_lock = True,
+    use_home_npmrc = False,
+)
+use_repo(npm, "npm")
+
+playwright = use_extension("//tooling/bazel:playwright.bzl", "playwright")
+use_repo(playwright, "playwright_runtime")
+
+web_public_repository = use_repo_rule("//tooling/bazel:web_public.bzl", "web_public_repository")
+
+web_public_repository(name = "web_public")
