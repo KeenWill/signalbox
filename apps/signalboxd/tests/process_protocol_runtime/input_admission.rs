@@ -563,8 +563,8 @@ async fn reported_usage_preflight_counts_the_queued_input() -> Result<(), Box<dy
     )
     .await?;
     // `reported_usage_preflight_configuration_text` declares a 4096-token
-    // window with a one-token output reservation, so this reported input leaves
-    // 95 tokens of headroom on its own.
+    // window with a 16-token output reservation, so this reported input leaves
+    // 80 tokens of headroom on its own.
     let fitting_usage = TokenUsage {
         input_tokens: Some(4000),
         output_tokens: Some(0),
