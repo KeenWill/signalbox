@@ -110,9 +110,8 @@ returns `configuration_reloaded { command_id, reloaded_sections }`, whose
 sections are an array of the closed values `model_catalog`, `session_templates`,
 and `repo_watch`. Failure returns
 `configuration_reload_failed { command_id, phase, reason }`, sanitized as
-startup logs are, and leaves the running configuration unchanged. Which sections
-reload and the validate-then-swap rule belong to
-[configuration-and-credentials.md](../spec/configuration-and-credentials.md).
+startup logs are. Which sections reload and the validate-then-swap rule belong
+to [configuration-and-credentials.md](../spec/configuration-and-credentials.md).
 
 Program-run cancellation is the request
 `cancel_program_run { run_id, command_id }` and the receipt

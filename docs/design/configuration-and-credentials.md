@@ -22,11 +22,11 @@ Reload is one admin verb, `reload_configuration`, owned by
 paths, validates the complete replacement exactly as startup does, and swaps the
 in-memory catalogs atomically on success. The reloadable sections are the model
 and alias catalog with its rate windows, the session-template catalog, and
-repository-watch configuration; every other section is startup-only. Any
-failure, and any replacement whose startup-only sections differ, leaves the
-running configuration in place. File watching and polling are external tooling
-that calls the verb; webhook listener and repository polling-task reload belong
-to [repository watch](repo-watch.md). A reload that adds, edits, or removes
+repository-watch configuration; every other section is startup-only. A
+replacement whose startup-only sections differ leaves the running configuration
+in place. File watching and polling are external tooling that calls the verb;
+webhook listener and repository polling-task reload belong to
+[repository watch](repo-watch.md). A reload that adds, edits, or removes
 `repository_watch.rules` commits activations and deactivations in the
 [reconciliation transaction](../spec/repo-watch.md) that records each
 activation's repository event tail, inside the reload boundary. A reload re-runs
@@ -404,7 +404,7 @@ snapshot atomically without a reader observing two documents.
 
 - `reload_configuration` re-reads and validates the complete document as startup
   does, swaps atomically on success, and leaves the running configuration in
-  place on any failure or on a startup-only difference.
+  place on a startup-only difference.
 - A model entry admits non-overlapping dated windows per channel, a cost read
   names the window covering the call's timestamp, and every stored call prices
   as it did under the flat rate.

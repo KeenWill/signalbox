@@ -27,10 +27,11 @@ runner. Each has one typed record family keyed by command identifier and follows
 the claim protocol on the spec page. Their semantics belong to
 [runner-protocol](../spec/runner-protocol.md).
 
-Replacement is the one command in this set that can span more than one
-transaction, and only when it provisions a workspace. A replacement that needs
-no provisioning, such as one recovering a runner lost before its placement was
-pinned, claims and terminates in a single transaction. A provisioning
+Replacement spans transactions when it provisions a workspace or is staged
+behind an in-flight call or its tool batch; otherwise it claims and terminates
+in one transaction. A staged non-provisioning replacement claims its identity
+and stores its immutable request immediately, then completes or retires at the
+[turn-lifecycle boundary](turn-lifecycle-and-scheduling.md). A provisioning
 replacement's first transaction claims the registry identity, stores the
 complete immutable request row, and stores a single-use provisioning
 authorization; the request row alone satisfies typed-record completeness while
@@ -95,11 +96,11 @@ that adds the field states how each earlier version reconstitutes.
   it.
 - Imported-creation version 4 and create-session version 5 stay unwritten; no
   writer uses either number and the decoders keep rejecting them.
-- Workspace-provisioning replacement, OAuth provisioning and re-provisioning,
-  and configuration reload may span claim and terminal-result transactions;
-  every other new kind is one claim-and-terminal-result transaction.
-  [Process protocol](process-protocol.md) owns OAuth and reload startup
-  recovery.
+- Workspace-provisioning or staged replacement, OAuth provisioning and
+  re-provisioning, and configuration reload may span claim and terminal-result
+  transactions; every other new kind is one claim-and-terminal-result
+  transaction. [Process protocol](process-protocol.md) owns OAuth and reload
+  startup recovery.
 
 ## Acceptance criteria
 
@@ -107,8 +108,8 @@ that adds the field states how each earlier version reconstitutes.
   deferred typed-record trigger and the append-only trigger, a hand-written
   structural equality that excludes the command identifier, and a closed-kind
   test that names it.
-- An equal replay of a runner replacement during provisioning returns the
-  pending disposition; after the result row commits it returns that result.
+- An equal replay of a runner replacement during provisioning or staging returns
+  the pending disposition; after the result row commits it returns that result.
 - A runner replacement claimed but unterminated at process exit is resumed at
   startup before clients are admitted, and terminates under its own identifier.
 - The workspace store and its operator verbs write `WorkspaceId`,

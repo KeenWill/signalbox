@@ -59,11 +59,11 @@ resolution. After every request resolves, replacement takes over in the
 appended and before the next call is prepared against the changed placement.
 When an interrupt or crash-loss reconciliation terminalizes the batch, that path
 completes or retires the staged replacement before terminalizing the turn. The
-command claims its identity and provisioning authorization immediately, and its
-terminal transaction commits only after any authorized in-flight daemon-local
-call for the session reaches its observation boundary. A pinned loss installs
-the successor placement and extends the next context frontier in that
-transaction, so the call's entries append before the placement boundary; a
+command claims its identity immediately and provisioning authorization only when
+needed, and its terminal transaction commits only after any authorized in-flight
+daemon-local call for the session reaches its observation boundary. A pinned
+loss installs the successor placement and extends the next context frontier in
+that transaction, so the call's entries append before the placement boundary; a
 pre-pin replacement returns the placement to unpinned at the successor revision
 and appends no boundary. The terminal transaction also moves the turn out of the
 runner-recovery wait when it is still parked there: to running with a fresh
