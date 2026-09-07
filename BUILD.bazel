@@ -1,3 +1,4 @@
+load("@python_deps//:requirements.bzl", "requirement")
 load("@rules_python//python:defs.bzl", "py_test")
 
 exports_files([
@@ -48,6 +49,27 @@ test_suite(
         ":test_supervise_lifecycle",
         ":test_sweep_test_containers",
         "//scripts:checker_tests",
+    ],
+)
+
+MARKDOWN_FILES = glob(
+    [
+        "*.md",
+        "docs/**/*.md",
+    ],
+    exclude = ["docs/api/**"],
+)
+
+py_test(
+    name = "markdown_format",
+    size = "small",
+    srcs = ["//tooling/bazel:check_markdown.py"],
+    args = ["--check"] + MARKDOWN_FILES,
+    data = MARKDOWN_FILES + [".mdformat.toml"],
+    main = "//tooling/bazel:check_markdown.py",
+    deps = [
+        requirement("mdformat"),
+        requirement("mdformat-gfm"),
     ],
 )
 
