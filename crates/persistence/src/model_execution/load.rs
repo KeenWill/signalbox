@@ -51,6 +51,7 @@ pub(super) async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }

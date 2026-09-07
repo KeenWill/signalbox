@@ -5,4 +5,5 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | config | 1 | 0 | 0 | [config](config.md) |
+| oauth | 4 | 2 | 0 | [oauth](oauth.md) |
 | runtime | 4 | 0 | 2 | [runtime](runtime.md) |

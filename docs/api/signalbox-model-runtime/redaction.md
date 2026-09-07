@@ -28,3 +28,10 @@ pub fn redact_evidence(
     native_message_limit: option::Option<usize>,
 ) -> TerminalEvidence;
 ```
+
+## redact_credential_text
+
+```rust
+pub fn redact_credential_text(text: string::String, credential: &CredentialValue)
+    -> string::String;
+```

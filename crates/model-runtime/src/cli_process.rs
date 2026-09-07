@@ -323,6 +323,16 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
     sink: &mut (dyn ObservationSink<C> + Send),
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
+    execute_cli_process_with_credentials(request, sink, cancellation, &[]).await
+}
+
+/// Runs a CLI with exact credential sanitization before stderr evidence truncation.
+pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: CliSession<C>>(
+    request: CliProcessRequest<D>,
+    sink: &mut (dyn ObservationSink<C> + Send),
+    cancellation: &mut CancellationSignal,
+    exact_credentials: &[crate::CredentialValue],
+) -> TerminalEvidence {
     let labels = D::LABELS;
     if !CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED {
         return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
@@ -483,8 +493,14 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             labels.provider
         ));
     };
-    let mut stderr_task =
-        tokio::spawn(async move { read_bounded_output(stderr, stderr_limit).await });
+    let credential_lookahead = exact_credentials
+        .iter()
+        .map(|credential| credential.expose_bytes().len().saturating_mul(6))
+        .max()
+        .unwrap_or(0);
+    let mut stderr_task = tokio::spawn(async move {
+        read_bounded_output_with_lookahead(stderr, stderr_limit, credential_lookahead).await
+    });
     let mut decoder = decoder;
     let mut redacting_sink = RedactingSink::new(sink);
     match decoder.terminal_text_capture() {
@@ -637,6 +653,15 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         };
         match next {
             ProcessStep::Line(Ok(Some(line))) => {
+                let mut line = line;
+                if !exact_credentials.is_empty()
+                    && let Ok(mut text) = String::from_utf8(line.clone())
+                {
+                    for credential in exact_credentials {
+                        text = crate::redact_credential_text(text, credential);
+                    }
+                    line = text.into_bytes();
+                }
                 if let Err(error) = decoder.push(&line, &mut redacting_sink) {
                     let (class, error_detail) = error.into_parts();
                     // Serde details quote provider-controlled bytes, and both
@@ -1006,7 +1031,12 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             // prose between a held credential-marker fragment and its stderr
             // continuation would otherwise keep the pair from rejoining, and
             // the continuation would survive the stateless stderr redaction.
-            let stderr_detail = sanitized_stderr(&redacting_sink, &stderr, stderr_limit);
+            let stderr_detail = sanitized_stderr_with_credentials(
+                &redacting_sink,
+                &stderr,
+                stderr_limit,
+                exact_credentials,
+            );
             // The emitted message carries only sanitized stderr; the failure
             // is classified from the bounded raw stderr so an explicit error
             // phrase sharing a line with a consumed credential marker still
@@ -1552,11 +1582,21 @@ impl BoundedOutput {
     }
 }
 
+#[cfg(test)]
 async fn read_bounded_output<R: AsyncRead + Unpin>(
-    mut reader: R,
+    reader: R,
     evidence_limit: usize,
 ) -> std::io::Result<BoundedOutput> {
-    let sanitization_limit = stderr_sanitization_limit(evidence_limit);
+    read_bounded_output_with_lookahead(reader, evidence_limit, 0).await
+}
+
+async fn read_bounded_output_with_lookahead<R: AsyncRead + Unpin>(
+    mut reader: R,
+    evidence_limit: usize,
+    credential_lookahead: usize,
+) -> std::io::Result<BoundedOutput> {
+    let sanitization_limit =
+        stderr_sanitization_limit(evidence_limit).saturating_add(credential_lookahead);
     let mut retained = Vec::with_capacity(sanitization_limit.min(8192));
     let mut buffer = [0_u8; 8192];
     let mut evidence_truncated = false;
@@ -1581,16 +1621,29 @@ fn stderr_sanitization_limit(evidence_limit: usize) -> usize {
     evidence_limit.saturating_mul(2)
 }
 
+#[cfg(test)]
 fn sanitized_stderr<C: Clone>(
     sink: &RedactingSink<'_, C>,
     stderr: &BoundedOutput,
     evidence_limit: usize,
 ) -> String {
+    sanitized_stderr_with_credentials(sink, stderr, evidence_limit, &[])
+}
+
+fn sanitized_stderr_with_credentials<C: Clone>(
+    sink: &RedactingSink<'_, C>,
+    stderr: &BoundedOutput,
+    evidence_limit: usize,
+    exact_credentials: &[crate::CredentialValue],
+) -> String {
     // The reader retains an additional evidence-limit-sized window so
     // JSON-aware sanitization can see escapes and closing syntax beyond the
     // emitted prefix. Cutting at the evidence limit first could split an
     // escape and hide the reversible credential it encodes.
-    let text = String::from_utf8_lossy(&stderr.raw);
+    let mut text = String::from_utf8_lossy(&stderr.raw).into_owned();
+    for credential in exact_credentials {
+        text = crate::redaction::redact_native_message(text, credential, None);
+    }
     let sanitized = sink.redact_terminal_failure_text(&text);
     truncate_text(&sanitized, evidence_limit, stderr.evidence_truncated)
 }

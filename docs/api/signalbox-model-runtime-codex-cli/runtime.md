@@ -47,10 +47,16 @@ pub async fn verify_pinned_codex_cli_version(
 
 ```rust
 pub struct CodexCliRuntime {/* private */}
+// derives: clone::Clone
 impl fmt::Debug for CodexCliRuntime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl CodexCliRuntime {
+    pub fn with_oauth_delivery(
+        self,
+        provider: sync::Arc<dyn OauthCredentialProvider>,
+        root: sync::Arc<OauthCredentialRoot>,
+    ) -> Self;
     pub fn new(config: CodexCliConfig) -> result::Result<Self, CodexCliConstructionError>;
 }
 impl<C: clone::Clone + marker::Send + marker::Sync> signalbox_model_runtime::ModelRuntime<C>
@@ -60,7 +66,7 @@ impl<C: clone::Clone + marker::Send + marker::Sync> signalbox_model_runtime::Mod
     async fn prepare(
         &self,
         operation: signalbox_model_runtime::ModelOperation<C>,
-        _cancellation: signalbox_model_runtime::CancellationSignal,
+        cancellation: signalbox_model_runtime::CancellationSignal,
     ) -> signalbox_model_runtime::PreparationOutcome<
         C,
         <Self as signalbox_model_runtime::ModelRuntime>::Prepared,

@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 pub(crate) fn response(request: &Value) -> Value {
     let result = match request["method"].as_str().expect("request method") {
         "initialize" => json!({"userAgent":"fake","codexHome":"/private/credential/home"}),
+        "account/rateLimits/read" => json!({"rateLimits":{}}),
         "thread/start" => json!({"thread":{"id":"thread-fixture"}}),
         "turn/start" => json!({"turn":{"id":"turn-fixture","status":"inProgress","items":[]}}),
         method => panic!("unexpected client request: {method}"),

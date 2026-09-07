@@ -246,19 +246,6 @@ per-turn provenance. The following extensions remain undecided:
   tools that read or edit templates remain undecided. Blocks only those storage
   and authoring surfaces.
 
-## Codex CLI fixture validation
-
-- **Validation of recorded event-shape fixtures against the pinned CLI.** The
-  adapter build mechanically derives its supported upstream version from the
-  pinned fork release tag, and the automatic pull-request smoke checks the
-  installed executable's version, feature inventory, ambient-skill controls, and
-  one live exchange. Neither establishes that the offline event fixtures still
-  represent all current CLI event shapes. Decide whether a pin bump regenerates
-  those fixtures from the installed CLI or validates the existing corpus against
-  it, including how the resulting artifact is reviewed. Blocks claiming
-  fixture-corpus review as an enforced pin-bump gate; it does not block the
-  existing mechanical pin or live compatibility gates.
-
 ## Codex CLI image capability features
 
 - **Whether the pinned CLI's image features return once provider input carries
