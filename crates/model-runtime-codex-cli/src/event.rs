@@ -271,6 +271,15 @@ impl<C: Clone> EventDecoder<C> {
             }),
             FailureClass::Provider(kind) => {
                 let mut exchange = self.exchange;
+                if matches!(
+                    kind,
+                    ProviderErrorKind::RateLimited | ProviderErrorKind::QuotaExhausted
+                ) {
+                    exchange.retry_after = self
+                        .client
+                        .rate_limits
+                        .retry_after(std::time::SystemTime::now());
+                }
                 exchange.http_status = info.and_then(|info| info.http_status());
                 TerminalEvidence::ProviderError(ProviderErrorEvidence {
                     exchange,

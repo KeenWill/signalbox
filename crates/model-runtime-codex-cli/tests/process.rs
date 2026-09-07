@@ -4906,3 +4906,24 @@ fn unsupported_detail(failure: PreparationFailure) -> String {
     };
     detail
 }
+
+#[tokio::test]
+async fn consumed_snapshot_past_reset_is_recorded_as_zero_delay() {
+    for (scenario, kind) in [
+        ("rate_snapshot_past", ProviderErrorKind::RateLimited),
+        ("quota_snapshot_past", ProviderErrorKind::QuotaExhausted),
+    ] {
+        let result = execute_scenario(
+            scenario,
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        let error = provider_error(&result.evidence);
+        assert_eq!(error.kind, kind);
+        assert_eq!(error.exchange.retry_after, Some(Duration::ZERO));
+        assert!(error.non_acceptance_proven);
+        assert_eq!(result.spawns, 1);
+    }
+}

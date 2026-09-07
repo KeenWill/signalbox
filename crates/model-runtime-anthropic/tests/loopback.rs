@@ -551,6 +551,32 @@ async fn credential_rejection_is_typed_provider_error_evidence() {
 }
 
 #[tokio::test]
+async fn a_past_retry_after_date_records_zero_delay() {
+    let server = CannedServer::serving(vec![http_response(
+        "429 Too Many Requests",
+        &[
+            ("content-type", "application/json"),
+            ("retry-after", "Thu, 01 Jan 1970 00:00:01 GMT"),
+        ],
+        br#"{"type":"error","error":{"type":"rate_limit_error","message":"wait"}}"#,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+    let (report, _) = execute(
+        &runtime,
+        operation("past-retry-after"),
+        CancellationSignal::never(),
+    )
+    .await;
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("a rate-limit response carries provider evidence");
+    };
+    assert_eq!(error.kind, ProviderErrorKind::RateLimited);
+    assert_eq!(error.exchange.retry_after, Some(Duration::ZERO));
+    assert_eq!(server.recorded_requests().len(), 1);
+}
+
+#[tokio::test]
 async fn a_malformed_error_body_falls_back_to_http_status() {
     assert_anthropic_error_body_falls_back_to_status(b"{not json").await;
 }

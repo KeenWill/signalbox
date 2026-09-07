@@ -304,10 +304,13 @@ otherwise a recognized native code outranks a recognized type, which outranks
 the status. An error record that follows the provider's finish marker and names
 no classifiable failure is stream-protocol loss, while a classified one stays
 definitive and outranks the finish. A provider-directed retry delay, decoded
-from the HTTP `Retry-After` header, rides the provider-error evidence, and the
-bridge carries it into the durable failure observation that feeds the
-availability-successor backoff. The header admits the delay-seconds and
-HTTP-date forms, a past date is no delay, and a malformed value is no evidence.
+from the HTTP `Retry-After` header or the Codex app-server's typed rate-limit
+snapshot, rides the provider-error evidence into durable availability backoff.
+The header admits delay-seconds and HTTP-date forms; malformed values carry no
+evidence. For rate-limit and quota failures, Codex uses the latest reported
+reset among fully consumed primary and secondary windows; null windows in sparse
+updates preserve prior observations. Past HTTP dates and Codex reset instants
+saturate to zero delay.
 
 The non-acceptance proof on a provider error is an adapter-owned typed fact,
 never inferred from the error kind, status retryability or provider prose. A
