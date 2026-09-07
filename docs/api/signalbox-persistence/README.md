@@ -24,7 +24,7 @@
 | hub_fence | 4 | 0 | 3 | [hub_fence](hub_fence.md) |
 | lifecycle_metrics | 8 | 0 | 0 | [lifecycle_metrics](lifecycle_metrics.md) |
 | mapping | 6 | 0 | 29 | [mapping](mapping.md) |
-| model_execution | 14 | 0 | 0 | [model_execution](model_execution.md) |
+| model_execution | 15 | 0 | 0 | [model_execution](model_execution.md) |
 | operator_status | 6 | 0 | 0 | [operator_status](operator_status.md) |
 | outbox | 31 | 0 | 7 | [types](outbox/types.md), [types-2](outbox/types-2.md), [functions](outbox/functions.md) |
 | plan | 3 | 0 | 0 | [plan](plan.md) |

@@ -275,10 +275,8 @@ member is excluded. A sticky selection advances nothing. Preparation locks the
 cursor row `FOR UPDATE` after its session scheduler, the candidate action heads,
 and any candidate capacity rows, then rereads the facts those locks protect; no
 path acquires a capacity row while holding a cursor row. A failed preparation
-advances nothing. `least_used` and a headroom reserve are admitted once an
-adapter reports remaining capacity; that adapter defines the normalized
-quantity, the observation lifetime, and a deterministic secondary tie-break. The
-admission gate is the capacity report alone.
+advances nothing. Capacity-dependent selection follows
+[configuration and credentials](../spec/configuration-and-credentials.md).
 
 A membership exclusion is reset-aware: a reported reset time clears it when that
 time passes, and only an exclusion carrying no reported reset is indefinite. The
@@ -358,10 +356,9 @@ work.
 ## Compatibility constraints
 
 The configuration grammar already admits the `oauth` spelling, the `codex_cli`
-`file` spelling, `max_concurrent_invocations`, `headroom_reserve_percent`,
-`round_robin`, `least_used`, and a non-`stay` `on_headroom_low`, and rejects
-each at startup as undelivered or unobservable. Supplying a surface for any of
-them changes no grammar.
+`file` spelling, `max_concurrent_invocations`, and `round_robin`, and rejects
+each at startup as unsupported. Supplying a surface for any of them changes no
+grammar.
 
 The session credential record and entry rows are append-only behind a guarded
 head. Any update appends one complete event and advances the head by one.
@@ -416,9 +413,7 @@ snapshot atomically without a reader observing two documents.
   tuple mismatch or rejected refresh, and its scratch home never holds a refresh
   token.
 - `max_concurrent_invocations` is admitted together with the reservation that
-  gives it effect, `round_robin` selects through its durable cursor, and
-  `least_used` and headroom reserves are admitted only once an adapter reports
-  remaining capacity.
+  gives it effect, and `round_robin` selects through its durable cursor.
 - An exclusion with a reported reset clears when it passes, an operator clear or
   zero-cost probe ends an indefinite policy-origin generation while a
   delivery-origin one ends only by re-provisioning except a `codex_home`

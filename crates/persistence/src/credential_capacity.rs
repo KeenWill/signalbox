@@ -42,7 +42,7 @@ pub(crate) async fn retain_call_rate_limits(
     connection: &mut PgConnection,
     call: ModelCallId,
     snapshot: &ProviderRateLimitSnapshot,
-) -> Result<(), ModelCallRepositoryError> {
+) -> Result<bool, ModelCallRepositoryError> {
     let windows = snapshot
         .windows()
         .iter()
@@ -54,7 +54,7 @@ pub(crate) async fn retain_call_rate_limits(
         .collect::<Vec<_>>();
     let windows = serde_json::to_string(&windows)
         .map_err(|_| ModelCallCorruption::Inconsistent("credential capacity window encoding"))?;
-    sqlx::query(
+    let result = sqlx::query(
         "INSERT INTO credential_rate_limit_snapshot
             (credential_reference, observation_model_call_id, observed_at_nanos, windows)
          SELECT credential_reference, model_call_id, $2, $3::jsonb
@@ -73,7 +73,7 @@ pub(crate) async fn retain_call_rate_limits(
     .bind(windows)
     .execute(connection)
     .await?;
-    Ok(())
+    Ok(result.rows_affected() != 0)
 }
 
 /// Loads the most recently observed windows for a non-secret profile reference.
