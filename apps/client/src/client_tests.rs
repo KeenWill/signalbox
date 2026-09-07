@@ -5188,12 +5188,53 @@ async fn reload_configuration_prints_the_correlated_installed_sections()
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut output = Output::new(&mut stdout, &mut stderr, false);
-    crate::session::reload_configuration(&mut client, &mut output).await?;
+    crate::session::reload_configuration(&mut client, &mut output, None).await?;
     assert_eq!(
         String::from_utf8(stdout)?,
         "reloaded model_catalog session_templates repo_watch\n"
     );
     assert!(String::from_utf8(stderr)?.starts_with("command_id="));
     server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reload_configuration_reuses_the_supplied_command_id() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("reload.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
+    let expected = ClientRequest::ReloadConfiguration { command_id };
+    let receipt = ServerMessage::ConfigurationReloaded {
+        command_id,
+        reloaded_sections: signalbox_process_protocol::ReloadedSection::ALL.to_vec(),
+    };
+    let server =
+        tokio::spawn(async move { accept_request_and_reply(&listener, &expected, receipt).await });
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let identity = command_id.into_uuid().hyphenated().to_string();
+    let exit = run(
+        client_arguments(
+            &socket,
+            &["reload-configuration", "--command-id", &identity],
+        ),
+        None,
+        &mut input,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    server.await??;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    assert_eq!(
+        String::from_utf8(stdout)?,
+        "reloaded model_catalog session_templates repo_watch\n"
+    );
+    assert_eq!(
+        String::from_utf8(stderr)?,
+        format!("command_id={identity}\n")
+    );
     Ok(())
 }

@@ -288,7 +288,7 @@ async fn execute(
         | Command::Imported { .. }
         | Command::Status
         | Command::List
-        | Command::ReloadConfiguration
+        | Command::ReloadConfiguration { .. }
         | Command::Templates
         | Command::Search(_)
         | Command::Conversations(_)
@@ -315,7 +315,7 @@ async fn execute(
         | Command::Imported { .. }
         | Command::Status
         | Command::List
-        | Command::ReloadConfiguration
+        | Command::ReloadConfiguration { .. }
         | Command::Templates
         | Command::Search(_)
         | Command::Conversations(_)
@@ -350,7 +350,7 @@ async fn execute(
         | Command::Goal(_)
         | Command::Status
         | Command::List
-        | Command::ReloadConfiguration
+        | Command::ReloadConfiguration { .. }
         | Command::Templates
         | Command::Search(_)
         | Command::Conversations(_)
@@ -476,8 +476,8 @@ async fn execute(
         Command::Goal(command) => goal(&mut client, &mut output, command).await,
         Command::Status => status(&mut client, &mut output).await,
         Command::List => list(&mut client, &mut output).await,
-        Command::ReloadConfiguration => {
-            session::reload_configuration(&mut client, &mut output).await
+        Command::ReloadConfiguration { command_id } => {
+            session::reload_configuration(&mut client, &mut output, command_id).await
         }
         Command::Templates => list_templates(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
