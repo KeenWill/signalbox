@@ -245,7 +245,7 @@ where
             statement,
             content,
         } => {
-            handle_commission_session(
+            Box::pin(handle_commission_session(
                 writer,
                 version,
                 request_id,
@@ -257,7 +257,7 @@ where
                     content,
                 },
                 services,
-            )
+            ))
             .await
         }
         ClientRequest::CreateSessionFromImportedFrontier {
