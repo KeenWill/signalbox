@@ -475,7 +475,21 @@ async fn pinned_installation_preserves_seed(
     let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM semantic_transcript_entry WHERE payload_kind = 'runner_placement_changed'").fetch_one(&pool).await?;
     assert_eq!(entries, 1);
     let member_count: Decimal = sqlx::query_scalar("SELECT frontier.member_count FROM runner_session_placement_frontier AS head JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) JOIN context_frontier AS frontier ON frontier.owning_session_id = boundary.session_id AND frontier.context_frontier_id = boundary.context_frontier_id WHERE head.session_id = $1").bind(command.session.into_uuid()).fetch_one(&pool).await?;
-    assert_eq!(member_count, Decimal::from(if imported { 3 } else { 1 }));
+    assert_eq!(
+        member_count,
+        Decimal::from(if imported {
+            3
+        } else if runtime_terminal {
+            2
+        } else {
+            1
+        })
+    );
+    if runtime_terminal {
+        let kinds: Vec<String> = sqlx::query_scalar("SELECT entry.payload_kind FROM runner_session_placement_frontier AS head JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) CROSS JOIN LATERAL resolve_context_frontier_members(head.session_id, boundary.context_frontier_id) AS member JOIN semantic_transcript_entry AS entry ON entry.source_session_id = member.source_session_id AND entry.semantic_entry_id = member.semantic_entry_id WHERE head.session_id = $1 ORDER BY member.member_position")
+            .bind(command.session.into_uuid()).fetch_all(&pool).await?;
+        assert_eq!(kinds, ["turn_cancelled", "runner_placement_changed"]);
+    }
     if imported {
         let preserved: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM resolve_context_frontier_members($1, $2) AS seed LEFT JOIN runner_session_placement_frontier AS head ON head.session_id = $1 LEFT JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) LEFT JOIN LATERAL resolve_context_frontier_members($1, boundary.context_frontier_id) AS next ON next.member_position = seed.member_position WHERE seed.source_session_id IS DISTINCT FROM next.source_session_id OR seed.semantic_entry_id IS DISTINCT FROM next.semantic_entry_id)")
             .bind(command.session.into_uuid()).bind(seed.into_uuid()).fetch_one(&pool).await?;
@@ -503,6 +517,98 @@ async fn pinned_installation_preserves_seed(
         DispatchedRunnerState::Replaced,
     )
     .await?;
+    if imported {
+        compact_replaced_imported_session(&pool, command.session).await?;
+        reject_malformed_placement_entries(&pool, command.session).await?;
+    }
+    Ok(())
+}
+
+async fn compact_replaced_imported_session(
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        ContextCompactionId, ContextCompactionTokenUsage, ProviderModelIdentity,
+        ResolvedProviderTarget,
+    };
+    use signalbox_persistence::context_compaction::{
+        ContextCompactionRepository, PrepareContextCompactionOutcome,
+        PrepareContextCompactionRequest,
+    };
+    let repository = ContextCompactionRepository::new(pool.clone());
+    let PrepareContextCompactionOutcome::Prepared(prepared) = repository
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::now_v7()),
+            session,
+            requested_through_position: Some(2),
+            automatic_for_turn: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(uuid(0xa101)),
+            target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(uuid(0xa159))),
+            input_includes_cache_tokens: false,
+            credential_reference: String::from("fixture-credential-reference"),
+            call: ModelCallId::from_uuid(Uuid::now_v7()),
+            compaction: ContextCompactionId::from_uuid(Uuid::now_v7()),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::now_v7()),
+        })
+        .await?
+    else {
+        panic!("the imported prefix can be compacted after replacement")
+    };
+    repository.authorize(&prepared).await?;
+    repository
+        .complete(
+            &prepared,
+            "Imported conversation summary",
+            ContextCompactionTokenUsage::unreported(),
+        )
+        .await?;
+    let kinds: Vec<String> = sqlx::query_scalar("SELECT entry.payload_kind FROM context_compaction AS compaction CROSS JOIN LATERAL resolve_context_frontier_members(compaction.session_id, compaction.result_frontier_id) AS member JOIN semantic_transcript_entry AS entry USING (source_session_id, semantic_entry_id) WHERE compaction.session_id = $1 ORDER BY member.member_position DESC LIMIT 2")
+        .bind(session.into_uuid()).fetch_all(pool).await?;
+    assert_eq!(kinds, ["context_summary", "runner_placement_changed"]);
+    assert!(
+        ProcessReadRepository::new(pool.clone())
+            .read_transcript(session)
+            .await?
+            .is_some()
+    );
+    Ok(())
+}
+
+async fn reject_malformed_placement_entries(
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::raw_sql("ALTER TABLE semantic_transcript_entry ALTER COLUMN runner_placement_revision TYPE numeric;
+        ALTER TABLE semantic_transcript_entry DROP CONSTRAINT semantic_transcript_entry_payload_shape;
+        ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;").execute(pool).await?;
+    let reader = ProcessReadRepository::new(pool.clone());
+    let scheduler = StartEligibleTurnRepository::new(pool.clone());
+    let identities = AcceptedInputTurnActivationIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+        ContextFrontierId::from_uuid(Uuid::now_v7()),
+        TurnAttemptId::from_uuid(Uuid::now_v7()),
+    );
+    assert!(scheduler.preview(session, identities).await?.is_none());
+    sqlx::query("UPDATE semantic_transcript_entry SET runner_placement_revision = runner_placement_revision + 0.5 WHERE source_session_id = $1 AND payload_kind = 'runner_placement_changed'")
+        .bind(session.into_uuid()).execute(pool).await?;
+    assert!(matches!(
+        reader.read_transcript(session).await,
+        Err(signalbox_persistence::process_read::ProcessReadError::Corruption(_))
+    ));
+    assert!(matches!(scheduler.preview(session, identities).await,
+        Err(signalbox_persistence::start_eligible_turn::StartEligibleTurnRepositoryError::Corruption(_))));
+    sqlx::query("UPDATE semantic_transcript_entry SET runner_placement_revision = trunc(runner_placement_revision), assistant_text_value = 'mixed payload' WHERE source_session_id = $1 AND payload_kind = 'runner_placement_changed'")
+        .bind(session.into_uuid()).execute(pool).await?;
+    assert!(matches!(
+        reader.read_transcript(session).await,
+        Err(signalbox_persistence::process_read::ProcessReadError::Corruption(_))
+    ));
+    assert!(matches!(scheduler.preview(session, identities).await,
+        Err(signalbox_persistence::start_eligible_turn::StartEligibleTurnRepositoryError::Corruption(_))));
     Ok(())
 }
 
@@ -615,6 +721,28 @@ async fn insert_retired_delegated_wait(
         .execute(&mut *transaction)
         .await?;
     sqlx::query("UPDATE turn_lifecycle SET delegation_runtime_terminal = true WHERE session_id = $1 AND turn_id = $2").bind(session.into_uuid()).bind(turn.into_uuid()).execute(&mut *transaction).await?;
+    let terminal_frontier = Uuid::now_v7();
+    let terminal_entry = Uuid::now_v7();
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_logical_terminal DISABLE TRIGGER ALL;
+        ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("INSERT INTO semantic_transcript_entry (source_session_id, semantic_entry_id, payload_kind, cancelled_turn_id) VALUES ($1, $2, 'turn_cancelled', $3)")
+        .bind(session.into_uuid()).bind(terminal_entry).bind(turn.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO context_frontier (owning_session_id, context_frontier_id, member_count) VALUES ($1, $2, 1)")
+        .bind(session.into_uuid()).bind(terminal_frontier).execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO context_frontier_delta (owning_session_id, context_frontier_id, member_position, source_session_id, semantic_entry_id) VALUES ($1, $2, 1, $1, $3)")
+        .bind(session.into_uuid()).bind(terminal_frontier).bind(terminal_entry).execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO session_delegation_logical_terminal (spawning_tool_request_id, child_session_id, child_turn_id, root_command_id, terminal_frontier_id, disposition_kind) VALUES ($1, $2, $3, $4, $5, 'cancelled')")
+        .bind(Uuid::now_v7()).bind(session.into_uuid()).bind(turn.into_uuid()).bind(Uuid::now_v7()).bind(terminal_frontier).execute(&mut *transaction).await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_logical_terminal ENABLE TRIGGER ALL;
+        ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
     sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
         .execute(&mut *transaction)
         .await?;

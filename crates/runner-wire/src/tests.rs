@@ -14,7 +14,7 @@ const ARBITRARY_UUID_F: &str = "00000000-0000-4000-8000-000000000006";
 const ARBITRARY_UUID_G: &str = "00000000-0000-4000-8000-000000000007";
 const ARBITRARY_UUID_H: &str = "00000000-0000-4000-8000-000000000008";
 const EXPECTED_ADVERTISEMENT_DIGEST: &str =
-    "083656c2f2cc5b8ce6da8c6f0a93b2cfe0f837a1fae8dc7cb3e4d1bf48897c98";
+    "d2cfb8a873b962f27dab0882992b14e194bf441c7002e00a237d6ed0f32fd187";
 const EXPECTED_CLONE_URL_DIGEST: &str =
     "1a65f9f5977dc0dcfaae9165099f5639eaa3562991fa3242153f363c868ce930";
 const EXPECTED_MANIFEST_DIGEST: &str =
@@ -909,4 +909,21 @@ fn rejected_frame_rejects_invalid_complete_provision_correlation() {
     });
 
     assert!(Frame::try_new(invalid).is_err());
+}
+
+#[test]
+fn workspace_provision_omits_absent_recovery_and_rejects_explicit_null() {
+    let provision = WorkspaceProvision {
+        correlation: provision_correlation(),
+        recovery: None,
+    };
+    let mut encoded = serde_json::to_value(&provision).expect("workspace provision encodes");
+    assert!(encoded.get("recovery").is_none());
+    assert_eq!(
+        serde_json::from_value::<WorkspaceProvision>(encoded.clone())
+            .expect("absent recovery decodes"),
+        provision
+    );
+    encoded["recovery"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<WorkspaceProvision>(encoded).is_err());
 }
