@@ -97,6 +97,12 @@ physical iteration rather than that multi-iteration billing sum. The
 tool-continuation guard likewise excludes replaced pre-compaction input from its
 retained-context baseline when the next request replays the block.
 
+A later call omits a provider reasoning item from its request projection unless
+the effective target is served by OpenAI, declares the same configured reasoning
+replay family as the producing call's effective OpenAI target, and uses the same
+pinned credential reference. The omission is per part, an emptied message is
+dropped, and this projection neither removes nor rewrites the durable entry.
+
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five
 composed roles: prepare, capability, authorize-send, provider, and

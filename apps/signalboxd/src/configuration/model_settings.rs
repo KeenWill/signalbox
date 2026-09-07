@@ -165,8 +165,35 @@ pub(super) fn parse_provider_compaction_capability(
     Ok(supported)
 }
 
+pub(super) fn record_reasoning_replay_family(
+    table: &Table,
+    adapter: ModelAdapter,
+    provider_model: &str,
+    families: &mut BTreeMap<String, Option<String>>,
+) -> Result<Option<String>, HubModelConfigurationError> {
+    let family = table
+        .get("reasoning_replay_family")
+        .map(|item| {
+            let value = item
+                .as_str()
+                .ok_or(HubModelConfigurationError::InvalidModelCapabilities)?;
+            if adapter != ModelAdapter::OpenAi || value.is_empty() || value.trim() != value {
+                return Err(HubModelConfigurationError::InvalidModelCapabilities);
+            }
+            Ok(value.to_owned())
+        })
+        .transpose()?;
+    if let Some(previous) = families.insert(provider_model.to_owned(), family.clone())
+        && previous != family
+    {
+        return Err(HubModelConfigurationError::InvalidModelCapabilities);
+    }
+    Ok(family)
+}
+
 pub(super) fn project_runtime_model_capabilities(
     projections: Vec<RuntimeCapabilityProjection>,
+    reasoning_families: BTreeMap<String, Option<String>>,
     target_provider_models: &HashMap<ResolvedProviderTarget, String>,
     target_adapters: &HashMap<ResolvedProviderTarget, ModelAdapter>,
     selectable_targets: &HashSet<ResolvedProviderTarget>,
@@ -186,6 +213,17 @@ pub(super) fn project_runtime_model_capabilities(
         {
             return Err(HubModelConfigurationError::InvalidModelCapabilities);
         }
+    }
+    for (provider_model, family) in reasoning_families {
+        let capabilities = capabilities_by_provider_model
+            .remove(&provider_model)
+            .unwrap_or_else(|| {
+                RuntimeModelCapabilities::new(BTreeSet::new(), None, BTreeSet::new())
+            });
+        capabilities_by_provider_model.insert(
+            provider_model,
+            capabilities.with_reasoning_replay_family(family),
+        );
     }
     RuntimeModelCapabilityCatalog::try_from_definitions(
         capabilities_by_provider_model

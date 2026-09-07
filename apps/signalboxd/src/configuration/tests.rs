@@ -5521,3 +5521,184 @@ context_window_tokens = 200000
     );
     assert_eq!(projected, Some(&expected));
 }
+
+#[test]
+fn reasoning_replay_family_changes_only_request_capabilities() {
+    let source = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}");
+    let untagged = HubModelConfiguration::parse(&source).expect("untagged targets are valid");
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::parse_str("20000000-0000-4000-8000-00000000000e").expect("fixture target UUID"),
+    ));
+    assert_eq!(
+        untagged
+            .runtime_model_capability_catalog()
+            .resolve(&signalbox_model_runtime::ResolvedTarget::new("gpt-example"))
+            .expect("OpenAI capability")
+            .reasoning_replay_family(),
+        None
+    );
+    let tagged = HubModelConfiguration::parse(&source.replace(
+        "provider_model = \"gpt-example\"",
+        "provider_model = \"gpt-example\"\nreasoning_replay_family = \"shared\"",
+    ))
+    .expect("OpenAI family is valid");
+    assert_eq!(
+        untagged
+            .runtime_model_catalog()
+            .resolve(target)
+            .expect("untagged OpenAI target"),
+        tagged
+            .runtime_model_catalog()
+            .resolve(target)
+            .expect("tagged OpenAI target"),
+        "replay family does not change the producer definition"
+    );
+    assert_eq!(
+        tagged
+            .runtime_model_capability_catalog()
+            .resolve(&signalbox_model_runtime::ResolvedTarget::new("gpt-example"))
+            .expect("OpenAI capability")
+            .reasoning_replay_family(),
+        Some("shared")
+    );
+}
+
+#[test]
+fn reasoning_replay_family_rejects_malformed_or_non_openai_declarations() {
+    for value in ["true", "\"\"", "\" padded \""] {
+        let source = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}").replace(
+            "provider_model = \"gpt-example\"",
+            &format!("provider_model = \"gpt-example\"\nreasoning_replay_family = {value}"),
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&source).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities),
+            "{value}"
+        );
+    }
+    let non_openai = CONFIGURATION.replace(
+        "provider_model = \"claude-example\"",
+        "provider_model = \"claude-example\"\nreasoning_replay_family = \"shared\"",
+    );
+    assert_eq!(
+        HubModelConfiguration::parse(&non_openai).err(),
+        Some(HubModelConfigurationError::InvalidModelCapabilities)
+    );
+}
+
+#[test]
+fn reasoning_replay_family_must_match_every_entry_for_one_provider_model() {
+    let source = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}").replace(
+        "provider_model = \"gpt-example\"",
+        "provider_model = \"gpt-example\"\nreasoning_replay_family = \"shared\"",
+    );
+    for family_line in ["reasoning_replay_family = \"other\"", ""] {
+        for (inventory, selection_line) in [
+            (
+                "models",
+                "selection_id = \"10000000-0000-4000-8000-00000000000f\"\nreasoning_levels = [\"minimal\", \"medium\", \"xhigh\"]\nfast_mode = \"request_control\"\nservice_tiers = [\"flex\", \"priority\"]\n",
+            ),
+            ("serving_targets", ""),
+        ] {
+            let entry = format!(
+                r#"
+[[{inventory}]]
+target_id = "20000000-0000-4000-8000-00000000000f"
+model_family = "openai"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+{family_line}
+"#
+            );
+            assert_eq!(
+                HubModelConfiguration::parse(&format!("{source}{entry}{selection_line}")).err(),
+                Some(HubModelConfigurationError::InvalidModelCapabilities),
+                "{inventory}: {family_line}"
+            );
+        }
+    }
+}
+
+#[test]
+fn reasoning_replay_family_is_retained_on_the_effective_serving_target() {
+    let source = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}").replace(
+        "fast_mode = \"request_control\"", "fast_mode = \"alternate_target\"\nfast_target_id = \"20000000-0000-4000-8000-00000000000f\"",
+    );
+    let source = format!(
+        r#"{source}
+[[serving_targets]]
+target_id = "20000000-0000-4000-8000-00000000000f"
+model_family = "openai"
+provider_model = "gpt-fast"
+max_output_tokens = 256
+context_window_tokens = 200000
+reasoning_replay_family = "shared"
+"#
+    );
+    let configuration = HubModelConfiguration::parse(&source)
+        .expect("a fast serving target declares its own replay family");
+    let catalog = configuration.runtime_model_capability_catalog();
+    let selected = signalbox_model_runtime::ResolvedTarget::new("gpt-example");
+    let (effective, _) = catalog
+        .resolve(&selected)
+        .expect("selected target")
+        .effective_target(&selected, signalbox_model_runtime::FastMode::Enabled)
+        .expect("fast target");
+    assert_eq!(
+        catalog
+            .resolve(effective)
+            .expect("effective target")
+            .reasoning_replay_family(),
+        Some("shared")
+    );
+    let durable_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::parse_str("20000000-0000-4000-8000-00000000000f").expect("fixture target UUID"),
+    ));
+    assert!(
+        configuration
+            .runtime_model_catalog()
+            .resolve(durable_target)
+            .is_some()
+    );
+}
+
+#[test]
+fn reasoning_replay_family_accepts_matching_declarations_for_one_provider_model() {
+    let source = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}").replace(
+        "provider_model = \"gpt-example\"",
+        "provider_model = \"gpt-example\"\nreasoning_replay_family = \"shared\"",
+    );
+    let alias = OPENAI_MAPPING_AND_MODEL
+        .split("[[models]]")
+        .nth(1)
+        .expect("fixture model table")
+        .replace("00000000000e", "00000000000f")
+        .replace(
+            "provider_model = \"gpt-example\"",
+            "provider_model = \"gpt-example\"\nreasoning_replay_family = \"shared\"",
+        );
+    let source = format!(
+        r#"{source}
+[[models]]
+{alias}
+[[serving_targets]]
+target_id = "20000000-0000-4000-8000-000000000010"
+model_family = "openai"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+reasoning_replay_family = "shared"
+"#
+    );
+    let configuration = HubModelConfiguration::parse(&source)
+        .expect("matching family declarations share a provider spelling");
+    assert_eq!(
+        configuration
+            .runtime_model_capability_catalog()
+            .resolve(&signalbox_model_runtime::ResolvedTarget::new("gpt-example"))
+            .expect("OpenAI capability")
+            .reasoning_replay_family(),
+        Some("shared")
+    );
+}
