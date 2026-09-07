@@ -95,7 +95,7 @@ The checker job runs its Python suites with
 `bazel test //:python_checker_tests`. Bazel supplies Python 3.14, packages from
 `tooling/requirements-mdformat.txt`, and the shared Rustfmt toolchain. The Git
 fixture suite and two shell-script suites carry `external` because they execute
-host utilities; their results always run. The other five results are cacheable.
+host utilities; their results always run. The remaining results are cacheable.
 
 `bazel test //:markdown_format` checks repository Markdown with the same pinned
 mdformat and GFM plugin as devenv. Its inputs include the Markdown files and
