@@ -104,7 +104,7 @@ impl GoalEventOrdinal {
 ```rust
 pub enum GoalTurnSource {
     UserEvent(GoalEventOrdinal),
-    SuccessfulTurn(TurnId),
+    PredecessorTurn(TurnId),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
