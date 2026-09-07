@@ -174,12 +174,18 @@ impl RunnerProtocolStore {
             ));
         }
         let terminal: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM replace_lost_runner_result WHERE command_id = $1)",
+            "SELECT EXISTS (SELECT 1 FROM replace_lost_runner_result WHERE command_id = $1 AND result_kind = 'rejected')",
         )
         .bind(authorization.command.into_uuid())
         .fetch_one(&mut *transaction)
         .await?;
-        if terminal {
+        let failed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM runner_replacement_provisioning_failure WHERE authorization_id = $1)",
+        )
+        .bind(authorization.authorization.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if failed {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
             ));
@@ -198,7 +204,12 @@ impl RunnerProtocolStore {
             .await?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
         if enrollment.state() == RunnerEnrollmentState::Revoked
-            || !connection.is_some_and(|head| head.state() == RunnerConnectionState::Connected)
+            || !connection.is_some_and(|head| {
+                matches!(
+                    head.state(),
+                    RunnerConnectionState::Connected | RunnerConnectionState::Suspect
+                )
+            })
         {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
@@ -223,6 +234,10 @@ impl RunnerProtocolStore {
             .bind(workspace.working_directory.as_str()).bind(workspace.relative_path.as_str())
             .bind(workspace.canonical_clone_url_digest.as_ref().map(CanonicalCloneUrlDigest::as_str))
             .bind(revision).bind(branch).execute(&mut *transaction).await?;
+        if terminal {
+            release_rejected_replacement_workspace(transaction.as_mut(), authorization.command)
+                .await?;
+        }
         sqlx::query("SELECT pg_notify('runner_recovery', '')")
             .execute(&mut *transaction)
             .await?;
@@ -346,4 +361,20 @@ fn decode_recovery(
         },
         None => WorkspaceRecovery::Commit { revision },
     }))
+}
+
+pub(super) async fn release_rejected_replacement_workspace(
+    connection: &mut PgConnection,
+    command: DurableCommandId,
+) -> Result<(), RunnerProtocolStoreError> {
+    sqlx::query("INSERT INTO runner_replacement_workspace_release (authorization_id, connection_epoch)
+            SELECT operation.authorization_id, head.connection_epoch
+            FROM runner_replacement_provisioning_authorization AS operation
+            JOIN runner_replacement_workspace_ready USING (authorization_id)
+            JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
+            JOIN runner_connection_event AS event ON event.enrollment_id = head.enrollment_id
+                AND event.connection_epoch = head.connection_epoch AND event.event_ordinal = head.connection_event_ordinal
+            WHERE operation.command_id = $1 AND event.state_kind IN ('connected', 'suspect')")
+            .bind(command.into_uuid()).execute(connection).await?;
+    Ok(())
 }

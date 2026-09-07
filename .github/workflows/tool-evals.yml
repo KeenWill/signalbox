@@ -71,6 +71,7 @@ on:
       - "crates/persistence/src/submit_input.rs"
       - "crates/persistence/src/submit_input/**"
       - "crates/persistence/src/tool_loop.rs"
+      - "crates/persistence/src/tool_loop/**"
       - ".github/workflows/tool-evals.yml"
   push:
     branches: [main]
@@ -118,6 +119,7 @@ on:
       - "crates/persistence/src/submit_input.rs"
       - "crates/persistence/src/submit_input/**"
       - "crates/persistence/src/tool_loop.rs"
+      - "crates/persistence/src/tool_loop/**"
       - ".github/workflows/tool-evals.yml"
   # One daily provider/model drift sample. GitHub schedules only the copy on
   # the default branch, so this starts after owner merge.

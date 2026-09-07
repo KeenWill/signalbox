@@ -426,6 +426,7 @@ impl RunnerEnrollmentReceipt {
             registration.sandboxes(),
             registration.repositories().cloned(),
         )
+        .with_default_working_directory(registration.default_working_directory().cloned())
     }
 
     /// Separates the canonical enrollment authority and registration receipt.
@@ -3922,8 +3923,8 @@ async fn insert_registration(
         "INSERT INTO runner_registration
             (enrollment_id, registration_revision, runner_id,
              authentication_reference_id, class_count, tool_count,
-             profile_count, workspace_count, repository_count, sandbox_count)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             profile_count, workspace_count, repository_count, sandbox_count, default_working_directory)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(registration.enrollment().into_uuid())
     .bind(Decimal::from(revision.get()))
@@ -3935,6 +3936,7 @@ async fn insert_registration(
     .bind(count_decimal(workspaces.len())?)
     .bind(count_decimal(repositories.len())?)
     .bind(count_decimal(sandboxes.len())?)
+    .bind(registration.default_working_directory().map(RunnerWorkingDirectory::as_str))
     .execute(&mut **transaction)
     .await?;
     for class in classes {
@@ -4202,6 +4204,10 @@ async fn load_registration_in(
         authority,
         catalog,
         ValidatedRunnerRegistrationReconstitutionInput {
+            default_working_directory: row
+                .decode_column::<Option<String>>("default_working_directory")?
+                .map(working_directory)
+                .transpose()?,
             enrollment: runner_enrollment_id(row.decode_column("enrollment_id")?),
             revision: RunnerGeneration::try_from_u64(revision.get())
                 .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,

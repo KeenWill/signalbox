@@ -323,12 +323,82 @@ async fn recovery_abandonment_terminalizes_the_lost_pre_pin_placement() -> Resul
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_pinned_installation_commits_one_reference_boundary_and_replays()
 -> Result<(), Box<dyn Error>> {
+    pinned_installation_preserves_seed(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_pinned_installation_preserves_the_imported_seed_before_the_first_turn()
+-> Result<(), Box<dyn Error>> {
+    pinned_installation_preserves_seed(true).await
+}
+
+async fn pinned_installation_preserves_seed(imported: bool) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, predecessor, _, pin) = stored_pin_fixture(&pool).await?;
+    let seed = ContextFrontierId::from_uuid(Uuid::now_v7());
+    let (store, predecessor, _, pin) = if imported {
+        use signalbox_application::{ImportedConversationConverter, ImportedConversationStore};
+        use signalbox_domain::{
+            CreateSessionFromImportedFrontier, ImportedConversationId, ImportedSessionRelationship,
+            ImportedTranscriptEntryId,
+        };
+        use signalbox_persistence::{
+            conversation_import::ImportedConversationRepository,
+            create_session_from_imported_frontier::ImportedSessionRepository,
+        };
+        let conversation = signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter
+            .convert(
+                ImportedConversationId::from_uuid(Uuid::now_v7()),
+                b"{\"type\":\"summary\",\"value\":null}\n{\"type\":\"summary\",\"value\":null}",
+                || ImportedTranscriptEntryId::from_uuid(Uuid::now_v7()),
+            )
+            .expect("the recovery fixture retains its required correlated fact");
+        ImportedConversationStore::resolve_or_insert(
+            &mut ImportedConversationRepository::new(pool.clone()),
+            conversation.clone(),
+        )
+        .await?;
+        let command = CreateSessionFromImportedFrontier::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            conversation
+                .frontiers()
+                .last()
+                .expect("the recovery fixture retains its required correlated fact"),
+            ImportedSessionRelationship::Resume,
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(uuid(0xa101)),
+            )),
+        );
+        ImportedSessionRepository::new(
+            pool.clone(),
+            SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+                "fixture-model-family",
+                "fixture-credential-reference",
+            )])
+            .expect("the recovery fixture retains its required correlated fact"),
+        )
+        .handle(command, SessionId::from_uuid(uuid(SESSION)), seed, || {
+            SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())
+        })
+        .await?;
+        let (store, predecessor, registration, pin) = prepared_pin_fixture_for_stored_session(
+            &pool,
+            authorized,
+            catalog(),
+            no_permission_overrides(),
+            "effect_free",
+        )
+        .await?;
+        store.open_connection(predecessor.enrollment()).await?;
+        store.store_pin(&pin, &registration).await?;
+        (store, predecessor, registration, pin)
+    } else {
+        stored_pin_fixture(&pool).await?
+    };
     let connection = store
         .load_connection(predecessor.enrollment())
         .await?
-        .unwrap();
+        .expect("the recovery fixture retains its required correlated fact");
     store
         .transition_connection(
             predecessor.enrollment(),
@@ -355,7 +425,11 @@ async fn recovery_pinned_installation_commits_one_reference_boundary_and_replays
         result,
         RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Replaced {
             runner: candidate.identities().runner(),
-            placement_revision: pin.placement.revision().checked_next().unwrap()
+            placement_revision: pin
+                .placement
+                .revision()
+                .checked_next()
+                .expect("the recovery fixture retains its required correlated fact")
         })
     );
     assert_eq!(store.replace_lost_runner(command.clone()).await?, result);
@@ -366,9 +440,79 @@ async fn recovery_pinned_installation_commits_one_reference_boundary_and_replays
     let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM semantic_transcript_entry WHERE payload_kind = 'runner_placement_changed'").fetch_one(&pool).await?;
     assert_eq!(entries, 1);
     let member_count: Decimal = sqlx::query_scalar("SELECT frontier.member_count FROM runner_session_placement_frontier AS head JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) JOIN context_frontier AS frontier ON frontier.owning_session_id = boundary.session_id AND frontier.context_frontier_id = boundary.context_frontier_id WHERE head.session_id = $1").bind(command.session.into_uuid()).fetch_one(&pool).await?;
-    assert_eq!(member_count, Decimal::ONE);
-    assert!(
-        matches!(store.load_placement(command.session).await?.unwrap().placement().state(), SessionRunnerPlacementState::Pinned(pinned) if pinned.runner == candidate.identities().runner())
+    assert_eq!(member_count, Decimal::from(if imported { 3 } else { 1 }));
+    if imported {
+        let preserved: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM resolve_context_frontier_members($1, $2) AS seed LEFT JOIN runner_session_placement_frontier AS head ON head.session_id = $1 LEFT JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) LEFT JOIN LATERAL resolve_context_frontier_members($1, boundary.context_frontier_id) AS next ON next.member_position = seed.member_position WHERE seed.source_session_id IS DISTINCT FROM next.source_session_id OR seed.semantic_entry_id IS DISTINCT FROM next.semantic_entry_id)")
+            .bind(command.session.into_uuid()).bind(seed.into_uuid()).fetch_one(&pool).await?;
+        assert!(preserved);
+    }
+    let placement = store
+        .load_placement(command.session)
+        .await?
+        .expect("replacement placement is retained");
+    let SessionRunnerPlacementState::Pinned(pinned) = placement.placement().state() else {
+        panic!("replacement is pinned");
+    };
+    assert_eq!(
+        pinned.working_directory.as_str(),
+        "/workspace/successor-default"
     );
+    assert!(
+        matches!(store.load_placement(command.session).await?.expect("the recovery fixture retains its required correlated fact").placement().state(), SessionRunnerPlacementState::Pinned(pinned) if pinned.runner == candidate.identities().runner())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_replacement_requires_existing_control_before_staging()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, _, _) = insert_running_turn(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let predecessor = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    let connection = store
+        .open_connection(predecessor.identities().enrollment())
+        .await?;
+    store
+        .store_placement(
+            &SessionRunnerPlacement::new(
+                session,
+                exact_runner_request(predecessor.identities().runner()),
+            ),
+            None,
+            None,
+        )
+        .await?;
+    store
+        .transition_connection(
+            predecessor.identities().enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let command = signalbox_domain::ReplaceLostRunner {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        session,
+        revision: None,
+    };
+    let result = store.replace_lost_runner(command.clone()).await?;
+    assert_eq!(
+        result,
+        RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Rejected(
+            RunnerRecoveryRejection::ExistingControlRequired
+        ))
+    );
+    assert_eq!(store.replace_lost_runner(command).await?, result);
+    let stages: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_replacement_stage WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stages, 0);
     Ok(())
 }

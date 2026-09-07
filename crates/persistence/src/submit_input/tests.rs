@@ -1,5 +1,14 @@
 use std::io;
 
+use super::decode::{
+    decode_delegation_outcome_kind, decode_delegation_outcome_reason, decode_delegation_provenance,
+    map_imported_scheduling_error,
+};
+use signalbox_domain::{
+    DelegationContent, DelegationOutcome, DelegationOutcomeKind,
+    DelegationProvenanceReconstitutionInput,
+};
+
 use super::*;
 
 #[test]

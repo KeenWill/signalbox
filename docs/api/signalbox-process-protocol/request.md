@@ -19,6 +19,18 @@ pub enum ClientRequest {
         command_id: CommandId,
         enrollment_request_id: CanonicalUuid,
     },
+    ProvisionOauthCredential {
+        command_id: CommandId,
+        profile: string::String,
+    },
+    ReprovisionOauthCredential {
+        command_id: CommandId,
+        profile: string::String,
+    },
+    DeleteOauthCredential {
+        command_id: CommandId,
+        profile: string::String,
+    },
     CreateSession {
         command_id: CommandId,
         initial_model_selection: ModelSelection,

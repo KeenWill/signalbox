@@ -337,13 +337,43 @@ async fn judge_observation_closes_lost_request(
         .complete(
             &prepared,
             recommendation,
-            rationale,
+            rationale.clone(),
             signalbox_domain::ProviderReportedTokenUsage::unreported(),
             identities,
             |_| panic!("equal observation replay creates no entries"),
         )
         .await?;
     assert_eq!(replay, outcome);
+    let changed_identities = ApprovalJudgeCompletionIdentities::new(
+        TurnAttemptId::from_uuid(Uuid::now_v7()),
+        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+        ContextFrontierId::from_uuid(Uuid::now_v7()),
+    );
+    let changed = repository
+        .complete(
+            &prepared,
+            recommendation,
+            rationale,
+            signalbox_domain::ProviderReportedTokenUsage::unreported(),
+            changed_identities,
+            |_| panic!("observation replay creates no entries"),
+        )
+        .await;
+    if recommendation == signalbox_domain::DelegateApprovalRecommendation::EscalateToHuman {
+        assert_eq!(changed?, outcome);
+    } else {
+        assert!(matches!(
+            changed,
+            Err(
+                signalbox_persistence::approval_judge::ApprovalJudgeRepositoryError::Corruption(
+                    signalbox_persistence::approval_judge::ApprovalJudgeCorruption::Inconsistent(
+                        "completed judge replay"
+                    )
+                )
+            )
+        ));
+    }
+
     Ok(())
 }
 

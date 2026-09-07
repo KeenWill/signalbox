@@ -1660,14 +1660,14 @@ async fn exact_completed(
     .bind(prepared.request().id().into_uuid())
     .fetch_one(&mut *connection)
     .await?;
-    if inadmissible {
-        return Ok(Some(CompleteApprovalJudgeOutcome::ClosedInadmissible));
-    }
     let continuation_exact = stored == Some(DelegateApprovalRecommendation::EscalateToHuman)
         || exact_completion_continuation(connection, prepared, identities.continuation_attempt())
             .await?;
     if !continuation_exact {
         return Ok(None);
+    }
+    if inadmissible {
+        return Ok(Some(CompleteApprovalJudgeOutcome::ClosedInadmissible));
     }
     Ok(Some(match stored {
         Some(DelegateApprovalRecommendation::Approve | DelegateApprovalRecommendation::Deny) => {
