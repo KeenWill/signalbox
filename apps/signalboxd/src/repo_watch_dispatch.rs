@@ -65,6 +65,9 @@ async fn submit_with_checkout<Runner: signalbox_tools_exec::ProcessRunner>(
     (),
     signalbox_module_repo_watch_v2::dispatch::SubmissionError<RepositoryWatchCommandError>,
 > {
+    scavenge_checkouts(store, &sink.pool, &sink.models)
+        .await
+        .map_err(signalbox_module_repo_watch_v2::dispatch::SubmissionError::Sink)?;
     store
         .submit_pending(
             &mut RepositoryWatchCommandCodec,
@@ -76,6 +79,52 @@ async fn submit_with_checkout<Runner: signalbox_tools_exec::ProcessRunner>(
             },
         )
         .await
+}
+
+/// Removes retired dispatch checkouts during startup and lifecycle processing.
+pub async fn scavenge_checkouts(
+    store: &signalbox_module_repo_watch_v2::RepoWatchStore,
+    core: &PgPool,
+    models: &HubModelConfiguration,
+) -> Result<(), RepositoryWatchCommandError> {
+    let Some(tools) = models.daemon_tools() else {
+        return Ok(());
+    };
+    let roots = crate::daemon_tools::SessionWorkspaceRoots::try_new(tools.workspace_root())
+        .map_err(|_| RepositoryWatchCommandError::CheckoutRemovalFailed)?;
+    for checkout in store
+        .checkout_removal_candidates()
+        .await
+        .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+    {
+        let terminal: bool = sqlx::query_scalar(
+            "SELECT state_kind = 'terminal' FROM session_lifecycle WHERE session_id = $1",
+        )
+        .bind(checkout.session.into_uuid())
+        .fetch_one(core)
+        .await
+        .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+        if checkout.retired_reason.is_none() && !terminal {
+            continue;
+        }
+        let roots = roots.clone();
+        let removal = tokio::task::spawn_blocking(move || {
+            crate::repo_watch_checkout::remove(&roots, checkout.session)
+        })
+        .await;
+        if !matches!(removal, Ok(Ok(()))) {
+            tracing::warn!(
+                reason = "checkout_removal_failed",
+                "repository-watch checkout removal failed"
+            );
+            continue;
+        }
+        store
+            .settle_checkout_removal(checkout.command)
+            .await
+            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+    }
+    Ok(())
 }
 
 struct CheckoutCommandSink<'a, Runner> {
@@ -280,6 +329,7 @@ pub enum RepositoryWatchCommandError {
     UnsupportedCommand,
     CoreCommandFailed,
     InterruptFailed,
+    CheckoutRemovalFailed,
 }
 
 impl SessionCommandSink for RepositoryWatchCommandSink {

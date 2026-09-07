@@ -318,6 +318,36 @@ system_prompt = "Inspect repository activity."
         .expect("created session");
         SessionId::from_uuid(id)
     }
+
+    fn root(&self, session: SessionId) -> PathBuf {
+        SessionWorkspaceRoots::try_new(
+            self.sink
+                .models
+                .daemon_tools()
+                .expect("tools")
+                .workspace_root(),
+        )
+        .expect("derived roots")
+        .derived_path(session)
+    }
+
+    async fn stop(&mut self, session: SessionId) {
+        use signalbox_module_repo_watch_v2::dispatch::SessionCommandSink;
+        self.sink
+            .submit(
+                SessionCommand::lifecycle(SessionLifecycleCommand::new(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    session,
+                    SessionLifecycleOperation::Stop {
+                        sticky: StopStickiness::Sticky,
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                ))
+                .expect("stop admitted by seam"),
+            )
+            .await
+            .expect("stop session");
+    }
 }
 
 #[tokio::test]
@@ -463,6 +493,86 @@ async fn a_symlinked_workspace_parent_retires_dispatch_before_git_runs()
         (String::from("workspace"), String::from("not_started"))
     );
     assert!(fixture.runner.steps.lock().expect("steps").is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn terminal_session_removes_its_checkout_without_following_tracked_symlinks()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let root = fixture.root(session);
+    let outside = fixture._files.path().join("outside");
+    std::fs::create_dir(&outside)?;
+    std::fs::write(outside.join("keep.txt"), "outside the checkout")?;
+    std::os::unix::fs::symlink(&outside, root.join("outside"))?;
+    scavenge_checkouts(&fixture.store, &fixture.core, &fixture.sink.models)
+        .await
+        .expect("active checkout retained");
+    assert!(root.join(".git").is_dir());
+    fixture.stop(session).await;
+    scavenge_checkouts(&fixture.store, &fixture.core, &fixture.sink.models)
+        .await
+        .expect("terminal checkout removed");
+    assert!(!root.exists());
+    assert_eq!(
+        std::fs::read_to_string(outside.join("keep.txt"))?,
+        "outside the checkout"
+    );
+    let removed: bool =
+        sqlx::query_scalar("SELECT checkout_removed FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    assert!(removed);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn startup_scavenges_a_failed_dispatch_checkout_idempotently() -> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.runner.bare = fixture.runner.bare.with_file_name("missing.git");
+    fixture.dispatch().await;
+    let root = fixture.root(fixture.session().await);
+    assert!(root.is_dir());
+    let restarted = RepoWatchStore::new(fixture.module.clone());
+    scavenge_checkouts(&restarted, &fixture.core, &fixture.sink.models)
+        .await
+        .expect("startup scavenges retired checkout");
+    assert!(!root.exists());
+    scavenge_checkouts(&restarted, &fixture.core, &fixture.sink.models)
+        .await
+        .expect("repeated startup is idempotent");
+    assert!(restarted.checkout_removal_candidates().await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn cleanup_rejects_a_symlink_replacing_the_session_root() -> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let root = fixture.root(session);
+    let retained = fixture._files.path().join("retained");
+    std::fs::rename(&root, &retained)?;
+    std::os::unix::fs::symlink(&retained, &root)?;
+    fixture.stop(session).await;
+    scavenge_checkouts(&fixture.store, &fixture.core, &fixture.sink.models)
+        .await
+        .expect("unsafe removal remains pending");
+    assert!(std::fs::symlink_metadata(&root)?.is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(retained.join("review.txt"))?,
+        "retained head\n"
+    );
+    assert_eq!(fixture.store.checkout_removal_candidates().await?.len(), 1);
     Ok(())
 }
 

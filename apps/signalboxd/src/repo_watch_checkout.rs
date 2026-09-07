@@ -231,3 +231,64 @@ fn create_directory(
     }
     openat(parent, name, DIRECTORY_FLAGS, Mode::empty())
 }
+
+pub(crate) fn remove(
+    roots: &SessionWorkspaceRoots,
+    session: SessionId,
+) -> Result<(), rustix::io::Errno> {
+    let path = roots.derived_path(session);
+    let parent = match open_directory(path.parent().ok_or(rustix::io::Errno::INVAL)?) {
+        Ok(parent) => parent,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let name = path.file_name().ok_or(rustix::io::Errno::INVAL)?;
+    let directory = match openat(&parent, name, DIRECTORY_FLAGS, Mode::empty()) {
+        Ok(directory) => directory,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    remove_contents(&directory)?;
+    remove_directory_entry(&parent, name, &directory)
+}
+
+fn remove_contents(directory: &OwnedFd) -> Result<(), rustix::io::Errno> {
+    use rustix::fs::{AtFlags, Dir, FileType, statat, unlinkat};
+    let mut entries = Dir::new(rustix::io::dup(directory)?)?;
+    while let Some(entry) = entries.read() {
+        let entry = entry?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let metadata = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        if FileType::from_raw_mode(metadata.st_mode) == FileType::Directory {
+            let child = openat(directory, name, DIRECTORY_FLAGS, Mode::empty())?;
+            remove_contents(&child)?;
+            use std::os::unix::ffi::OsStrExt;
+            remove_directory_entry(
+                directory,
+                std::ffi::OsStr::from_bytes(name.to_bytes()),
+                &child,
+            )?;
+        } else {
+            // A tracked symlink is removed as an entry, never traversed.
+            unlinkat(directory, name, AtFlags::empty())?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_directory_entry(
+    parent: &OwnedFd,
+    name: &std::ffi::OsStr,
+    directory: &OwnedFd,
+) -> Result<(), rustix::io::Errno> {
+    use rustix::fs::{AtFlags, fstat, statat, unlinkat};
+    let pinned = fstat(directory)?;
+    let standing = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if (pinned.st_dev, pinned.st_ino) != (standing.st_dev, standing.st_ino) {
+        return Err(rustix::io::Errno::STALE);
+    }
+    unlinkat(parent, name, AtFlags::REMOVEDIR)
+}

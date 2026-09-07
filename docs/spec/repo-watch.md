@@ -201,10 +201,12 @@ workspace root, on the retained head branch and SHA, before completing held
 creation. The ledger records checkout path `.` and the provisioned SHA. Git uses
 the polling credential only in its invocation environment; provisioning failure
 retires the dispatch as `checkout_provisioning_failed` with the failing step and
-exit status and stops the session. Pending submission follow-ups remain
-retryable after core command settlement, including interruption of a live turn
-whose session is closing. Synchronous command-identity conflicts settle as
-rejected before submission continues to the next action.
+exit status and stops the session. Retired dispatches and terminal sessions lose
+their provisioned checkout; startup scavenges retained checkouts awaiting
+removal. Pending submission follow-ups remain retryable after core command
+settlement, including interruption of a live turn whose session is closing.
+Synchronous command-identity conflicts settle as rejected before submission
+continues to the next action.
 
 ## Boundary contracts
 

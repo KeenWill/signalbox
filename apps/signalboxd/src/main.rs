@@ -2094,6 +2094,13 @@ async fn run_hub(
     let repository_watch_runtime = if model_configuration.repository_watch().is_some() {
         let start = async {
             let module_pool = connect_repository_watch_pool(&pool).await?;
+            signalboxd::repo_watch_dispatch::scavenge_checkouts(
+                &signalbox_module_repo_watch_v2::RepoWatchStore::new(module_pool.clone()),
+                &pool,
+                &model_configuration,
+            )
+            .await
+            .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
             RepositoryWatchRuntime::new(
                 module_pool,
                 model_configuration.repository_watch().cloned(),

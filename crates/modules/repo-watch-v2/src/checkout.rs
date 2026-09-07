@@ -1,7 +1,9 @@
 //! Checkout facts retained on the dispatch command ledger.
 
 use crate::{RepoWatchStore, StoreError};
-use signalbox_ownership_seam::{CommitSha, DurableCommandId, RepoWatchEvent, RepoWatchEventId};
+use signalbox_ownership_seam::{
+    CommitSha, DurableCommandId, RepoWatchEvent, RepoWatchEventId, SessionId,
+};
 use uuid::Uuid;
 
 /// The immutable triggering event and the checkout's durable settlement.
@@ -19,7 +21,47 @@ struct CheckoutRow {
     checkout_stop_command_id: Option<Uuid>,
 }
 
+/// A checkout whose filesystem removal has not yet settled.
+pub struct CheckoutRemovalCandidate {
+    pub command: DurableCommandId,
+    pub session: SessionId,
+    pub retired_reason: Option<String>,
+}
+
 impl RepoWatchStore {
+    /// Lists provisioned or failed checkouts after their command follow-up settles.
+    pub async fn checkout_removal_candidates(
+        &self,
+    ) -> Result<Vec<CheckoutRemovalCandidate>, StoreError> {
+        let rows: Vec<(Uuid, Uuid, Option<String>)> = sqlx::query_as(
+            "SELECT command_id, created_session_id, checkout_retired_reason FROM dispatch_ledger
+             WHERE created_session_id IS NOT NULL AND NOT submission_pending AND NOT checkout_removed
+               AND (checkout_path IS NOT NULL OR checkout_retired_reason IS NOT NULL)")
+            .fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(command, session, retired_reason)| CheckoutRemovalCandidate {
+                    command: DurableCommandId::from_uuid(command),
+                    session: SessionId::from_uuid(session),
+                    retired_reason,
+                },
+            )
+            .collect())
+    }
+
+    /// Marks removal only after the derived checkout is absent.
+    pub async fn settle_checkout_removal(
+        &self,
+        command: DurableCommandId,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE dispatch_ledger SET checkout_removed = true WHERE command_id = $1")
+            .bind(command.into_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Reads the retained event, including its exact PR head, for one creation.
     pub async fn dispatch_checkout(
         &self,
