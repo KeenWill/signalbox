@@ -894,6 +894,11 @@ impl ServerMessage {
                     return Err(FrameValidationError::MetadataShape);
                 }
             }
+            Self::ConfigurationReloaded {
+                reloaded_sections, ..
+            } if reloaded_sections.as_slice() != ReloadedSection::ALL => {
+                return Err(FrameValidationError::ConfigurationReloadShape);
+            }
             Self::ConfigurationReloadFailed { reason, .. } => {
                 if reason.is_empty()
                     || reason.len() > MAX_CONFIGURATION_RELOAD_REASON_BYTES

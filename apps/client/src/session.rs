@@ -570,8 +570,9 @@ pub(crate) async fn read_session_metadata_page(
 pub(crate) async fn reload_configuration(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
+    command_id: Option<CommandId>,
 ) -> Result<(), ClientError> {
-    let (command_id, _) = command_identity(None)?;
+    let (command_id, _) = command_identity(command_id)?;
     output.recovery_value(
         "command_id",
         &command_id.into_uuid().hyphenated().to_string(),
