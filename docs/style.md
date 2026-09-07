@@ -131,7 +131,9 @@ size or bound their fixture.
 A representation fact, such as a type's maximum or an encoding width, is not a
 bound. A literal that encodes an external limit cites its source in a plain
 comment; a non-obvious derivation gets a plain explanation. Omit comments that
-merely restate the name or surrounding code. Review enforces this rule.
+merely restate the name or surrounding code. Review checks that literals
+encoding external limits cite their sources and that no bound classification
+tags remain.
 
 ## Conventions at component seams
 
