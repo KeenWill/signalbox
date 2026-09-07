@@ -575,12 +575,37 @@ export function SessionWorkspaceSurface({
                   Reconnect live updates
                 </button>
               </>
+            ) : synchronization.sessionId === sessionId && synchronization.phase === 'resyncing' ? (
+              'Resynchronizing live session…'
             ) : live ? (
               'Following live session'
             ) : (
               'Connecting live session…'
             )}
           </p>
+          {(live?.reconciliation || live?.runner) && (
+            <div className="session-live-facts">
+              {live.reconciliation && (
+                <span className="availability-tag">
+                  Awaiting reconciliation · {live.reconciliation.kind.replaceAll('_', ' ')}
+                </span>
+              )}
+              {live.runner && (
+                <span className="availability-tag">
+                  Runner · {live.runner.state.replaceAll('_', ' ')}
+                  {live.runner.state === 'pinned' && ` · ${live.runner.connection_health}`}
+                </span>
+              )}
+            </div>
+          )}
+          {synchronization.sessionId === sessionId && synchronization.drafts.length > 0 && (
+            <section className="provider-drafts" aria-label="Provider draft">
+              <span>Streaming draft · discarded on resync</span>
+              {synchronization.drafts.map((draft) => (
+                <p key={draft.key}>{draft.content}</p>
+              ))}
+            </section>
+          )}
           {transcriptAvailable &&
             displayedSession.descriptor.sizes.projected_text_bytes !== '0' && (
               <SessionTranscriptText

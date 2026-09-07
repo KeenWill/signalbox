@@ -1,3 +1,5 @@
+use super::prepare::map_model_settings_resolution_error;
+use crate::mapping::{durable_command_id_from_uuid, session_id_from_uuid, turn_id_from_uuid};
 use std::io;
 
 use super::decode::{
@@ -6,7 +8,7 @@ use super::decode::{
 };
 use signalbox_domain::{
     DelegationContent, DelegationOutcome, DelegationOutcomeKind,
-    DelegationProvenanceReconstitutionInput,
+    DelegationProvenanceReconstitutionInput, OriginModelSettingsError,
 };
 
 use super::*;

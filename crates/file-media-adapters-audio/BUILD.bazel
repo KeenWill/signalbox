@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_unit_test")
 
 rust_package()
 
@@ -31,4 +31,41 @@ rust_unit_test(
 rust_unit_test(
     name = "signalbox_file_media_audio_worker_unit_tests",
     crate = ":signalbox-file-media-audio-worker",
+)
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_file_media_adapters_audio",
+)
+
+rust_integration_test(
+    name = "adapters",
+    args = ["--test-threads=4"],
+    srcs = glob(["tests/**/*.rs"]),
+    crate_root = "tests/adapters.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [":signalbox-file-media-audio-worker"],
+    env = {
+        "CI": "true",
+        "NEXTEST_BIN_EXE_signalbox_file_media_audio_worker": "$(rootpath :signalbox-file-media-audio-worker)",
+    },
+    env_inherit = ["SIGNALBOX_FILE_MEDIA_CGROUP_ROOT"],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/file-media-adapters-audio",
+        "CARGO_BIN_EXE_signalbox-file-media-audio-worker": "$(rootpath :signalbox-file-media-audio-worker)",
+    },
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+    deps = [
+        "//crates/file-media-adapters-audio:signalbox_file_media_adapters_audio",
+        "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
+        "//crates/file-media-runtime:signalbox_file_media_runtime",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
 )
