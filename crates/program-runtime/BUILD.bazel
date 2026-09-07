@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_postgres_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_postgres_test", "rust_selection_test", "rust_unit_test")
 
 CRATE_FEATURES = [
     "default",
@@ -49,4 +49,19 @@ rust_api_json(
     name = "api_json",
     crate = ":signalbox_program_runtime",
     crate_features = CRATE_FEATURES,
+)
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_program_runtime",
+    crate_features = [
+        "default",
+        "postgres-integration",
+    ],
+)
+
+rust_selection_test(
+    name = "program_host_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":program_host_postgres",
 )
