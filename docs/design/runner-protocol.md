@@ -72,62 +72,16 @@ paths.
 
 Several runners are enrolled with one daemon at once.
 
-After durable predecessor loss, one successor `enroll` may be admitted as a
-provisioning-only pending replacement candidate. It receives the same identity
-shapes plus a pending enrollment and pending registration revision; at most one
-pending request exists, and equal replay returns its exact original receipt.
-Pending authority admits heartbeat, startup leak reconciliation, and one
-user-command-bound workspace operation, and never registration mutation, grant
-creation, lease offer, claim, or dispatch.
-
-`promote_pending_runner` is the user command for the fact that this daemon's
-active runner is durably gone, or, with several runners, that one of this
-daemon's active runners is gone and a successor for it is pending. It requires
-the recorded active enrollment's connection to be durably lost and the pending
-candidate to be connected, then revokes the predecessor and constructs the
-active enrollment and validated registration from the exact pending facts in one
-transaction. It provisions no workspace, consumes no receipt, touches no session
-placement, creates no lease, and fabricates no turn or frontier. A session
-pinned to the promoted predecessor stays lost until its own user replacement
-runs.
-
-For a pinned repository-backed loss, `replace_lost_runner` first durably claims
-the user command and its complete request, then creates one single-use
-provisioning authorization naming that command and the pending registration. The
-runner provisions and spools `workspace_ready` under that limited authority. The
-receipt remains retained until the replacement boundary selected by
-[turn lifecycle](turn-lifecycle-and-scheduling.md); this page owns installation
-in that transaction. It activates the pending enrollment: it rechecks the lost
-predecessor and the connected candidate, consumes the exact workspace receipt,
-revokes the predecessor, constructs the active enrollment and validated
-registration from the pending facts, and installs the successor placement, grant
-lineage, semantic `RunnerPlacementChanged` transcript entry, next context
-frontier, and terminal command result atomically, except that pre-continuation
-takeover durably retains the pending relocation instead of appending the entry
-or advancing the frontier. Continuation or batch terminalization appends that
-entry exactly once and advances the frontier after all batch results and before
-the next model call or terminal marker. The transcript entry is reference-only
-and contains no credential value or unbounded runner output. Pinned replacement
-provisions a fresh workspace at the successor revision when the successor
-request requires one; pre-pin replacement provisions nothing until initial
-dispatch and performs the promotion in its single terminal transaction. A
-provisioning rejection or candidate loss records the typed terminal command
-rejection, retires only the command's staging workspace through the release
-path, and leaves the candidate pending for a later command. Process exit after
-the command claim is recoverable: startup resumes the one nonterminal
-replacement command from its durable authorization and receipt rather than
-claiming again.
-
-Re-registration triggers a loss with its own recovery: when a live runner stops
-advertising a capability that a pinned placement requires, reconciliation marks
-the placement lost while the connection and enrollment stay healthy. For that
-loss source only, the replacement command may name the same runner identity;
-every other loss source keeps the different-runner requirement. A checked
-re-enrollment against the current connection revalidates the exact enrollment,
-runner, and authentication-reference correlations, requires the current
-registration to advertise every capability the successor placement request
-needs, and installs the successor placement, grant lineage, and semantic
-boundary exactly as a different-runner replacement does.
+For replacement behind an active call or tool batch, the workspace receipt
+remains retained until the replacement boundary selected by
+[turn lifecycle](turn-lifecycle-and-scheduling.md). Installation in that
+transaction rechecks the lost predecessor and connected candidate, consumes the
+exact receipt, promotes pending authority, and installs the placement, grant
+lineage, relocation entry, frontier, and terminal command result atomically.
+Pre-continuation takeover retains the pending relocation instead of appending
+the entry or advancing the frontier. Continuation or batch terminalization
+appends that entry exactly once after all batch results and before the next
+model call or terminal marker.
 
 ### Healthy-session relocation
 
@@ -326,11 +280,6 @@ repository hooks is a change to this design.
 
 The gate that admits `enroll` only while no other active enrollment exists is a
 development boundary; nothing built forecloses several runners enrolled at once.
-
-The domain gate in `replace_lost_runner` that refuses a same-runner successor,
-and the test that pins that refusal after registration-triggered loss,
-contradict the same-runner recovery above and flip when the replacement command
-is built.
 
 Every transaction this design adds takes runner locks in the order
 [persistence protocol](../spec/persistence-protocol.md) fixes and holds no

@@ -37,6 +37,11 @@ pub enum CredentialAccessFailure {
     Unmapped,
     Unavailable,
     Unreadable,
+    OauthTupleMismatch,
+    OauthRefreshAmbiguous,
+    OauthRefreshRejected,
+    OauthIdentityChanged,
+    OauthCredentialHome,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq
 ```

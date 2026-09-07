@@ -158,6 +158,13 @@ impl RunnerConfiguration {
         let content = fs::read_to_string(path).map_err(RunnerConfigurationError::Read)?;
         let mut configuration = Self::parse(&content)?;
         configuration.validate_filesystem()?;
+        configuration.advertisement.default_working_directory = Some(
+            std::env::current_dir()
+                .map_err(|_| RunnerConfigurationError::InvalidDefaultWorkingDirectory)?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| RunnerConfigurationError::InvalidDefaultWorkingDirectory)?,
+        );
         Ok(configuration)
     }
 
@@ -188,6 +195,7 @@ impl RunnerConfiguration {
         // sandbox, tool, or capability-class provider. Credential and repository
         // availability is the exact validated configuration projection.
         let advertisement = Advertisement {
+            default_working_directory: None,
             capability_classes: Vec::new(),
             tools: Vec::new(),
             workspace_capabilities: Vec::new(),
@@ -533,6 +541,8 @@ struct RawCredential {
 /// Sanitized strict runner-configuration failure.
 #[derive(Debug)]
 pub enum RunnerConfigurationError {
+    /// The process default directory could not be reported as an absolute UTF-8 path.
+    InvalidDefaultWorkingDirectory,
     /// The configuration file could not be read.
     Read(io::Error),
     /// TOML shape, type, duplicate, or field validation failed.
@@ -576,6 +586,9 @@ impl fmt::Display for RunnerConfigurationError {
                 formatter.write_str("runner daemon socket path is invalid")
             }
             Self::InvalidRunnerRoot => formatter.write_str("runner state root is invalid"),
+            Self::InvalidDefaultWorkingDirectory => {
+                formatter.write_str("runner default working directory is invalid")
+            }
             Self::InvalidBubblewrapPath => formatter.write_str("runner bubblewrap path is invalid"),
             Self::InvalidReadOnlyPaths => {
                 formatter.write_str("runner read-only path inventory is invalid")
@@ -606,6 +619,7 @@ impl Error for RunnerConfigurationError {
             | Self::UnsupportedVersion(_)
             | Self::InvalidDaemonSocketPath
             | Self::InvalidRunnerRoot
+            | Self::InvalidDefaultWorkingDirectory
             | Self::InvalidBubblewrapPath
             | Self::InvalidReadOnlyPaths
             | Self::InvalidNetworkHosts
@@ -683,6 +697,7 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
         assert_eq!(
             configuration.advertisement(),
             &Advertisement {
+                default_working_directory: None,
                 capability_classes: Vec::new(),
                 tools: Vec::new(),
                 workspace_capabilities: Vec::new(),

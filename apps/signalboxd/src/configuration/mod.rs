@@ -1227,6 +1227,24 @@ impl HubModelConfiguration {
         self.credential_profiles.get(name)
     }
 
+    /// Canonical OAuth registrations installed before model work starts.
+    pub fn oauth_registrations(
+        &self,
+    ) -> Vec<(
+        String,
+        signalbox_persistence::oauth_credential::OauthRegistration,
+    )> {
+        self.credential_profiles
+            .values()
+            .filter_map(|profile| match profile.delivery() {
+                CredentialDelivery::Oauth(delivery) => {
+                    Some((profile.name().to_owned(), delivery.registration()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Returns one declared credential pool by its exact name.
     pub fn credential_pool(&self, name: &str) -> Option<&CredentialPool> {
         self.credential_pools.get(name)
@@ -1256,6 +1274,11 @@ impl HubModelConfiguration {
                     post_kill_reap_bound,
                 );
                 runtime_configuration.exchange_timeout = model_exchange_timeout;
+                runtime_configuration.oauth_profiles = self
+                    .oauth_registrations()
+                    .into_iter()
+                    .map(|(name, _)| CredentialReference::new(name))
+                    .collect();
                 runtime_configuration = runtime_configuration.with_credential_homes(
                     self.credential_profiles.values().filter_map(|profile| {
                         let CredentialDelivery::CodexHome { path, .. } = profile.delivery() else {
