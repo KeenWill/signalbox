@@ -323,17 +323,27 @@ async fn recovery_abandonment_terminalizes_the_lost_pre_pin_placement() -> Resul
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_pinned_installation_commits_one_reference_boundary_and_replays()
 -> Result<(), Box<dyn Error>> {
-    pinned_installation_preserves_seed(false).await
+    pinned_installation_preserves_seed(false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_pinned_installation_preserves_the_imported_seed_before_the_first_turn()
 -> Result<(), Box<dyn Error>> {
-    pinned_installation_preserves_seed(true).await
+    pinned_installation_preserves_seed(true, false).await
 }
 
-async fn pinned_installation_preserves_seed(imported: bool) -> Result<(), Box<dyn Error>> {
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_replaces_a_delegated_session_after_its_runtime_terminal_boundary()
+-> Result<(), Box<dyn Error>> {
+    pinned_installation_preserves_seed(false, true).await
+}
+
+async fn pinned_installation_preserves_seed(
+    imported: bool,
+    runtime_terminal: bool,
+) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let seed = ContextFrontierId::from_uuid(Uuid::now_v7());
     let (store, predecessor, _, pin) = if imported {
@@ -407,6 +417,15 @@ async fn pinned_installation_preserves_seed(imported: bool) -> Result<(), Box<dy
         )
         .await?;
     append_runner_lost_projection(&pool, pin.placement.session()).await?;
+    if runtime_terminal {
+        insert_retired_delegated_wait(
+            &pool,
+            pin.placement.session(),
+            predecessor.runner(),
+            pin.placement.revision(),
+        )
+        .await?;
+    }
     let candidate = store
         .enroll_pristine(enrollment_request())
         .await?
@@ -514,5 +533,65 @@ async fn recovery_replacement_requires_existing_control_before_staging()
             .fetch_one(&pool)
             .await?;
     assert_eq!(stages, 0);
+    Ok(())
+}
+
+async fn insert_retired_delegated_wait(
+    pool: &PgPool,
+    session: SessionId,
+    runner: RunnerId,
+    revision: RunnerGeneration,
+) -> Result<(), sqlx::Error> {
+    let turn = TurnId::from_uuid(Uuid::now_v7());
+    super::runner_recovery::insert_runner_recovery_turn(
+        pool, session, turn, runner, revision, None, None,
+    )
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("UPDATE turn_lifecycle SET delegation_runtime_terminal = true WHERE session_id = $1 AND turn_id = $2").bind(session.into_uuid()).bind(turn.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_abandons_a_delegated_session_after_its_runtime_terminal_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, predecessor, _, pin) = stored_pin_fixture(&pool).await?;
+    let connection = store
+        .load_connection(predecessor.enrollment())
+        .await?
+        .expect("predecessor connection");
+    store
+        .transition_connection(
+            predecessor.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    append_runner_lost_projection(&pool, pin.placement.session()).await?;
+    insert_retired_delegated_wait(
+        &pool,
+        pin.placement.session(),
+        predecessor.runner(),
+        pin.placement.revision(),
+    )
+    .await?;
+    let command = AbandonLostRunner {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        session: pin.placement.session(),
+    };
+    let result = store.abandon_lost_runner(command.clone()).await?;
+    assert_eq!(
+        result,
+        RunnerRecoveryOutcome::Recorded(AbandonLostRunnerResult::Abandoned)
+    );
+    assert_eq!(store.abandon_lost_runner(command).await?, result);
     Ok(())
 }
