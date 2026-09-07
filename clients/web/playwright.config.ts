@@ -24,7 +24,7 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: 'npm run preview -- --port 4173',
+    command: process.env.SIGNALBOX_WEB_PREVIEW_COMMAND ?? 'npm run preview -- --port 4173',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: !process.env.CI,
   },
