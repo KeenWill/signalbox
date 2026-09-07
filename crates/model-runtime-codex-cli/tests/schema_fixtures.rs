@@ -109,18 +109,21 @@ fn pinned_notifications_preserve_consumed_and_adapter_required_fields() {
     );
 }
 
-fn variants(schema: &Value) -> std::collections::BTreeMap<String, Value> {
-    let mut variants = std::collections::BTreeMap::new();
+fn variants(schema: &Value) -> std::collections::BTreeMap<String, Vec<Value>> {
+    let mut variants: std::collections::BTreeMap<String, Vec<Value>> =
+        std::collections::BTreeMap::new();
     for entry in schema["oneOf"]
         .as_array()
         .expect("error info is a tagged union")
     {
         if let Some(tags) = entry["enum"].as_array() {
             for tag in tags {
-                variants.insert(
-                    tag.as_str().expect("tag is a string").to_owned(),
-                    Value::Null,
-                );
+                let mut shape = entry.clone();
+                shape["enum"] = serde_json::json!([tag]);
+                variants
+                    .entry(tag.as_str().expect("tag is a string").to_owned())
+                    .or_default()
+                    .push(shape);
             }
         } else {
             for tag in entry["properties"]
@@ -128,7 +131,7 @@ fn variants(schema: &Value) -> std::collections::BTreeMap<String, Value> {
                 .expect("data variant has properties")
                 .keys()
             {
-                variants.insert(tag.clone(), entry.clone());
+                variants.entry(tag.clone()).or_default().push(entry.clone());
             }
         }
     }
@@ -151,7 +154,7 @@ fn pinned_error_and_turn_enums_preserve_the_adapter_members() {
     let errors = schema("ErrorNotification");
     let turns = schema("TurnCompletedNotification");
     for schema in [&errors, &turns] {
-        check_errors(schema);
+        check_errors(schema).expect("known error representations remain decoder-compatible");
     }
     let expected = derived::<frame::TurnStatus>();
     assert_eq!(
@@ -161,28 +164,35 @@ fn pinned_error_and_turn_enums_preserve_the_adapter_members() {
     );
 }
 
-fn check_errors(schema: &Value) {
-    let expected = variants(&derived::<frame::KnownError>());
+fn check_errors(schema: &Value) -> Result<(), String> {
+    let expected_schema = derived::<frame::KnownError>();
+    let expected = variants(&expected_schema);
     let actual = variants(&schema["definitions"]["CodexErrorInfo"]);
     let additions = enum_members(
         &expected.keys().map(String::as_str).collect(),
         &actual.keys().map(String::as_str).collect(),
-    )
-    .expect("known error members remain present");
+    )?;
     for tag in additions {
         println!("CodexErrorInfo: additive member {tag}");
     }
-    for (tag, shape) in expected {
-        if !shape.is_null() {
-            check_object(&tag, shape.clone(), &actual[&tag], schema);
-            check_object(
-                &tag,
-                shape["properties"][&tag].clone(),
-                &actual[&tag]["properties"][&tag],
-                schema,
-            );
+    for (tag, shapes) in expected {
+        for candidate in &actual[&tag] {
+            let shape = shapes
+                .iter()
+                .find(|shape| schema_shape::compatible(shape, &expected_schema, candidate, schema))
+                .ok_or_else(|| format!("incompatible known error representation: {tag}"))?;
+            if shape["type"] == "object" {
+                check_object(&tag, shape.clone(), candidate, schema);
+                check_object(
+                    &tag,
+                    shape["properties"][&tag].clone(),
+                    &candidate["properties"][&tag],
+                    schema,
+                );
+            }
         }
     }
+    Ok(())
 }
 
 #[test]
@@ -238,10 +248,10 @@ fn incompatible_consumed_field_types_fail_through_references_and_nullable_varian
     assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
 
     let expected = derived::<frame::KnownError>();
-    let expected_variant = variants(&expected)["httpConnectionFailed"].clone();
+    let expected_variant = variants(&expected)["httpConnectionFailed"][0].clone();
     let document = schema("ErrorNotification");
     let mut actual =
-        variants(&document["definitions"]["CodexErrorInfo"])["httpConnectionFailed"].clone();
+        variants(&document["definitions"]["CodexErrorInfo"])["httpConnectionFailed"][0].clone();
     actual["properties"]["httpConnectionFailed"]["properties"]["httpStatusCode"]["type"] =
         serde_json::json!(["string", "null"]);
     assert!(!schema_shape::compatible(
@@ -266,4 +276,43 @@ fn incompatible_consumed_field_types_fail_through_references_and_nullable_varian
         &actual,
         &document
     ));
+}
+
+#[test]
+fn a_known_unit_error_cannot_change_to_an_object_representation() {
+    let mut actual = schema("ErrorNotification");
+    let alternatives = actual["definitions"]["CodexErrorInfo"]["oneOf"]
+        .as_array_mut()
+        .unwrap();
+    alternatives
+        .iter_mut()
+        .find(|shape| strings(&shape["enum"]).contains("unauthorized"))
+        .unwrap()["enum"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|tag| tag != "unauthorized");
+    alternatives.push(serde_json::json!({
+        "type":"object", "required":["unauthorized"],
+        "properties":{"unauthorized":{"type":"object"}}
+    }));
+    assert_eq!(
+        check_errors(&actual),
+        Err("incompatible known error representation: unauthorized".into())
+    );
+}
+
+#[test]
+fn a_known_unit_error_cannot_add_an_object_representation() {
+    let mut actual = schema("ErrorNotification");
+    actual["definitions"]["CodexErrorInfo"]["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "type":"object", "required":["unauthorized"],
+            "properties":{"unauthorized":{"type":"object"}}
+        }));
+    assert_eq!(
+        check_errors(&actual),
+        Err("incompatible known error representation: unauthorized".into())
+    );
 }
