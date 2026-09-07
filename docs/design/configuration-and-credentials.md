@@ -21,10 +21,25 @@ Reload is one admin verb, `reload_configuration`, owned by
 [process protocol](../spec/process-protocol.md). It re-reads the configured
 paths, validates the complete replacement exactly as startup does, and swaps the
 in-memory catalogs atomically on success. The reloadable sections are the model
-and alias catalog with its rate windows and the session-template catalog; every
-other section is startup-only. Any failure, and any replacement whose
-startup-only sections differ, leaves the running configuration in place. File
-watching and polling are external tooling that calls the verb.
+and alias catalog with its rate windows, the session-template catalog, and
+repository-watch configuration; every other section is startup-only. A
+replacement whose startup-only sections differ leaves the running configuration
+in place. File watching and polling are external tooling that calls the verb;
+webhook listener and repository polling-task reload belong to
+[repository watch](repo-watch.md). A reload that adds, edits, or removes
+`repository_watch.rules` commits activations and deactivations in the
+[reconciliation transaction](../spec/repo-watch.md) that records each
+activation's repository event tail, inside the reload boundary. A reload pauses
+sweep admission and stops and joins active sweep attempts before re-running
+convergence configured-target reconciliation after rule activation and
+event-tail capture commit, inside the reload boundary, using an empty effective
+target set when repository watch is disabled; sweep admission resumes under the
+replacement snapshot on success or the prior snapshot on rule-revision rejection
+only if that snapshot validates against the current startup-only sections, as
+[reload recovery](process-protocol.md) requires. Enabling convergence while
+repository watch is enabled composes the sweep task; disabling either terminates
+the task. A running sweep reads the new targets, template, interval, and
+credential path at its next attempt.
 
 A model entry carries zero or more `[[models.rate_windows]]` entries, each one
 dated price window over that entry's own `provider_model`. A window names the
@@ -194,8 +209,11 @@ A stored authorization is bound to the exact `client_id`, `token_url`,
 in the same transaction as the token generation. Every refresh and every
 dispatch compares that stored tuple with the current registration by canonical
 components, under the profile row lock and before any request is formed; a
-mismatch never sends the stored token, the generation quarantines, and
-re-provisioning is the only recovery.
+mismatch never sends the stored token, the generation quarantines, and recovery
+requires re-provisioning or deletion followed by provisioning. Dispatch holds
+the profile row lock from its authorization and generation check through copying
+the token into the child's scratch home; deletion acquires that lock before
+removing authorization and cached tokens.
 
 The daemon is the sole refresher. It locks the profile row, reads the stored
 token, and transactionally marks that generation's refresh in progress; the
@@ -222,10 +240,11 @@ possible request bytes and ambiguous afterward. Access tokens are held in memory
 only; a clean restart discards them without contacting a provider, and the first
 later preparation that needs the profile refreshes lazily, so recovery stays
 configuration-independent. A refresh rejected as expired, reused, or revoked is
-permanent: the profile quarantines and re-provisioning is the only recovery.
-Delivery-layer quarantine that occurs before a provider request names its own
-typed refresh or credential-home failure, commits that evidence atomically with
-the quarantine, and bypasses pool trigger policy.
+permanent: the profile quarantines and recovery requires re-provisioning or
+deletion followed by provisioning. Delivery-layer quarantine that occurs before
+a provider request names its own typed refresh or credential-home failure,
+commits that evidence atomically with the quarantine, and bypasses pool trigger
+policy.
 
 Dispatch supplies each invocation a scratch credential home carrying the
 complete authentication state the CLI needs to form a request minus the refresh
@@ -294,10 +313,10 @@ commit mints the generation; a later commit for an exclusion already active at
 the same scope and of the same origin records its correlation against that
 generation and mints no second one. Origin is part of the coalescing key because
 a policy-origin quarantine is clearable by operator command while a
-delivery-origin one requires re-provisioning, except a `codex_home` quarantine,
-which an operator clears once the store is repaired; a delivery-origin failure
-against a profile carrying an active policy-origin generation mints its own, and
-the two are cleared and reported separately.
+delivery-origin one requires re-provisioning or deletion, except a `codex_home`
+quarantine, which an operator clears once the store is repaired; a
+delivery-origin failure against a profile carrying an active policy-origin
+generation mints its own, and the two are cleared and reported separately.
 
 The session credential history event carries a complete family-to-pool-policy
 snapshot rather than a family-to-reference one. Each immutable policy includes
@@ -391,7 +410,7 @@ snapshot atomically without a reader observing two documents.
 
 - `reload_configuration` re-reads and validates the complete document as startup
   does, swaps atomically on success, and leaves the running configuration in
-  place on any failure or on a startup-only difference.
+  place on a startup-only difference.
 - A model entry admits non-overlapping dated windows per channel, a cost read
   names the window covering the call's timestamp, and every stored call prices
   as it did under the flat rate.
@@ -416,7 +435,7 @@ snapshot atomically without a reader observing two documents.
   gives it effect, and `round_robin` selects through its durable cursor.
 - An exclusion with a reported reset clears when it passes, an operator clear or
   zero-cost probe ends an indefinite policy-origin generation while a
-  delivery-origin one ends only by re-provisioning except a `codex_home`
+  delivery-origin one ends by re-provisioning or deletion except a `codex_home`
   quarantine, which an operator clears once the store is repaired, and repeated
   triggers of one origin coalesce onto one generation.
 - Session credential history carries the complete pool policy, each call pins

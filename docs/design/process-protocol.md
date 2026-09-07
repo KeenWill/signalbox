@@ -7,15 +7,68 @@ from the terminal client's existing `spawn_session` half.
 
 ## Goal
 
-Seven surfaces land under protocol version 1, each with its daemon handler and
-its terminal-client consumer in the same change: credential-exclusion
-administration, configuration reload, program-run cancellation, runner placement
-facts, `spawn_session`, cascade metadata on stop receipts, and the typed
-projection of credential-pool exhaustion and of the credential-availability
-wait. The terminal client already sends `spawn_session` and validates its
-receipt, so that surface needs only its daemon transaction.
+Future implementation of these ten surfaces under protocol version 1 must pair
+each daemon handler with its terminal-client consumer in the same change:
+provisioning an `oauth` credential profile, re-provisioning it after a rejected
+daemon-owned refresh, deleting it, credential-exclusion administration,
+configuration reload, program-run cancellation, runner placement facts,
+`spawn_session`, cascade metadata on stop receipts, and the typed projection of
+credential-pool exhaustion and of the credential-availability wait. The terminal
+client already sends `spawn_session` and validates its receipt, so that surface
+needs only its daemon transaction.
 
 ## Design
+
+OAuth administration has three requests, `provision_oauth_credential`,
+`reprovision_oauth_credential`, and `delete_oauth_credential`, each carrying
+`profile` and a user-global `command_id`. Provisioning and re-provisioning emit
+`oauth_credential_authorization { command_id, profile, user_code, verification_uri }`
+for the device-authorization exchange owned by
+[configuration and credentials](configuration-and-credentials.md). `user_code`
+is 1 through 256 printable ASCII bytes; `verification_uri` is an absolute
+`https` URI without user information or fragment, 1 through 4,096 UTF-8 bytes.
+Invalid fields fail as `device_endpoint_rejected` before progress is emitted.
+Each request ends with
+`oauth_credential_receipt { command_id, profile, outcome }`, whose outcome is
+`provisioned`, `already_provisioned`, `reprovisioned`, `deleted`,
+`already_deleted`, `not_provisioned`, `abandoned`, `superseded`, or
+`failed { reason }`, where `reason` is one of the fieldless values
+`unknown_profile`, `non_oauth_profile`, `registration_changed`,
+`device_endpoint_rejected`, `device_endpoint_failed` for transport failure of
+the initial device-authorization request, `access_denied` for operator denial,
+`polling_expired`, `token_endpoint_failed`, `token_response_without_identity`,
+or `account_independence_failed`. Provisioning or re-provisioning an undeclared
+profile returns `failed { reason: unknown_profile }`; either request naming a
+profile whose delivery is not `oauth` returns
+`failed { reason: non_oauth_profile }`. Neither starts an exchange or mutates
+credential state. Initial provisioning returns `already_provisioned` without
+starting an exchange when the profile holds authorization. Re-provisioning
+returns `not_provisioned` without starting an exchange when no authorization is
+stored. Only re-provisioning replaces authorization; it clears every OAuth
+delivery-origin quarantine, including refresh and tuple-mismatch quarantines,
+only on success. Deletion addresses retained OAuth state by profile identity
+even when its declaration is absent or its delivery is no longer `oauth`.
+Deletion acquires the profile row lock that dispatch holds through the
+token-copy step, then ends its OAuth delivery-origin quarantine and removes
+stored authorization and cached access tokens, preventing future dispatches
+while retaining any current registration and referenced history; a child already
+holding a copied token finishes its invocation. Each profile retains a
+generation that every deletion advances. Provisioning and re-provisioning commit
+authorization and advance that generation atomically only when their starting
+generation is current and, for re-provisioning, authorization is still stored;
+otherwise the transaction records `superseded` without storing authorization.
+The final transaction also revalidates, serialized with catalog replacement,
+that the profile exists with `oauth` delivery and the exchange's canonical OAuth
+tuple; otherwise it records `failed { reason: registration_changed }` without
+storing authorization. The claim retains authorization details before their
+first emission and while pending. An equal request with the same `command_id`
+reports busy while pending and replays those details when available, or returns
+its stored receipt without repeating the exchange or deletion; conflicting reuse
+is rejected. Startup terminalizes each pending provisioning or re-provisioning
+claim with an `abandoned` receipt; another provisioning attempt requires a new
+`command_id`. The credential mutation and terminal receipt commit atomically
+under the command claim protocol in
+[identity and commands](../spec/identity-and-commands.md).
 
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
@@ -28,15 +81,14 @@ or
 The read lists every active exclusion the mutation admits, as its exact target
 object, and omits exactly the records the mutation rejects; the filter turns on
 the exclusion's origin, never on the profile's delivery. A quarantine minted by
-a rejected daemon-owned OAuth refresh is rejected, because only re-provisioning
-clears it; a quarantine minted by a failed `codex_home` identity walk is
-accepted, because the walk reruns at every preparation and re-quarantines a
-still-broken home. `page_size` is 1 through 100; `after` is null or one complete
-target object and is an exclusive keyset cursor. Results sort by target tag in
-the order above, then by each field's canonical order: UTF-8 bytes for
-configured names, UUID bytes for durable identities, numeric order for
-generations. The read opens with `credential_exclusion_start`, then one
-`credential_exclusion` per row, then
+a rejected daemon-owned OAuth refresh is rejected; a quarantine minted by a
+failed `codex_home` identity walk is accepted, because the walk reruns at every
+preparation and re-quarantines a still-broken home. `page_size` is 1 through
+100; `after` is null or one complete target object and is an exclusive keyset
+cursor. Results sort by target tag in the order above, then by each field's
+canonical order: UTF-8 bytes for configured names, UUID bytes for durable
+identities, numeric order for generations. The read opens with
+`credential_exclusion_start`, then one `credential_exclusion` per row, then
 `credential_exclusion_end { exclusion_count, next_after }` with a null
 `next_after` only at the end. The mutation marks exactly the named active
 generation or predecessor correlation cleared. A newer active generation at the
@@ -52,15 +104,42 @@ durable. An equal `command_id` replay returns its stored receipt before current
 state is evaluated. Both operations are authorized as every other request is:
 reaching the owner-private socket is the authority.
 
-Configuration reload is one `reload_configuration` request with no members and
-no `command_id`, because the swap changes process memory alone and a repeat
-re-reads and re-validates. Success returns
-`configuration_reloaded { reloaded_sections }`, an array of the closed values
-`model_catalog` and `session_templates`. Failure returns
-`configuration_reload_failed { phase, reason }`, sanitized as startup logs are,
-and leaves the running configuration unchanged. Which sections reload and the
-validate-then-swap rule belong to
-[configuration-and-credentials.md](../spec/configuration-and-credentials.md).
+Configuration reload is one `reload_configuration { command_id }` request
+carrying a user-global command identity. An equal command retry reports busy
+while pending or replays its stored result without re-reading configuration.
+Reloads, including startup replay, run serially from configuration read through
+the terminal result. Core first commits the reload command with a complete
+checked snapshot of every reloadable section, the rule-set digest, and the prior
+snapshot for refusal recovery as durable intent. The replacement snapshot
+contains the model catalog, session-template catalog, and repository-watch
+configuration, including rules, convergence targets, template, interval,
+credential path, webhook listener settings, and hook map. Reload pauses sweep
+admission and stops and joins active sweep attempts and affected ingestion tasks
+before rule activation and event-tail capture. Only after that activation
+commits does core reconcile convergence targets from the retained intent. On a
+stale or conflicting rule-revision rejection, recovery first validates the prior
+snapshot against the current startup-only sections. If invalid, it terminalizes
+the intent with `configuration_reload_failed` without resuming workers, and
+startup recovery fails. Otherwise it resumes ingestion and sweep admission under
+the prior snapshot before terminalizing the intent with
+`configuration_reload_failed`, without replacing the running configuration.
+Other failures after either stops leave the intent pending until recovery
+installs the replacement snapshot and resumes them before terminalizing the
+claim. The [reload-intent input](ownership-seam.md) delivers rule activation
+only, and the module activates the rules atomically and idempotently by command
+identity and digest. The activation transaction captures each repository's
+current event tail and retains it for idempotent replay. Before replay activates
+any retained effects, startup validates the retained reloadable snapshot
+together with the on-disk startup-only sections; incompatibility fails startup
+and leaves the intent pending. Startup replays any undelivered intent from its
+retained payload even if the configuration files changed, before terminalizing
+its claim. Success returns
+`configuration_reloaded { command_id, reloaded_sections }`, whose sections are
+an array of the closed values `model_catalog`, `session_templates`, and
+`repo_watch`. Failure returns
+`configuration_reload_failed { command_id, phase, reason }`, sanitized as
+startup logs are. Which sections reload and the validate-then-swap rule belong
+to [configuration-and-credentials.md](../spec/configuration-and-credentials.md).
 
 Program-run cancellation is the request
 `cancel_program_run { run_id, command_id }` and the receipt

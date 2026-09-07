@@ -239,3 +239,7 @@ Repository-watch dispatch provenance is planned in the
 
 Restart-persistent poll caching is planned in the
 [repository watch design](../design/repo-watch.md).
+
+- Webhook listener composition and reload: [design](../design/repo-watch.md).
+- Repository polling-task composition and reload:
+  [design](../design/repo-watch.md).
