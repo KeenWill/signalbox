@@ -841,6 +841,19 @@ impl OutboxConsumerReader {
         Self { pool, consumer }
     }
 
+    /// Reads the durable terminal time independently of the consumer cursor.
+    pub async fn session_terminal_at(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<OffsetDateTime>, OutboxDispatchError> {
+        Ok(sqlx::query_scalar(
+            "SELECT ended_at FROM session_terminal_outbox_event WHERE session_id = $1",
+        )
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     /// Reads the next typed event without advancing the durable prefix.
     pub async fn read_next(&self) -> Result<Option<DispatchedOutboxEvent>, OutboxDispatchError> {
         let mut transaction = self.pool.begin().await?;

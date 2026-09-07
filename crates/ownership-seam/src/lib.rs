@@ -278,6 +278,14 @@ impl LifecycleEventSource {
         }
     }
 
+    /// Reads a session's durable terminal time, including unread events.
+    pub async fn session_terminal_at(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<OffsetDateTime>, OutboxDispatchError> {
+        self.reader.session_terminal_at(session).await
+    }
+
     /// Reads the next module-visible event without advancing its cursor.
     ///
     /// Core-only event families are acknowledged internally and skipped. A
