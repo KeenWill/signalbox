@@ -676,24 +676,18 @@ service_tiers = ["auto", "standard_only"]
 # could not be established from a provider source says so in place and carries
 # the conservative value instead.
 
-# OpenAI Chat Completions catalog, read from the provider's model, pricing, and
-# deprecation pages under developers.openai.com/api/docs on 2026-08-06. Every
-# row is a Chat Completions model: the `-pro` variants serve only the Responses
-# API and are omitted, as are the retiring o-series, GPT-4o, and `-chat-latest`
-# spellings. Context windows and the recorded hard caps are the provider's;
-# `max_output_tokens` remains this deployment's budget, as the header states.
+# OpenAI Responses catalog. The capability values below were read from the
+# provider's model, pricing, and deprecation pages under
+# developers.openai.com/api/docs on 2026-08-06; they are deployment selections,
+# not an inventory of every model supported by the adapter. Responses-only
+# models may also be configured with their provider-stated capabilities.
+# Context windows and hard caps are the provider's; max_output_tokens remains
+# this deployment's budget and must be at least 16.
 #
-# Two provider behaviors bind these rows. Chat Completions rejects a request
-# that carries function tools together with a reasoning effort other than
-# "none" on GPT-5.4 and later, so a selection the daemon composes tools into
-# leaves its reasoning level unset; the levels a row declares are the model's
-# capability, not a claim that a tool-bearing call may use them. That
-# restriction was observed in provider error text reported by several client
-# projects and appears on no model page. And the "priority" tier was renamed
-# "fast" on 2026-07-30 with both spellings still accepted, so these rows
-# declare "fast". The "minimal" effort the request enum still admits is listed
-# by no current model page and appears on no row. Tier support is enumerated
-# only on the pricing page, not per model page.
+# Requests use store = false. Non-empty stop sequences are unsupported.
+# Function tools and reasoning effort may be combined; the selected model's
+# declared capability levels still apply. Tier support below follows the
+# pricing page, not per-model pages.
 
 # [[models]]
 # # The family alias, which resolves to the snapshot the Codex CLI catalog
