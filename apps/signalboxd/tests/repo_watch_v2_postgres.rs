@@ -4025,6 +4025,7 @@ struct ConditionalRequest {
 struct ConditionalPollFixture {
     pages: std::collections::BTreeMap<String, (serde_json::Value, bool)>,
     requests: std::sync::Mutex<Vec<ConditionalRequest>>,
+    changed: bool,
 }
 
 impl ConditionalPollFixture {
@@ -4052,6 +4053,7 @@ impl ConditionalPollFixture {
         Self {
             pages,
             requests: std::sync::Mutex::new(Vec::new()),
+            changed: false,
         }
     }
 }
@@ -4083,7 +4085,7 @@ impl signalbox_module_repo_watch_v2::poll_cache::ConditionalObservationRead
             .pages
             .get(path)
             .ok_or(ObservationError::InvalidResponse)?;
-        if validators.is_some() {
+        if validators.is_some() && !self.changed {
             return Ok(ConditionalPage::Unchanged);
         }
         Ok(ConditionalPage::Modified {
@@ -4305,6 +4307,164 @@ async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the
     restarted_pool.close().await;
     core_pool.close().await;
     container.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn completed_polls_prune_terminal_and_expired_subject_pages() -> Result<(), Box<dyn Error>> {
+    use serde_json::json;
+    use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    let reviewers = [RepoWatchAuthorLogin::try_new(String::from("reviewer"))?];
+    store.prepare_poll_cache(&repository, &reviewers).await?;
+    let root = "/repos/example/project";
+    let pull_path = format!("{root}/pulls/1");
+    let head = "1111111111111111111111111111111111111111";
+    let workflow_path =
+        format!("{root}/actions/runs?head_sha={head}&status=completed&per_page=100&page=1");
+    for merged in [false, true] {
+        let mut open = ConditionalPollFixture::new();
+        open.changed = true;
+        poll_with_cache(
+            &open,
+            &store,
+            &repository,
+            &reviewers,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+        let initial_keys: Vec<String> =
+            sqlx::query_scalar("SELECT resource_key FROM poll_cache_page ORDER BY resource_key")
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(initial_keys.len(), open.pages.len());
+        let stale_pull: String = sqlx::query_scalar(
+            "SELECT snapshot::text FROM poll_cache_page WHERE resource_key = $1",
+        )
+        .bind(&pull_path)
+        .fetch_one(&pool)
+        .await?;
+        let mut incomplete = ConditionalPollFixture::new();
+        incomplete.pages.remove(&workflow_path);
+        assert!(
+            poll_with_cache(
+                &incomplete,
+                &store,
+                &repository,
+                &reviewers,
+                EventProducer::Poll,
+                MERGED_RETENTION
+            )
+            .await
+            .is_err()
+        );
+        let after_failure: Vec<String> =
+            sqlx::query_scalar("SELECT resource_key FROM poll_cache_page ORDER BY resource_key")
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(
+            after_failure, initial_keys,
+            "a failed poll cannot prune accepted pages"
+        );
+
+        let mut terminal = ConditionalPollFixture::new();
+        terminal.changed = true;
+        terminal
+            .pages
+            .get_mut(&format!("{root}/pulls?state=open&per_page=100&page=2"))
+            .expect("open page")
+            .0 = json!([]);
+        let detail = &mut terminal.pages.get_mut(&pull_path).expect("pull detail").0;
+        detail["state"] = json!("closed");
+        if merged {
+            let now = OffsetDateTime::now_utc();
+            detail["merged_at"] = json!(format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                now.year(),
+                u8::from(now.month()),
+                now.day(),
+                now.hour(),
+                now.minute(),
+                now.second()
+            ));
+        }
+        poll_with_cache(
+            &terminal,
+            &store,
+            &repository,
+            &reviewers,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+        let expected = std::collections::BTreeSet::from([
+            root.to_owned(),
+            format!("{root}/branches?per_page=100&page=1"),
+            format!("{root}/pulls?state=open&per_page=100&page=1"),
+            format!("{root}/pulls?state=open&per_page=100&page=2"),
+            workflow_path.clone(),
+        ]);
+        let keys: Vec<String> = sqlx::query_scalar("SELECT resource_key FROM poll_cache_page")
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(
+            keys.into_iter().collect::<std::collections::BTreeSet<_>>(),
+            expected,
+            "terminal PR details, checks, reviews, comments and reactions leave the cache while the shared default-head workflow stays"
+        );
+        if merged {
+            assert_eq!(
+                store
+                    .ingest_baseline(&repository)
+                    .await?
+                    .merged_baselines
+                    .len(),
+                1
+            );
+            sqlx::query("INSERT INTO poll_cache_page(repository,resource_key,etag,has_next,snapshot) VALUES ($1,$2,'stale',false,$3::jsonb)")
+                .bind(repository.as_str()).bind(&pull_path).bind(stale_pull).execute(&pool).await?;
+            let expired = OffsetDateTime::now_utc() - MERGED_RETENTION - Duration::from_secs(1);
+            sqlx::query("UPDATE repository_state SET comparison_baseline=jsonb_set(comparison_baseline,'{merged_pull_requests,0,merged_at}',to_jsonb($2::bigint)) WHERE repository=$1")
+                .bind(repository.as_str()).bind(expired.unix_timestamp()).execute(&pool).await?;
+            terminal.changed = false;
+            poll_with_cache(
+                &terminal,
+                &store,
+                &repository,
+                &reviewers,
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+            assert!(
+                store
+                    .ingest_baseline(&repository)
+                    .await?
+                    .merged_baselines
+                    .is_empty()
+            );
+            let keys: Vec<String> = sqlx::query_scalar("SELECT resource_key FROM poll_cache_page")
+                .fetch_all(&pool)
+                .await?;
+            assert_eq!(
+                keys.into_iter().collect::<std::collections::BTreeSet<_>>(),
+                expected,
+                "expiry prunes stale compact-subject pages while preserving unchanged live pages"
+            );
+        }
+    }
+    pool.close().await;
+    core_pool.close().await;
+    drop(container);
     Ok(())
 }
 

@@ -797,6 +797,7 @@ impl RepoWatchStore {
         repository: &RepositorySlug,
         reviewers: &[RepoWatchAuthorLogin],
         pages: Vec<(Resource, Option<AcceptedPage>)>,
+        retained: BTreeSet<String>,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
         let same: Option<bool> = sqlx::query_scalar(
@@ -810,6 +811,9 @@ impl RepoWatchStore {
             return Err(StoreError::InvalidPollCache);
         }
         for (resource, page) in pages {
+            if !retained.contains(&resource.path(repository)) {
+                continue;
+            }
             if let Some(page) = page {
                 sqlx::query("INSERT INTO poll_cache_page (repository,resource_key,etag,last_modified,has_next,snapshot) VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT(repository,resource_key) DO UPDATE SET etag=EXCLUDED.etag,last_modified=EXCLUDED.last_modified,has_next=EXCLUDED.has_next,snapshot=EXCLUDED.snapshot")
                     .bind(repository.as_str()).bind(resource.path(repository)).bind(page.validators.etag).bind(page.validators.last_modified).bind(page.has_next).bind(page.snapshot.encode().to_string()).execute(&mut *tx).await?;
@@ -821,6 +825,13 @@ impl RepoWatchStore {
                     .await?;
             }
         }
+        sqlx::query(
+            "DELETE FROM poll_cache_page WHERE repository=$1 AND NOT (resource_key = ANY($2))",
+        )
+        .bind(repository.as_str())
+        .bind(retained.into_iter().collect::<Vec<_>>())
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -832,6 +843,7 @@ pub(crate) struct CachedObservationRead<'a, T> {
     pub repository: &'a RepositorySlug,
     pub reviewers: &'a [RepoWatchAuthorLogin],
     pending: Mutex<Vec<(Resource, Option<AcceptedPage>)>>,
+    retained: Mutex<BTreeSet<String>>,
 }
 
 impl<'a, T> CachedObservationRead<'a, T> {
@@ -847,6 +859,7 @@ impl<'a, T> CachedObservationRead<'a, T> {
             repository,
             reviewers,
             pending: Mutex::new(Vec::new()),
+            retained: Mutex::new(BTreeSet::new()),
         }
     }
     pub(crate) async fn retain(&self) -> Result<(), StoreError> {
@@ -855,6 +868,7 @@ impl<'a, T> CachedObservationRead<'a, T> {
                 self.repository,
                 self.reviewers,
                 std::mem::take(&mut *self.pending.lock().await),
+                std::mem::take(&mut *self.retained.lock().await),
             )
             .await
     }
@@ -864,19 +878,20 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for CachedObservationR
     async fn page(&self, path: &str) -> Result<(Value, bool), ObservationError> {
         let resource =
             Resource::parse(self.repository, path).ok_or(ObservationError::InvalidResponse)?;
+        let pull = matches!(resource, Resource::Pull(_));
         let cached = self
             .store
             .cached_page(self.repository, self.reviewers, &resource)
             .await
             .map_err(ObservationError::Cache)?;
-        match self
+        let (value, has_next) = match self
             .io
             .conditional_page(path, cached.as_ref().map(|p| &p.validators))
             .await?
         {
             ConditionalPage::Unchanged => {
                 let page = cached.ok_or(ObservationError::InvalidResponse)?;
-                Ok((page.snapshot.provider_value(self.repository), page.has_next))
+                (page.snapshot.provider_value(self.repository), page.has_next)
             }
             ConditionalPage::Modified {
                 body,
@@ -897,9 +912,13 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for CachedObservationR
                     None
                 };
                 self.pending.lock().await.push((resource, page));
-                Ok((value, has_next))
+                (value, has_next)
             }
+        };
+        if !pull || value["state"].as_str() == Some("open") {
+            self.retained.lock().await.insert(path.to_owned());
         }
+        Ok((value, has_next))
     }
     async fn threads(&self, request: Value) -> Result<Value, ObservationError> {
         self.io.threads(request).await
