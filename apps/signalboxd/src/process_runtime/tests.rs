@@ -306,6 +306,23 @@ mod tests {
         })
     }
 
+    #[test]
+    fn oauth_completion_storage_failure_requests_recovery_and_preserves_the_error() {
+        use signalbox_persistence::oauth_credential::{OauthCredentialOutcome, OauthCredentialRepositoryError};
+        for error in [OauthCredentialRepositoryError::Database, OauthCredentialRepositoryError::CommitAmbiguous] {
+            let (supervisor, signal) = FatalExecutionSupervisor::new(());
+            let reporter = supervisor.recovery_reporter();
+            let expected = std::mem::discriminant(&error);
+            let error = super::request::recover_failed_oauth_exchange::<OauthCredentialOutcome>(Err(error), Some(&reporter)).expect_err("storage failure is returned");
+            assert_eq!(std::mem::discriminant(&error), expected);
+            assert!(signal.is_triggered());
+        }
+        let (supervisor, signal) = FatalExecutionSupervisor::new(());
+        let reporter = supervisor.recovery_reporter();
+        assert!(matches!(super::request::recover_failed_oauth_exchange(Ok(OauthCredentialOutcome::Provisioned), Some(&reporter)), Ok(OauthCredentialOutcome::Provisioned)));
+        assert!(!signal.is_triggered());
+    }
+
     #[tokio::test]
     async fn oauth_progress_write_failure_requests_recovery_for_the_pending_claim() -> Result<(), Box<dyn Error>> {
         let (supervisor, signal) = FatalExecutionSupervisor::new(());

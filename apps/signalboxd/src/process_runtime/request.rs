@@ -69,10 +69,12 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
                             {
                                 Err(OauthCredentialFailure::DeviceEndpointRejected)
                             } else {
-                                match repository
-                                    .retain_progress(&exchange, &device.progress)
-                                    .await
-                                {
+                                match recover_failed_oauth_exchange(
+                                    repository
+                                        .retain_progress(&exchange, &device.progress)
+                                        .await,
+                                    services.recovery_reporter.as_ref(),
+                                ) {
                                     Err(error) => {
                                         return write_error(
                                             writer,
@@ -98,10 +100,16 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
                         }
                     },
                 };
-                repository
-                    .complete_exchange(&exchange, authorization.as_ref().map_err(|reason| *reason))
-                    .await
-                    .map(OauthCredentialHandlingOutcome::Recorded)
+                recover_failed_oauth_exchange(
+                    repository
+                        .complete_exchange(
+                            &exchange,
+                            authorization.as_ref().map_err(|reason| *reason),
+                        )
+                        .await,
+                    services.recovery_reporter.as_ref(),
+                )
+                .map(OauthCredentialHandlingOutcome::Recorded)
             }
             Ok(signalbox_persistence::oauth_credential::OauthStartOutcome::Existing(outcome)) => {
                 if outcome == OauthCredentialHandlingOutcome::Pending {
@@ -160,6 +168,18 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
         Err(error) => oauth_repository_error(error),
     };
     write_error(writer, version, request_id, error).await
+}
+
+pub(super) fn recover_failed_oauth_exchange<T>(
+    result: Result<T, signalbox_persistence::oauth_credential::OauthCredentialRepositoryError>,
+    recovery_reporter: Option<&FatalRecoveryReporter>,
+) -> Result<T, signalbox_persistence::oauth_credential::OauthCredentialRepositoryError> {
+    if result.is_err()
+        && let Some(reporter) = recovery_reporter
+    {
+        reporter.report_recovery_required();
+    }
+    result
 }
 
 fn oauth_repository_error(
