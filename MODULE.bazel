@@ -9,6 +9,7 @@ single_version_override(
     patches = [
         "//tooling/bazel:patches/rustfmt-crate-roots.patch",
         "//tooling/bazel:patches/build-script-lints.patch",
+        "//tooling/bazel:patches/coverage-subprocesses.patch",
     ],
 )
 

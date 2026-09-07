@@ -91,7 +91,7 @@ shard its own matrix worker; each worker runs one partition per binary at a time
 with 16 test threads. The Rust workflow calls `bazel.yml` and binds its ordinary
 and PostgreSQL results to `validate` under the Rust change-scope gate.
 
-The checker job runs its eight Python suites with
+The checker job runs its Python suites with
 `bazel test //:python_checker_tests`. Bazel supplies Python 3.14, packages from
 `tooling/requirements-mdformat.txt`, and the shared Rustfmt toolchain. The Git
 fixture suite and two shell-script suites carry `external` because they execute
@@ -151,3 +151,10 @@ non-PostgreSQL suite does not execute their ignored tests.
 and their modules, matching Cargo formatting. `//:rust_documentation` builds
 Cargo's documentation entrypoints with warnings denied. These actions use the
 declared Rust toolchain and remote cache.
+
+`coverage.yml` runs `bazel coverage` for the workspace and the persistence,
+daemon, and terminal-client PostgreSQL selections. It retains their named
+exclusions and reports each suite's outcome without gating merges. LCOV merges
+hits across binaries and declared subprocess fixtures; the report excludes
+dedicated test and benchmark files and marks region coverage unavailable.
+Instrumented binaries keep a relative path to the declared runtime libraries.

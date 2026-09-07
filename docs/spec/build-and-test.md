@@ -20,8 +20,8 @@ retain their provisioned Cargo job.
 
 ## Design decisions
 
-The checker job runs its eight Python suites through Bazel with declared Python
-and Rustfmt toolchains. Suites using host Git or shell utilities always execute.
+The checker job runs its Python suites through Bazel with declared Python and
+Rustfmt toolchains. Suites using host Git or shell utilities always execute.
 Markdown formatting uses a Bazel test with declared files, formatter packages,
 and configuration. Web-contract and model-projection generation run as native
 Bazel actions with declared output trees and snapshot-comparison tests. The
@@ -45,3 +45,6 @@ mapping outside the Bazel sandbox.
 ## Planned
 
 None.
+
+Coverage runs through Bazel for the workspace and the persistence, daemon, and
+terminal-client PostgreSQL selections. It is report-only, with no threshold.
