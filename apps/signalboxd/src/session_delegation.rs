@@ -45,11 +45,11 @@ impl DaemonSessionDelegationPort {
 }
 
 impl PostgresSessionDelegationPort {
-    pub(crate) fn nudge_spawned_child(&self, child: SessionId) {
-        if self.eligibility_nudge.nudge(child) == EligibilityNudgeOutcome::DroppedAtCapacity {
+    pub(crate) fn retain_eligibility_hint(&self, session: SessionId) {
+        if self.eligibility_nudge.nudge(session) == EligibilityNudgeOutcome::DroppedAtCapacity {
             let nudge = self.eligibility_nudge.clone();
             // Capacity waiting must not occupy the spawning scheduler pass.
-            tokio::spawn(async move { nudge.nudge_waiting_for_capacity(child).await });
+            tokio::spawn(async move { nudge.nudge_waiting_for_capacity(session).await });
         }
     }
 
@@ -317,7 +317,7 @@ impl SessionDelegationPort for PostgresSessionDelegationPort {
             RecordDelegationSpawnOutcome::Recorded(relation) => {
                 let receipt = SpawnSessionReceipt::from_relation(&request, &relation)
                     .ok_or(PostgresSessionDelegationPortError::Contract)?;
-                self.nudge_spawned_child(receipt.child());
+                self.retain_eligibility_hint(receipt.child());
                 Ok(SessionDelegationPortOutcome::Applied(receipt))
             }
             RecordDelegationSpawnOutcome::Rejected(_) => Ok(SessionDelegationPortOutcome::Rejected),
