@@ -1,10 +1,13 @@
 //! Durable OAuth administration claims and receipts (docs/spec/identity-and-commands.md).
 
 mod provisioning;
+mod refresh;
 pub(crate) use provisioning::lock_pool_members;
 pub use provisioning::{
     OauthAuthorization, OauthExchange, OauthProgress, OauthRegistration, OauthStartOutcome,
 };
+pub(crate) use refresh::quarantined_profiles;
+pub use refresh::{OauthDispatchLease, OauthQuarantineCause, OauthStoredAuthorization};
 
 use crate::command_registry::{self, CommandKind};
 use signalbox_domain::DurableCommandId;

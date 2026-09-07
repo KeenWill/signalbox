@@ -1597,7 +1597,7 @@ async fn run_hub(
         })?
         .with_convergence_policy(model_configuration.convergence().cloned());
     let runtime_models = model_configuration.runtime_model_catalog();
-    let compaction_runtime = ConfiguredModelRuntime::new(
+    let mut compaction_runtime = ConfiguredModelRuntime::new(
         compaction_anthropic,
         compaction_openai,
         &model_configuration,
@@ -1611,7 +1611,7 @@ async fn run_hub(
             SanitizedStartupCause::Static(error.cause_code()),
         )
     })?;
-    let runtime = ConfiguredModelRuntime::new(
+    let mut runtime = ConfiguredModelRuntime::new(
         anthropic,
         openai,
         &model_configuration,
@@ -1625,17 +1625,6 @@ async fn run_hub(
             SanitizedStartupCause::Static(error.cause_code()),
         )
     })?;
-    let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
-        RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
-    );
-    let approval_judge_model: Arc<dyn ApprovalJudgeModel> = Arc::new(
-        RuntimeApprovalJudgeModel::new(runtime.clone(), runtime_models.clone()),
-    );
-    let provider = RuntimeModelCallProvider::new(
-        runtime,
-        runtime_models.clone(),
-        diagnostic_model_identity_limit,
-    );
     let model_targets = model_configuration.target_catalog();
     let mut database = FencedHubDatabase::connect_production(
         configuration.database_url(),
@@ -1654,6 +1643,59 @@ async fn run_hub(
         erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
     })?;
     let pool = database.pool().clone();
+    let oauth_registrations = model_configuration.oauth_registrations();
+    let root_path = configuration.process_socket_path().with_extension("oauth");
+    let retained_root = match root_path.symlink_metadata() {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => {
+            return Err(erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("oauth_credential_home_recovery_failed"),
+            ));
+        }
+    };
+    if !oauth_registrations.is_empty() || retained_root {
+        let root = signalbox_model_runtime_codex_cli::OauthCredentialRoot::open(&root_path)
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("oauth_credential_home_recovery_failed"),
+                )
+            })?;
+        signalbox_persistence::oauth_credential::OauthCredentialRepository::new(pool.clone())
+            .replace_registrations(&oauth_registrations)
+            .await
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("oauth_registration_recovery_failed"),
+                )
+            })?;
+        let service = Arc::new(
+            signalboxd::OauthCredentialService::new(pool.clone(), oauth_registrations).map_err(
+                |_| {
+                    erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static("oauth_delivery_construction_failed"),
+                    )
+                },
+            )?,
+        );
+        compaction_runtime = compaction_runtime.with_oauth_delivery(service.clone(), root.clone());
+        runtime = runtime.with_oauth_delivery(service.clone(), root);
+    }
+    let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
+        RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
+    );
+    let approval_judge_model: Arc<dyn ApprovalJudgeModel> = Arc::new(
+        RuntimeApprovalJudgeModel::new(runtime.clone(), runtime_models.clone()),
+    );
+    let provider = RuntimeModelCallProvider::new(
+        runtime,
+        runtime_models.clone(),
+        diagnostic_model_identity_limit,
+    );
     let fenced_pool_floor_pool = pool.clone();
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()

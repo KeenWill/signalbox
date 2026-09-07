@@ -25,7 +25,7 @@
 | lifecycle_metrics | 8 | 0 | 0 | [lifecycle_metrics](lifecycle_metrics.md) |
 | mapping | 6 | 0 | 29 | [mapping](mapping.md) |
 | model_execution | 15 | 0 | 0 | [model_execution](model_execution.md) |
-| oauth_credential | 12 | 0 | 0 | [oauth_credential](oauth_credential.md) |
+| oauth_credential | 15 | 0 | 0 | [oauth_credential](oauth_credential.md) |
 | operator_status | 6 | 0 | 0 | [operator_status](operator_status.md) |
 | outbox | 31 | 0 | 7 | [types](outbox/types.md), [types-2](outbox/types-2.md), [functions](outbox/functions.md) |
 | plan | 3 | 0 | 0 | [plan](plan.md) |

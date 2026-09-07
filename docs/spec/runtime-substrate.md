@@ -230,6 +230,12 @@ it truncates the text; a delivery that gives the daemon no value receives
 credential-shape redaction instead. A credential for one repository never
 authorizes a request to another.
 
+OAuth access and identity tokens seed exact-value redaction before scratch-home
+writes. Raw and JSON-escaped token forms are scrubbed across child-output chunks
+before adapter decoding, truncation, observations, or terminal evidence;
+credential-shape redaction also applies. Failure to install this delivery fails
+preparation before spawn.
+
 `crates/domain`, `crates/application` and `crates/persistence` declare no
 dependency on any runtime crate, and no runtime type appears in a domain or
 application signature.
@@ -565,6 +571,4 @@ turn-liveness causes.
   ([design](../design/runtime-substrate.md)).
 - Codex CLI file credential delivery: the configuration grammar admits it and
   composition rejects it as undelivered
-  ([design](../design/runtime-substrate.md)).
-- Codex CLI OAuth delivery and the exact-value redaction it seeds before spawn
   ([design](../design/runtime-substrate.md)).

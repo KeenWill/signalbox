@@ -3,6 +3,93 @@
 use super::*;
 use signalbox_persistence::oauth_credential::*;
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn oauth_dispatch_serializes_token_copy_and_records_refresh_quarantine()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let repository = OauthCredentialRepository::new(pool.clone());
+    let command = command(OauthCredentialOperation::Provision);
+    let registration = registration();
+    repository
+        .replace_registrations(&[(command.profile.clone(), registration.clone())])
+        .await?;
+    let OauthStartOutcome::Started(exchange) = repository
+        .begin_exchange(&command, Ok(&registration))
+        .await?
+    else {
+        panic!("initial exchange");
+    };
+    repository
+        .complete_exchange(&exchange, Ok(&authorization()))
+        .await?;
+    let lease = repository
+        .lock_dispatch(&command.profile)
+        .await?
+        .expect("profile");
+    let competing = repository.lock_dispatch(&command.profile);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), competing)
+            .await
+            .is_err(),
+        "token copying retains the profile lock"
+    );
+    lease.mark_refresh().await?;
+    let lease = repository
+        .lock_dispatch(&command.profile)
+        .await?
+        .expect("profile");
+    assert!(
+        lease
+            .authorization()
+            .expect("authorization")
+            .refresh_in_progress
+    );
+    lease.clear_refresh().await?;
+    let lease = repository
+        .lock_dispatch(&command.profile)
+        .await?
+        .expect("profile");
+    assert!(
+        !lease
+            .authorization()
+            .expect("authorization")
+            .refresh_in_progress
+    );
+    lease.mark_refresh().await?;
+    let lease = repository
+        .lock_dispatch(&command.profile)
+        .await?
+        .expect("profile");
+    let mut replacement = authorization();
+    replacement.refresh_token = "replacement-refresh".into();
+    replacement.identity_token = "replacement-identity".into();
+    lease.replace_refresh(&replacement).await?;
+    let lease = repository
+        .lock_dispatch(&command.profile)
+        .await?
+        .expect("profile");
+    let current = lease.authorization().expect("authorization");
+    assert!(!current.refresh_in_progress);
+    assert_eq!(
+        current.authorization.identity_token,
+        replacement.identity_token
+    );
+    assert_eq!(
+        current.authorization.refresh_token,
+        replacement.refresh_token
+    );
+    lease
+        .quarantine(OauthQuarantineCause::RefreshAmbiguous)
+        .await?;
+    let (quarantined, cause, evidence): (bool, String, String) = sqlx::query_as("SELECT a.quarantined, a.quarantine_cause, f.cause FROM oauth_credential_authorization a JOIN oauth_credential_failure f USING (profile, generation) WHERE profile = $1")
+        .bind(&command.profile).fetch_one(&pool).await?;
+    assert!(quarantined);
+    assert_eq!(cause, "refresh_ambiguous");
+    assert_eq!(cause, evidence);
+    Ok(())
+}
+
 fn command(operation: OauthCredentialOperation) -> OauthCredentialCommand {
     OauthCredentialCommand {
         command_id: DurableCommandId::from_uuid(Uuid::now_v7()),

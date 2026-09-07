@@ -595,6 +595,12 @@ Pool-policy insertion locks every member in the same order. Authorization
 commits take a shared catalog lock; registration replacement takes its exclusive
 counterpart.
 
+OAuth refresh marks the current authorization generation under the profile row
+lock before exchange; replacement of returned tokens and marker clearing commit
+atomically, and recovery rereads the generation and marker. Delivery quarantine
+and its typed failure evidence commit together. Dispatch retains the row lock
+through copying tokens to the child's scratch home.
+
 ## Planned
 
 - Runner replacement and abandonment transactions:
@@ -612,5 +618,5 @@ counterpart.
   [persistence-protocol design](../design/persistence-protocol.md).
 - A producer for the session-state-changed outbox event:
   [persistence-protocol design](../design/persistence-protocol.md).
-- OAuth refresh replacement and recovery storage:
+- OAuth refresh member-availability wakeups:
   [persistence-protocol design](../design/persistence-protocol.md).

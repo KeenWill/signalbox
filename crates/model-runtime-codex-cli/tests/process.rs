@@ -30,6 +30,104 @@ mod fixtures;
 const CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 const RESOLVED_TARGET: &str = "gpt-offline-exact";
 const OFFLINE_HARNESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct OauthFixture;
+
+impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for OauthFixture {
+    fn deliver<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        installer: &'a mut dyn signalbox_model_runtime_codex_cli::OauthCredentialInstaller,
+        _: CancellationSignal,
+    ) -> signalbox_model_runtime_codex_cli::OauthDeliveryFuture<'a> {
+        Box::pin(async move {
+            installer.install(signalbox_model_runtime_codex_cli::OauthCredentialMaterial {
+                access_token: signalbox_model_runtime::CredentialValue::new(
+                    b"opaque-access-that-crosses-the-small-stderr-evidence-window".to_vec(),
+                ),
+                identity_token: signalbox_model_runtime::CredentialValue::new(
+                    b"opaque-identity".to_vec(),
+                ),
+                account_id: Some("fixture-account".into()),
+            })
+        })
+    }
+    fn invalidate<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn oauth_dispatch_isolates_file_auth_scrubs_tokens_before_truncation_and_removes_home() {
+    let temporary = tempfile::tempdir().expect("working directory");
+    let root_path = temporary.path().join("oauth");
+    let root = signalbox_model_runtime_codex_cli::OauthCredentialRoot::open(&root_path)
+        .expect("private root");
+    let executable = script_cli(
+        temporary.path(),
+        "oauth-fixture",
+        r#"#!/bin/sh
+test "$HOME" = "$CODEX_HOME" || exit 90
+test -z "$OPENAI_API_KEY$CODEX_API_KEY$CODEX_ACCESS_TOKEN" || exit 91
+printf '%s\n' "$@" > oauth-argv
+umask > oauth-umask
+printf '%s' 'opaque-access-that-crosses-the-small-stderr-evidence-window opaque-identity' >&2
+exit 1
+"#,
+    );
+    let mut config = CodexCliConfig::new(
+        executable,
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
+    );
+    config
+        .oauth_profiles
+        .insert(CredentialReference::new(CREDENTIAL_REFERENCE));
+    config.stderr_limit = 20;
+    let runtime = CodexCliRuntime::new(config)
+        .expect("runtime")
+        .with_oauth_delivery(std::sync::Arc::new(OauthFixture), root);
+    let prepared = prepare(
+        &runtime,
+        operation("oauth", DeliveryMode::Buffered, OperationShape::Text),
+    )
+    .await;
+    let entry = std::fs::read_dir(&root_path)
+        .expect("root entries")
+        .next()
+        .expect("prepared home")
+        .expect("entry")
+        .path();
+    let auth: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(entry.join("auth.json")).expect("auth file"))
+            .expect("auth JSON");
+    assert_eq!(auth["tokens"]["refresh_token"], "");
+    let report = runtime
+        .execute(prepared, &mut Vec::new(), CancellationSignal::never())
+        .await;
+    let evidence = format!("{:?}", report.evidence);
+    assert!(!evidence.contains("opaque-access"), "{evidence}");
+    assert!(!evidence.contains("opaque-identity"), "{evidence}");
+    assert!(evidence.contains("[redacted]"), "{evidence}");
+    assert!(!entry.exists());
+    assert!(
+        std::fs::read_to_string(temporary.path().join("oauth-argv"))
+            .expect("argv")
+            .contains("cli_auth_credentials_store=\"file\"")
+    );
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("oauth-umask"))
+            .expect("umask")
+            .trim(),
+        "0077"
+    );
+}
 /// Provider text carried by the terminal half of the boundary extractor fixture.
 const BOUNDARY_FIXTURE_TERMINAL_TEXT: &str = "synthetic-terminal-boundary-text";
 /// Provider text carried by the observation half of the boundary extractor fixture.

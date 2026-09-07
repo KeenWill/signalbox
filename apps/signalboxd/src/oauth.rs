@@ -8,6 +8,10 @@ use signalbox_persistence::oauth_credential::{
 use std::time::Duration;
 use tokio::time::Instant;
 
+mod refresh;
+mod service;
+pub use service::OauthCredentialService;
+
 pub(crate) struct DeviceAuthorization {
     pub progress: OauthProgress,
     device_code: String,

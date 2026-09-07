@@ -54,10 +54,8 @@ const PROFILE_COMMON_FIELDS: [&str; 4] = ["name", "adapter", "billing_kind", "de
 
 /// How one credential profile's secret reaches its provider.
 ///
-/// The variants below are the deliveries this build supplies. The grammar also
-/// recognizes `oauth`; parsing rejects it as undelivered so a deployment learns
-/// at startup that no surface honors it, rather than from
-/// a call that silently authenticated as some other account.
+/// The variants below are the deliveries this build supplies; OAuth uses
+/// daemon-owned authorization for Codex dispatch.
 #[derive(Clone, Eq, PartialEq)]
 pub enum CredentialDelivery {
     /// The adapter's own client resolves its login and the daemon supplies no
@@ -248,8 +246,7 @@ impl CredentialDelivery {
                     "scopes",
                 ]);
                 reject_unknown_fields(profile, &allowed)?;
-                parse_oauth_delivery(profile)?;
-                Err(undelivered(key))
+                parse_oauth_delivery(profile).map(Self::Oauth)
             }
             _ => Err(HubModelConfigurationError::InvalidCredentialDelivery),
         }

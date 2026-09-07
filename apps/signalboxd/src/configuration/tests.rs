@@ -3740,9 +3740,7 @@ scopes = ["model:invoke"]"#,
 }
 
 #[test]
-fn configuration_admits_a_subscription_oauth_profile_before_refusing_it() {
-    // The legal `oauth` pairing passes the agreement rule and reaches the
-    // undelivered refusal, which is what proves the rule admitted it.
+fn configuration_admits_a_subscription_oauth_profile() {
     let oauth = CONFIGURATION.replace(
         "delivery = \"ambient\"",
         r#"delivery = "oauth"
@@ -3752,12 +3750,8 @@ device_authorization_url = "https://example.test/device"
 scopes = ["model:invoke"]"#,
     );
 
-    assert_eq!(
-        HubModelConfiguration::parse(&oauth).err(),
-        Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
-            delivery: Arc::from("oauth"),
-        })
-    );
+    let configuration = HubModelConfiguration::parse(&oauth).expect("valid OAuth profile");
+    assert_eq!(configuration.oauth_registrations().len(), 1);
 }
 
 #[test]
@@ -3816,7 +3810,7 @@ scopes = ["model:invoke"]"#,
 }
 
 #[test]
-fn configuration_parses_valid_oauth_before_refusing_it() {
+fn configuration_parses_valid_oauth() {
     let oauth = CONFIGURATION.replace(
         "delivery = \"ambient\"",
         r#"delivery = "oauth"
@@ -3826,12 +3820,8 @@ device_authorization_url = "https://example.test/device"
 scopes = ["model:invoke"]"#,
     );
 
-    assert_eq!(
-        HubModelConfiguration::parse(&oauth).err(),
-        Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
-            delivery: Arc::from("oauth"),
-        })
-    );
+    let configuration = HubModelConfiguration::parse(&oauth).expect("valid OAuth profile");
+    assert_eq!(configuration.oauth_registrations().len(), 1);
 }
 
 #[test]

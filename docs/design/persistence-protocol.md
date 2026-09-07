@@ -81,17 +81,10 @@ A session-state-changed event is appended, through the outbox append, in the
 transaction that commits a nonterminal session state change; the transition to
 terminal has its own event. Its typed record and decoder exist.
 
-OAuth material storage supplies three shapes: a per-generation
-refresh-in-progress marker that exactly one transaction can win; an atomic
-replace-and-clear that installs the new material and clears the marker in one
-commit; and a reread that reports whether a replacement committed and whether
-the marker is set. The replace shape expresses an exchange that returns a new
-identity token and one that returns none, without a second commit and without
-mixing tokens from different exchanges. The replace-and-clear commit publishes
-the durable member-availability update that wakes a parked deadline-free
-exhausted wait, as every accepted exclusion clear does in its own transaction,
-and a clear that removes no exclusion publishes nothing. Delivery of OAuth
-material to a model call is owned by
+The replace-and-clear commit publishes the durable member-availability update
+that wakes a parked deadline-free exhausted wait, as every accepted exclusion
+clear does in its own transaction, and a clear that removes no exclusion
+publishes nothing. Delivery of OAuth material to a model call is owned by
 [configuration-and-credentials](../spec/configuration-and-credentials.md).
 
 ## Compatibility constraints
@@ -138,9 +131,6 @@ Pool state, reservations, and waits are durable and reconstitute after restart.
 
 Every committed nonterminal session state change appears as a
 session-state-changed event in the outbox.
-
-Exactly one refresh transaction wins per generation, replace-and-clear is one
-commit, and a reread distinguishes a committed replacement from none.
 
 A replace-and-clear commit publishes a durable member-availability update, and a
 deadline-free exhausted wait parked on that member wakes.

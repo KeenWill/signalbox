@@ -68,7 +68,7 @@ async fn lock_catalog(connection: &mut PgConnection) -> Result<(), OauthCredenti
     Ok(())
 }
 
-async fn read_catalog(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
+pub(super) async fn read_catalog(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
     sqlx::query(
         "SELECT pg_advisory_xact_lock_shared(hashtextextended('oauth-registration-catalog', 0))",
     )
@@ -140,7 +140,7 @@ async fn finish(
     Ok(())
 }
 
-async fn commit(
+pub(super) async fn commit(
     tx: sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), OauthCredentialRepositoryError> {
     tx.commit().await.map_err(|error| {
@@ -343,7 +343,7 @@ impl OauthCredentialRepository {
                             VALUES ($1, $2::jsonb, $3, $4, $5::jsonb, $6)
                             ON CONFLICT (profile) DO UPDATE SET tuple = EXCLUDED.tuple, refresh_token = EXCLUDED.refresh_token,
                             identity_token = EXCLUDED.identity_token, account_identity = EXCLUDED.account_identity,
-                            generation = EXCLUDED.generation, refresh_in_progress = false, quarantined = false")
+                            generation = EXCLUDED.generation, refresh_in_progress = false, quarantined = false, quarantine_cause = NULL")
                             .bind(&exchange.command.profile).bind(json(&exchange.registration)?).bind(&authorization.refresh_token)
                             .bind(&authorization.identity_token).bind(json(&authorization.account_identity)?).bind(generation + 1)
                             .execute(&mut *tx).await?;

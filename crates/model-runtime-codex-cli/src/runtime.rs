@@ -332,11 +332,17 @@ fn kill_probe_process_group(group: Option<u32>) {
 fn kill_probe_process_group(_group: Option<u32>) {}
 
 /// Stateless subscription-backed Codex CLI adapter.
+#[derive(Clone)]
 pub struct CodexCliRuntime {
     executable: PathBuf,
     working_directory: PathBuf,
     credential_reference: signalbox_model_runtime::CredentialReference,
     credential_homes: HashMap<signalbox_model_runtime::CredentialReference, PathBuf>,
+    oauth_profiles: std::collections::HashSet<signalbox_model_runtime::CredentialReference>,
+    oauth_delivery: Option<(
+        std::sync::Arc<dyn crate::OauthCredentialProvider>,
+        std::sync::Arc<crate::OauthCredentialRoot>,
+    )>,
     exchange_timeout: Option<Duration>,
     interrupt_grace: Duration,
     post_kill_reap_bound: Option<Duration>,
@@ -370,6 +376,7 @@ pub struct CodexCliPreparedRequest<C> {
     controls: CodexControls,
     model_context_window_override: Option<u32>,
     credential_home: Option<PathBuf>,
+    oauth_home: Option<crate::oauth::OauthCredentialHome>,
 }
 
 struct CodexControls {
@@ -472,6 +479,15 @@ impl std::fmt::Debug for CodexCliRuntime {
 }
 
 impl CodexCliRuntime {
+    /// Installs the process-shared OAuth authority and its private scratch root.
+    pub fn with_oauth_delivery(
+        mut self,
+        provider: std::sync::Arc<dyn crate::OauthCredentialProvider>,
+        root: std::sync::Arc<crate::OauthCredentialRoot>,
+    ) -> Self {
+        self.oauth_delivery = Some((provider, root));
+        self
+    }
     /// Validates adapter configuration without invoking Codex or inspecting
     /// its login store.
     pub fn new(config: CodexCliConfig) -> Result<Self, CodexCliConstructionError> {
@@ -532,6 +548,8 @@ impl CodexCliRuntime {
             working_directory: config.working_directory,
             credential_reference: config.credential_reference,
             credential_homes: config.credential_homes,
+            oauth_profiles: config.oauth_profiles,
+            oauth_delivery: None,
             exchange_timeout: config.exchange_timeout,
             interrupt_grace: config.interrupt_grace,
             post_kill_reap_bound: config.post_kill_reap_bound,
@@ -607,7 +625,11 @@ impl CodexCliRuntime {
             .credential_homes
             .get(&operation.credential_reference)
             .cloned();
-        if operation.credential_reference != self.credential_reference && credential_home.is_none()
+        if operation.credential_reference != self.credential_reference
+            && credential_home.is_none()
+            && !self
+                .oauth_profiles
+                .contains(&operation.credential_reference)
         {
             return PreparationOutcome::Failed {
                 correlation,
@@ -715,6 +737,7 @@ impl CodexCliRuntime {
             controls,
             model_context_window_override,
             credential_home,
+            oauth_home: None,
         })
     }
 }
@@ -798,9 +821,52 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for CodexCliRuntime {
     async fn prepare(
         &self,
         operation: ModelOperation<C>,
-        _cancellation: CancellationSignal,
+        mut cancellation: CancellationSignal,
     ) -> PreparationOutcome<C, Self::Prepared> {
-        self.prepare_request(operation)
+        let reference = operation.credential_reference.clone();
+        let outcome = self.prepare_request(operation);
+        if !self.oauth_profiles.contains(&reference) {
+            return outcome;
+        }
+        let mut prepared = match outcome {
+            PreparationOutcome::Prepared(prepared) => prepared,
+            outcome => return outcome,
+        };
+        if cancellation.is_cancelled() {
+            return PreparationOutcome::Cancelled {
+                correlation: prepared.correlation,
+            };
+        }
+        let result = if let Some((provider, root)) = &self.oauth_delivery {
+            let mut installer = crate::oauth::Installer {
+                root: root.clone(),
+                home: None,
+            };
+            match provider
+                .deliver(&reference, &mut installer, cancellation)
+                .await
+            {
+                Ok(()) => installer
+                    .home
+                    .ok_or(signalbox_model_runtime::CredentialAccessFailure::OauthCredentialHome),
+                Err(error) => Err(error),
+            }
+        } else {
+            Err(signalbox_model_runtime::CredentialAccessFailure::OauthCredentialHome)
+        };
+        match result {
+            Ok(home) => {
+                prepared.credential_home = Some(home.path.clone());
+                prepared.oauth_home = Some(home);
+                PreparationOutcome::Prepared(prepared)
+            }
+            Err(failure) => PreparationOutcome::Failed {
+                correlation: prepared.correlation,
+                failure: PreparationFailure::CredentialUnavailable {
+                    error: signalbox_model_runtime::CredentialAccessError::new(reference, failure),
+                },
+            },
+        }
     }
 
     async fn execute(
@@ -831,7 +897,21 @@ async fn execute_process<C: Clone + Send + Sync>(
     sink: &mut (dyn ObservationSink<C> + Send),
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
-    let mut command = std::process::Command::new(&prepared.executable);
+    let oauth = prepared.oauth_home.as_ref();
+    let mut command = if oauth.is_some() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("umask 077; exec \"$@\"")
+            .arg("signalbox-oauth")
+            .arg(&prepared.executable);
+        command
+            .arg("--config")
+            .arg("cli_auth_credentials_store=\"file\"");
+        command
+    } else {
+        std::process::Command::new(&prepared.executable)
+    };
     command
         .arg("exec")
         .arg("--json")
@@ -890,11 +970,18 @@ async fn execute_process<C: Clone + Send + Sync>(
         &prepared.translated,
         prepared.output_last_message.path().to_path_buf(),
         prepared.event_limit,
+    )
+    .with_exact_credentials(
+        oauth
+            .map(|home| {
+                vec![
+                    home.material.access_token.clone(),
+                    home.material.identity_token.clone(),
+                ]
+            })
+            .unwrap_or_default(),
     );
-    // The selected profile controls this child only; the adapter passes the
-    // path reference and never opens the login material, as required by
-    // `docs/spec/configuration-and-credentials.md`.
-    let environment_overrides = prepared
+    let mut environment_overrides = prepared
         .credential_home
         .map(|home| {
             vec![CliEnvironmentOverride::replacing_inherited(
@@ -903,6 +990,12 @@ async fn execute_process<C: Clone + Send + Sync>(
             )]
         })
         .unwrap_or_default();
+    if let Some(home) = oauth {
+        environment_overrides.push(CliEnvironmentOverride::replacing_inherited(
+            "HOME",
+            home.path.clone().into_os_string(),
+        ));
+    }
     let request = CliProcessRequest {
         command,
         prompt: prepared.prompt,
@@ -917,7 +1010,41 @@ async fn execute_process<C: Clone + Send + Sync>(
     };
     let _output_schema = prepared.output_schema;
     let _output_last_message = prepared.output_last_message;
-    execute_cli_process(request, sink, cancellation).await
+    if let Some(home) = oauth {
+        let mut access_sink = signalbox_model_runtime::CredentialRedactingSink::new(
+            sink,
+            &home.material.access_token,
+        );
+        let mut identity_sink = signalbox_model_runtime::CredentialRedactingSink::new(
+            &mut access_sink,
+            &home.material.identity_token,
+        );
+        let evidence = signalbox_model_runtime::execute_cli_process_with_credentials(
+            request,
+            &mut identity_sink,
+            cancellation,
+            &[
+                home.material.access_token.clone(),
+                home.material.identity_token.clone(),
+            ],
+        )
+        .await;
+        identity_sink.flush();
+        access_sink.flush();
+        let evidence =
+            signalbox_model_runtime::redact_evidence(evidence, &home.material.identity_token, None);
+        let mut evidence =
+            signalbox_model_runtime::redact_evidence(evidence, &home.material.access_token, None);
+        if let TerminalEvidence::ProviderError(error) = &mut evidence
+            && error.kind == signalbox_model_runtime::ProviderErrorKind::CredentialRejected
+        {
+            error.kind = signalbox_model_runtime::ProviderErrorKind::Unrecognized;
+            error.non_acceptance_proven = false;
+        }
+        evidence
+    } else {
+        execute_cli_process(request, sink, cancellation).await
+    }
 }
 
 #[cfg(test)]

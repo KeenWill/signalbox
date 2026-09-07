@@ -81,6 +81,7 @@ pub(crate) struct EventDecoder<C> {
     message_id: Option<String>,
     agent_message: Option<String>,
     output_last_message: PathBuf,
+    exact_credentials: Vec<signalbox_model_runtime::CredentialValue>,
     terminal_message_limit: usize,
     next_part_index: u32,
     usage: TokenUsage,
@@ -102,6 +103,13 @@ enum CliTerminal {
 }
 
 impl<C: Clone> EventDecoder<C> {
+    pub(crate) fn with_exact_credentials(
+        mut self,
+        credentials: Vec<signalbox_model_runtime::CredentialValue>,
+    ) -> Self {
+        self.exact_credentials = credentials;
+        self
+    }
     pub(crate) fn new(
         correlation: C,
         delivery: DeliveryMode,
@@ -119,6 +127,7 @@ impl<C: Clone> EventDecoder<C> {
             message_id: None,
             agent_message: None,
             output_last_message,
+            exact_credentials: Vec::new(),
             terminal_message_limit,
             next_part_index: 0,
             usage: TokenUsage::unreported(),
@@ -700,7 +709,12 @@ impl<C: Clone> EventDecoder<C> {
             return Ok(None);
         }
         String::from_utf8(bytes)
-            .map(Some)
+            .map(|mut text| {
+                for credential in &self.exact_credentials {
+                    text = signalbox_model_runtime::redact_credential_text(text, credential);
+                }
+                Some(text)
+            })
             .map_err(|_| "Codex output-last-message was not UTF-8".to_string())
     }
 

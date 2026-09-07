@@ -5,6 +5,114 @@ use std::{
     sync::Arc,
 };
 
+#[tokio::test]
+async fn oauth_refresh_rotates_once_and_preserves_identity_when_omitted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (client, registration, server) = https_server(vec![(
+        200,
+        serde_json::json!({"access_token":"fresh-access", "refresh_token":"replacement-refresh", "expires_in":3600}),
+    )])?;
+    let stored = OauthAuthorization {
+        refresh_token: "initial-refresh".into(),
+        identity_token: "retained-identity".into(),
+        account_identity: serde_json::json!({"subject":"subject"}),
+    };
+    let result = client
+        .refresh(
+            &registration,
+            &stored,
+            &mut signalbox_model_runtime::CancellationSignal::never(),
+        )
+        .await
+        .map_err(|_| "refresh failed")?;
+    assert_eq!(result.access_token.expose_bytes(), b"fresh-access");
+    assert_eq!(result.authorization.refresh_token, "replacement-refresh");
+    assert_eq!(result.authorization.identity_token, stored.identity_token);
+    assert!(result.expires_at.is_some());
+    assert_eq!(
+        server.join().map_err(|_| "TLS server panicked")??,
+        vec!["grant_type=refresh_token&refresh_token=initial-refresh&client_id=local-client"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn oauth_refresh_rejects_redirect_revocation_and_changed_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    use super::refresh::RefreshFailure;
+    let identity = format!(
+        "header.{}.signature",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"sub":"different"}"#)
+    );
+    for (status, body, expected) in [
+        (302, serde_json::json!({}), "ambiguous"),
+        (
+            400,
+            serde_json::json!({"error":"invalid_client"}),
+            "non_rotating",
+        ),
+        (
+            400,
+            serde_json::json!({"error":"invalid_grant"}),
+            "rejected",
+        ),
+        (
+            200,
+            serde_json::json!({"access_token":"fresh-access", "id_token":identity}),
+            "identity",
+        ),
+    ] {
+        let (client, registration, server) = https_server(vec![(status, body)])?;
+        let stored = OauthAuthorization {
+            refresh_token: "initial-refresh".into(),
+            identity_token: "retained-identity".into(),
+            account_identity: serde_json::json!({"subject":"subject"}),
+        };
+        let result = client
+            .refresh(
+                &registration,
+                &stored,
+                &mut signalbox_model_runtime::CancellationSignal::never(),
+            )
+            .await;
+        assert!(matches!(
+            (expected, result),
+            ("ambiguous", Err(RefreshFailure::Ambiguous))
+                | ("non_rotating", Err(RefreshFailure::NonRotating))
+                | ("rejected", Err(RefreshFailure::Rejected))
+                | ("identity", Err(RefreshFailure::IdentityChanged))
+        ));
+        assert_eq!(server.join().map_err(|_| "TLS server panicked")??.len(), 1);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn oauth_refresh_cancellation_before_send_is_non_rotating() {
+    let client = OauthClient::new().unwrap_or_else(|_| panic!("client"));
+    let registration = OauthRegistration {
+        client_id: "local-client".into(),
+        token_url: "https://unused.invalid/token".into(),
+        device_authorization_url: "https://unused.invalid/device".into(),
+        scopes: vec!["openid".into()],
+    };
+    let stored = OauthAuthorization {
+        refresh_token: "initial-refresh".into(),
+        identity_token: "retained-identity".into(),
+        account_identity: serde_json::json!({"subject":"subject"}),
+    };
+    assert!(matches!(
+        client
+            .refresh(
+                &registration,
+                &stored,
+                &mut signalbox_model_runtime::CancellationSignal::already_cancelled()
+            )
+            .await,
+        Err(super::refresh::RefreshFailure::NonRotating)
+    ));
+}
+
 // Generated, public test-only localhost certificate and key.
 const CERTIFICATE: &str = r#"-----BEGIN CERTIFICATE-----
 MIIDHDCCAgSgAwIBAgIUar3xOa7Fi2aYaCm9aZejGT/ZV+IwDQYJKoZIhvcNAQEL
@@ -62,7 +170,7 @@ type HttpsFixture = (
     std::thread::JoinHandle<std::io::Result<Vec<String>>>,
 );
 
-fn https_server(
+pub(super) fn https_server(
     responses: Vec<(u16, serde_json::Value)>,
 ) -> Result<HttpsFixture, Box<dyn std::error::Error>> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
