@@ -122,6 +122,103 @@ async fn model_call_outbox_order_guard_is_available(
     Ok(available)
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn oauth_quarantine_committing_during_selection_prevents_a_call_checkpoint()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::oauth_credential::*;
+    let (_container, pool, _) = migrated_postgres().await?;
+    let seed = 0xcd60_0000_u128;
+    let profile = "oauth-checkpoint-member";
+    let (session, _, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "oauth-checkpoint-pool",
+        &[profile],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let oauth = OauthCredentialRepository::new(pool.clone());
+    let registration = OauthRegistration {
+        client_id: "fixture-client".into(),
+        token_url: "https://oauth.example/token".into(),
+        device_authorization_url: "https://oauth.example/device".into(),
+        scopes: vec!["openid".into()],
+    };
+    oauth
+        .replace_registrations(&[(profile.into(), registration.clone())])
+        .await?;
+    let command = OauthCredentialCommand {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        operation: OauthCredentialOperation::Provision,
+        profile: profile.into(),
+    };
+    let OauthStartOutcome::Started(exchange) =
+        oauth.begin_exchange(&command, Ok(&registration)).await?
+    else {
+        panic!("initial exchange");
+    };
+    oauth
+        .complete_exchange(
+            &exchange,
+            Ok(&OauthAuthorization {
+                refresh_token: "fixture-refresh".into(),
+                identity_token: "fixture-identity".into(),
+                account_identity: serde_json::json!({"subject":"checkpoint-subject"}),
+            }),
+        )
+        .await?;
+    let lease = oauth
+        .lock_dispatch(profile)
+        .await?
+        .expect("retained profile");
+    let checkpoint = repository.prepare_initial_call(
+        session,
+        ModelCallId::from_uuid(Uuid::from_u128(seed + 100)),
+        FailedModelCallTurnIdentities::new(
+            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 101)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 102)),
+        ),
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 103)),
+        |_| {
+            (
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 104)),
+                TurnId::from_uuid(Uuid::from_u128(seed + 105)),
+            )
+        },
+    );
+    tokio::pin!(checkpoint);
+    let waiting_for_profile = async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%oauth_credential_profile%')",
+            ).fetch_one(&pool).await?;
+            if waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        result = &mut checkpoint => panic!("checkpoint escaped the profile lock: {result:?}"),
+        waiting = tokio::time::timeout(Duration::from_secs(5), waiting_for_profile) => waiting??,
+    }
+    lease
+        .quarantine(OauthQuarantineCause::RefreshRejected)
+        .await?;
+    assert!(matches!(
+        checkpoint.await?,
+        PrepareInitialModelCallOutcome::PoolExhausted(_)
+    ));
+    let calls: i64 = sqlx::query_scalar("SELECT count(*) FROM model_call WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(calls, 0);
+    Ok(())
+}
+
 /// A pool member quarantined after prospective counting closes the activation
 /// as call-free pool exhaustion instead of rolling back the definitive result.
 #[tokio::test(flavor = "multi_thread")]
