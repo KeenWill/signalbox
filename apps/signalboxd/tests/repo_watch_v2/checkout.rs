@@ -799,6 +799,77 @@ async fn terminal_session_removes_its_checkout_without_following_tracked_symlink
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn disabled_runtime_scavenges_checkouts_without_submitting_pending_commands()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_runtime::{RepositoryWatchRuntime, RepositoryWatchServices};
+
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let root = fixture.root(session);
+    sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
+    let models = HubModelConfiguration::parse(
+        &fixture.catalog.replace("enabled = true", "enabled = false"),
+    )?;
+    let templates = signalboxd::SessionTemplateConfiguration::read(
+        &fixture._files.path().join("templates.toml"),
+        || None,
+        &models,
+    )?;
+    let runtime = RepositoryWatchRuntime::new(
+        fixture.module.clone(),
+        models.repository_watch().cloned(),
+        RepositoryWatchServices {
+            core_pool: fixture.core.clone(),
+            models: Arc::new(models),
+            templates: Arc::new(templates),
+            eligibility_nudge: fixture.sink.eligibility_nudge.clone(),
+            tool_dispatch_gate: fixture.sink.tool_dispatch_gate.clone(),
+        },
+    )
+    .await
+    .expect("prepare disabled runtime");
+    let (shutdown, stopped) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(runtime.run(stopped));
+    assert!(root.join(".git").is_dir());
+    fixture.stop(session).await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let removed: bool = sqlx::query_scalar(
+                "SELECT checkout_removed FROM dispatch_ledger WHERE command_id = $1",
+            )
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+            if removed {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    shutdown.send(true)?;
+    worker.await?.expect("disabled runtime shuts down cleanly");
+    cleanup??;
+    assert!(!root.exists());
+    let pending: bool = sqlx::query_scalar(
+        "SELECT submission_pending FROM mod_repo_watch.dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.core)
+    .await?;
+    assert!(
+        pending,
+        "disabled runtime must not submit retained commands"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn startup_scavenges_interrupted_retirements_without_repository_watch_configuration()
 -> Result<(), Box<dyn Error>> {
     assert_startup_scavenges_interrupted_checkout(true).await

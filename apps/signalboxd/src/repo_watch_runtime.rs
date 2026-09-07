@@ -305,6 +305,9 @@ impl RuntimeState {
         if self.repositories.try_join_next().is_some() {
             return Err(RepositoryWatchRuntimeError::RepositoryWorker);
         }
+        crate::repo_watch_dispatch::scavenge_checkouts(&self.store, &self.sink.pool)
+            .await
+            .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
         let Some(configuration) = self
             .configuration
             .as_ref()

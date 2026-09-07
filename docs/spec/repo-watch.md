@@ -208,15 +208,15 @@ repository URL; redirects are refused and fork heads are fetched
 unauthenticated. Provisioning failure retires the dispatch as
 `checkout_provisioning_failed` with the failing step and exit status and stops
 the session. Retired dispatches and terminal sessions lose their provisioned
-checkout (at next startup if no runtime exists); startup scavenges retained
-checkouts awaiting removal even with pending submissions or no repository-watch
-configuration. The ledger retains the provisioning workspace root and core
-session identity before filesystem work; cleanup uses them without waiting for
-`SessionCreated` settlement or consulting current configuration. Removal refuses
-mount crossings. Pending submission follow-ups remain retryable after core
-command settlement, including interruption of a live turn whose session is
-closing. Synchronous command-identity conflicts settle as rejected before
-submission continues to the next action.
+checkout even when disabled (at next startup if no runtime exists); startup
+scavenges retained checkouts awaiting removal even with pending submissions or
+no repository-watch configuration. The ledger retains the provisioning workspace
+root and core session identity before filesystem work; cleanup uses them without
+waiting for `SessionCreated` settlement or consulting current configuration.
+Removal refuses mount crossings. Pending submission follow-ups remain retryable
+after core command settlement, including interruption of a live turn whose
+session is closing. Synchronous command-identity conflicts settle as rejected
+before submission continues to the next action.
 
 ## Boundary contracts
 

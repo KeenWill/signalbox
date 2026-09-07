@@ -70,9 +70,6 @@ async fn submit_with_checkout<Runner: signalbox_tools_exec::ProcessRunner>(
     (),
     signalbox_module_repo_watch_v2::dispatch::SubmissionError<RepositoryWatchCommandError>,
 > {
-    scavenge_checkouts(store, &sink.pool)
-        .await
-        .map_err(signalbox_module_repo_watch_v2::dispatch::SubmissionError::Sink)?;
     store
         .submit_pending(
             &mut RepositoryWatchCommandCodec,
