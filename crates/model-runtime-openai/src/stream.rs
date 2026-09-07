@@ -28,6 +28,7 @@ struct ItemParts {
     kind: Option<String>,
     nonempty: BTreeMap<u32, bool>,
     complete: bool,
+    item_done: bool,
 }
 
 impl ItemParts {
@@ -120,6 +121,20 @@ impl StreamDecoder {
         if event.kind.starts_with("response.function_call_arguments.") {
             self.opened_tool_calls = true;
         }
+        if matches!(
+            event.kind.as_str(),
+            "response.output_text.delta"
+                | "response.refusal.delta"
+                | "response.function_call_arguments.delta"
+                | "response.reasoning_text.delta"
+                | "response.reasoning_summary_text.delta"
+        ) && event.output_index.is_some_and(|index| {
+            self.item_parts
+                .get(&index)
+                .is_some_and(|parts| parts.item_done)
+        }) {
+            return self.violation("delta follows output item completion");
+        }
         let step = match event.kind.as_str() {
             "error" => StreamStep::Terminal(Box::new(provider_error(
                 ResponseError {
@@ -140,7 +155,7 @@ impl StreamDecoder {
                 StreamStep::Continue
             }
             "response.completed" | "response.incomplete" | "response.failed" => {
-                let Some(response) = event.response else {
+                let Some(mut response) = event.response else {
                     return self.violation("terminal event lacks response");
                 };
                 let failed = event.kind == "response.failed";
@@ -158,12 +173,22 @@ impl StreamDecoder {
                 if response.status.as_deref() != event.kind.strip_prefix("response.") {
                     return self.violation("terminal event and response status disagree");
                 }
-                let observation = if failed {
-                    self.observe_response_metadata(&response, correlation, sink)
-                } else {
-                    self.observe_response(&response, correlation, sink)
-                };
-                if let Err(detail) = observation {
+                if failed && response.error.is_some() {
+                    if response.model.as_deref().is_none_or(str::is_empty) {
+                        response.model = self
+                            .reported_model
+                            .as_ref()
+                            .map(|model| model.as_str().to_string());
+                    }
+                    return StreamStep::Terminal(Box::new(decode_response(
+                        response,
+                        self.usage,
+                        self.exchange.clone(),
+                        correlation,
+                        sink,
+                    )));
+                }
+                if let Err(detail) = self.observe_response(&response, correlation, sink) {
                     return self.violation(detail);
                 }
                 if response.usage.is_none()
@@ -225,6 +250,9 @@ impl StreamDecoder {
                     self.observe_item_parts(index, &item, event.kind == "response.output_item.done")
                 {
                     return self.violation(detail);
+                }
+                if event.kind == "response.output_item.done" {
+                    self.item_parts.entry(index).or_default().item_done = true;
                 }
                 StreamStep::Continue
             }
@@ -1990,9 +2018,9 @@ mod tests {
             "in_progress",
             "queued",
         ] {
-            for field in ["usage", "incomplete_details"] {
+            for field in ["id", "object", "model", "usage", "incomplete_details"] {
                 for malformed in [
-                    json!("invalid"),
+                    json!(42),
                     json!([]),
                     json!({"input_tokens":"invalid","reason":42}),
                 ] {
@@ -2067,6 +2095,152 @@ mod tests {
                         o.fact,
                         ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
                     )));
+                }
+            }
+        }
+    }
+    #[test]
+    fn failed_status_and_error_survive_missing_malformed_or_changed_identity() {
+        for prior in [false, true] {
+            for ancillary in [
+                json!({}),
+                json!({
+                    "id":42,"object":[],"model":{},"output":{},"usage":"invalid","incomplete_details":[]
+                }),
+                json!({"id":"resp_other","object":"other","model":"other-model"}),
+            ] {
+                let mut response = ancillary;
+                response["status"] = json!("failed");
+                response["error"] = json!({"code":"invalid_prompt","message":"rejected prompt"});
+                let mut decoder = StreamDecoder::new(ExchangeFacts {
+                    http_status: Some(200),
+                    ..ExchangeFacts::default()
+                });
+                let mut sink = Vec::new();
+                if prior {
+                    assert!(matches!(
+                        apply(
+                            &mut decoder,
+                            json!({"type":"response.created","response":{
+                                "id":"resp_fixture","model":"model-fixture","status":"in_progress","output":[],
+                                "usage":{"input_tokens":23}
+                            }}),
+                            &mut sink
+                        ),
+                        StreamStep::Continue
+                    ));
+                }
+                let expected_model = response["model"]
+                    .as_str()
+                    .or(prior.then_some("model-fixture"));
+                let expected_model = expected_model.map(ProviderReportedModel::new);
+                let StreamStep::Terminal(evidence) = apply(
+                    &mut decoder,
+                    json!({"type":"response.failed","response":response}),
+                    &mut sink,
+                ) else {
+                    panic!("failed response must terminate");
+                };
+                let TerminalEvidence::ProviderError(error) = *evidence else {
+                    panic!("intact failure must take precedence over every ancillary field");
+                };
+                assert_eq!(
+                    error.kind,
+                    signalbox_model_runtime::ProviderErrorKind::InvalidRequest
+                );
+                assert_eq!(error.native.error_code.as_deref(), Some("invalid_prompt"));
+                assert_eq!(error.native.message.as_deref(), Some("rejected prompt"));
+                assert_eq!(error.exchange.http_status, Some(200));
+                assert!(!error.non_acceptance_proven);
+                assert_eq!(error.reported_model, expected_model);
+                assert_eq!(
+                    error.usage,
+                    TokenUsage {
+                        input_tokens: prior.then_some(23),
+                        ..TokenUsage::unreported()
+                    }
+                );
+                assert!(!sink.iter().any(|o| matches!(
+                    o.fact,
+                    ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn item_done_rejects_later_deltas_even_when_the_layout_is_unchanged() {
+        for (item, delta_type) in [
+            (
+                json!({"type":"message","id":"item_fixture","role":"assistant","status":"completed",
+                "content":[{"type":"output_text","text":"ready"}]}),
+                "response.output_text.delta",
+            ),
+            (
+                json!({"type":"message","id":"item_fixture","role":"assistant","status":"completed",
+                "content":[{"type":"refusal","refusal":"declined"}]}),
+                "response.refusal.delta",
+            ),
+            (
+                json!({"type":"function_call","id":"item_fixture","status":"completed","call_id":"call_fixture",
+                "name":"lookup","arguments":"{}"}),
+                "response.function_call_arguments.delta",
+            ),
+            (
+                json!({"type":"reasoning","id":"item_fixture","status":"completed","summary":[]}),
+                "response.reasoning_text.delta",
+            ),
+            (
+                json!({"type":"reasoning","id":"item_fixture","status":"completed","summary":[]}),
+                "response.reasoning_summary_text.delta",
+            ),
+        ] {
+            for done in [false, true] {
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                assert!(matches!(
+                    apply(
+                        &mut decoder,
+                        json!({
+                            "type":if done { "response.output_item.done" } else { "response.output_item.added" },
+                            "output_index":0,"item":item
+                        }),
+                        &mut sink
+                    ),
+                    StreamStep::Continue
+                ));
+                let observations_before = sink.len();
+                let step = apply(
+                    &mut decoder,
+                    json!({"type":delta_type,"output_index":0,
+                    "content_index":0,"summary_index":0,"item_id":"item_fixture","delta":" "}),
+                    &mut sink,
+                );
+                if done {
+                    let StreamStep::Terminal(evidence) = step else {
+                        panic!("{delta_type} must be rejected after item completion");
+                    };
+                    let TerminalEvidence::BoundaryLoss(loss) = *evidence else {
+                        panic!("post-completion deltas are protocol loss");
+                    };
+                    assert!(matches!(
+                        loss.cause,
+                        LossCause::StreamProtocolViolation { .. }
+                    ));
+                    assert_eq!(
+                        loss.tool_calls,
+                        if item["type"] == "function_call" {
+                            ToolCallsAtLoss::Opened
+                        } else {
+                            ToolCallsAtLoss::NoneOpened
+                        }
+                    );
+                    assert_eq!(sink.len(), observations_before);
+                } else {
+                    assert!(
+                        matches!(step, StreamStep::Continue),
+                        "{delta_type} remains open after added"
+                    );
                 }
             }
         }

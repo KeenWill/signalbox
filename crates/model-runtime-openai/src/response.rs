@@ -1085,9 +1085,9 @@ mod tests {
     #[test]
     fn buffered_failed_envelopes_survive_malformed_ancillary_fields() {
         for status in ["failed", "completed", "incomplete"] {
-            for field in ["usage", "incomplete_details"] {
+            for field in ["id", "object", "model", "usage", "incomplete_details"] {
                 for malformed in [
-                    json!("invalid"),
+                    json!(42),
                     json!([]),
                     json!({"input_tokens":"invalid","reason":42}),
                 ] {
@@ -1145,6 +1145,33 @@ mod tests {
                     )));
                 }
             }
+        }
+    }
+    #[test]
+    fn failed_status_and_error_suffice_without_valid_ancillary_fields() {
+        for ancillary in [
+            json!({}),
+            json!({
+                "id":42,"object":[],"model":{},"output":{},"usage":"invalid","incomplete_details":[]
+            }),
+        ] {
+            let mut value = ancillary;
+            value["status"] = json!("failed");
+            value["error"] = json!({"code":"invalid_prompt","message":"rejected prompt"});
+            let (TerminalEvidence::ProviderError(error), observations) = decode(value) else {
+                panic!("intact failure must take precedence over every ancillary field");
+            };
+            assert_eq!(
+                error.kind,
+                signalbox_model_runtime::ProviderErrorKind::InvalidRequest
+            );
+            assert_eq!(error.native.error_code.as_deref(), Some("invalid_prompt"));
+            assert_eq!(error.native.message.as_deref(), Some("rejected prompt"));
+            assert_eq!(error.exchange.http_status, Some(200));
+            assert!(!error.non_acceptance_proven);
+            assert_eq!(error.reported_model, None);
+            assert_eq!(error.usage, TokenUsage::unreported());
+            assert!(observations.is_empty());
         }
     }
 }

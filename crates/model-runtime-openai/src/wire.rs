@@ -75,9 +75,9 @@ pub(crate) struct Response {
 
 #[derive(Deserialize)]
 struct ResponseEnvelope {
-    id: Option<String>,
-    object: Option<String>,
-    model: Option<String>,
+    id: Option<Box<RawValue>>,
+    object: Option<Box<RawValue>>,
+    model: Option<Box<RawValue>>,
     status: Option<String>,
     incomplete_details: Option<Box<RawValue>>,
     output: Option<Box<RawValue>>,
@@ -89,32 +89,45 @@ impl TryFrom<ResponseEnvelope> for Response {
     type Error = serde_json::Error;
 
     fn try_from(envelope: ResponseEnvelope) -> Result<Self, Self::Error> {
-        let failed = envelope.status.as_deref() == Some("failed") && envelope.error.is_some();
-        let usage = envelope
-            .usage
-            .map(|raw| serde_json::from_str(raw.get()))
-            .transpose();
-        let usage = if failed {
-            usage.unwrap_or(None)
-        } else {
-            usage?
-        };
-        let incomplete_details = if failed {
-            None
-        } else {
-            envelope
+        if envelope.status.as_deref() == Some("failed") && envelope.error.is_some() {
+            return Ok(Self {
+                status: envelope.status,
+                error: envelope.error,
+                model: envelope
+                    .model
+                    .and_then(|raw| serde_json::from_str(raw.get()).ok()),
+                usage: envelope
+                    .usage
+                    .and_then(|raw| serde_json::from_str(raw.get()).ok()),
+                id: None,
+                object: None,
+                incomplete_details: None,
+                output: None,
+            });
+        }
+        Ok(Self {
+            id: envelope
+                .id
+                .map(|raw| serde_json::from_str(raw.get()))
+                .transpose()?,
+            object: envelope
+                .object
+                .map(|raw| serde_json::from_str(raw.get()))
+                .transpose()?,
+            model: envelope
+                .model
+                .map(|raw| serde_json::from_str(raw.get()))
+                .transpose()?,
+            status: envelope.status,
+            incomplete_details: envelope
                 .incomplete_details
                 .map(|raw| serde_json::from_str(raw.get()))
-                .transpose()?
-        };
-        Ok(Self {
-            id: envelope.id,
-            object: envelope.object,
-            model: envelope.model,
-            status: envelope.status,
-            incomplete_details,
+                .transpose()?,
             output: envelope.output,
-            usage,
+            usage: envelope
+                .usage
+                .map(|raw| serde_json::from_str(raw.get()))
+                .transpose()?,
             error: envelope.error,
         })
     }
