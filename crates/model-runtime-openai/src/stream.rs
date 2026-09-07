@@ -1864,4 +1864,88 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn streamed_reasoning_status_must_agree_with_its_terminal_response() {
+        for status in ["completed", "incomplete"] {
+            for item_status in [
+                None,
+                Some("completed"),
+                Some("incomplete"),
+                Some("in_progress"),
+                Some("future"),
+            ] {
+                for tool in [false, true] {
+                    let mut reasoning = json!({"type":"reasoning","id":"rs_fixture","summary":[]});
+                    if let Some(item_status) = item_status {
+                        reasoning["status"] = json!(item_status);
+                    }
+                    let content = if tool {
+                        json!({"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"})
+                    } else {
+                        json!({"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ready"}]})
+                    };
+                    let mut event = terminal();
+                    event["type"] = json!(format!("response.{status}"));
+                    event["response"]["status"] = json!(status);
+                    if status == "incomplete" {
+                        event["response"]["incomplete_details"] =
+                            json!({"reason":"max_output_tokens"});
+                    }
+                    event["response"]["output"] = json!([reasoning, content]);
+                    let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                    let mut observations = Vec::new();
+                    let StreamStep::Terminal(evidence) =
+                        apply(&mut decoder, event, &mut observations)
+                    else {
+                        panic!("terminal event must terminate");
+                    };
+                    let evidence = *evidence;
+                    let finish = if status == "incomplete" {
+                        FinishReason::MaxOutputTokens
+                    } else if tool {
+                        FinishReason::ToolUse
+                    } else {
+                        FinishReason::EndTurn
+                    };
+                    if item_status.is_none()
+                        || item_status == Some("completed")
+                        || (status == "incomplete" && item_status == Some("incomplete"))
+                    {
+                        let TerminalEvidence::Completed(result) = evidence else {
+                            panic!("consistent reasoning status must permit terminal content");
+                        };
+                        assert_eq!(FinishReason::from(result.finish), finish);
+                        assert_eq!(result.content.len(), 1);
+                    } else {
+                        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+                            panic!("contradictory reasoning status must fail closed");
+                        };
+                        assert!(matches!(
+                            loss.cause,
+                            LossCause::StreamProtocolViolation { .. }
+                        ));
+                        assert_eq!(loss.finish_reported, Some(finish));
+                        assert_eq!(
+                            loss.tool_calls,
+                            if tool {
+                                ToolCallsAtLoss::Opened
+                            } else {
+                                ToolCallsAtLoss::NoneOpened
+                            }
+                        );
+                        assert!(!observations.iter().any(|o| matches!(
+                            o.fact,
+                            ObservationFact::FinishReported(_)
+                                | ObservationFact::ToolCallProposed(_)
+                        )));
+                    }
+                    assert!(
+                        !observations
+                            .iter()
+                            .any(|o| matches!(o.fact, ObservationFact::ThinkingDelta { .. }))
+                    );
+                }
+            }
+        }
+    }
 }

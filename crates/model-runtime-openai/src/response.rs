@@ -75,10 +75,20 @@ struct ConvertedItem {
 /// Converts one terminal output item; reasoning has no durable producer here.
 fn convert_item(item: &WireOutputItem, response_status: &str) -> Result<ConvertedItem, String> {
     match item.kind.as_str() {
-        "reasoning" => Ok(ConvertedItem {
-            parts: Vec::new(),
-            refused: false,
-        }),
+        "reasoning" => {
+            if let Some(status) = item.status.as_deref()
+                && status != "completed"
+                && !(response_status == "incomplete" && status == "incomplete")
+            {
+                return Err(
+                    "reasoning item status disagrees with its terminal response".to_string()
+                );
+            }
+            Ok(ConvertedItem {
+                parts: Vec::new(),
+                refused: false,
+            })
+        }
         "function_call" => Ok(ConvertedItem {
             parts: vec![AssistantPart::ToolCall(convert_tool_call(item)?)],
             refused: false,
@@ -964,6 +974,81 @@ mod tests {
                     o.fact,
                     ObservationFact::ToolCallProposed(_) | ObservationFact::FinishReported(_)
                 )));
+            }
+        }
+    }
+    #[test]
+    fn buffered_reasoning_status_must_agree_with_its_terminal_response() {
+        for status in ["completed", "incomplete"] {
+            for item_status in [
+                None,
+                Some("completed"),
+                Some("incomplete"),
+                Some("in_progress"),
+                Some("future"),
+            ] {
+                for tool in [false, true] {
+                    let mut reasoning = json!({"type":"reasoning","id":"rs_fixture","summary":[]});
+                    if let Some(item_status) = item_status {
+                        reasoning["status"] = json!(item_status);
+                    }
+                    let content = if tool {
+                        json!({"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"})
+                    } else {
+                        json!({"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ready"}]})
+                    };
+                    let mut value = response();
+                    value["status"] = json!(status);
+                    if status == "incomplete" {
+                        value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                    }
+                    value["output"] = json!([reasoning, content]);
+                    let (evidence, observations) = decode(value);
+                    let finish = if status == "incomplete" {
+                        FinishReason::MaxOutputTokens
+                    } else if tool {
+                        FinishReason::ToolUse
+                    } else {
+                        FinishReason::EndTurn
+                    };
+                    if item_status.is_none()
+                        || item_status == Some("completed")
+                        || (status == "incomplete" && item_status == Some("incomplete"))
+                    {
+                        let TerminalEvidence::Completed(result) = evidence else {
+                            panic!("consistent reasoning status must permit terminal content");
+                        };
+                        assert_eq!(FinishReason::from(result.finish), finish);
+                        assert_eq!(result.content.len(), 1);
+                    } else {
+                        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+                            panic!("contradictory reasoning status must fail closed");
+                        };
+                        assert!(matches!(
+                            loss.cause,
+                            LossCause::ResponseUnintelligible { .. }
+                        ));
+                        assert_eq!(loss.finish_reported, Some(finish));
+                        assert_eq!(
+                            loss.tool_calls,
+                            if tool {
+                                ToolCallsAtLoss::Opened
+                            } else {
+                                ToolCallsAtLoss::NoneOpened
+                            }
+                        );
+                        assert!(!observations.iter().any(|o| matches!(
+                            o.fact,
+                            ObservationFact::FinishReported(_)
+                                | ObservationFact::ToolCallProposed(_)
+                        )));
+                    }
+                    assert!(
+                        !observations
+                            .iter()
+                            .any(|o| matches!(o.fact, ObservationFact::ThinkingDelta { .. }))
+                    );
+                }
             }
         }
     }
