@@ -241,7 +241,7 @@ fn continuation_compaction(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn repository_watch_continuation_compacts_and_completes_one_successor()
+async fn durable_sweep_recovers_repository_watch_continuation_and_completes_one_successor()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let (session, original) =
@@ -299,8 +299,21 @@ async fn repository_watch_continuation_compacts_and_completes_one_successor()
         None,
         Vec::new(),
     ));
+    // A new sweep has no in-process nudge from the committed terminalization.
+    let (recovered, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert_eq!(recovered, vec![session]);
+    for hint in recovered {
+        pass.run(hint).await?;
+    }
     pass.run(session).await?;
-    pass.run(session).await?;
+    let (remaining, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(remaining.is_empty(), "completed successors leave the sweep");
     assert_eq!(ordinary_probe.prepared_operations().len(), 1);
     assert_eq!(probe.received_operations().len(), 1);
     let (successor, command): (Uuid, Uuid) = sqlx::query_as(
@@ -333,6 +346,14 @@ async fn interactive_continuation_does_not_create_a_compaction_successor()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let (session, _) = exhausted_continuation(&runtime, ContinuationSession::Interactive).await?;
+    let (recovered, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(
+        recovered.is_empty(),
+        "interactive headroom failures stay terminal"
+    );
     let summary = ScriptedModel::following([]);
     let probe = summary.clone();
     continuation_compaction(&runtime, summary)?
@@ -381,6 +402,14 @@ async fn failed_continuation_compaction_closes_the_successor_without_retrying()
         "SELECT terminal_disposition_kind, terminal_model_call_id FROM turn_lifecycle WHERE session_id = $1 AND turn_id <> $2",
     ).bind(session.into_uuid()).bind(original.into_uuid()).fetch_all(&runtime.pool).await?;
     assert_eq!(states, vec![(String::from("failed"), None)]);
+    let (recovered, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(
+        recovered.is_empty(),
+        "failed compaction is not retried by the sweep"
+    );
     runtime.stop().await
 }
 
@@ -623,7 +652,18 @@ async fn a_defaults_rejection_does_not_abandon_the_compaction_successor()
     ));
     let probe = summary.clone();
     let compaction = continuation_compaction(&runtime, summary)?;
-    compaction.compact_if_needed(session, None).await?;
+    let (recovered, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert_eq!(
+        recovered,
+        vec![session],
+        "the rejected admission remains discoverable"
+    );
+    for hint in recovered {
+        compaction.compact_if_needed(hint, None).await?;
+    }
     compaction.compact_if_needed(session, None).await?;
     assert_eq!(probe.received_operations().len(), 1);
     let mut activation = StartEligibleTurnService::new(
