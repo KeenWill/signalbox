@@ -264,10 +264,10 @@ optional checkout revision, promotes a connected pending successor when needed,
 and installs the successor placement and grant lineage. Successor selection
 follows the enrollment chain to its current pending or active descendant.
 Pre-pin replacement provisions nothing and returns to unpinned at the next
-revision. A replacement requested with an active turn records
-`ExistingControlRequired` before staging. Registration-triggered loss permits
-replacement on the same runner after its current registration satisfies the
-retained request; other loss sources require a different runner.
+revision. Replacement behind an active model call or tool batch remains staged
+until its observation or complete-result boundary. Registration-triggered loss
+permits replacement on the same runner after its current registration satisfies
+the retained request; other loss sources require a different runner.
 
 Pinned replacement requiring a repository or private root retains a single-use
 command authorization and an exactly correlated `workspace_ready` receipt,
@@ -276,18 +276,19 @@ retained receipt even while installation waits. Provisioning retains a
 repository key and checkout revision together or neither; a mismatched pair is
 rejected before staging. Installation consumes that receipt, promotes the
 pending candidate, installs the placement and grant, appends the reference-only
-placement boundary, and records the terminal result atomically when no turn is
-active. Provisioning refusal or candidate loss records a typed terminal
-rejection and leaves the candidate pending. A terminal delegated runtime does
-not count as an active turn for recovery commands. Replacement rejects a
-candidate lacking the requested sandbox or repository workspace capability
-before staging provisioning. Ambient default-directory replacement requires the
-successor registration's reported directory. A rejected command's ready
-workspace, including a correlated receipt arriving after abandonment, is
-released only through its exact manifest correlation on the candidate's retained
-connection epoch. Suspicion retains that cleanup authority; loss does not
-transfer it. Release acknowledgement uses the same current-epoch fence as
-release dispatch.
+placement boundary, and records the terminal result atomically after any
+authorized in-flight call reaches its observation boundary and, for a tool
+batch, after all results are appended. Provisioning refusal or candidate loss
+records a typed terminal rejection and leaves the candidate pending. A terminal
+delegated runtime does not count as an active turn for recovery commands.
+Replacement rejects a candidate lacking the requested sandbox or repository
+workspace capability before staging provisioning. Ambient default-directory
+replacement requires the successor registration's reported directory. A rejected
+command's ready workspace, including a correlated receipt arriving after
+abandonment, is released only through its exact manifest correlation on the
+candidate's retained connection epoch. Suspicion retains that cleanup authority;
+loss does not transfer it. Release acknowledgement uses the same current-epoch
+fence as release dispatch.
 
 ## Planned
 

@@ -432,11 +432,27 @@ occupancy bound and drains under that window: after its in-flight operation
 reaches a durable boundary, it checkpoints the active turn and returns without
 issuing another, and a successor resumes from that boundary.
 
+A runner replacement issued during a model call or tool batch remains staged.
+After every request resolves, continuation appends all results, installs the
+replacement and appends one relocation boundary, then prepares the next call. An
+earlier boundary commit is rejected. Candidate recovery waits retain no
+transaction or pooled connection. Interrupt or crash-loss batch terminalization
+retires the staged command before ending the turn. A model observation,
+including failure, refusal, cancellation or ambiguity, permits installation and
+retains the turn state that observation produced. Pre-pin installation appends
+no boundary.
+
+A queued turn cannot activate while its placement is lost. Replacement and
+abandonment outbox events wake queued work, retaining hints when the eligibility
+channel is full. Committed turn and runner authority changes resume retained
+replacement commands without requiring a connected command client. Startup
+rechecks them after the generic scan and before client admission. Abandonment
+with an active turn records the existing-control result and creates no
+cancellation.
+
 ## Planned
 
-- Runner-loss recovery: replacement and abandonment of a lost runner, and the
-  runner-loss projection's effect on queued activation and runner execution;
-  design in
+- Pre-continuation runner takeover and retry supersession; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - Recovery-only startup: a runner reconciliation phase between migrations and
   the generic scan; design in

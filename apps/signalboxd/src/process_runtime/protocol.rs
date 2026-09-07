@@ -2203,6 +2203,8 @@ pub enum ProcessRuntimeError {
     Dispatch(OutboxDispatchError),
     /// The shared runner-recovery notification listener failed.
     RunnerRecoveryNotifications(sqlx::Error),
+    /// A retained runner-recovery command could not be resumed.
+    RunnerRecoveryCommands(signalbox_persistence::runner_protocol::RunnerRecoveryError),
     /// The single dispatcher produced an impossible retry result.
     UnexpectedDispatcherRetry,
     /// The revalidated socket path could not be cleaned up.
@@ -2238,6 +2240,7 @@ impl fmt::Display for ProcessRuntimeError {
             Self::RunnerRecoveryNotifications(_) => {
                 "the runner recovery notification listener failed"
             }
+            Self::RunnerRecoveryCommands(_) => "a retained runner recovery command failed",
             Self::UnexpectedDispatcherRetry => {
                 "the process-update dispatcher unexpectedly requested retry"
             }
@@ -2255,6 +2258,7 @@ impl Error for ProcessRuntimeError {
             Self::ConnectionTask(error) => Some(error),
             Self::Dispatch(error) => Some(error),
             Self::RunnerRecoveryNotifications(error) => Some(error),
+            Self::RunnerRecoveryCommands(error) => Some(error),
             Self::CleanupSocket(error) => Some(error),
             Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed

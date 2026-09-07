@@ -72,12 +72,6 @@ paths.
 
 Several runners are enrolled with one daemon at once.
 
-For replacement behind an active call or tool batch, the workspace receipt
-remains retained until the replacement boundary selected by
-[turn lifecycle](turn-lifecycle-and-scheduling.md). Installation in that
-transaction rechecks the lost predecessor and connected candidate, consumes the
-exact receipt, promotes pending authority, and installs the placement, grant
-lineage, relocation entry, frontier, and terminal command result atomically.
 Pre-continuation takeover retains the pending relocation instead of appending
 the entry or advancing the frontier. Continuation or batch terminalization
 appends that entry exactly once after all batch results and before the next

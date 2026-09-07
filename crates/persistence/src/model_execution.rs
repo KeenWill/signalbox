@@ -636,6 +636,7 @@ pub struct PostgresModelCallRepository {
     #[get]
     pool: PgPool,
     targets: ModelTargetCatalog,
+    runner_recovery: Option<crate::runner_protocol::RunnerProtocolStore>,
     credential_reference: ModelCallCredentialReference,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     credential_pools: CredentialPoolRuntimeCatalog,
@@ -668,12 +669,44 @@ impl PostgresModelCallRepository {
             pool,
             targets,
             credential_reference,
+            runner_recovery: None,
             credential_families: None,
             credential_pools: HashMap::new(),
             same_credential_attempt_bound: NonZeroUsize::MIN,
             cache_inclusive_input_targets: HashSet::new(),
             continuation_usage_limits: HashMap::new(),
         }
+    }
+
+    /// Shares the runner authority used at model and tool continuation boundaries.
+    pub fn with_runner_recovery(
+        mut self,
+        runner: crate::runner_protocol::RunnerProtocolStore,
+    ) -> Self {
+        self.runner_recovery = Some(runner);
+        self
+    }
+
+    async fn settle_runner_replacement_after_observation(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        session: SessionId,
+    ) -> Result<(), ModelCallRepositoryError> {
+        if let Some(runner) = &self.runner_recovery {
+            runner
+                .settle_replacement_at_boundary(transaction, session, None)
+                .await
+                .map_err(|error| match error {
+                    crate::runner_protocol::RunnerProtocolStoreError::Database(source) => {
+                        ModelCallRepositoryError::from(source)
+                    }
+                    _ => {
+                        ModelCallCorruption::Inconsistent("runner replacement observation boundary")
+                            .into()
+                    }
+                })?;
+        }
+        Ok(())
     }
 
     /// Selects credentials from each session's latest append-only snapshot.
@@ -1235,6 +1268,7 @@ impl PostgresModelCallRepository {
         .with_continuation_usage_limits(self.continuation_usage_limits.clone())
         .with_session_credentials(self.credential_families.clone())
         .with_credential_pools(self.credential_pools.clone())
+        .with_runner_recovery(self.runner_recovery.clone())
     }
 
     /// Derives approval-judge storage from this repository's exact database
@@ -2265,6 +2299,14 @@ impl PostgresModelCallRepository {
             ))))
         }
         .await;
+        let result = match result {
+            Ok(outcome) => {
+                self.settle_runner_replacement_after_observation(&mut transaction, session)
+                    .await?;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        };
         finish_commit(transaction, result).await
     }
 
@@ -2311,6 +2353,14 @@ impl PostgresModelCallRepository {
             Ok(failed)
         }
         .await;
+        let result = match result {
+            Ok(outcome) => {
+                self.settle_runner_replacement_after_observation(&mut transaction, session)
+                    .await?;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        };
         finish_commit(transaction, result).await
     }
 
@@ -2865,6 +2915,14 @@ impl PostgresModelCallRepository {
             Ok(outcome)
         }
         .await;
+        let result = match result {
+            Ok(outcome) => {
+                self.settle_runner_replacement_after_observation(&mut transaction, session)
+                    .await?;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        };
         finish_commit(transaction, result).await
     }
 }
@@ -4968,6 +5026,8 @@ pub(crate) async fn persist_tool_reconciliation_required(
         reconciliation.reclassified_pending_steering(),
     )
     .await?;
+    retire_terminal_batch_replacement(connection, reconciliation.session(), reconciliation.turn())
+        .await?;
     let rows = sqlx::query(
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal',
@@ -6919,6 +6979,22 @@ const fn prepared_failure_cause(
     }
 }
 
+pub(crate) async fn retire_terminal_batch_replacement(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), ModelCallRepositoryError> {
+    crate::runner_protocol::retire_replacement_for_terminal_batch(connection, session, turn)
+        .await
+        .map_err(|error| match error {
+            crate::runner_protocol::RunnerProtocolStoreError::Database(source) => {
+                ModelCallRepositoryError::from(source)
+            }
+            _ => ModelCallCorruption::Inconsistent("terminal batch runner replacement").into(),
+        })?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn terminalize_lifecycle(
     connection: &mut PgConnection,
@@ -6930,6 +7006,7 @@ async fn terminalize_lifecycle(
     terminal_attempt: Option<signalbox_domain::TurnAttemptId>,
     terminal_call: Option<ModelCallId>,
 ) -> Result<(), ModelCallRepositoryError> {
+    retire_terminal_batch_replacement(connection, session, turn).await?;
     let runner_recovery_terminal_attempt: Option<Uuid> = sqlx::query_scalar(
         "SELECT yielded_turn_attempt_id
            FROM turn_runner_recovery_interrupt_effect

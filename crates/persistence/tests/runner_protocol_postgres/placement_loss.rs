@@ -900,3 +900,5 @@ async fn placement_loss_uses_current_registration_for_an_epoch_without_retained_
     );
     Ok(())
 }
+#[path = "staged_replacement.rs"]
+mod staged_replacement;

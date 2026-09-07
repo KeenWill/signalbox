@@ -162,6 +162,11 @@ impl PostgresRunnerRegistrationService {
         self
     }
 
+    /// Shares exact runner authority with model and tool boundary transactions.
+    pub fn recovery_store(&self) -> RunnerProtocolStore {
+        self.store.clone()
+    }
+
     /// Composes the registration-only catalog admitted by this daemon slice.
     pub fn registration_only(pool: PgPool) -> Result<Self, RunnerDomainError> {
         Ok(Self::new(

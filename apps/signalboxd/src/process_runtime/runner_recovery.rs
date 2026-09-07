@@ -216,6 +216,7 @@ fn rejection(
         Domain::SessionNotFound => Wire::SessionNotFound,
         Domain::PlacementNotLost => Wire::PlacementNotLost,
         Domain::ExistingControlRequired => Wire::ExistingControlRequired,
+        Domain::TurnTerminalized => Wire::TurnTerminalized,
         Domain::PendingRunnerNotFound => Wire::PendingRunnerNotFound,
         Domain::RunnerUnavailable => Wire::RunnerUnavailable,
         Domain::ReplacementPending => Wire::ReplacementPending,

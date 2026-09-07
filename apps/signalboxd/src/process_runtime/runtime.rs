@@ -150,6 +150,11 @@ impl ProcessRuntime {
         }
     }
 
+    /// Shares committed runner-authority wakeups with continuation boundary waiters.
+    pub fn runner_recovery_notifications(&self) -> watch::Receiver<()> {
+        self.fanouts.runner_recovery.subscribe()
+    }
+
     /// Serves requests and dispatches durable updates until `shutdown` changes
     /// to true or its sender closes.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), ProcessRuntimeError> {
@@ -161,8 +166,18 @@ impl ProcessRuntime {
             .await
             .map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
         let fanouts = self.fanouts;
+        let recovery_store = signalbox_persistence::runner_protocol::RunnerProtocolStore::new(
+            self.pool.clone(),
+            crate::runner_protocol_runtime::registration_only_catalog().map_err(|error| {
+                ProcessRuntimeError::RunnerRecoveryCommands(
+                    signalbox_persistence::runner_protocol::RunnerProtocolStoreError::Domain(error)
+                        .into(),
+                )
+            })?,
+        );
         let recovery_notifications = forward_runner_recovery_notifications(
             recovery_listener,
+            recovery_store,
             fanouts.runner_recovery.clone(),
             shutdown.clone(),
         );
@@ -197,6 +212,7 @@ impl ProcessRuntime {
 
 async fn forward_runner_recovery_notifications(
     mut listener: sqlx::postgres::PgListener,
+    store: signalbox_persistence::runner_protocol::RunnerProtocolStore,
     notifications: watch::Sender<()>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
@@ -204,6 +220,10 @@ async fn forward_runner_recovery_notifications(
         if *shutdown.borrow() {
             return Ok(());
         }
+        store
+            .resume_runner_replacements()
+            .await
+            .map_err(ProcessRuntimeError::RunnerRecoveryCommands)?;
         tokio::select! {
             notification = listener.try_recv() => {
                 notification.map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
@@ -261,7 +281,18 @@ pub(super) async fn dispatch_updates(
                 );
                 // A sessionless receipt has no follower to reach.
                 if let Some(session) = event.session() {
-                    nudge_delegation_wake(&eligibility_nudge, session, event.kind());
+                    let outcome =
+                        nudge_eligible_outbox_wake(&eligibility_nudge, session, event.kind());
+                    if outcome
+                        == Some(signalbox_application::EligibilityNudgeOutcome::DroppedAtCapacity)
+                        && matches!(
+                            event.kind(),
+                            DispatchedOutboxEventKind::RunnerStateTransition { .. }
+                        )
+                    {
+                        let nudge = eligibility_nudge.clone();
+                        tokio::spawn(async move { nudge.nudge_when_ready(session).await });
+                    }
                     let _ = fanouts.monitor.send(ProcessMonitorUpdate::Durable {
                         cursor: event.sequence(),
                         session,
@@ -438,13 +469,24 @@ fn monitor_event_kind(event: &DispatchedOutboxEventKind) -> SessionTimelineEvent
     }
 }
 
-pub(super) fn nudge_delegation_wake(
+pub(super) fn nudge_eligible_outbox_wake(
     eligibility_nudge: &impl EligibilityNudge,
     session: SessionId,
     event: &DispatchedOutboxEventKind,
-) {
-    if matches!(event, DispatchedOutboxEventKind::DelegationWake(_)) {
-        let _ = eligibility_nudge.nudge(session);
+) -> Option<signalbox_application::EligibilityNudgeOutcome> {
+    if matches!(
+        event,
+        DispatchedOutboxEventKind::DelegationWake(_)
+            | DispatchedOutboxEventKind::RunnerStateTransition {
+                state: DispatchedRunnerState::Replaced
+                    | DispatchedRunnerState::WorkingDirectoryChanged
+                    | DispatchedRunnerState::Abandoned,
+                ..
+            }
+    ) {
+        Some(eligibility_nudge.nudge(session))
+    } else {
+        None
     }
 }
 
@@ -574,6 +616,7 @@ mod runner_recovery_tests {
             .connect_with(local_test_connection_options(&database_url)?)
             .await?;
         let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
+        signalbox_persistence::migrate(&pool).await?;
         listener.listen("runner_recovery").await?;
         let (notifications, _) = watch::channel(());
         let mut waiters: Vec<_> = (0..PENDING_REPLAYS)
@@ -582,6 +625,11 @@ mod runner_recovery_tests {
         let (shutdown, receiver) = watch::channel(false);
         let forwarder = tokio::spawn(forward_runner_recovery_notifications(
             listener,
+            signalbox_persistence::runner_protocol::RunnerProtocolStore::new(
+                pool.clone(),
+                crate::runner_protocol_runtime::registration_only_catalog()
+                    .expect("registration catalog is valid"),
+            ),
             notifications,
             receiver,
         ));

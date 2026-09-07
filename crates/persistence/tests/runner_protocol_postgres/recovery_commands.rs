@@ -653,7 +653,7 @@ async fn assert_recovery_event(
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn recovery_replacement_requires_existing_control_before_staging()
+async fn recovery_replacement_claims_and_replays_while_a_turn_is_active()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, _, _) = insert_running_turn(&pool).await?;
@@ -683,25 +683,27 @@ async fn recovery_replacement_requires_existing_control_before_staging()
         )
         .await?;
     append_runner_lost_before_pin_projection(&pool, session).await?;
+    let candidate = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    store
+        .open_connection(candidate.identities().enrollment())
+        .await?;
     let command = signalbox_domain::ReplaceLostRunner {
         command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
         session,
         revision: None,
     };
     let result = store.replace_lost_runner(command.clone()).await?;
-    assert_eq!(
-        result,
-        RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Rejected(
-            RunnerRecoveryRejection::ExistingControlRequired
-        ))
-    );
+    assert_eq!(result, RunnerRecoveryOutcome::Pending);
     assert_eq!(store.replace_lost_runner(command).await?, result);
     let stages: i64 =
         sqlx::query_scalar("SELECT count(*) FROM runner_replacement_stage WHERE session_id = $1")
             .bind(session.into_uuid())
             .fetch_one(&pool)
             .await?;
-    assert_eq!(stages, 0);
+    assert_eq!(stages, 1);
     Ok(())
 }
 

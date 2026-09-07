@@ -1982,7 +1982,16 @@ fn frontier_closes_latest_tool_round(
             return Ok(false);
         }
     }
-    Ok(suffix[results_end..].iter().all(|entry| {
+    let mut continuation = &suffix[results_end..];
+    if continuation.first().is_some_and(|entry| {
+        matches!(
+            entry.payload(),
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+        )
+    }) {
+        continuation = &continuation[1..];
+    }
+    Ok(continuation.iter().all(|entry| {
         matches!(
             entry.payload(),
             SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }

@@ -525,7 +525,7 @@ impl PreparedToolResultProjection {
         self.producing_call
     }
 
-    /// Returns reference-only result entries in proposal order.
+    /// Returns proposal-order results followed by any runner replacement boundary.
     pub fn entries(&self) -> &[SemanticTranscriptEntry] {
         &self.entries
     }
@@ -533,6 +533,23 @@ impl PreparedToolResultProjection {
     /// Borrows the yielded-plus-results snapshot.
     pub const fn snapshot(&self) -> &ResolvedContextFrontierSnapshot {
         &self.snapshot
+    }
+
+    /// Extends the complete result frontier by its checked runner replacement boundary.
+    pub fn with_runner_placement_boundary(
+        mut self,
+        boundary: &crate::RunnerPlacementBoundary,
+    ) -> Result<Self, crate::RunnerDomainError> {
+        if !self.snapshot.is_semantic_prefix_of(boundary.frontier())
+            || boundary.frontier().entry_count() != self.snapshot.entry_count() + 1
+        {
+            return Err(crate::RunnerDomainError::CorrelationMismatch);
+        }
+        let mut entries = self.entries.into_vec();
+        entries.push(boundary.entry().clone());
+        self.entries = entries.into_boxed_slice();
+        self.snapshot = boundary.frontier().clone();
+        Ok(self)
     }
 
     /// Returns both atomic projection values.
