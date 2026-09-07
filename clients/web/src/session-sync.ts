@@ -84,10 +84,24 @@ export function startSessionSynchronization(
         drafts: draftProjection(),
       })
     }
-    const extendHistory = (cursor: string) =>
-      extendSessionWorkspace(queryClient, sessionId, cursor, controller.signal).catch(
-        () => undefined,
-      )
+    let pendingHistoryCursor: string | null = null
+    let extendingHistory = false
+    const extendHistory = (cursor: string) => {
+      if (pendingHistoryCursor === null || BigInt(cursor) > BigInt(pendingHistoryCursor))
+        pendingHistoryCursor = cursor
+      if (extendingHistory) return
+      extendingHistory = true
+      void (async () => {
+        while (!controller.signal.aborted && pendingHistoryCursor !== null) {
+          const observed = pendingHistoryCursor
+          pendingHistoryCursor = null
+          await extendSessionWorkspace(queryClient, sessionId, observed, controller.signal).catch(
+            () => undefined,
+          )
+        }
+        extendingHistory = false
+      })()
+    }
     void (async () => {
       try {
         for await (const event of followSession(
@@ -98,10 +112,10 @@ export function startSessionSynchronization(
           if (controller.signal.aborted) return
           if (event.kind === 'snapshot') {
             publishSnapshot(event.snapshot, false)
-            await extendHistory(event.snapshot.observed_through)
+            extendHistory(event.snapshot.observed_through)
           } else if (event.kind === 'durable') {
             publish({ cursor: event.cursor })
-            await extendHistory(event.cursor)
+            extendHistory(event.cursor)
             const snapshot = await readSessionLive(sessionId, controller.signal)
             publishSnapshot(snapshot, true)
           } else if (event.kind === 'provider_text_delta') {

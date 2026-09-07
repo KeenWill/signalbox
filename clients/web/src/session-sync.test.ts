@@ -528,3 +528,136 @@ it('cancels a pending draft publication when leaving the session', async () => {
   unsubscribe()
   queries.clear()
 })
+
+it.each([
+  { branch: 'snapshot', stalledRead: 'describe' },
+  { branch: 'snapshot', stalledRead: 'load' },
+  { branch: 'durable', stalledRead: 'describe' },
+  { branch: 'durable', stalledRead: 'load' },
+] as const)(
+  'keeps live events moving while the $branch history $stalledRead stalls',
+  async ({ branch, stalledRead }) => {
+    const sessionId = draftSessionId
+    const extensions = vi.spyOn(await import('./session-workspace'), 'extendSessionWorkspace')
+    const heldThrough = branch === 'snapshot' ? 40 : 41
+    const item = (sequence: number) => ({
+      address: { event_sequence: String(sequence) },
+      kind: 'input_accepted' as const,
+      projected_structured_bytes: 78,
+    })
+    const descriptor = (through: number, observed = through) => ({
+      session_id: sessionId,
+      observed_through: String(observed),
+      first_address: { event_sequence: '40' },
+      latest_address: { event_sequence: String(through) },
+      sizes: {
+        item_count: String(through - 39),
+        projected_structured_bytes: String((through - 39) * 78),
+        projected_text_bytes: '0',
+        referenced_blob_count: '0',
+        referenced_blob_bytes: '0',
+      },
+      work: { active_turn_count: '0', queued_turn_count: '0' },
+    })
+    let release = () => {}
+    let started = () => {}
+    const stalled = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const historyStarted = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    const source = {
+      limits: { max_timeline_window_items: 256, max_timeline_window_bytes: 65_536 },
+      readDescriptor: vi
+        .fn()
+        .mockResolvedValue(descriptor(42, 1042))
+        .mockImplementationOnce(async () => {
+          if (stalledRead === 'describe') {
+            started()
+            await stalled
+          }
+          return descriptor(42)
+        }),
+      readWindow: vi.fn().mockImplementation(async () => {
+        if (stalledRead === 'load') {
+          started()
+          await stalled
+        }
+        return {
+          session_id: sessionId,
+          items: Array.from({ length: 42 - heldThrough }, (_, index) =>
+            item(heldThrough + index + 1),
+          ),
+          projected_structured_bytes: (42 - heldThrough) * 78,
+          continuation_before: { event_sequence: String(heldThrough + 1) },
+          continuation_after: null,
+        }
+      }),
+    }
+    const queries = new QueryClient()
+    const key = ['production', 'session-workspace', sessionId]
+    queries.setQueryData<SessionWorkspace>(key, {
+      active: false,
+      anchor: { kind: 'latest' },
+      descriptor: descriptor(heldThrough),
+      history: new BoundedSessionHistory(sessionId, source),
+      window: {
+        session_id: sessionId,
+        items: Array.from({ length: heldThrough - 39 }, (_, index) => item(40 + index)),
+        projected_structured_bytes: (heldThrough - 39) * 78,
+        continuation_before: null,
+        continuation_after: null,
+      },
+    })
+    vi.mocked(followSession).mockImplementation(async function* () {
+      yield { kind: 'snapshot', snapshot: snapshot(sessionId) }
+      yield {
+        kind: 'durable',
+        cursor: '42',
+        address: { event_sequence: '42' },
+        event_kind: 'input_accepted',
+      }
+      await historyStarted
+      for (let cursor = 43; cursor <= 1042; cursor++) {
+        yield {
+          kind: 'snapshot',
+          snapshot: { ...snapshot(sessionId), observed_through: String(cursor) },
+        }
+      }
+      yield draft('Text while history stalls')
+    })
+    vi.mocked(readSessionLive).mockResolvedValue({ ...snapshot(sessionId), observed_through: '42' })
+    const store = createAppStore()
+    const stop = startSessionSynchronization(store, queries)
+    store.dispatch(actions.sessionFollowRequested(sessionId))
+    try {
+      await vi.waitFor(() =>
+        expect(selectSessionSync(store.getState())).toMatchObject({
+          phase: 'live',
+          cursor: '1042',
+          drafts: [{ content: 'Text while history stalls' }],
+        }),
+      )
+      expect(readSessionLive).toHaveBeenCalledTimes(1)
+      expect(source.readDescriptor).toHaveBeenCalledTimes(1)
+      expect(extensions).toHaveBeenCalledTimes(branch === 'snapshot' ? 1 : 2)
+      expect(source.readWindow).toHaveBeenCalledTimes(stalledRead === 'load' ? 1 : 0)
+      release()
+      await vi.waitFor(() =>
+        expect(queries.getQueryData<SessionWorkspace>(key)?.descriptor.observed_through).toBe(
+          '1042',
+        ),
+      )
+      expect(source.readDescriptor).toHaveBeenCalledTimes(2)
+      expect(source.readWindow).toHaveBeenCalledTimes(1)
+      expect(extensions).toHaveBeenCalledTimes(branch === 'snapshot' ? 2 : 3)
+      expect(extensions.mock.lastCall?.[2]).toBe('1042')
+    } finally {
+      extensions.mockRestore()
+      stop()
+      release()
+      queries.clear()
+    }
+  },
+)
