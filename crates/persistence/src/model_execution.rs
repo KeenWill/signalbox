@@ -1807,15 +1807,23 @@ impl PostgresModelCallRepository {
                 .try_get::<Option<String>, _>("prepared_credential_model_family")?;
             let stored_limit =
                 decode_prepared_usage_limit(&stored_serving_evidence, stored_effective_target)?;
+            let current_credential_model_family = self
+                .credential_families
+                .as_ref()
+                .and_then(|families| families.family(current_effective_target));
             let current_limit = self
                 .continuation_usage_limits
-                .get(&(current.target(), fast_mode));
-            if stored_effective_target != current_effective_target
+                .get(&(current.target(), fast_mode))
+                .copied();
+            let serving_configuration_changed = stored_effective_target != current_effective_target
+                || stored_credential_model_family.as_deref() != current_credential_model_family
+                || !prepared_limit_configuration_matches(stored_limit, current_limit);
+            if serving_configuration_changed
                 && (!prepared_credential_family_matches(
                     self.credential_families.as_ref(),
                     stored_credential_model_family.as_deref(),
                     current_effective_target,
-                ) || !remap_preserves_preflight_limits(stored_limit, current_limit.copied()))
+                ) || !remap_preserves_preflight_limits(stored_limit, current_limit))
             {
                 return Ok((false, AuthorizeModelCallOutcome::NoSend));
             }
@@ -6855,6 +6863,25 @@ fn remap_preserves_preflight_limits(
                 .saturating_sub(current.max_output_tokens());
             current_input_allowance >= previous_input_allowance
                 && current.replays_provider_compaction() == previous.replays_provider_compaction()
+        }
+        _ => false,
+    }
+}
+
+fn prepared_limit_configuration_matches(
+    prepared: Option<ToolContinuationUsageLimit>,
+    current: Option<ToolContinuationUsageLimit>,
+) -> bool {
+    match (prepared, current) {
+        (None, None) => true,
+        (Some(prepared), Some(current)) => {
+            prepared
+                .context_window_tokens()
+                .saturating_sub(prepared.max_output_tokens())
+                == current
+                    .context_window_tokens()
+                    .saturating_sub(current.max_output_tokens())
+                && prepared.replays_provider_compaction() == current.replays_provider_compaction()
         }
         _ => false,
     }

@@ -818,6 +818,74 @@ async fn effective_target_authorization_records_changed_mapping_after_restart()
         Some("23514".into())
     );
 
+    let changed_same_target_family = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (
+            old_fast_target,
+            Arc::<str>::from("other-model-family"),
+            None,
+        ),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, old_fast_target)]))
+    .expect("the unchanged target has a different credential family after restart");
+    let changed_family = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(changed_same_target_family)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        100,
+    )]);
+    assert!(matches!(
+        changed_family.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
+    let unchanged_target_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, old_fast_target)]))
+    .expect("the unchanged target retains its credential family");
+    let narrower_same_target = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(unchanged_target_families.clone())
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        50,
+    )]);
+    assert!(matches!(
+        narrower_same_target.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
+    let changed_replay = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(unchanged_target_families)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        100,
+    )
+    .with_provider_compaction_replay()]);
+    assert!(matches!(
+        changed_replay.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
     let different_families = ModelCredentialFamilyCatalog::try_new([
         (selected_target, Arc::<str>::from("test-model-family"), None),
         (
