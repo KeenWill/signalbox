@@ -237,6 +237,9 @@ impl SessionMetadataRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential
                 | CommandKind::SessionLifecycle,
             ) => Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }),
         }
@@ -592,6 +595,9 @@ async fn existing_or_conflicting(
         | CommandKind::RegisterWorkspace
         | CommandKind::MintGitRemote
         | CommandKind::WithdrawGitRemote
+        | CommandKind::ProvisionOauthCredential
+        | CommandKind::ReprovisionOauthCredential
+        | CommandKind::DeleteOauthCredential
         | CommandKind::SessionLifecycle => {
             return Ok(ReplaceSessionMetadataHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),

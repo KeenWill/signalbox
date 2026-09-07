@@ -11,7 +11,7 @@
 | goal | 16 | 0 | 0 | [goal](goal.md) |
 | operator_status | 5 | 0 | 0 | [operator_status](operator_status.md) |
 | request | 2 | 0 | 0 | [request](request.md) |
-| response | 2 | 0 | 0 | [response](response.md) |
+| response | 4 | 0 | 1 | [response](response.md) |
 | review | 32 | 0 | 0 | [review](review.md) |
 | runner | 11 | 0 | 0 | [runner](runner.md) |
 | scalars | 28 | 0 | 3 | [scalars](scalars.md) |

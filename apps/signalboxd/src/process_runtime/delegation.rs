@@ -30,7 +30,10 @@ where
             on_parent_cancelled: spawn_child_action(on_parent_cancelled),
         },
     };
-    let port = PostgresSessionDelegationPort::new(services.pool.clone());
+    let port = PostgresSessionDelegationPort::new(
+        services.pool.clone(),
+        services.eligibility_nudge.clone(),
+    );
     let parent = SessionId::from_uuid(session_id.into_uuid());
     match port
         .spawn_process_session(
@@ -133,7 +136,10 @@ where
         WireDelegationWaitMode::Background => DomainDelegationWaitMode::Background,
     };
     let mut subscription = services.fanouts.durable.subscribe();
-    let port = PostgresSessionDelegationPort::new(services.pool.clone());
+    let port = PostgresSessionDelegationPort::new(
+        services.pool.clone(),
+        services.eligibility_nudge.clone(),
+    );
     let Some(outcome) = run_until_shutdown(
         &mut shutdown,
         port.await_process_session(session, turn, request, child, mode),
@@ -431,7 +437,7 @@ pub(super) async fn handle_send_session_message<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let port = PostgresSessionDelegationPort::new(pool.clone());
+    let port = PostgresSessionDelegationPort::new(pool.clone(), eligibility_nudge.clone());
     let result = port
         .send_process_message(
             SessionId::from_uuid(session_id.into_uuid()),

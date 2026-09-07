@@ -972,6 +972,9 @@ where
 /// A structurally invalid frame value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameValidationError {
+    #[error("OAuth credential frame shape is inconsistent")]
+    /// An OAuth profile or device-authorization detail violates its bounds.
+    OauthCredentialShape,
     #[error("frame version is unsupported")]
     /// In-memory frame used another version.
     UnsupportedVersion,

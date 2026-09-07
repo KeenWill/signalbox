@@ -52,10 +52,129 @@ pub struct TerminationReceipt {
     pub descendant_count: CanonicalU64,
 }
 
+/// Closed terminal OAuth administration outcomes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OauthCredentialOutcome {
+    /// Authorization was stored.
+    Provisioned {},
+    /// Authorization already exists.
+    AlreadyProvisioned {},
+    /// Authorization was replaced.
+    Reprovisioned {},
+    /// Authorization was deleted.
+    Deleted {},
+    /// No authorization remained.
+    AlreadyDeleted {},
+    /// Re-provisioning found no authorization.
+    NotProvisioned {},
+    /// Startup abandoned a pending exchange.
+    Abandoned {},
+    /// A newer generation won.
+    Superseded {},
+    /// The operation failed without installing authorization.
+    Failed {
+        /// Closed failure classification.
+        reason: OauthCredentialFailure,
+    },
+}
+
+/// Closed failures emitted by OAuth administration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OauthCredentialFailure {
+    /// The profile is undeclared.
+    UnknownProfile,
+    /// The profile does not use OAuth.
+    NonOauthProfile,
+    /// The registration changed during the exchange.
+    RegistrationChanged,
+    /// The device endpoint rejected the request or returned invalid details.
+    DeviceEndpointRejected,
+    /// The initial device request failed in transport.
+    DeviceEndpointFailed,
+    /// The operator denied authorization.
+    AccessDenied,
+    /// The authorization polling deadline expired.
+    PollingExpired,
+    /// The token endpoint failed.
+    TokenEndpointFailed,
+    /// The token response contained no identity token.
+    TokenResponseWithoutIdentity,
+    /// A pool co-member already holds the account identity.
+    AccountIndependenceFailed,
+}
+
+pub(crate) fn validate_oauth_profile(profile: &str) -> Result<(), FrameValidationError> {
+    if profile.is_empty()
+        || profile.len() > 256
+        || profile.trim() != profile
+        || profile.contains('\0')
+    {
+        return Err(FrameValidationError::OauthCredentialShape);
+    }
+    Ok(())
+}
+
+/// Checks device-authorization progress before it can be emitted.
+pub fn validate_oauth_authorization(
+    user_code: &str,
+    verification_uri: &str,
+) -> Result<(), FrameValidationError> {
+    if user_code.is_empty()
+        || user_code.len() > 256
+        || !user_code.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+        || verification_uri.is_empty()
+        || verification_uri.len() > 4096
+        || verification_uri
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+        // Url accepts repaired browser addresses; progress requires a URI authority.
+        || !verification_uri.split_once("://").is_some_and(|(_, rest)| {
+            rest.split(['/', '?', '#'])
+                .next()
+                .is_some_and(|authority| !authority.is_empty() && !authority.contains('@'))
+        })
+    {
+        return Err(FrameValidationError::OauthCredentialShape);
+    }
+    let uri = url::Url::parse(verification_uri)
+        .map_err(|_| FrameValidationError::OauthCredentialShape)?;
+    if uri.scheme() != "https"
+        || uri.host_str().is_none()
+        || !uri.username().is_empty()
+        || uri.password().is_some()
+        || uri.fragment().is_some()
+    {
+        return Err(FrameValidationError::OauthCredentialShape);
+    }
+    Ok(())
+}
+
 /// Closed versioned server message family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
+    /// Operator instructions for a pending OAuth exchange.
+    OauthCredentialAuthorization {
+        /// User-global durable command identity.
+        command_id: crate::CommandId,
+        /// Credential profile identity.
+        profile: String,
+        /// Printable ASCII device user code, at most 256 bytes.
+        user_code: String,
+        /// Absolute HTTPS verification URI, at most 4,096 bytes.
+        verification_uri: String,
+    },
+    /// Durable result of an OAuth administration command.
+    OauthCredentialReceipt {
+        /// User-global durable command identity.
+        command_id: crate::CommandId,
+        /// Credential profile identity.
+        profile: String,
+        /// Closed terminal result.
+        outcome: OauthCredentialOutcome,
+    },
     /// Session creation receipt.
     SessionCreated {
         /// Created session.
@@ -745,6 +864,16 @@ impl ServerMessage {
         }
         validate_operator_status_message(self)?;
         match self {
+            Self::OauthCredentialAuthorization {
+                profile,
+                user_code,
+                verification_uri,
+                ..
+            } => {
+                validate_oauth_profile(profile)?;
+                validate_oauth_authorization(user_code, verification_uri)?;
+            }
+            Self::OauthCredentialReceipt { profile, .. } => validate_oauth_profile(profile)?,
             Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,
             Self::SessionAwaitRegistered {
                 mode: DelegationWaitMode::Foreground,

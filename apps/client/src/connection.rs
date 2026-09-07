@@ -271,7 +271,10 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::ReadReviewOrchestration { .. }
         | ClientRequest::StopTurn { .. }
         | ClientRequest::DecideToolRequest { .. }
-        | ClientRequest::OverrideDeniedToolRequest { .. } => false,
+        | ClientRequest::OverrideDeniedToolRequest { .. }
+        | ClientRequest::ProvisionOauthCredential { .. }
+        | ClientRequest::ReprovisionOauthCredential { .. }
+        | ClientRequest::DeleteOauthCredential { .. } => false,
     }
 }
 

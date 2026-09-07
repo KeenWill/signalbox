@@ -142,6 +142,7 @@ impl<Clock>
     pub fn try_new_production(
         clock: Clock,
         pool: PgPool,
+        eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
         credentials: MappedDaemonCredentialInputs<FileCredentialAccess>,
         code_host_transport: GitHubCodeHostTransport,
         github_egress_policy: GitHubEgressPolicy,
@@ -191,9 +192,11 @@ impl<Clock>
                 .map_err(|_| DaemonToolsConstructionError::Conversations)?;
         let goal = GoalDeclarationTool::try_new(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
-        let delegation =
-            SessionDelegationTools::try_new(DaemonSessionDelegationPort::postgres(pool.clone()))
-                .map_err(|_| DaemonToolsConstructionError::SessionDelegation)?;
+        let delegation = SessionDelegationTools::try_new(DaemonSessionDelegationPort::postgres(
+            pool.clone(),
+            eligibility_nudge,
+        ))
+        .map_err(|_| DaemonToolsConstructionError::SessionDelegation)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
             .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
@@ -218,6 +221,7 @@ impl<Clock>
     pub fn try_new_without_tool_mappings(
         clock: Clock,
         pool: PgPool,
+        eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
         credentials: BaseDaemonCredentialInputs<FileCredentialAccess>,
         code_host_transport: GitHubCodeHostTransport,
         web_fetch_egress_policy: WebFetchEgressPolicy,
@@ -239,9 +243,11 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
         let code_host = CodeHostTools::try_new(code_host, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
-        let delegation =
-            SessionDelegationTools::try_new(DaemonSessionDelegationPort::postgres(pool.clone()))
-                .map_err(|_| DaemonToolsConstructionError::SessionDelegation)?;
+        let delegation = SessionDelegationTools::try_new(DaemonSessionDelegationPort::postgres(
+            pool.clone(),
+            eligibility_nudge,
+        ))
+        .map_err(|_| DaemonToolsConstructionError::SessionDelegation)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
             .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
