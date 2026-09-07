@@ -37,9 +37,6 @@ impl RuntimeModelDefinition {
         max_output_tokens: u32,
         context_window_tokens: u32,
     ) -> result::Result<Self, RuntimeModelDefinitionError>;
-    #[must_use]
-    pub const fn with_provider_reasoning_support(self, supported: bool) -> Self;
-    pub const fn provider_reasoning_supported(&self) -> bool;
     pub const fn target(&self) -> signalbox_domain::ResolvedProviderTarget;
     pub fn provider_model(&self) -> &str;
     pub const fn with_fast_target(

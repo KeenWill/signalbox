@@ -138,7 +138,6 @@ pub struct RuntimeModelDefinition {
     provider_model: String,
     fast_target: Option<ResolvedProviderTarget>,
     provider_compaction_supported: bool,
-    provider_reasoning_supported: bool,
     max_output_tokens: u32,
     context_window_tokens: u32,
 }
@@ -168,22 +167,9 @@ impl RuntimeModelDefinition {
             provider_model,
             fast_target: None,
             provider_compaction_supported: false,
-            provider_reasoning_supported: true,
             max_output_tokens,
             context_window_tokens,
         })
-    }
-
-    /// Sets whether this target's reasoning may enter durable response content.
-    #[must_use]
-    pub const fn with_provider_reasoning_support(mut self, supported: bool) -> Self {
-        self.provider_reasoning_supported = supported;
-        self
-    }
-
-    /// Whether this target's decoded reasoning may enter durable response content.
-    pub const fn provider_reasoning_supported(&self) -> bool {
-        self.provider_reasoning_supported
     }
 
     /// Returns the durable exact target represented by this mapping.
@@ -814,7 +800,6 @@ pub struct RuntimeModelCallCapability<Prepared> {
     prepared: Prepared,
     binding: PreparedBinding,
     resolved_target: ResolvedTarget,
-    provider_reasoning_supported: bool,
 }
 
 #[derive(signalbox_derive::OperatorError)]
@@ -1281,8 +1266,6 @@ where
                     prepared,
                     binding,
                     resolved_target,
-                    provider_reasoning_supported: effective_definition
-                        .provider_reasoning_supported(),
                 },
             )),
             PreparationOutcome::Cancelled {
@@ -1378,12 +1361,8 @@ where
             TerminalEvidence::ProviderError(error) => error.non_acceptance_proven,
             _ => false,
         };
-        let mut evidence = report.evidence;
-        if !capability.provider_reasoning_supported {
-            omit_provider_reasoning(&mut evidence);
-        }
         let classified = classify_terminal(
-            evidence,
+            report.evidence,
             &observations.observations,
             &capability.resolved_target,
             self.diagnostic_model_identity_limit,
@@ -1992,18 +1971,6 @@ impl ClassificationFailure {
             served_target: None,
         }
     }
-}
-
-fn omit_provider_reasoning(evidence: &mut TerminalEvidence) {
-    let content = match evidence {
-        TerminalEvidence::Completed(completion)
-        | TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
-            &mut completion.content
-        }
-        TerminalEvidence::Refused(refusal) => &mut refusal.content,
-        _ => return,
-    };
-    content.retain(|part| !matches!(part, AssistantPart::ProviderReasoning { .. }));
 }
 
 fn classify_terminal(
@@ -3226,23 +3193,6 @@ mod tests {
                 ],
             }
         );
-    }
-
-    #[test]
-    fn reasoning_retention_can_be_disabled_without_dropping_visible_content() {
-        let mut evidence = tool_completion("model-exact");
-        let TerminalEvidence::Completed(content) = &mut evidence else {
-            panic!("fixture completion");
-        };
-        let visible = content.content.clone();
-        content.content.insert(1, AssistantPart::ProviderReasoning {
-            item_json: r#"{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"opaque"}"#.to_string(),
-        });
-        super::omit_provider_reasoning(&mut evidence);
-        let TerminalEvidence::Completed(content) = evidence else {
-            panic!("completion retained");
-        };
-        assert_eq!(content.content, visible);
     }
 
     #[test]
