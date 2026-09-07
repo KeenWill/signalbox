@@ -370,8 +370,10 @@ fn socket_artifacts_conflict(process_path: &Path, runner_path: &Path) -> bool {
     let Some(runner_artifacts) = socket_artifact_paths(runner_path) else {
         return process_path == runner_path;
     };
+    let oauth_root = oauth_credential_root(&process_artifacts[0]);
     process_artifacts
         .iter()
+        .chain(std::iter::once(&oauth_root))
         .any(|process| runner_artifacts.iter().any(|runner| runner == process))
 }
 
@@ -455,6 +457,12 @@ fn normalize_file_reference(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+fn oauth_credential_root(process_socket: &Path) -> PathBuf {
+    let mut root = process_socket.as_os_str().to_owned();
+    root.push(".oauth");
+    PathBuf::from(root)
 }
 
 fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
@@ -1646,7 +1654,7 @@ async fn run_hub(
     })?;
     let pool = database.pool().clone();
     let oauth_registrations = model_configuration.oauth_registrations();
-    let root_path = configuration.process_socket_path().with_extension("oauth");
+    let root_path = oauth_credential_root(configuration.process_socket_path());
     let retained_root = match root_path.symlink_metadata() {
         Ok(_) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -1668,10 +1676,12 @@ async fn run_hub(
         signalbox_persistence::oauth_credential::OauthCredentialRepository::new(pool.clone())
             .replace_registrations(&oauth_registrations)
             .await
-            .map_err(|_| {
-                erase_startup_cause(
-                    RuntimePhase::StartupScan,
-                    SanitizedStartupCause::Static("oauth_registration_recovery_failed"),
+            .map_err(|error| {
+                erase_startup_scan_cause(
+                    process_runtime_failure_class(&ProcessRuntimeError::OauthRecovery(error)),
+                    "oauth_registration_recovery_failed",
+                    None,
+                    None,
                 )
             })?;
         let service = Arc::new(
@@ -3325,6 +3335,36 @@ mod tests {
         assert_eq!(
             configuration.runner_socket_path(),
             std::path::Path::new("/tmp/signalbox-runner.sock")
+        );
+    }
+
+    #[test]
+    fn oauth_root_remains_distinct_when_the_socket_ends_in_oauth() {
+        let socket = std::path::Path::new("/tmp/signalbox.oauth");
+        let root = super::oauth_credential_root(socket);
+        assert_ne!(root, socket);
+        assert_eq!(root, std::path::Path::new("/tmp/signalbox.oauth.oauth"));
+        assert_ne!(
+            root,
+            super::oauth_credential_root(std::path::Path::new("/tmp/signalbox.sock"))
+        );
+    }
+
+    #[test]
+    fn runner_socket_cannot_replace_the_oauth_credential_root() {
+        let error = HubConfiguration::from_values(HubConfigurationValues {
+            process_socket_path: Some(OsString::from("/tmp/signalbox.sock")),
+            runner_socket_path: Some(OsString::from("/tmp/signalbox.sock.oauth")),
+            ..hub_configuration_values()
+        })
+        .err()
+        .expect("the OAuth root is a reserved process socket artifact");
+        assert_eq!(
+            error,
+            HubConfigurationError::new(
+                RUNNER_SOCKET_PATH_ENVIRONMENT,
+                RequiredSettingFailure::Conflicts,
+            )
         );
     }
 

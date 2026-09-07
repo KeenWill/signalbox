@@ -725,9 +725,10 @@ Dispatch holds the profile row lock through copying access and identity tokens
 and account metadata into a scratch home, withholding the refresh token. The
 adapter seeds exact-value redaction before writing either token. Homes use
 `0700` directories and `0600` regular files beneath one daemon-owned `0700`
-root, with descriptor-relative creation and removal rejecting symlinks.
-Completion removes the home; startup validates all retained homes before
-scavenging and fails without removal on ownership, type, or containment
+root, with descriptor-relative creation and removal rejecting symlinks. The root
+appends `.oauth` to the process socket path and cannot overlap runner socket
+artifacts. Completion removes the home; startup validates all retained homes
+before scavenging and fails without removal on ownership, type, or containment
 mismatch. The Codex child uses the home's file backend and token-only
 authentication with ambient credentials, keyrings, helpers, and external stores
 disabled; inability to deliver the home is a typed pre-send failure. An
