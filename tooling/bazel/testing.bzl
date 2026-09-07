@@ -188,11 +188,14 @@ def rust_quality_tests(documented_crates):
     Args:
         documented_crates: Crate labels Cargo includes in workspace documentation.
     """
-    targets = [
-        ":" + name
-        for name, rule in native.existing_rules().items()
-        if rule["kind"] in ["rust_library", "rust_binary", "rust_proc_macro", "rust_test"]
-    ]
+    targets = {}
+    for name, rule in native.existing_rules().items():
+        if rule["kind"] == "cargo_build_script":
+            # Quality aspects consume the compiled Rust script's crate provider.
+            targets[rule["script"]] = True
+        elif rule["kind"] in ["rust_library", "rust_binary", "rust_proc_macro", "rust_test"]:
+            targets[":" + name] = True
+    targets = targets.keys()
     rust_clippy_test(name = "clippy", targets = targets, visibility = ["//:__pkg__"])
     rustfmt_test(name = "rustfmt", targets = targets, visibility = ["//:__pkg__"])
     for crate in documented_crates:

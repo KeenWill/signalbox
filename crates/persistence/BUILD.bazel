@@ -1,4 +1,5 @@
 load("@postgres_suites//:defs.bzl", "SUITES")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_postgres_test", "rust_quality_tests", "rust_selection_test", "rust_unit_test")
@@ -19,6 +20,15 @@ TEST_DEPS = [
 ]
 
 rust_package()
+
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    crate_root = "build.rs",
+    data = glob(["migrations/*.sql"]),
+    edition = "2024",
+    rustc_env_files = [":cargo_environment"],
+)
 
 rust_library(
     name = "signalbox_persistence",

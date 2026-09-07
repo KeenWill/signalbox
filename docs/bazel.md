@@ -147,7 +147,7 @@ Ordinary PostgreSQL selections reuse the ignored suites’ compiled binaries; th
 non-PostgreSQL suite does not execute their ignored tests.
 
 `//:rust_clippy_tests` runs Clippy with `clippy.toml` and warnings denied.
-`//:rust_format_tests` checks native workspace crate roots and their modules,
-matching Cargo formatting. `//:rust_documentation` builds Cargo's documentation
-entrypoints with warnings denied. These actions use the declared Rust toolchain
-and remote cache.
+`//:rust_format_tests` checks native workspace crate roots, Cargo build scripts,
+and their modules, matching Cargo formatting. `//:rust_documentation` builds
+Cargo's documentation entrypoints with warnings denied. These actions use the
+declared Rust toolchain and remote cache.
