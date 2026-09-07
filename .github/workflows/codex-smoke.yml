@@ -255,6 +255,13 @@ jobs:
             echo "::error::Expected exactly one live smoke test to execute; libtest reported '${passed_count:-no passed count}'."
             exit 1
           fi
+      - name: Probe the pinned app-server protocol
+        env:
+          SIGNALBOX_CODEX_SMOKE_MODEL: ${{ vars.CODEX_SMOKE_MODEL }}
+        run: >-
+          cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli
+          --test live_smoke -- --ignored --exact
+          the_pinned_codex_app_server_answers_protocol_questions --nocapture
       - name: Remove the credential store
         if: ${{ always() }}
         run: rm -rf "${CODEX_HOME}"
