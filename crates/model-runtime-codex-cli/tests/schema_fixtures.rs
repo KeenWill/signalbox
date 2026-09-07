@@ -563,3 +563,19 @@ fn transparent_all_of_wrappers_preserve_consumed_status_checks() {
         .push(serde_json::json!("futureStatus"));
     assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
 }
+
+#[test]
+fn all_of_wrappers_ignore_annotations_but_preserve_value_constraints() {
+    let expected = derived::<frame::TurnCompleted>();
+    let mut actual = schema("TurnCompletedNotification");
+    let status = actual["definitions"]["Turn"]["properties"]["status"].clone();
+    actual["definitions"]["Turn"]["properties"]["status"] = serde_json::json!({
+        "allOf":[status], "title":"Turn status", "description":"Current turn status",
+        "default":"completed", "examples":["completed"], "readOnly":true,
+        "writeOnly":false, "deprecated":false, "$comment":"Status schema"
+    });
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_ok());
+    actual["definitions"]["Turn"]["properties"]["status"]["enum"] =
+        serde_json::json!(["completed"]);
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
+}

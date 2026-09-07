@@ -66,7 +66,24 @@ fn dereference<'a>(mut value: &'a Value, root: &'a Value) -> &'a Value {
         } else if let Some(branches) = value["allOf"]
             .as_array()
             .filter(|branches| branches.len() == 1)
-            .filter(|_| value.as_object().is_some_and(|fields| fields.len() == 1))
+            .filter(|_| {
+                value.as_object().is_some_and(|fields| {
+                    fields.keys().all(|key| {
+                        matches!(
+                            key.as_str(),
+                            "allOf"
+                                | "title"
+                                | "description"
+                                | "default"
+                                | "examples"
+                                | "readOnly"
+                                | "writeOnly"
+                                | "deprecated"
+                                | "$comment"
+                        )
+                    })
+                })
+            })
         {
             value = &branches[0];
         } else {
