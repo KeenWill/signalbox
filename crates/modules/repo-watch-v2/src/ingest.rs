@@ -88,26 +88,21 @@ impl RepoWatchStore {
         transaction.commit().await?;
         let (generation, observation, merged_baselines) = match row {
             Some(row) => {
-                let value: Value = serde_json::from_str(&row.comparison_baseline)
+                let mut value: Value = serde_json::from_str(&row.comparison_baseline)
                     .map_err(|_| StoreError::InvalidComparisonBaseline)?;
-                let comparison = if observation_decode::requires_refetch(&value) {
-                    (None, Vec::new())
-                } else {
-                    (
-                        Some(
-                            observation_decode::observation(&value)
-                                .ok_or(StoreError::InvalidComparisonBaseline)?,
-                        ),
-                        observation_decode::merged_baselines(&value)
-                            .ok_or(StoreError::InvalidComparisonBaseline)?,
-                    )
-                };
+                if let Some(merged) = value["merged_pull_requests"].as_array_mut() {
+                    merged.retain(|entry| entry.get("merged_at").is_some());
+                }
                 (
                     row.frontier_generation
                         .to_u64()
                         .ok_or(StoreError::InvalidFrontierGeneration)?,
-                    comparison.0,
-                    comparison.1,
+                    Some(
+                        observation_decode::observation(&value)
+                            .ok_or(StoreError::InvalidComparisonBaseline)?,
+                    ),
+                    observation_decode::merged_baselines(&value)
+                        .ok_or(StoreError::InvalidComparisonBaseline)?,
                 )
             }
             None => (0, None, Vec::new()),
