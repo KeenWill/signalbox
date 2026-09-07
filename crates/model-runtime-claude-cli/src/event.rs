@@ -699,6 +699,7 @@ impl<C: Clone> EventDecoder<C> {
             let content = self.redacted_content(&mut capture);
             self.report_usage(sink);
             return TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
                 exchange: self.exchange,
                 message_id: self.message_id,
                 reported_model: self.reported_model,

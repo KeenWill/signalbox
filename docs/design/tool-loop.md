@@ -1,10 +1,13 @@
 # Tool loop design
 
-This design is not built; it extends [tool-loop](../spec/tool-loop.md) with
-three capabilities: pre-approval admissibility, the instruction admission
-effect, and child creation by `spawn_session`.
+This design is not built; it extends [tool-loop](../spec/tool-loop.md) with four
+capabilities: lost-placement resolution, pre-approval admissibility, the
+instruction admission effect, and child creation by `spawn_session`.
 
 ## Goal
+
+Lost-placement resolution prevents or retires approval parking for unavailable
+runner requests.
 
 Pre-approval admissibility lets a tool family refuse a request on evidence
 available before any approval decision, so no judge or user is asked about a
@@ -19,6 +22,60 @@ Child creation gives `spawn_session` one placement-owned transaction that
 creates a delegated child and its initial task work.
 
 ## Design
+
+Before approval, a runner-locus request whose placement is lost before any lease
+offer or executor dispatch resolves as a retryable failure recorded in the batch
+before any approval wait parks the batch. The request stores
+`closed_inadmissible` with the retryable `placement_lost` reason, without an
+approval state, judge call, attempt row, or executor work. It projects one
+`ToolInadmissible { request }` entry in proposal order, rendered as
+`execution_failed` with detail `placement_lost`, and satisfies the
+batch-complete condition.
+
+The loss transaction resolves every unresolved runner-locus request in the batch
+that has neither an offered lease nor executor dispatch, including earlier
+approved requests when a later request parks the batch. It retires any existing
+approval and records only the retryable `closed_inadmissible` logical resolution
+without creating an attempt row or result entry, then resumes batch evaluation;
+continuation projects the result after the whole batch resolves. Any existing
+`Prepared` tool attempt is terminalized as `KnownFailed` with `placement_lost`
+in that transaction before the request closes, without lease offer or executor
+dispatch; its retained evidence adds no second result projection.
+
+A `Prepared` dedicated approval-judge call is retired without authorization in
+the same loss transaction that closes the request. If the call is in flight, the
+loss transition waits for that call's observation boundary and terminalizes its
+result before retiring any resulting approval and closing the request. Batch
+evaluation and staged replacement cannot continue between that observation and
+the request closure.
+
+An offered lease is already dispatched. With durable no-execution proof, loss
+permits a checked successor generation for every effect class while retaining
+the unexecuted attempt, as the [runner contract](../spec/runner-protocol.md)
+requires. Without that proof, side-effecting work receives crash classification;
+pure or idempotent work instead retains the lost attempt and requires a fresh
+physical attempt. When either retry path needs a successor runner, all preceding
+requests first reach durable resolution, but none of the batch's result entries
+is projected yet. A distinct pre-continuation takeover transaction then locks
+the session, batch, retained lost attempt, and staged replacement; revalidates
+that every preceding request is resolved and that this request alone is
+recovery-pending; installs the successor placement; and consumes the staged
+replacement before a retry lease can be offered, using the
+[runner installation transaction](runner-protocol.md). It neither appends
+tool-result entries nor prepares a continuation. This recovery takeover is the
+exception to waiting for the lost offered request to resolve. The request
+remains recovery-pending until its retry resolves or
+[terminalization wins](turn-lifecycle-and-scheduling.md). If the retry resolves
+first, later requests execute in proposal order. The transaction offering a
+fresh retry attempt terminalizes the retained lost attempt as superseded by that
+fresh attempt atomically with the retry offer, without an extra result entry.
+Once the whole batch resolves, the ordinary continuation transaction projects
+every result in proposal order, appends the pending relocation entry, and
+prepares the next call. Retry correlation crosses the placement boundary and
+therefore validates the lost attempt and successor placement generations without
+requiring their runner ids to match. An executor-dispatched attempt otherwise
+completes or receives its effect-class crash classification; placement loss
+never rewrites or cancels it.
 
 A family declares an admissibility check for a condition it can evaluate before
 approval. Where a family declares one, that check takes precedence over the
@@ -113,6 +170,35 @@ The spawn port rejects execution unconditionally today. That rejection stays
 until the creation transaction exists, and no other surface creates the child.
 
 ## Acceptance criteria
+
+A runner-locus request that loses placement before any lease offer or executor
+dispatch records a retryable failure without creating an attempt row; its
+retained `closed_inadmissible` resolution projects `ToolInadmissible` and counts
+toward batch completion. Loss retires existing approvals and records that
+resolution only after terminalizing any existing `Prepared` tool attempt as
+`KnownFailed` with `placement_lost` in the same transaction, without dispatch or
+a second result projection. It records that resolution for every unresolved
+runner-locus request before dispatch, including earlier approved requests in a
+parked batch, then resumes batch evaluation. A prepared judge call is retired
+without authorization atomically with request closure; an in-flight judge call
+reaches its observation boundary first. Offered attempts lost with durable
+no-execution proof permit a checked successor generation for every effect class,
+retaining the unexecuted attempt. Without that proof, side-effecting offered
+attempts receive effect-class crash classification. Both proof-backed retries of
+any effect class and pure or idempotent retries without proof use
+pre-continuation takeover when a successor runner is needed: after every
+preceding request resolves, that transaction installs the successor and consumes
+the staged replacement before the retry lease is offered, without requiring the
+old and new runner ids to match. It projects no result and prepares no
+continuation. Unless terminalization closes the retained attempt and request and
+suppresses retry, the request remains recovery-pending until that retry
+resolves; later requests then execute in proposal order before the ordinary
+continuation transaction projects the complete batch. Executor-dispatched
+attempts otherwise complete or receive effect-class crash classification;
+placement loss never rewrites or cancels them.
+
+Offering a fresh retry atomically leaves the retained lost attempt terminal and
+superseded by that retry, without an extra result entry or two live attempts.
 
 A request a declaring family marks inadmissible resolves before approval with no
 approval state, no judge call, no attempt row, and no executor work; it projects

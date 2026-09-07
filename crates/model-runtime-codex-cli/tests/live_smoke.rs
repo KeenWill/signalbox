@@ -1,10 +1,10 @@
 //! Compatibility smoke against the real, pinned Codex CLI.
 //!
-//! Ignored by default: it spawns the installed executable, spends one real
-//! model exchange, and therefore needs credentials the ordinary Rust workflow
-//! never has. `.github/workflows/codex-smoke.yml` is the only automated caller:
-//! its unprivileged gate rejects changed fork pull requests before the
-//! environment-backed smoke job can start.
+//! Ignored by default: the adapter smoke and temporary app-server probe each
+//! spend one real model exchange. They need credentials the ordinary Rust
+//! workflow never has. Their only automated caller is
+//! `.github/workflows/codex-smoke.yml`: its unprivileged gate rejects changed
+//! fork pull requests before the environment-backed smoke job can start.
 //!
 //! What it proves is protocol compatibility, which is what a CLI version bump
 //! actually breaks: the `codex exec --json` event stream still starts a thread,
@@ -45,7 +45,7 @@ use signalbox_model_runtime_codex_cli::{
 };
 
 /// Overrides the executable under test. The default resolves through `PATH`;
-/// CI points it at the binary `npm ci` unpacked from the pin manifest.
+/// CI points it at the binary installed from the pinned release manifest.
 const EXECUTABLE_VARIABLE: &str = "SIGNALBOX_CODEX_SMOKE_EXECUTABLE";
 
 /// Overrides the model. The default is the cheapest model this CLI advertises
@@ -401,6 +401,12 @@ async fn the_pinned_codex_cli_pre_spend_contract_holds() {
 }
 
 async fn assert_pre_spend_contract(executable: &std::path::Path) {
+    signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version(
+        executable,
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    .expect("the executable matches the manifest's upstream version and fork binary digest");
     assert_pinned_version(executable).await;
     assert_pinned_feature_inventory(executable).await;
     assert_ambient_skill_instructions_disabled(executable).await;
@@ -679,7 +685,7 @@ async fn assert_pinned_version(executable: &std::path::Path) {
         "the executable at `{}` reports {version}, but this smoke can \
          only produce compatibility evidence for the pinned \
          {SUPPORTED_CODEX_CLI_VERSION}; install the version pinned in \
-         tooling/codex-cli/package.json",
+         tooling/codex-cli/release.json",
         executable.display()
     );
 }
@@ -1547,6 +1553,7 @@ fn decoded_response_accepts_refusal_without_completion_material() {
         ..TokenUsage::default()
     };
     let evidence = TerminalEvidence::Refused(RefusalEvidence {
+        reason: signalbox_model_runtime::RefusalReason::Unspecified,
         exchange: exchange.clone(),
         message_id: None,
         reported_model: None,
@@ -1972,4 +1979,289 @@ fn executable_resolution_panics_for_a_missing_bare_command() {
         empty.path(),
         Some(&search),
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "observes the pinned app-server with CI-only credentials"]
+async fn the_pinned_codex_app_server_answers_protocol_questions() {
+    let executable = absolute_executable(&executable_override_or_default());
+    assert_pinned_version(&executable).await;
+    app_server_probe::run(&executable).await;
+}
+
+#[cfg(unix)]
+mod app_server_probe {
+    use super::*;
+    use serde_json::{Value, json};
+    use std::path::Path;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    // Probe-only bounds keep a protocol stall and an oversized frame observable.
+    const TURN_BOUND: Duration = Duration::from_secs(180);
+    const FRAME_BOUND: u64 = 1024 * 1024;
+
+    #[derive(Default)]
+    struct Observed {
+        stage: &'static str,
+        rpc_code: Option<i64>,
+        status: &'static str,
+        unauthorized: bool,
+        error_info: &'static str,
+        path_present: bool,
+        refresh_requests: usize,
+        windows: Vec<Value>,
+    }
+
+    pub(super) async fn run(executable: &Path) {
+        let empty_home = tempfile::tempdir().expect("empty home");
+        let working = tempfile::tempdir().expect("non-Git working directory");
+        std::fs::write(empty_home.path().join("config.toml"), "").expect("empty config");
+        let empty = exchange(executable, empty_home.path(), working.path()).await;
+        println!(
+            "PROBE a observed empty_home stage={} rpc_code={:?} status={} unauthorized={} codex_error_info={}",
+            empty.stage, empty.rpc_code, empty.status, empty.unauthorized, empty.error_info
+        );
+
+        let invalid_home = tempfile::tempdir().expect("synthetic invalid login home");
+        std::fs::write(invalid_home.path().join("config.toml"), "").expect("empty config");
+        std::fs::write(
+            invalid_home.path().join("auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-signalbox-invalid-probe-credential"}"#,
+        )
+        .expect("write a deliberately invalid synthetic credential");
+        let invalid = exchange(executable, invalid_home.path(), working.path()).await;
+        println!(
+            "PROBE a observed synthetic_invalid_login stage={} rpc_code={:?} status={} unauthorized={} codex_error_info={}",
+            invalid.stage,
+            invalid.rpc_code,
+            invalid.status,
+            invalid.unauthorized,
+            invalid.error_info
+        );
+
+        let home = tempfile::tempdir().expect("authenticated probe home");
+        std::fs::write(home.path().join("config.toml"), "").expect("empty config");
+        let credential_home = std::env::var_os("CODEX_HOME").expect("CI credential home");
+        // The CLI opens its own login; the test never reads credential bytes.
+        std::os::unix::fs::symlink(
+            Path::new(&credential_home).join("auth.json"),
+            home.path().join("auth.json"),
+        )
+        .expect("reference the CI login");
+        let live = exchange(executable, home.path(), working.path()).await;
+        let config = std::fs::read_to_string(home.path().join("config.toml"))
+            .expect("read only the probe-owned configuration");
+        println!(
+            "PROBE b observed sandbox=read-only config_empty={} trust_entry={}",
+            config.is_empty(),
+            config.contains("trust_level")
+        );
+        println!(
+            "PROBE c observed ephemeral=true thread_path_present={} sessions_directory={} files={}",
+            live.path_present,
+            home.path().join("sessions").exists(),
+            file_count(home.path())
+        );
+        println!(
+            "PROBE d observed refresh_requests={} decline_code=-32601 stage={} status={}",
+            live.refresh_requests, live.stage, live.status
+        );
+        println!(
+            "PROBE e observed windows_used_percent_and_resets_at={:?}",
+            live.windows
+        );
+        let mut command = command(executable, empty_home.path(), working.path());
+        command.args(["--disable", "signalbox_probe_unknown_feature", "app-server"]);
+        let mut child = spawn_probe(&mut command, executable).await;
+        drop(child.stdin.take());
+        let output = command_output_bounded(
+            child,
+            executable,
+            "unknown feature app-server",
+            Duration::from_secs(30),
+            FRAME_BOUND as usize,
+            "probe output",
+        )
+        .await;
+        println!(
+            "PROBE f observed unknown_feature_exit_success={}",
+            output.status.success()
+        );
+        println!(
+            "PROBE g observed non_git_cwd=true stage={} rpc_code={:?} status={}",
+            live.stage, live.rpc_code, live.status
+        );
+    }
+
+    fn file_count(root: &Path) -> usize {
+        std::fs::read_dir(root)
+            .expect("list probe home")
+            .map(|entry| {
+                let entry = entry.expect("probe entry");
+                if entry.file_type().expect("entry type").is_dir() {
+                    file_count(&entry.path())
+                } else {
+                    1
+                }
+            })
+            .sum()
+    }
+
+    fn command(executable: &Path, home: &Path, working: &Path) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(executable);
+        command
+            .env_clear()
+            .env("CODEX_HOME", home)
+            .env("HOME", working);
+        for name in ["PATH", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        command
+            .current_dir(working)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .process_group(0);
+        command
+    }
+
+    async fn send(stdin: &mut tokio::process::ChildStdin, frame: Value) {
+        let mut bytes = serde_json::to_vec(&frame).expect("probe request encodes");
+        bytes.push(b'\n');
+        stdin.write_all(&bytes).await.expect("probe request writes");
+    }
+
+    async fn exchange(executable: &Path, home: &Path, working: &Path) -> Observed {
+        let mut command = command(executable, home, working);
+        for feature in DISABLED_CODEX_CLI_CAPABILITY_FEATURES {
+            command.args(["--disable", feature]);
+        }
+        for config in [
+            "agents.enabled=false",
+            "skills.include_instructions=false",
+            "mcp_servers={}",
+            "web_search=\"disabled\"",
+            "project_doc_max_bytes=0",
+        ] {
+            command.args(["-c", config]);
+        }
+        command.args(["app-server", "--stdio", "--strict-config"]);
+        let mut child = spawn_probe(&mut command, executable).await;
+        let group = child.id();
+        let mut stdin = child.stdin.take().expect("probe stdin");
+        let mut stdout = BufReader::new(child.stdout.take().expect("probe stdout"));
+        let mut observed = Observed {
+            stage: "initialize",
+            status: "no_terminal",
+            ..Observed::default()
+        };
+        let completed = tokio::time::timeout(TURN_BOUND, async {
+            send(&mut stdin, json!({"id":1,"method":"initialize","params":{
+                "clientInfo":{"name":"signalbox_protocol_probe","version":"1"},
+                "capabilities":{"experimentalApi":false}
+            }})).await;
+            loop {
+                use tokio::io::AsyncReadExt;
+                let mut bytes = Vec::new();
+                let size = (&mut stdout).take(FRAME_BOUND + 1).read_until(b'\n', &mut bytes)
+                    .await.expect("probe frame read");
+                if size == 0 { break; }
+                assert!(size as u64 <= FRAME_BOUND, "probe frame exceeded bound");
+                let frame: Value = serde_json::from_slice(&bytes).expect("probe frame is JSON");
+                if let Some(method) = frame.get("method").and_then(Value::as_str) {
+                    if let Some(id) = frame.get("id") {
+                        if method == "account/chatgptAuthTokens/refresh" {
+                            observed.refresh_requests += 1;
+                        }
+                        send(&mut stdin, json!({"id":id,"error":{"code":-32601,"message":"Unsupported method"}})).await;
+                    } else if method == "account/rateLimits/updated" {
+                        for name in ["primary", "secondary"] {
+                            let window = &frame["params"]["rateLimits"][name];
+                            if !window.is_null() {
+                                observed.windows.push(json!({
+                                    "usedPercent": window["usedPercent"].as_i64(),
+                                    "resetsAt": window["resetsAt"].as_i64()
+                                }));
+                            }
+                        }
+                    } else if method == "turn/completed" {
+                        observed.unauthorized = frame["params"]["turn"]["error"]["codexErrorInfo"] == "unauthorized";
+                        observed.error_info = error_tag(&frame["params"]["turn"]["error"]["codexErrorInfo"]);
+                        observed.status = match frame["params"]["turn"]["status"].as_str() {
+                            Some("completed") => "completed",
+                            Some("failed") => "failed",
+                            Some("interrupted") => "interrupted",
+                            _ => continue,
+                        };
+                        observed.stage = "turn/completed";
+                        break;
+                    }
+                } else if frame.get("error").is_some() {
+                    observed.rpc_code = frame["error"]["code"].as_i64();
+                    break;
+                } else {
+                    match frame["id"].as_u64() {
+                        Some(1) => {
+                            send(&mut stdin, json!({"method":"initialized"})).await;
+                            observed.stage = "thread/start";
+                            send(&mut stdin, json!({"id":2,"method":"thread/start","params":{
+                                "model":variable_or(MODEL_VARIABLE, DEFAULT_MODEL),
+                                "cwd":working,"sandbox":"read-only","approvalPolicy":"never","ephemeral":true
+                            }})).await;
+                        }
+                        Some(2) => {
+                            observed.path_present = !frame["result"]["thread"]["path"].is_null();
+                            let id = frame["result"]["thread"]["id"].as_str().expect("thread id");
+                            observed.stage = "turn/start";
+                            send(&mut stdin, json!({"id":3,"method":"turn/start","params":{
+                                "threadId":id,"input":[{"type":"text","text":"Reply OK. Do not use tools.","text_elements":[]}]
+                            }})).await;
+                        }
+                        Some(3) => observed.stage = "turn_started",
+                        _ => {}
+                    }
+                }
+            }
+        }).await;
+        if completed.is_err() {
+            observed.status = "timeout";
+        }
+        kill_probe_group(group);
+        let _ = child.wait().await;
+        observed
+    }
+
+    fn error_tag(value: &Value) -> &'static str {
+        const TAGS: &[&str] = &[
+            "contextWindowExceeded",
+            "sessionBudgetExceeded",
+            "usageLimitExceeded",
+            "rateLimitExceeded",
+            "serverOverloaded",
+            "cyberPolicy",
+            "misalignmentPolicyViolation",
+            "httpConnectionFailed",
+            "responseStreamConnectionFailed",
+            "internalServerError",
+            "unauthorized",
+            "badRequest",
+            "threadRollbackFailed",
+            "sandboxError",
+            "responseStreamDisconnected",
+            "responseTooManyFailedAttempts",
+            "activeTurnNotSteerable",
+            "other",
+        ];
+        if value.is_null() {
+            return "absent";
+        }
+        TAGS.iter()
+            .copied()
+            .find(|tag| value.as_str() == Some(tag) || value.get(tag).is_some())
+            .unwrap_or("unknown")
+    }
 }

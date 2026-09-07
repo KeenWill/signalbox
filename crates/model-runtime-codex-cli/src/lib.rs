@@ -11,8 +11,11 @@
 //! output is sanitized for credential-shaped material before it crosses the
 //! adapter boundary.
 
+#[cfg(test)]
+mod app_server;
 mod config;
 mod event;
+mod executable_pin;
 #[cfg(test)]
 mod redaction;
 mod runtime;

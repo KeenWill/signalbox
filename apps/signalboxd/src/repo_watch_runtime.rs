@@ -186,7 +186,7 @@ impl RepositoryWatchRuntime {
             .collect();
         let listener = state
             .listener
-            .prepare(configuration.as_ref(), &wakes)
+            .prepare(configuration.as_ref(), &wakes, &state.store)
             .await
             .map_err(|_| RepositoryWatchRuntimeError::Listener)?;
         let rules = enabled

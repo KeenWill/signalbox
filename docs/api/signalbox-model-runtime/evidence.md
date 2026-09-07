@@ -148,10 +148,23 @@ pub struct CompletionEvidence {
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
 ```
 
+## RefusalReason
+
+```rust
+pub enum RefusalReason {
+    ContentPolicy,
+    CyberPolicy,
+    Misalignment,
+    Unspecified,
+}
+// derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq
+```
+
 ## RefusalEvidence
 
 ```rust
 pub struct RefusalEvidence {
+    pub reason: RefusalReason,
     pub exchange: ExchangeFacts,
     pub message_id: option::Option<ProviderMessageId>,
     pub reported_model: option::Option<ProviderReportedModel>,

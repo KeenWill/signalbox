@@ -15,10 +15,7 @@
 )]
 
 /// The pin manifest, relative to the workspace root.
-const PIN_MANIFEST: &str = "tooling/codex-cli/package.json";
-
-/// The pinned package, whose executable this adapter spawns.
-const PIN_PACKAGE: &str = "@openai/codex";
+const PIN_MANIFEST: &str = "tooling/codex-cli/release.json";
 
 /// A range, tag, or alias would let the installed executable drift away from
 /// the version the fixtures cover while this manifest still looked current.
@@ -26,15 +23,14 @@ const PIN_PACKAGE: &str = "@openai/codex";
 fn the_pin_manifest_uses_an_exact_version() {
     let manifest = read_pin_manifest();
     let pinned = manifest
-        .get("dependencies")
-        .and_then(|dependencies| dependencies.get(PIN_PACKAGE))
+        .get("release")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or_else(|| panic!("{PIN_MANIFEST} declares a {PIN_PACKAGE} dependency"));
+        .unwrap_or_else(|| panic!("{PIN_MANIFEST} declares a fork release tag"));
 
-    assert!(
-        is_exact_pin(pinned),
-        "{PIN_MANIFEST} must pin {PIN_PACKAGE} at an exact release \
-         version, not the range, tag, or alias {pinned}"
+    assert_eq!(
+        version_pin::upstream_version(pinned),
+        Some(signalbox_model_runtime_codex_cli::SUPPORTED_CODEX_CLI_VERSION),
+        "the installed release and adapter must agree on the binary version"
     );
 }
 
@@ -101,4 +97,25 @@ fn workspace_root() -> std::path::PathBuf {
 #[test]
 fn exact_pin_rejects_build_metadata() {
     assert!(!is_exact_pin("0.145.0+build.1"));
+}
+
+#[test]
+fn fork_revisions_preserve_the_upstream_binary_version() {
+    assert_eq!(
+        version_pin::upstream_version("rust-v1.2.3-signalbox.12"),
+        Some("1.2.3")
+    );
+}
+
+#[test]
+fn fork_pin_rejects_branch_names_and_inexact_releases() {
+    for tag in [
+        "signalbox",
+        "rust-v^1.2.3-signalbox.1",
+        "rust-v1.2.3-signalbox.0",
+        "rust-v1.2.3-signalbox.latest",
+        "rust-v1.2.3",
+    ] {
+        assert_eq!(version_pin::upstream_version(tag), None);
+    }
 }

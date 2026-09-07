@@ -87,6 +87,7 @@ pub(crate) struct StreamDecoder {
     finish: Option<FinishReason>,
     content_text: String,
     refusal_text: String,
+    refusal_reason: signalbox_model_runtime::RefusalReason,
     tool_builders: BTreeMap<u32, ToolBuilder>,
     completed_tools: Vec<ToolCallProposal>,
     /// Sticky: at least one tool call was announced by the provider. Neither
@@ -114,6 +115,7 @@ impl StreamDecoder {
             finish: None,
             content_text: String::new(),
             refusal_text: String::new(),
+            refusal_reason: signalbox_model_runtime::RefusalReason::Unspecified,
             tool_builders: BTreeMap::new(),
             completed_tools: Vec::new(),
             opened_tool_calls: false,
@@ -413,6 +415,9 @@ impl StreamDecoder {
                 }
             }
             if let Some(token) = choice.finish_reason {
+                if token == "content_filter" {
+                    self.refusal_reason = signalbox_model_runtime::RefusalReason::ContentPolicy;
+                }
                 let mut finish = map_finish(&token, self.stop_sequences);
                 if matches!(finish, FinishReason::Unrecognized { .. }) {
                     // The verdict is recorded here but *deferred* to `[DONE]`,
@@ -758,6 +763,7 @@ impl StreamDecoder {
                     content.push(AssistantPart::Text(refusal));
                 }
                 TerminalEvidence::Refused(RefusalEvidence {
+                    reason: self.refusal_reason,
                     exchange: self.exchange.clone(),
                     message_id: None,
                     reported_model: self.reported_model.clone(),
@@ -1747,6 +1753,10 @@ mod tests {
         let Some(TerminalEvidence::Refused(refusal)) = terminal else {
             panic!("a content_filter finish is the provider's refusal outcome");
         };
+        assert_eq!(
+            refusal.reason,
+            signalbox_model_runtime::RefusalReason::ContentPolicy
+        );
         assert_eq!(
             refusal.content,
             vec![AssistantPart::Text("partial".to_string())]

@@ -12,10 +12,7 @@
 //! adapter's own types. Three outcomes pass, each carrying reported usage:
 //!
 //! - a completed outcome;
-//! - the adapter's downgraded-refusal `ProviderError` shape (this transport
-//!   exposes no independent proof that a response arrived only after the
-//!   complete request was sent, so `OpenAiRuntime::execute` never returns a
-//!   raw `Refused` — see `require_decoded_response` below);
+//! - refusal evidence;
 //! - the exchange that stopped at this smoke's output ceiling, accepted
 //!   because answer length is not this smoke's business. The decoder defers
 //!   that verdict to `[DONE]` and refuses it outright if the requested final
@@ -215,75 +212,11 @@ struct DecodedResponse {
     usage: TokenUsage,
 }
 
-/// Accepts a completion, or the adapter's own decoded-refusal shape, as
-/// well-formed evidence that the response contract still holds. Only a
-/// terminal outcome the adapter never decoded (a transport, protocol, or
-/// genuine provider-error class) fails this gate.
-///
-/// `OpenAiRuntime::execute` never returns a raw `TerminalEvidence::Refused` to
-/// its caller. That downgrade is unconditional, so it covers this smoke's
-/// streamed exchange too; the specification's refusal-downgrade rule states
-/// why it is unconditional (a fully buffered HTTP request exposes no
-/// independent proof that the response arrived only after the complete
-/// upload, and the adapter fails toward known failure rather than inventing
-/// evidence). `execute` therefore rewrites a decoded refusal into
-/// `ProviderError { kind: Unrecognized, native: { error_token: None, .. }, .. }`
-/// from the same HTTP 200 exchange before returning (`without_unproven_refusal`,
-/// runtime.rs:616,628-646; the "Refusal downgrade" rule in
-/// `docs/spec/runtime-substrate.md`). Matching the dead `Refused` arm here
-/// would make this smoke fail a correctly decoded refusal, so this recognizes
-/// what the adapter actually returns instead. The `http_status == 200` guard
-/// keeps this arm from also swallowing a genuine unrecognized 4xx/5xx
-/// provider error, which the assertions below must still fail on.
-///
-/// `kind` and outer status alone are not enough to identify that downgrade on
-/// this transport, because a genuine failure can wear the same two facts: a
-/// mid-stream `error` record inside an HTTP 200 SSE body is terminal
-/// `ProviderError` evidence carrying that same 200 (`stream.rs`), and an error
-/// whose native code and type are both unknown classifies as `Unrecognized`
-/// (`classify_error_envelope` in `status.rs` falls through to the status, which
-/// is zero for a record with no status of its own). Accepting on those two
-/// facts would turn a real streamed provider failure green as long as usage
-/// had accumulated. So this arm additionally requires two facts a native
-/// stream error cannot produce:
-///
-/// - `native == NativeErrorFacts::default()`. The downgrade fabricates no
-///   native material at all, while a native error record populates its facts
-///   from the provider's own error object (`into_native_facts` in `wire.rs`
-///   carries `type`, `code`, and `message` straight through).
-/// - An observed `FinishReported(FinishReason::Refusal)`. The decoder emits
-///   that fact only after the provider reports the refusal finish for the
-///   choice; the native-error branch returns terminal evidence immediately,
-///   emitting no finish at all.
-///
-/// Both are checked because either alone is defeatable: an error object with
-/// every field null would clear the first, and the second cannot by itself
-/// rule out a stream that reported a refusal finish and then failed natively.
-///
-/// A third shape is accepted: the exchange that stopped at this smoke's own
-/// output ceiling. `PROMPT` asks for one word, but a prompt is a request, not
-/// an enforced bound, and Chat Completions has no control that caps visible
-/// output other than the ceiling itself. If the model ever runs to it, the
-/// provider reports `finish_reason: "length"`, which `map_finish` leaves
-/// `Unrecognized` on purpose (OpenAI reuses that token for both the requested
-/// ceiling and the context limit, and the adapter will not guess), so the
-/// decoder ends the stream as `BoundaryLoss` carrying the token verbatim.
-/// That outcome is a truthful report about answer length, not a protocol
-/// break: the request was accepted, the SSE body framed and decoded, and the
-/// model identity and usage reported. It carries usage like the other two
-/// accepted shapes, because the decoder defers this verdict to `[DONE]` and
-/// refuses it outright if the requested final usage chunk never arrived, so
-/// `assert_well_formed_response` holds all three to the same bar. Failing a
-/// required, twice-daily paid check on it would be asserting something about
-/// answer quality, which the owning specification says this smoke does not do.
-/// The arm is keyed to that exact token from a 200 exchange that also reported
-/// a model identity, so any other unrecognized finish, and every other loss
-/// cause, still fails; a malformed envelope reaching a `length` finish carries
-/// no reported finish at all (`stream.rs`) and so cannot reach this arm.
+/// Accepts decoded completion or refusal evidence from the compatibility exchange.
 #[track_caller]
 fn require_decoded_response(
     evidence: TerminalEvidence,
-    observations: &[Observation<String>],
+    _observations: &[Observation<String>],
 ) -> DecodedResponse {
     match evidence {
         TerminalEvidence::Completed(completed) if !proposes_tool_calls(&completed.finish) => {
@@ -292,17 +225,10 @@ fn require_decoded_response(
                 usage: completed.usage,
             }
         }
-        TerminalEvidence::ProviderError(error)
-            if is_the_refusal_downgrade_kind(error.kind)
-                && error.exchange.http_status == Some(200)
-                && error.native == NativeErrorFacts::default()
-                && refusal_finish_observed(observations) =>
-        {
-            DecodedResponse {
-                exchange: error.exchange,
-                usage: error.usage,
-            }
-        }
+        TerminalEvidence::Refused(refusal) => DecodedResponse {
+            exchange: refusal.exchange,
+            usage: refusal.usage,
+        },
         TerminalEvidence::BoundaryLoss(loss)
             if loss.exchange.http_status == Some(200)
                 && loss.reported_model.is_some()
@@ -321,7 +247,6 @@ fn require_decoded_response(
         // silently inheriting this panic path.
         rejected @ (TerminalEvidence::Completed(_)
         | TerminalEvidence::CompletedWithProviderCompaction { .. }
-        | TerminalEvidence::Refused(_)
         | TerminalEvidence::ProviderError(_)
         | TerminalEvidence::CancellationConfirmed(_)
         | TerminalEvidence::ProvenUnsent(_)
@@ -329,39 +254,6 @@ fn require_decoded_response(
             panic!("the OpenAI API returned no decoded response: {rejected:?}")
         }
     }
-}
-
-/// Whether this execution observed the provider reporting a refusal finish —
-/// the corroboration `require_decoded_response` requires before accepting the
-/// downgraded-refusal shape, and the one signal a mid-stream native error
-/// record cannot manufacture.
-fn refusal_finish_observed(observations: &[Observation<String>]) -> bool {
-    observations
-        .iter()
-        .any(|observation| match &observation.fact {
-            // Both owned enums are enumerated rather than wildcarded: this
-            // discriminator decides whether a provider error is waved through
-            // as a refusal, so a new observation class *or* a new finish
-            // reason must fail to compile here and be considered, not
-            // silently default to "no refusal".
-            ObservationFact::FinishReported(finish) => match finish {
-                FinishReason::Refusal => true,
-                FinishReason::EndTurn
-                | FinishReason::MaxOutputTokens
-                | FinishReason::ContextWindowExceeded
-                | FinishReason::StopSequence { .. }
-                | FinishReason::ToolUse
-                | FinishReason::Unrecognized { .. } => false,
-            },
-            ObservationFact::SendCommenced
-            | ObservationFact::ExchangeEstablished(_)
-            | ObservationFact::ProviderModelReported(_)
-            | ObservationFact::TextDelta { .. }
-            | ObservationFact::ThinkingDelta { .. }
-            | ObservationFact::ToolArgumentsDelta { .. }
-            | ObservationFact::ToolCallProposed(_)
-            | ObservationFact::UsageReported(_) => false,
-        })
 }
 
 /// The provider's own token for "generation stopped at the requested output
@@ -413,27 +305,6 @@ fn proposes_tool_calls(finish: &CompletionFinish) -> bool {
     }
 }
 
-/// Whether an error classification is the one the refusal downgrade produces.
-///
-/// `ProviderErrorKind` is enumerated rather than compared for equality: this
-/// gates whether a provider error is accepted at all on a merge-gating check,
-/// so a new classification must fail to compile here rather than silently
-/// inherit the rejection path.
-fn is_the_refusal_downgrade_kind(kind: ProviderErrorKind) -> bool {
-    match kind {
-        ProviderErrorKind::Unrecognized => true,
-        ProviderErrorKind::CredentialRejected
-        | ProviderErrorKind::PermissionDenied
-        | ProviderErrorKind::InvalidRequest
-        | ProviderErrorKind::TargetNotFound
-        | ProviderErrorKind::RequestTooLarge
-        | ProviderErrorKind::RateLimited
-        | ProviderErrorKind::QuotaExhausted
-        | ProviderErrorKind::Overloaded
-        | ProviderErrorKind::ProviderInternal => false,
-    }
-}
-
 /// Whether this loss is the plain output-ceiling stop rather than some other
 /// protocol violation that reached the same evidence variant.
 ///
@@ -480,8 +351,8 @@ fn is_the_output_ceiling_violation(loss: &BoundaryLossEvidence) -> bool {
 /// least one — but output tokens are asserted only present, not positive: a
 /// valid `Completed` response can legitimately report zero output tokens
 /// (the adapter's own streamed fixtures cover an `end_turn` with
-/// `output_tokens: Some(0)` as `Completed`), and a downgraded-refusal
-/// `ProviderError` can be blocked before any completion token is produced.
+/// `output_tokens: Some(0)` as `Completed`), and a refusal
+/// can be blocked before any completion token is produced.
 ///
 /// One usage bar covers all three accepted shapes, including the
 /// output-ceiling loss: the decoder defers that verdict to `[DONE]` so the
@@ -602,22 +473,19 @@ mod require_decoded_response_tests {
     }
 
     #[test]
-    fn downgraded_refusal_provider_error_is_accepted() {
-        // The exact shape `without_unproven_refusal` constructs: `kind:
-        // Unrecognized` carried by the same HTTP 200 exchange, with no native
-        // material at all (OpenAI's refusal comes from `finish_reason` or
-        // `message.refusal`, not an error envelope), corroborated by the
-        // refusal finish the decoder reported on the way there.
+    fn refusal_is_accepted() {
         let expected_exchange = exchange(200);
         let expected_usage = usage();
 
         let decoded = require_decoded_response(
-            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
                 exchange: expected_exchange.clone(),
+                message_id: None,
+                content: Vec::new(),
+                retained_input_tokens: None,
+                retained_output_tokens: None,
                 reported_model: None,
-                kind: ProviderErrorKind::Unrecognized,
-                non_acceptance_proven: false,
-                native: NativeErrorFacts::default(),
                 usage: expected_usage,
             }),
             &refusal_observed(),
@@ -628,13 +496,7 @@ mod require_decoded_response_tests {
     }
 
     #[test]
-    fn downgraded_refusal_with_zero_output_tokens_is_accepted() {
-        // A content_filter refusal can be blocked before any completion
-        // token is produced — `output_tokens: Some(0)` is a valid, honest
-        // report here too (see `completed_with_zero_output_tokens_is_accepted`
-        // above for the completed path). The classifier accepts both shapes
-        // identically; only `assert_well_formed_response`'s single, uniform
-        // usage-presence check applies to either.
+    fn refusal_with_zero_output_tokens_is_accepted() {
         let expected_exchange = exchange(200);
         let expected_usage = TokenUsage {
             input_tokens: Some(3),
@@ -643,12 +505,14 @@ mod require_decoded_response_tests {
         };
 
         let decoded = require_decoded_response(
-            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
                 exchange: expected_exchange.clone(),
+                message_id: None,
+                content: Vec::new(),
+                retained_input_tokens: None,
+                retained_output_tokens: None,
                 reported_model: None,
-                kind: ProviderErrorKind::Unrecognized,
-                non_acceptance_proven: false,
-                native: NativeErrorFacts::default(),
                 usage: expected_usage,
             }),
             &refusal_observed(),
@@ -661,11 +525,6 @@ mod require_decoded_response_tests {
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn native_stream_error_inside_a_200_body_panics() {
-        // A mid-stream `error` record whose native code and type are both
-        // unknown reaches the caller as `Unrecognized` carrying the outer
-        // HTTP 200 and whatever usage had accumulated — the same two facts
-        // the accepted downgrade shows. It is a genuine provider failure and
-        // must stay red; the native material it carries is what separates it.
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: exchange(200),
@@ -682,10 +541,6 @@ mod require_decoded_response_tests {
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn unrefused_provider_error_without_native_material_panics() {
-        // The residual case native facts alone cannot catch: an error record
-        // carrying an empty error object would clear the native check. No
-        // refusal finish was ever reported for it, so the observation check
-        // still rejects it.
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: exchange(200),
@@ -702,10 +557,6 @@ mod require_decoded_response_tests {
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn an_ordinary_observation_is_not_mistaken_for_a_refusal() {
-        // The discriminator's negative path, exercised with real observations
-        // rather than an empty slice: a stream that reported usage and an
-        // end-turn finish never reported a refusal, so the downgrade-shaped
-        // provider error must still fail.
         let observations = vec![
             Observation {
                 correlation: "call-1".to_string(),
@@ -732,27 +583,7 @@ mod require_decoded_response_tests {
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
-    fn raw_refused_panics() {
-        let _ = require_decoded_response(
-            TerminalEvidence::Refused(RefusalEvidence {
-                exchange: exchange(200),
-                message_id: None,
-                reported_model: None,
-                content: Vec::new(),
-                usage: usage(),
-                retained_input_tokens: None,
-                retained_output_tokens: None,
-            }),
-            &refusal_observed(),
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "returned no decoded response")]
     fn unrecognized_provider_error_from_a_non_200_status_panics() {
-        // Same `kind` as the accepted downgraded-refusal shape, but from a
-        // real error status: the `http_status == 200` guard must keep this
-        // from being swallowed as a well-formed decode.
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: exchange(500),

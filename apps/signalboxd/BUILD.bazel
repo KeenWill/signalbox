@@ -248,7 +248,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     args = ["--test-threads=16"],
-    compile_data = ["//crates/process-protocol:src/lib.rs"],
+    compile_data = ["//crates/process-protocol:src/request.rs"],
     crate = ":signalboxd_lib",
     crate_features = ["test-support"],
     data = [

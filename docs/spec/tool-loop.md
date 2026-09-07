@@ -45,7 +45,7 @@ proposal of the same command; each delegate denial admits at most one override
 ever, and a second command is rejected.
 
 The daemon composes one process-lifetime immutable registry from the implemented
-tool families in `apps/signalboxd/src/daemon_tools.rs`: basic, blob-read, web,
+tool families in `apps/signalboxd/src/daemon_tools/`: basic, blob-read, web,
 code-host, workspace, conversation, plan, session-delegation, goal-declaration,
 local Git, and execution tools. The workspace, conversation, local Git,
 execution, and mapped GitHub families are composed only under the complete
@@ -475,6 +475,7 @@ trips under the scheduler lock.
 
 ## Planned
 
+- Lost-placement resolution: [tool-loop design](../design/tool-loop.md).
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a fourth
   `ToolInadmissible` result entry; see

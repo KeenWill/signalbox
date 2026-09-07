@@ -45,19 +45,51 @@
       "datasourceTemplate": "github-releases",
       "extractVersionTemplate": "^v(?<version>.*)$",
     },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^tooling/codex-cli/release\\.json$/"],
+      "matchStrings": ["\"release\": \"rust-v(?<currentValue>[^\"]+)\""],
+      "depNameTemplate": "KeenWill/codex",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^rust-v(?<version>.*)$",
+      "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-signalbox\\.(?<build>\\d+)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^tooling/codex-cli/release\\.json$/"],
+      // Release digests are commit SHAs; attachments resolves the tarball SHA-256.
+      // Replace only the checksum so the grouped tag update stays independent.
+      "matchStringsStrategy": "recursive",
+      "matchStrings": [
+        "\"release\": \"(?<currentValue>rust-v[^\"]+)\"[\\s\\S]*",
+        "\"sha256\": \"(?<currentDigest>[a-f0-9]{64})\""
+      ],
+      "depNameTemplate": "KeenWill/codex",
+      "datasourceTemplate": "github-release-attachments",
+      "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-signalbox\\.(?<build>\\d+)$",
+      "autoReplaceStringTemplate": "\"sha256\": \"{{newDigest}}\""
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^tooling/codex-cli/release\\.json$/"],
+      // BINARY_SHA256SUMS names the extracted codex binary.
+      // Replace only the checksum so the grouped tag update stays independent.
+      "matchStringsStrategy": "recursive",
+      "matchStrings": [
+        "\"release\": \"(?<currentValue>rust-v[^\"]+)\"[\\s\\S]*",
+        "\"executableSha256\": \"(?<currentDigest>[a-f0-9]{64})\""
+      ],
+      "depNameTemplate": "KeenWill/codex",
+      "datasourceTemplate": "github-release-attachments",
+      "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-signalbox\\.(?<build>\\d+)$",
+      "autoReplaceStringTemplate": "\"executableSha256\": \"{{newDigest}}\""
+    },
   ],
   // The cargo manager's default file pattern ((^|/)Cargo\.toml$) already
   // covers the root manifest and every workspace member under crates/ and
   // apps/, so no path configuration is needed for full workspace coverage.
-  // The npm manager's default file pattern ((^|/)package\.json$) covers every
-  // npm manifest in the tree. Two of them are not Node projects: each of
-  // tooling/codex-cli and crates/model-runtime-claude-cli exists solely to pin
-  // one wrapped CLI executable to an exact version, and each pin bump is
-  // proven against the real CLI by that adapter's own compatibility smoke
-  // (.github/workflows/codex-smoke.yml and .github/workflows/claude-smoke.yml).
-  // See the Codex CLI and Claude Code CLI provider adapter sections of
-  // docs/spec/runtime-substrate.md. The third, clients/web, is a real Node
-  // project with a real dependency tree; its cooldown rules are below.
+  // Codex tracks fork releases and their asset checksums together. Claude Code
+  // still uses its npm manifest; clients/web is a Node dependency tree.
   "packageRules": [
     {
       "matchDatasources": [
@@ -67,6 +99,12 @@
         "rust-doc-toolchain"
       ],
       "groupName": "Rust documentation toolchain"
+    },
+    {
+      "matchPackageNames": ["KeenWill/codex"],
+      "groupName": "Codex CLI",
+      "ignoreUnstable": false,
+      "automerge": false,
     },
     {
       "matchDatasources": ["rust-version"],
@@ -125,7 +163,7 @@
     },
     {
       // Baseline for every npm manifest: exact pins, human-reviewed merges.
-      // For the two CLI-pin manifests this is deliberately the whole policy —
+      // For the Claude Code CLI pin this is deliberately the whole policy —
       // no minimum-release-age gate, unlike the cargo policy above. The
       // wrapped CLI releases far too often for calendar age to mean anything,
       // and what makes a pin bump safe is evidence, not waiting: the adapter

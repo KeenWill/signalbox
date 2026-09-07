@@ -66,6 +66,7 @@ py_test(
     name = "test_domain_spine_digest",
     size = "small",
     srcs = ["test_domain_spine_digest.py"],
+    data = ["//:postgres_workflow_fixtures"],
     deps = [":domain_spine"],
 )
 

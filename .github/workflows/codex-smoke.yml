@@ -1,9 +1,9 @@
 # Compatibility smoke for the Codex CLI wrapped by
 # crates/model-runtime-codex-cli. It installs the exact version pinned in
-# tooling/codex-cli/package.json and spends one real, cheapest-model exchange
-# through the adapter, so a Renovate pin bump is proven against the live CLI
-# rather than assumed. The discipline it implements is specified in the Codex
-# CLI provider adapter section of docs/spec/runtime-substrate.md.
+# tooling/codex-cli/release.json. It spends one real, cheapest-model exchange
+# through the adapter and another through the app-server protocol probe, so a
+# Renovate pin bump is proven against the live CLI. The discipline is specified
+# in the Codex CLI provider adapter section of docs/spec/runtime-substrate.md.
 #
 # Accepted trust boundary. The live exchange must execute the proposed
 # repository adapter code against the pinned CLI; that is the purpose of this
@@ -25,10 +25,10 @@
 #
 # The credential is referenced only in the authentication step, piped to the
 # CLI login command on stdin, and never echoed or passed in argv or a child
-# environment. npm lifecycle scripts are disabled, and repository code is
-# compiled and the credential-free real-CLI probes run before the credential
-# store exists. The later live test's access to that store is intentional under
-# the accepted same-repository-writer boundary above.
+# environment. Repository code is compiled and the credential-free real-CLI
+# probes run before the credential store exists. The later live test's access
+# to that store is intentional under the accepted same-repository-writer
+# boundary above.
 name: Codex CLI smoke
 
 on:
@@ -38,6 +38,8 @@ on:
     branches: [main]
     paths:
       - "tooling/codex-cli/**"
+      - "crates/model-runtime-codex-cli/**"
+      - "crates/model-runtime/src/cli_process.rs"
       - ".github/workflows/codex-smoke.yml"
   # Twice-daily provider-drift canary at 9AM/9PM Eastern during daylight
   # time (13:00/01:00 UTC; drifts one hour under standard time — accepted).
@@ -103,40 +105,28 @@ jobs:
           changed_paths="${RUNNER_TEMP}/codex-smoke-changed-files"
           git diff --no-renames --name-only -z \
             "${BASE_SHA}...${HEAD_SHA}" > "${changed_paths}"
-          pin_changed=false
-          workflow_changed=false
+          compatibility_changed=false
           while IFS= read -r -d '' path; do
-            if [[ "${path}" == tooling/codex-cli/* ]]; then
-              pin_changed=true
-            elif [[ "${path}" == ".github/workflows/codex-smoke.yml" ]]; then
-              workflow_changed=true
-            fi
+            case "${path}" in
+              tooling/codex-cli/*|crates/model-runtime-codex-cli/*|crates/model-runtime/src/cli_process.rs|.github/workflows/codex-smoke.yml)
+                compatibility_changed=true
+                ;;
+            esac
           done < "${changed_paths}"
-          if [[ "${pin_changed}" != "true" && "${workflow_changed}" != "true" ]]; then
+          if [[ "${compatibility_changed}" != "true" ]]; then
             echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
-            echo "Not applicable: neither tooling/codex-cli/** nor this workflow's own definition changed."
+            echo "Not applicable: no Codex compatibility input changed."
             exit 0
-          fi
-
-          # Describe the actual changed-path shape rather than assuming a pin
-          # bump, so a workflow-only pull request never sees a Renovate-pin
-          # message unrelated to what it submitted.
-          if [[ "${pin_changed}" == "true" && "${workflow_changed}" == "true" ]]; then
-            change_description="the Codex CLI pin and this workflow's own definition"
-          elif [[ "${pin_changed}" == "true" ]]; then
-            change_description="the Codex CLI pin"
-          else
-            change_description="this workflow's own definition"
           fi
 
           if [[ "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
             echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
-            echo "::error::A fork changed ${change_description}. Put the reviewed change on a trusted in-repository branch, then run: gh workflow run codex-smoke.yml --ref <trusted-branch>"
+            echo "::error::A fork changed Codex compatibility inputs. Put the reviewed change on a trusted in-repository branch, then run: gh workflow run codex-smoke.yml --ref <trusted-branch>"
             exit 1
           fi
 
           echo "smoke_required=true" >> "${GITHUB_OUTPUT}"
-          echo "Compatibility smoke is required because this same-repository pull request changed ${change_description}."
+          echo "Compatibility smoke is required because this same-repository pull request changed Codex compatibility inputs."
 
   smoke:
     name: Codex live compatibility
@@ -167,20 +157,15 @@ jobs:
       # nothing survives into a later step.
       CODEX_HOME: ${{ github.workspace }}/.codex-smoke-home
       SIGNALBOX_CODEX_SMOKE_EXECUTABLE: >-
-        ${{ github.workspace }}/tooling/codex-cli/node_modules/.bin/codex
+        ${{ github.workspace }}/tooling/codex-cli/bin/codex
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
-      # The runner image ships Node, and the pinned package is a thin launcher
-      # around a prebuilt native binary, so no Node toolchain setup is needed.
-      # `npm ci` installs the lockfile's integrity-checked artifact exactly.
-      # The package ships its platform binary as an optional dependency and
-      # needs no lifecycle script, so installation disables scripts entirely.
       - name: Install the pinned Codex CLI
-        run: npm ci --ignore-scripts --prefix tooling/codex-cli
+        run: bash tooling/codex-cli/install.sh
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -232,9 +217,10 @@ jobs:
           printenv CODEX_SMOKE_API_KEY \
             | env -u CODEX_SMOKE_API_KEY timeout --signal=TERM --kill-after=5s 30s \
                 sh -c 'trap "while :; do sleep 1; done" TERM; "$@"' sh \
-                tooling/codex-cli/node_modules/.bin/codex login --with-api-key
+                tooling/codex-cli/bin/codex login --with-api-key
       # The test repeats the pre-spend assertions immediately before the model
-      # operation, then spends exactly one exchange through the adapter.
+      # operation, then spends one exchange through the adapter. The following
+      # protocol probe performs another live exchange plus rejected-login probes.
       - name: Run one live exchange through the adapter
         env:
           # Optional, and a plain variable rather than a secret because a model
@@ -255,6 +241,13 @@ jobs:
             echo "::error::Expected exactly one live smoke test to execute; libtest reported '${passed_count:-no passed count}'."
             exit 1
           fi
+      - name: Probe the pinned app-server protocol
+        env:
+          SIGNALBOX_CODEX_SMOKE_MODEL: ${{ vars.CODEX_SMOKE_MODEL }}
+        run: >-
+          cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli
+          --test live_smoke -- --ignored --exact
+          the_pinned_codex_app_server_answers_protocol_questions --nocapture
       - name: Remove the credential store
         if: ${{ always() }}
         run: rm -rf "${CODEX_HOME}"
@@ -293,5 +286,5 @@ jobs:
           if [[ "${SMOKE_REQUIRED}" == "true" ]]; then
             echo "The required Codex live compatibility smoke passed."
           else
-            echo "Not applicable: the Codex CLI pin did not change."
+            echo "Not applicable: no Codex compatibility input changed."
           fi

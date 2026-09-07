@@ -1,27 +1,37 @@
 //! Reloadable authenticated webhook wakes for the repository task.
 
-use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     Router,
     body::Bytes,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, Method, StatusCode, Uri},
 };
 use ring::hmac;
 use signalbox_domain::RepositorySlug;
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
+use signalbox_module_repo_watch_v2::{
+    RepoWatchStore, WebhookAdmission, WebhookDelivery, WebhookDisposition,
+};
+use signalbox_ownership_seam::OffsetDateTime;
 use tokio::{
     net::TcpListener,
     sync::{Notify, RwLock, oneshot},
     task::JoinSet,
 };
+use uuid::Uuid;
 
 use crate::{
     FileCredentialAccess, RepositoryWatchConfiguration, configuration::RepositoryWatchWebhookMode,
 };
 
+// Matches the webhook_body CHECK in 202609050102_repo_watch_v2_ingest.sql.
+const MAX_WEBHOOK_BODY_BYTES: usize = 26_214_400;
+
 struct Hook {
+    store: RepoWatchStore,
+    retention: Duration,
     repository: RepositorySlug,
     credentials: FileCredentialAccess,
     reference: CredentialReference,
@@ -66,6 +76,7 @@ impl WebhookListener {
         &self,
         configuration: Option<&RepositoryWatchConfiguration>,
         wakes: &BTreeMap<RepositorySlug, Arc<Notify>>,
+        store: &RepoWatchStore,
     ) -> Result<PreparedListener, std::io::Error> {
         let configuration = configuration.filter(|configuration| configuration.enabled());
         let webhook = configuration.and_then(RepositoryWatchConfiguration::webhook);
@@ -85,10 +96,12 @@ impl WebhookListener {
         if let Some(webhook) = webhook {
             routing.path = webhook.path().to_owned();
         }
-        for repository in configuration
-            .into_iter()
-            .flat_map(|config| config.repositories())
-        {
+        for (repository, retention) in configuration.into_iter().flat_map(|config| {
+            config
+                .repositories()
+                .iter()
+                .map(move |repository| (repository, config.webhook_retention()))
+        }) {
             if let Some(webhook) = repository.webhook()
                 && let Some(reference) = repository.webhook_secret_reference()
                 && let Some(wake) = wakes.get(repository.repository())
@@ -96,6 +109,8 @@ impl WebhookListener {
                 routing.hooks.insert(
                     webhook.hook_id().get(),
                     Hook {
+                        store: store.clone(),
+                        retention,
                         repository: repository.repository().clone(),
                         credentials: FileCredentialAccess::new(
                             webhook.secret_file().to_path_buf(),
@@ -140,6 +155,7 @@ impl WebhookListener {
             SocketState::Reserved(socket) => {
                 let router = Router::new()
                     .fallback(delivery)
+                    .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES))
                     .with_state(self.routing.clone());
                 let (shutdown, stopped) = oneshot::channel();
                 self.servers.spawn(async move {
@@ -203,6 +219,20 @@ async fn delivery(
     else {
         return StatusCode::UNAUTHORIZED;
     };
+    let Some(delivery_id) = headers
+        .get("x-github-delivery")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let Some(event) = headers
+        .get("x-github-event")
+        .and_then(|value| value.to_str().ok())
+        .filter(|event| !event.is_empty())
+    else {
+        return StatusCode::BAD_REQUEST;
+    };
     loop {
         let snapshot = routing.read().await.clone();
         if uri.path() != snapshot.path {
@@ -243,17 +273,206 @@ async fn delivery(
         if repository.as_ref() != Some(&hook.repository) {
             return StatusCode::BAD_REQUEST;
         }
-        if hook.mode == RepositoryWatchWebhookMode::Primary {
-            hook.wake.notify_one();
+        let received_at = OffsetDateTime::now_utc();
+        let Ok(retention) = hook.retention.try_into() else {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        };
+        let Some(expires_at) = received_at.checked_add(retention) else {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        };
+        // Reload may replace routing while durable admission waits on PostgreSQL.
+        drop(current);
+        let Ok(admission) = hook
+            .store
+            .admit_webhook(WebhookDelivery {
+                repository: &hook.repository,
+                hook_id,
+                delivery_id,
+                event,
+                action: payload.get("action").and_then(serde_json::Value::as_str),
+                body: &body,
+                received_at,
+                expires_at,
+            })
+            .await
+        else {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        };
+        let current = routing.read().await;
+        if !Arc::ptr_eq(&snapshot, &current) {
+            continue;
         }
-        return StatusCode::ACCEPTED;
+        // Settlement and wake use one routing generation, excluding a concurrent reload.
+        let response = settle_and_wake(hook, hook_id, delivery_id, admission).await;
+        drop(current);
+        return response;
     }
+}
+
+async fn settle_and_wake(
+    hook: &Hook,
+    hook_id: u64,
+    delivery_id: Uuid,
+    admission: WebhookAdmission,
+) -> StatusCode {
+    match admission {
+        WebhookAdmission::Inserted | WebhookAdmission::PendingReplay => {}
+        WebhookAdmission::Replayed => return StatusCode::ACCEPTED,
+        WebhookAdmission::ConflictingReuse => return StatusCode::CONFLICT,
+    }
+    let disposition = match hook.mode {
+        RepositoryWatchWebhookMode::Primary => WebhookDisposition::Applied,
+        RepositoryWatchWebhookMode::Shadow => WebhookDisposition::Ignored,
+    };
+    let Ok(newly_settled) = hook
+        .store
+        .settle_webhook(hook_id, delivery_id, disposition, OffsetDateTime::now_utc())
+        .await
+    else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    if newly_settled && hook.mode == RepositoryWatchWebhookMode::Primary {
+        hook.wake.notify_one();
+    }
+    StatusCode::ACCEPTED
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use futures_util::FutureExt;
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL"]
+    async fn overlapping_pending_deliveries_wake_only_the_settlement_winner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalbox_persistence::{
+            disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
+            disposable_test_container_labels, local_test_connection_options, migrate,
+        };
+        use testcontainers_modules::{
+            postgres::Postgres,
+            testcontainers::{ImageExt, runners::AsyncRunner},
+        };
+        const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+        const FIXTURE_DATABASE: &str = "webhook_settlement";
+        const FIXTURE_USER: &str = "signalbox";
+        const FIXTURE_PASSWORD: &str = "signalbox-test-only";
+        const FIXTURE_HOOK_ID: u64 = 17;
+        let container = Postgres::default()
+            .with_db_name(FIXTURE_DATABASE)
+            .with_user(FIXTURE_USER)
+            .with_password(FIXTURE_PASSWORD)
+            .with_cmd(disposable_postgres_server_args())
+            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
+            .with_tag(POSTGRES_IMAGE_TAG)
+            .with_labels(disposable_test_container_labels())
+            .start()
+            .await?;
+        let host = container.get_host().await?;
+        let port = container.get_host_port_ipv4(5432).await?;
+        let url = format!(
+            "postgres://{FIXTURE_USER}:{FIXTURE_PASSWORD}@{host}:{port}/{FIXTURE_DATABASE}"
+        );
+        let core = sqlx::postgres::PgPoolOptions::new()
+            .connect_with(local_test_connection_options(&url)?)
+            .await?;
+        migrate(&core).await?;
+        let pool = crate::repo_watch_runtime::connect_repository_watch_pool(&core)
+            .await
+            .expect("module pool");
+        let directory = tempfile::tempdir()?;
+        let reference = CredentialReference::new("repository-watch:example/project:webhook");
+        let wake = Arc::new(Notify::new());
+        let hook = Hook {
+            store: RepoWatchStore::new(pool.clone()),
+            retention: Duration::from_secs(7 * 24 * 60 * 60),
+            repository: RepositorySlug::try_new(String::from("example/project"))?,
+            credentials: FileCredentialAccess::new(
+                directory.path().join("unused-secret"),
+                reference.clone(),
+            ),
+            reference,
+            mode: RepositoryWatchWebhookMode::Primary,
+            wake: wake.clone(),
+        };
+        let id = Uuid::now_v7();
+        let received_at = OffsetDateTime::now_utc();
+        let delivery = || WebhookDelivery {
+            repository: &hook.repository,
+            hook_id: FIXTURE_HOOK_ID,
+            delivery_id: id,
+            event: "push",
+            action: None,
+            body: br#"{"repository":{"full_name":"example/project"}}"#,
+            received_at,
+            expires_at: received_at + hook.retention,
+        };
+        // Both requests admit before either settles: the second result can become stale.
+        let first = hook.store.admit_webhook(delivery()).await?;
+        let overlapping = hook.store.admit_webhook(delivery()).await?;
+        assert_eq!(first, WebhookAdmission::Inserted);
+        assert_eq!(overlapping, WebhookAdmission::PendingReplay);
+        assert_eq!(
+            settle_and_wake(&hook, FIXTURE_HOOK_ID, id, first).await,
+            StatusCode::ACCEPTED
+        );
+        assert!(
+            wake.notified().now_or_never().is_some(),
+            "the settlement winner wakes ingestion"
+        );
+        assert_eq!(
+            settle_and_wake(&hook, FIXTURE_HOOK_ID, id, overlapping).await,
+            StatusCode::ACCEPTED
+        );
+        assert!(
+            wake.notified().now_or_never().is_none(),
+            "a stale pending replay cannot emit a second wake"
+        );
+        pool.close().await;
+        core.close().await;
+        drop(container);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn settled_replays_do_not_wake_primary_ingestion_or_rewrite_settlement() {
+        const FIXTURE_HOOK_ID: u64 = 17;
+        let directory = tempfile::tempdir().expect("credential directory");
+        let reference = CredentialReference::new("repository-watch:example/project:webhook");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+        pool.close().await;
+        let wake = Arc::new(Notify::new());
+        let hook = Hook {
+            store: RepoWatchStore::new(pool),
+            retention: Duration::from_secs(7 * 24 * 60 * 60),
+            repository: RepositorySlug::try_new(String::from("example/project"))
+                .expect("repository slug"),
+            credentials: FileCredentialAccess::new(
+                directory.path().join("unused-secret"),
+                reference.clone(),
+            ),
+            reference,
+            mode: RepositoryWatchWebhookMode::Primary,
+            wake: wake.clone(),
+        };
+        assert_eq!(
+            settle_and_wake(
+                &hook,
+                FIXTURE_HOOK_ID,
+                Uuid::now_v7(),
+                WebhookAdmission::Replayed
+            )
+            .await,
+            StatusCode::ACCEPTED,
+            "terminal replay does not require another settlement write"
+        );
+        assert!(
+            wake.notified().now_or_never().is_none(),
+            "terminal replay cannot wake primary ingestion"
+        );
+    }
 
     #[tokio::test]
     async fn empty_resolved_secrets_reject_signed_deliveries_without_waking_the_repository() {
@@ -269,6 +488,11 @@ mod tests {
             hooks: BTreeMap::from([(
                 FIXTURE_HOOK_ID,
                 Hook {
+                    retention: Duration::from_secs(7 * 24 * 60 * 60),
+                    store: RepoWatchStore::new(
+                        sqlx::postgres::PgPoolOptions::new()
+                            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new()),
+                    ),
                     repository: RepositorySlug::try_new(String::from("example/project"))
                         .expect("repository slug"),
                     credentials: FileCredentialAccess::new(path.clone(), reference.clone()),
@@ -280,6 +504,11 @@ mod tests {
         })));
         let empty_key_signature = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, b""), FIXTURE_BODY);
         let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-github-delivery",
+            Uuid::now_v7().to_string().parse().expect("delivery header"),
+        );
+        headers.insert("x-github-event", "push".parse().expect("event header"));
         headers.insert(
             "x-github-hook-id",
             FIXTURE_HOOK_ID.to_string().parse().expect("hook header"),

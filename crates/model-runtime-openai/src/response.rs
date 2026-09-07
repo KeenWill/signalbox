@@ -336,6 +336,11 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 content.push(AssistantPart::Text(refusal));
             }
             TerminalEvidence::Refused(RefusalEvidence {
+                reason: if finish_token == "content_filter" {
+                    signalbox_model_runtime::RefusalReason::ContentPolicy
+                } else {
+                    signalbox_model_runtime::RefusalReason::Unspecified
+                },
                 exchange,
                 message_id,
                 reported_model,
@@ -543,6 +548,10 @@ mod tests {
             panic!("a refusal payload must decode as refusal evidence, never completion");
         };
         assert_eq!(
+            refusal.reason,
+            signalbox_model_runtime::RefusalReason::Unspecified
+        );
+        assert_eq!(
             refusal.content,
             vec![AssistantPart::Text("I cannot help with that.".to_string())]
         );
@@ -570,6 +579,10 @@ mod tests {
         let TerminalEvidence::Refused(refusal) = evidence else {
             panic!("a content_filter finish is the provider's refusal outcome");
         };
+        assert_eq!(
+            refusal.reason,
+            signalbox_model_runtime::RefusalReason::ContentPolicy
+        );
         assert_eq!(
             refusal.content,
             vec![AssistantPart::Text("partial".to_string())]

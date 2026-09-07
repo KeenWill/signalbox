@@ -198,8 +198,19 @@ impl model_execution::CredentialPoolRuntimeMember {
         credential_reference: impl convert::Into<sync::Arc<str>>,
         priority: nonzero::NonZeroU32,
     ) -> Self;
+    pub fn with_headroom_reserve(self, percent: option::Option<u8>) -> Self;
     pub const fn priority(&self) -> nonzero::NonZeroU32;
 }
+```
+
+## CredentialPoolRuntimeTieBreak
+
+```rust
+pub enum CredentialPoolRuntimeTieBreak {
+    FirstListed,
+    LeastUsed,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## CredentialPoolRuntimePolicy
@@ -219,6 +230,12 @@ impl model_execution::CredentialPoolRuntimePolicy {
         rate_limited: model_execution::CredentialPoolRuntimeAction,
         overloaded: model_execution::CredentialPoolRuntimeAction,
         credential_rejected: model_execution::CredentialPoolRuntimeAction,
+    ) -> Self;
+    pub fn with_capacity_policy(
+        self,
+        tie_break: model_execution::CredentialPoolRuntimeTieBreak,
+        headroom_reserve_percent: option::Option<u8>,
+        headroom_low: model_execution::CredentialPoolRuntimeAction,
     ) -> Self;
     pub fn members(&self) -> &[model_execution::CredentialPoolRuntimeMember];
 }
