@@ -113,8 +113,16 @@ fn failed_turns_classify_only_the_typed_error_variant() {
         (json!("usageLimitExceeded"), Provider(QuotaExhausted), true),
         (json!("rateLimitExceeded"), Provider(RateLimited), true),
         (json!("serverOverloaded"), Provider(Overloaded), true),
-        (json!("cyberPolicy"), PolicyRefusal, false),
-        (json!("misalignmentPolicyViolation"), PolicyRefusal, false),
+        (
+            json!("cyberPolicy"),
+            PolicyRefusal(signalbox_model_runtime::RefusalReason::CyberPolicy),
+            false,
+        ),
+        (
+            json!("misalignmentPolicyViolation"),
+            PolicyRefusal(signalbox_model_runtime::RefusalReason::Misalignment),
+            false,
+        ),
         (
             json!({"httpConnectionFailed":{"httpStatusCode":429}}),
             Provider(Unrecognized),

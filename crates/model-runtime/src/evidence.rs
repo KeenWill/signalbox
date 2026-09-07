@@ -261,9 +261,19 @@ pub struct CompletionEvidence {
     pub usage: TokenUsage,
 }
 
+/// The provider's typed reason for refusing a response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalReason {
+    ContentPolicy,
+    CyberPolicy,
+    Misalignment,
+    Unspecified,
+}
+
 /// Evidence for a complete exchange the provider reported as refused.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RefusalEvidence {
+    pub reason: RefusalReason,
     pub exchange: ExchangeFacts,
     pub message_id: Option<ProviderMessageId>,
     pub reported_model: Option<ProviderReportedModel>,

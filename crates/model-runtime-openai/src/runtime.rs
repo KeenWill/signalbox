@@ -655,10 +655,6 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for OpenAiRunt
             )
             .await;
         redacting_sink.flush();
-        // A buffered reqwest request provides no independent proof that an
-        // early response followed the complete upload.
-        // `docs/spec/model-call-execution.md` therefore forbids classifying
-        // its refusal token as definitive `Refused`.
         let evidence = without_unproven_refusal(evidence);
         // Per the runtime-substrate spec, sanitize with the exact
         // preparation-time value, after no second credential lookup or
@@ -673,6 +669,9 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for OpenAiRunt
 
 fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
     match evidence {
+        TerminalEvidence::Refused(refusal) if refusal.usage != TokenUsage::unreported() => {
+            TerminalEvidence::Refused(refusal)
+        }
         TerminalEvidence::Refused(refusal) => {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: refusal.exchange,
@@ -832,8 +831,8 @@ fn sensitive_bearer(api_key: &CredentialValue) -> Option<HeaderValue> {
 mod tests {
     use signalbox_model_runtime::{
         CancellationSignal, CredentialRedactingSink, CredentialValue, ExchangeFacts, LossCause,
-        NativeErrorFacts, Observation, ObservationFact, ObservationSink, PreparationDefect,
-        RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
+        Observation, ObservationFact, ObservationSink, PreparationDefect, RefusalEvidence,
+        SseFraming, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
     };
 
     use super::{
@@ -844,8 +843,52 @@ mod tests {
     use crate::stream::StreamDecoder;
 
     #[test]
-    fn refusal_without_full_upload_proof_is_known_failure_evidence() {
+    fn refusal_without_reported_usage_remains_an_unproven_provider_error() {
+        let evidence = TerminalEvidence::Refused(RefusalEvidence {
+            reason: signalbox_model_runtime::RefusalReason::Unspecified,
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            content: Vec::new(),
+            usage: TokenUsage::unreported(),
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
+        let TerminalEvidence::ProviderError(error) = without_unproven_refusal(evidence) else {
+            panic!("a refusal with no usage or completed compaction has no processing evidence");
+        };
+        assert_eq!(
+            error.kind,
+            signalbox_model_runtime::ProviderErrorKind::Unrecognized
+        );
+        assert!(!error.non_acceptance_proven);
+    }
+
+    #[test]
+    fn refusal_with_reported_zero_output_is_preserved() {
+        let evidence = TerminalEvidence::Refused(RefusalEvidence {
+            reason: signalbox_model_runtime::RefusalReason::Unspecified,
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            content: Vec::new(),
+            usage: TokenUsage {
+                output_tokens: Some(0),
+                ..TokenUsage::unreported()
+            },
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
+        let TerminalEvidence::Refused(refusal) = without_unproven_refusal(evidence) else {
+            panic!("zero output is reported usage");
+        };
+        assert_eq!(refusal.usage.output_tokens, Some(0));
+    }
+
+    #[test]
+    fn refusal_with_reported_usage_is_preserved() {
         let refusal = TerminalEvidence::Refused(RefusalEvidence {
+            reason: signalbox_model_runtime::RefusalReason::Unspecified,
             exchange: ExchangeFacts::default(),
             message_id: None,
             reported_model: None,
@@ -860,13 +903,16 @@ mod tests {
             retained_output_tokens: None,
         });
 
-        let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {
-            panic!("unproven refusal must use the non-refusal known-failure mapping");
+        let TerminalEvidence::Refused(refusal) = without_unproven_refusal(refusal) else {
+            panic!("reported usage preserves refusal evidence");
         };
-        assert_eq!(error.native, NativeErrorFacts::default());
-        assert_eq!(error.usage.input_tokens, Some(11));
-        assert_eq!(error.usage.output_tokens, Some(2));
-        assert_eq!(error.usage.cache_read_input_tokens, Some(3));
+        assert_eq!(
+            refusal.reason,
+            signalbox_model_runtime::RefusalReason::Unspecified
+        );
+        assert_eq!(refusal.usage.input_tokens, Some(11));
+        assert_eq!(refusal.usage.output_tokens, Some(2));
+        assert_eq!(refusal.usage.cache_read_input_tokens, Some(3));
     }
 
     #[test]
