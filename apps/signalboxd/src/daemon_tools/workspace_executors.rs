@@ -1,8 +1,10 @@
 use super::{
-    ConfiguredWorkspaceComposition, DaemonToolExecutorError, DaemonToolsConstructionError,
-    SessionWorkspaceState, WorkspaceBoundExecutors, WorkspaceBoundFamilies,
+    DaemonToolsConstructionError,
     composed_identity::ComposedWorkspaceIdentity,
+    executor::DaemonToolExecutorError,
+    families::{ConfiguredWorkspaceComposition, WorkspaceBoundExecutors, WorkspaceBoundFamilies},
     pinned_file_system::PinFurtherWorkspaceRoot,
+    retained_workspaces::SessionWorkspaceState,
     session_workspace_roots::{
         RecordedSessionBinding, SessionRootDecision, SessionWorkspaceRoot, SessionWorkspaceRoots,
         WorkspaceInstructionRootAuthority, WorkspaceInstructionRootFuture,
