@@ -7,11 +7,12 @@ use super::decode::{
     require_applied_runner_recovery_interrupt, require_current_attempt_row,
     require_stored_inherited_configuration, require_stored_origin_configuration,
 };
+use super::prepare::require_recorded_batch;
 use super::write::{decode_starting_lineage, load_active_acceptance_tail};
 use super::{
     StoredSchedulingInventoryCounts, SubmitInputCorruption, SubmitInputRepositoryError,
     decode_frozen_model, decode_model_call_disposition, decode_optional_token_count,
-    decode_position, require_recorded_batch, required,
+    decode_position, required,
 };
 use crate::mapping::{
     accepted_input_id_from_uuid, defaults_version_from_numeric, durable_command_id_from_uuid,
@@ -24,6 +25,7 @@ use crate::tool_loop::{
     load_terminal_result_denials,
 };
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionInput,
@@ -254,6 +256,9 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
     let mut turn_configurations = BTreeMap::<TurnId, OriginConfiguration>::new();
     let mut pinned_target_identities = BTreeMap::new();
     let mut required_frontiers = BTreeSet::new();
+    let placement_frontiers: Vec<Uuid> = sqlx::query_scalar("SELECT context_frontier_id FROM runner_placement_boundary WHERE session_id = $1 ORDER BY placement_revision")
+        .bind(session_id_to_uuid(session_id)).fetch_all(&mut *connection).await?;
+    required_frontiers.extend(placement_frontiers.iter().copied());
     let mut required_model_calls = BTreeSet::new();
     let mut named_continuation_gate_calls = BTreeSet::new();
     for row in rows {
@@ -2288,6 +2293,7 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
             entry.source_session_id,
             entry.semantic_entry_id,
             entry.payload_kind,
+            entry.runner_placement_revision,
             entry.origin_accepted_input_id,
             entry.steering_source_turn_id,
             entry.failed_turn_id,
@@ -2421,6 +2427,30 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
         let source_session = session_id_from_uuid(source_session_uuid);
         let entry = SemanticTranscriptEntryId::from_uuid(entry_uuid);
         let payload_kind: String = required(&row, "payload_kind")?;
+        if payload_kind == "runner_placement_changed" {
+            let revision: Decimal = required(&row, "runner_placement_revision")?;
+            let revision = revision
+                .to_u64()
+                .and_then(signalbox_domain::RunnerGeneration::try_from_u64)
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "placement boundary revision",
+                ))?;
+            let matches: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runner_placement_boundary AS boundary JOIN runner_session_placement_record AS record USING (session_id, event_ordinal) WHERE boundary.session_id = $1 AND boundary.semantic_entry_id = $2 AND boundary.placement_revision = $3 AND record.placement_revision = boundary.placement_revision AND record.event_kind = 'runner_replaced')")
+                .bind(source_session_uuid).bind(entry_uuid).bind(Decimal::from(revision.get())).fetch_one(&mut *connection).await?;
+            if !matches {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("placement boundary record").into(),
+                );
+            }
+            semantic_entries.push(SemanticTranscriptEntryReconstitutionInput::new(
+                entry,
+                source_session,
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ));
+            continue;
+        }
         let origin: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
         let steering_source_turn: Option<Uuid> = row.try_get("steering_source_turn_id")?;
         let failed_turn: Option<Uuid> = row.try_get("failed_turn_id")?;
@@ -2976,6 +3006,21 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
                 request: ToolRequestId::from_uuid(request),
             },
             (
+                "tool_inadmissible",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(request),
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::ToolInadmissible {
+                request: ToolRequestId::from_uuid(request),
+            },
+            (
                 "tool_closed_by_turn_end",
                 None,
                 None,
@@ -3016,6 +3061,7 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
                 | "assistant_tool_use"
                 | "tool_execution_result"
                 | "tool_denied"
+                | "tool_inadmissible"
                 | "tool_closed_by_turn_end"
                 | "turn_completed",
                 _,
@@ -3144,6 +3190,19 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let inadmissible_request_ids: Vec<Uuid> = sqlx::query_scalar("SELECT request_id FROM tool_request WHERE session_id = $1 AND inadmissible_reason IS NOT NULL")
+        .bind(session_id.into_uuid()).fetch_all(&mut *connection).await?;
+    let inadmissible_requests = crate::tool_loop::load_requests_by_id(
+        connection,
+        &inadmissible_request_ids
+            .into_iter()
+            .map(ToolRequestId::from_uuid)
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(map_tool_loop_error)?
+    .into_values()
+    .collect();
     let mut input = AcceptedInputSchedulingReconstitutionInput::new(
         session,
         turns,
@@ -3164,6 +3223,13 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
         );
     }
     input
+        .with_inadmissible_requests(inadmissible_requests)
+        .with_runner_placement_frontiers(
+            placement_frontiers
+                .into_iter()
+                .map(ContextFrontierId::from_uuid)
+                .collect(),
+        )
         .with_model_call_facts(pinned_targets, model_calls)
         .with_context_compaction_facts(compaction_calls, compactions)
         .with_consumed_steering_facts(consumed_steering)

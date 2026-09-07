@@ -492,6 +492,7 @@ fn range_closes_tool_exchanges(entries: &[&SemanticTranscriptEntry]) -> bool {
             }
             SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
             | SemanticTranscriptEntryPayload::ToolClosed { .. } => {
                 let Some(remaining) = open_requests.checked_sub(1) else {
                     return false;

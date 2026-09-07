@@ -12,6 +12,7 @@ pub struct CodexCliConfig {
     pub working_directory: path::PathBuf,
     pub credential_reference: signalbox_model_runtime::CredentialReference,
     pub credential_homes: map::HashMap<signalbox_model_runtime::CredentialReference, path::PathBuf>,
+    pub oauth_profiles: set::HashSet<signalbox_model_runtime::CredentialReference>,
     pub exchange_timeout: option::Option<time::Duration>,
     pub interrupt_grace: time::Duration,
     pub post_kill_reap_bound: option::Option<time::Duration>,

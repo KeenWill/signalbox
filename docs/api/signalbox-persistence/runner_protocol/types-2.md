@@ -61,3 +61,44 @@ impl convert::From<runner_protocol::RunnerEnrollmentRequestFailure>
     fn from(error: runner_protocol::RunnerEnrollmentRequestFailure) -> Self;
 }
 ```
+
+## RunnerRecoveryOutcome
+
+```rust
+pub enum RunnerRecoveryOutcome<T> {
+    Recorded(T),
+    Pending,
+    ConflictingReuse,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerRecoveryError
+
+```rust
+pub enum RunnerRecoveryError {
+    Store(runner_protocol::RunnerProtocolStoreError),
+    Registry(string::String),
+    InvalidCommandId,
+}
+// derives: fmt::Debug
+impl fmt::Display for runner_protocol::RunnerRecoveryError {
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for runner_protocol::RunnerRecoveryError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+impl convert::From<runner_protocol::RunnerProtocolStoreError>
+    for runner_protocol::RunnerRecoveryError
+{
+    fn from(value: runner_protocol::RunnerProtocolStoreError) -> Self;
+}
+impl convert::From<runner_protocol::RunnerProtocolCorruption>
+    for runner_protocol::RunnerRecoveryError
+{
+    fn from(value: runner_protocol::RunnerProtocolCorruption) -> Self;
+}
+impl convert::From<error::Error> for runner_protocol::RunnerRecoveryError {
+    fn from(value: error::Error) -> Self;
+}
+```

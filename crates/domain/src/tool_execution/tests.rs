@@ -1158,3 +1158,159 @@ fn reconstitution_rejects_current_identity_as_retired() {
         ToolBatchReconstitutionFailure::AttemptInventoryMismatch
     );
 }
+
+fn inadmissible_request() -> ToolRequest {
+    let request = request(10, 0);
+    ToolRequestReconstitutionInput::new(
+        request.id(),
+        request.session(),
+        request.turn(),
+        request.producing_call(),
+        request.ordinal(),
+        request.name().clone(),
+        request.arguments().clone(),
+    )
+    .with_inadmissible_reason(Some(crate::ToolInadmissibleReason::PlacementLost))
+    .into_request()
+}
+
+#[test]
+fn inadmissible_only_batch_projects_one_result_without_execution() {
+    let request = inadmissible_request();
+    let batch = ToolBatchReconstitutionInput::new(
+        request.session(),
+        request.turn(),
+        request.producing_call(),
+        yielded_snapshot(),
+        vec![request.clone()],
+        vec![],
+        vec![],
+        ToolBatchPhaseReconstitutionInput::Executing {
+            turn_attempt: turn_attempt_id(13),
+        },
+    )
+    .reconstitute()
+    .expect("inadmissibility resolves the request without approval or attempt");
+    let projection = batch
+        .prepare_result_projection(
+            vec![semantic_transcript_entry_id(14)],
+            context_frontier_id(16),
+        )
+        .expect("the complete batch can continue");
+    assert_eq!(
+        projection.entries()[0].payload(),
+        &SemanticTranscriptEntryPayload::ToolInadmissible {
+            request: request.id()
+        }
+    );
+    let cancellation = batch
+        .prepare_cancellation_projection(
+            vec![semantic_transcript_entry_id(15)],
+            context_frontier_id(17),
+        )
+        .expect("terminalization preserves the request resolution");
+    assert_eq!(
+        cancellation.entries()[0].payload(),
+        projection.entries()[0].payload()
+    );
+    let error = batch
+        .prepare_next_attempt(tool_attempt_id(12), ToolEffectClass::EffectFree)
+        .expect_err("closed requests never mint physical attempts");
+    assert_eq!(
+        error.failure(),
+        ToolBatchExecutionFailure::ReadyForContinuation
+    );
+}
+
+#[test]
+fn inadmissible_request_does_not_park_a_later_approval() {
+    let closed = inadmissible_request();
+    let pending = request(11, 1);
+    let batch = ToolBatchReconstitutionInput::new(
+        closed.session(),
+        closed.turn(),
+        closed.producing_call(),
+        yielded_snapshot(),
+        vec![closed.clone(), pending.clone()],
+        vec![],
+        vec![],
+        ToolBatchPhaseReconstitutionInput::AwaitingApproval {
+            request: pending.id(),
+        },
+    )
+    .reconstitute()
+    .expect("only the later request is undecided");
+    let decision = batch
+        .prepare_user_decision(
+            DecideToolRequest::new(
+                DurableCommandId::from_uuid(uuid::Uuid::from_u128(20)),
+                pending.id(),
+                ToolApprovalDecision::Deny { reason: None },
+            ),
+            Some(turn_attempt_id(13)),
+        )
+        .expect("the last approval opens continuation");
+    let projection = decision
+        .batch()
+        .prepare_result_projection(
+            vec![
+                semantic_transcript_entry_id(14),
+                semantic_transcript_entry_id(15),
+            ],
+            context_frontier_id(16),
+        )
+        .expect("both logical resolutions project");
+    assert_eq!(
+        projection.entries()[0].payload(),
+        &SemanticTranscriptEntryPayload::ToolInadmissible {
+            request: closed.id()
+        }
+    );
+    assert_eq!(
+        projection.entries()[1].payload(),
+        &SemanticTranscriptEntryPayload::ToolDenied {
+            request: pending.id()
+        }
+    );
+    assert!(
+        crate::ApprovedToolRequest::try_from_resolution(
+            closed.clone(),
+            approval(closed.id(), ToolApprovalDecision::Approve)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn placement_loss_retires_prepared_attempt_and_preserves_dispatched_attempt() {
+    let request = request(10, 0);
+    let approved = crate::ApprovedToolRequest::try_from_resolution(
+        request.clone(),
+        approval(request.id(), ToolApprovalDecision::Approve),
+    )
+    .expect("fixture approval matches");
+    let prepared = approved.prepare_attempt(
+        tool_attempt_id(12),
+        turn_attempt_id(13),
+        ToolEffectClass::ExternalEffect,
+    );
+    let ended = prepared
+        .clone()
+        .end_placement_lost()
+        .expect("placement loss may retire a prepared attempt");
+    let ToolAttemptEnd::KnownFailed { error } = ended.end() else {
+        panic!("retired attempt retains a known failure");
+    };
+    assert_eq!(error.kind(), ToolExecutionErrorKind::ExecutionFailed);
+    assert_eq!(
+        error.detail().map(|detail| detail.as_str()),
+        Some("placement_lost")
+    );
+    let authorized = prepared.authorize().expect("the baseline may dispatch");
+    let dispatched = authorized.attempt().clone();
+    let rejection = dispatched
+        .clone()
+        .end_placement_lost()
+        .expect_err("loss cannot rewrite a dispatched attempt");
+    assert_eq!(rejection.attempt(), &dispatched);
+}
