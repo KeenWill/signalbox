@@ -3,6 +3,7 @@
 use std::{error::Error, fmt, future::Future, io, pin::Pin, sync::Arc, time::Duration};
 
 use rustix::process::geteuid;
+use signalbox_application::{EligibilityNudge as _, InProcessEligibilityNudge};
 use signalbox_domain::{
     CredentialProfileName, CredentialProfilePolicy, RunnerAuthenticationId, RunnerCapabilityClass,
     RunnerCatalog, RunnerDomainError, RunnerEnrollmentId, RunnerId,
@@ -138,6 +139,7 @@ pub struct PostgresRunnerRegistrationService {
     store: RunnerProtocolStore,
     allowed_classes: Vec<RunnerCapabilityClass>,
     registration_admission: Arc<Mutex<()>>,
+    eligibility_nudge: Option<InProcessEligibilityNudge>,
 }
 
 impl PostgresRunnerRegistrationService {
@@ -150,7 +152,14 @@ impl PostgresRunnerRegistrationService {
             store,
             allowed_classes: allowed_classes.into_iter().collect(),
             registration_admission: Arc::new(Mutex::new(())),
+            eligibility_nudge: None,
         }
+    }
+
+    /// Schedules affected sessions after connection-loss propagation commits.
+    pub fn with_eligibility_nudge(mut self, nudge: InProcessEligibilityNudge) -> Self {
+        self.eligibility_nudge = Some(nudge);
+        self
     }
 
     /// Composes the registration-only catalog admitted by this daemon slice.
@@ -225,6 +234,9 @@ impl PostgresRunnerRegistrationService {
                         .store
                         .propagate_connection_loss_session(loss, *session)
                         .await?;
+                    if let Some(nudge) = &self.eligibility_nudge {
+                        let _ = nudge.nudge(*session);
+                    }
                     tracing::info!(
                         enrollment_id = %loss.enrollment().into_uuid(),
                         loss_epoch = loss.loss_epoch().get(),
@@ -3496,7 +3508,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn terminal_connection_transition_propagates_loss_to_placed_sessions() {
+    async fn terminal_connection_loss_nudges_placed_sessions_without_periodic_reconciliation() {
         let (_container, database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
         let RunnerEnrollmentResponse::Active(enrolled) = service
@@ -3515,6 +3527,18 @@ mod tests {
         let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
         create_runner_placed_session(&pool, &store, session, runner).await;
 
+        use signalbox_application::{EligibilityWorkSource as _, InProcessEligibilityWorkSource};
+        let (nudge, mut work_source) = InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        const EMPTY_SWEEP_OBSERVATION_WINDOW: Duration = Duration::from_millis(100);
+        const NUDGE_DEADLINE: Duration = Duration::from_secs(5);
+        assert!(
+            timeout(EMPTY_SWEEP_OBSERVATION_WINDOW, work_source.next())
+                .await
+                .is_err()
+        );
+        let service = service.with_eligibility_nudge(nudge);
         service
             .transition_connection(
                 enrolled.enrollment_id,
@@ -3523,6 +3547,13 @@ mod tests {
             )
             .await
             .expect("the terminal transition propagates its durable loss cursor");
+        assert_eq!(
+            timeout(NUDGE_DEADLINE, work_source.next())
+                .await
+                .expect("loss wakes the scheduler without a periodic sweep")
+                .expect("the scheduler receives the committed session"),
+            session,
+        );
         let placement = store
             .load_placement(session)
             .await

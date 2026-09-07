@@ -2028,6 +2028,7 @@ async fn run_hub(
         reconciliation_sweep_interval,
         nudge_buffer_capacity,
     );
+    let runner_service = runner_service.with_eligibility_nudge(eligibility_nudge.clone());
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let convergence_sweep_runtime = match model_configuration.repository_watch() {
         Some(configuration) => match ConvergenceSweepRuntime::try_new(
