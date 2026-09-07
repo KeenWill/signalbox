@@ -6,6 +6,8 @@ import type {
 } from './generated/web-contract.mjs'
 import { followSession, readSessionLive } from './product'
 import { startSessionSynchronization } from './session-sync'
+import { BoundedSessionHistory } from './session-timeline/model'
+import type { SessionWorkspace } from './session-workspace'
 import { actions, createAppStore, selectSessionSync } from './state'
 
 vi.mock('./product', () => ({ followSession: vi.fn(), readSessionLive: vi.fn() }))
@@ -181,3 +183,87 @@ it('continues processing live snapshots when an in-flight historical read fails'
   stop()
   queries.clear()
 })
+
+it.each(['describe', 'load'] as const)(
+  'continues live following and retries history after an extension %s failure',
+  async (failure) => {
+    const sessionId = '00000000-0000-0000-0000-000000000991'
+    const descriptor = {
+      session_id: sessionId,
+      observed_through: '42',
+      first_address: { event_sequence: '40' },
+      latest_address: { event_sequence: '42' },
+      sizes: {
+        item_count: '3',
+        projected_structured_bytes: '234',
+        projected_text_bytes: '0',
+        referenced_blob_count: '0',
+        referenced_blob_bytes: '0',
+      },
+      work: { active_turn_count: '0', queued_turn_count: '0' },
+    }
+    const item = (sequence: string) => ({
+      address: { event_sequence: sequence },
+      kind: 'input_accepted' as const,
+      projected_structured_bytes: 78,
+    })
+    const source = {
+      limits: { max_timeline_window_items: 256, max_timeline_window_bytes: 65_536 },
+      readDescriptor: vi.fn().mockResolvedValue(descriptor),
+      readWindow: vi.fn().mockResolvedValue({
+        session_id: sessionId,
+        items: [item('41'), item('42')],
+        projected_structured_bytes: 156,
+        continuation_before: { event_sequence: '41' },
+        continuation_after: null,
+      }),
+    }
+    const failedRead = failure === 'describe' ? source.readDescriptor : source.readWindow
+    failedRead.mockRejectedValueOnce(new Error('history temporarily unavailable'))
+    const queries = new QueryClient()
+    const key = ['production', 'session-workspace', sessionId]
+    queries.setQueryData<SessionWorkspace>(key, {
+      active: false,
+      anchor: { kind: 'latest' },
+      descriptor: {
+        ...descriptor,
+        observed_through: '40',
+        latest_address: { event_sequence: '40' },
+        sizes: { ...descriptor.sizes, item_count: '1', projected_structured_bytes: '78' },
+      },
+      history: new BoundedSessionHistory(sessionId, source),
+      window: {
+        session_id: sessionId,
+        items: [item('40')],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: null,
+      },
+    })
+    vi.mocked(followSession).mockImplementation(async function* () {
+      yield { kind: 'snapshot', snapshot: snapshot(sessionId) }
+      yield {
+        kind: 'durable',
+        cursor: '42',
+        address: { event_sequence: '42' },
+        event_kind: 'input_accepted',
+      }
+      yield { kind: 'snapshot', snapshot: { ...snapshot(sessionId), observed_through: '43' } }
+    })
+    vi.mocked(readSessionLive).mockResolvedValue({ ...snapshot(sessionId), observed_through: '42' })
+    const store = createAppStore()
+    const stop = startSessionSynchronization(store, queries)
+    store.dispatch(actions.sessionFollowRequested(sessionId))
+    await vi.waitFor(() =>
+      expect(selectSessionSync(store.getState())).toMatchObject({ phase: 'live', cursor: '43' }),
+    )
+    expect(queries.getQueryData<SessionWorkspace>(key)?.window.items).toEqual([
+      item('40'),
+      item('41'),
+      item('42'),
+    ])
+    expect(failedRead.mock.calls.length).toBeGreaterThanOrEqual(2)
+    stop()
+    queries.clear()
+  },
+)

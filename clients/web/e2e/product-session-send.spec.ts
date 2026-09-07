@@ -523,3 +523,86 @@ test('resets text pagination when only the window observation changes', async ({
   expect(cursors.slice(2).length).toBeGreaterThan(0)
   expect(cursors.slice(2).every((cursor) => cursor === null)).toBe(true)
 })
+
+test('keeps earlier text reachable after live appending evicts a text-page entry', async ({
+  page,
+}) => {
+  const api = await sessionApi(page)
+  const latest = () => (api.state.grown ? 9 : 8)
+  await page.route(`**/api/sessions/${sessionId}`, (route) =>
+    route.fulfill({
+      json: {
+        session_id: sessionId,
+        sizes: {
+          item_count: String(latest()),
+          projected_text_bytes: String(latest() * 7),
+          projected_structured_bytes: String(latest() * 78),
+          referenced_blob_count: '0',
+          referenced_blob_bytes: '0',
+        },
+        first_address: { event_sequence: '1' },
+        latest_address: { event_sequence: String(latest()) },
+        observed_through: api.state.grown ? '44' : '43',
+        work: { active_turn_count: '0', queued_turn_count: '0' },
+      },
+    }),
+  )
+  await page.route(`**/api/sessions/${sessionId}/timeline?**`, (route) => {
+    const url = new URL(route.request().url())
+    const first =
+      url.searchParams.get('anchor') === 'after' ? Number(url.searchParams.get('address')) + 1 : 1
+    const items = Array.from({ length: latest() - first + 1 }, (_, index) => ({
+      address: { event_sequence: String(first + index) },
+      kind: 'input_accepted',
+      projected_structured_bytes: 78,
+    }))
+    return route.fulfill({
+      json: {
+        session_id: sessionId,
+        items,
+        projected_structured_bytes: items.length * 78,
+        continuation_before: first > 1 ? { event_sequence: String(first) } : null,
+        continuation_after: null,
+      },
+    })
+  })
+  const reads: string[] = []
+  await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
+    const url = new URL(route.request().url())
+    const first = Number(url.searchParams.get('cursor_address') ?? url.searchParams.get('first'))
+    const through = Number(url.searchParams.get('through'))
+    reads.push(String(first))
+    const end = Math.min(first + 7, through)
+    const items = Array.from({ length: end - first + 1 }, (_, index) => ({
+      address: { event_sequence: String(first + index) },
+      kind: 'input_accepted',
+      projected_body_bytes: 135,
+      body: {
+        type: 'user_input',
+        turn_id: turnId,
+        text: excerpt(`Entry ${first + index}`),
+        attachments: [],
+      },
+    }))
+    return route.fulfill({
+      json: {
+        session_id: sessionId,
+        items,
+        projected_body_bytes: items.length * 135,
+        continuation:
+          end < through ? { type: 'more_at', address: { event_sequence: String(end + 1) } } : null,
+      },
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${sessionId}`)
+  await expect(page.getByText('Entry 1', { exact: true })).toBeVisible()
+  api.grow()
+  await expect(page.getByText('Entry 9', { exact: true })).toBeVisible()
+  await expect(page.getByText('Entry 1', { exact: true })).toHaveCount(0)
+  expect(reads).toEqual(['1', '9'])
+  await page.getByRole('button', { name: 'First text page', exact: true }).click()
+  await expect(page.getByText('Entry 1', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Next text page', exact: true }).click()
+  await expect(page.getByText('Entry 9', { exact: true })).toBeVisible()
+  expect(reads).toEqual(['1', '9', '1', '9'])
+})

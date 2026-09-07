@@ -447,6 +447,7 @@ it('reads only new transcript addresses and keeps appended text within the item 
     '9',
   ])
   expect(extended.page.projected_body_bytes).toBe(8 * 129)
+  expect(extended.omittedThrough).toBe('1')
   const unchanged = await readExtendedSessionTranscript(
     { sessionId, first: '1', through: '9' },
     null,
@@ -469,6 +470,7 @@ it('reads only new transcript addresses and keeps appended text within the item 
     '8',
     '9',
   ])
+  expect(shifted.omittedThrough).toBeNull()
   expect(fetch).toHaveBeenCalledTimes(2)
 })
 

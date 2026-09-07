@@ -35,6 +35,10 @@ export function startSessionSynchronization(
       projection = { ...projection, ...update }
       store.dispatch(actions.sessionFollowUpdated(projection))
     }
+    const extendHistory = (cursor: string) =>
+      extendSessionWorkspace(queryClient, sessionId, cursor, controller.signal).catch(
+        () => undefined,
+      )
     void (async () => {
       try {
         for await (const event of followSession(sessionId, controller.signal)) {
@@ -45,15 +49,10 @@ export function startSessionSynchronization(
               snapshot: event.snapshot,
               cursor: event.snapshot.observed_through,
             })
-            await extendSessionWorkspace(
-              queryClient,
-              sessionId,
-              event.snapshot.observed_through,
-              controller.signal,
-            )
+            await extendHistory(event.snapshot.observed_through)
           } else if (event.kind === 'durable') {
             publish({ cursor: event.cursor })
-            await extendSessionWorkspace(queryClient, sessionId, event.cursor, controller.signal)
+            await extendHistory(event.cursor)
             const snapshot = await readSessionLive(sessionId, controller.signal)
             publish({ phase: 'live', snapshot, cursor: snapshot.observed_through })
           } else if (event.kind === 'resync_required') {

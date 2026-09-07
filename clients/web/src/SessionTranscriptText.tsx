@@ -75,7 +75,7 @@ function TranscriptWindow({
         signal,
       )
       if (!signal.aborted) held.current = next
-      return next.page
+      return { ...next.page, hasEarlierItems: next.omittedThrough !== null }
     },
     gcTime: 0,
   })
@@ -96,8 +96,15 @@ function TranscriptWindow({
         </div>
       ))}
       <div className="session-text-pagination">
-        {continuation !== null && (
-          <button type="button" onClick={() => setContinuation(null)}>
+        {(continuation !== null || transcript.data?.hasEarlierItems) && (
+          <button
+            type="button"
+            onClick={() => {
+              held.current = null
+              if (continuation !== null) setContinuation(null)
+              else void transcript.refetch()
+            }}
+          >
             First text page
           </button>
         )}

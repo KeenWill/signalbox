@@ -1216,6 +1216,7 @@ export interface HeldSessionTranscript {
   through: string
   page: Awaited<ReturnType<typeof readSessionTranscript>>
   continuation: WebTimelineDetailContinuation | null
+  omittedThrough: string | null
 }
 
 export async function readExtendedSessionTranscript(
@@ -1250,7 +1251,7 @@ export async function readExtendedSessionTranscript(
           limits,
           signal,
         )
-  if (!append) return { ...window, page, continuation }
+  if (!append) return { ...window, page, continuation, omittedThrough: null }
   const items = [
     ...held.page.items.filter(
       (item) => BigInt(item.address.event_sequence) >= BigInt(window.first),
@@ -1258,13 +1259,25 @@ export async function readExtendedSessionTranscript(
     ...page.items,
   ]
   let bytes = items.reduce((sum, item) => sum + item.projected_body_bytes, 0)
+  let omittedThrough = held.omittedThrough
   while (
     items.length > Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items) ||
     bytes > Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
   ) {
-    bytes -= items.shift()?.projected_body_bytes ?? 0
+    const omitted = items.shift()
+    if (omitted) {
+      bytes -= omitted.projected_body_bytes
+      omittedThrough = omitted.address.event_sequence
+    }
   }
-  return { ...window, continuation, page: { ...page, items, projected_body_bytes: bytes } }
+  if (omittedThrough !== null && BigInt(omittedThrough) < BigInt(window.first))
+    omittedThrough = null
+  return {
+    ...window,
+    continuation,
+    omittedThrough,
+    page: { ...page, items, projected_body_bytes: bytes },
+  }
 }
 
 export async function readSessionRates(sessionIds: readonly string[], signal?: AbortSignal) {
