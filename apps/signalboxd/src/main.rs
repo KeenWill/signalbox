@@ -919,8 +919,10 @@ fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailure
     use signalbox_persistence::outbox::OutboxDispatchError;
 
     match error {
-        ProcessRuntimeError::OauthRecovery
-        | ProcessRuntimeError::Accept(_)
+        ProcessRuntimeError::OauthRecovery(error) => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: matches!(error, signalbox_persistence::oauth_credential::OauthCredentialRepositoryError::CommitAmbiguous),
+        },
+        ProcessRuntimeError::Accept(_)
         | ProcessRuntimeError::SpoolIo(_)
         | ProcessRuntimeError::InsufficientPoolCapacity
         | ProcessRuntimeError::CleanupSocket(_)
@@ -3052,6 +3054,20 @@ mod tests {
 
         assert!(encoded.contains("openai_invalid_base_url"));
         assert!(!encoded.contains(adapter_detail));
+    }
+
+    #[test]
+    fn oauth_startup_recovery_preserves_commit_ambiguity() {
+        use signalbox_persistence::oauth_credential::OauthCredentialRepositoryError;
+        for (error, commit_ambiguous) in [
+            (OauthCredentialRepositoryError::Database, false),
+            (OauthCredentialRepositoryError::CommitAmbiguous, true),
+        ] {
+            assert_eq!(
+                process_runtime_failure_class(&ProcessRuntimeError::OauthRecovery(error)),
+                OperatorFailureClass::Infrastructure { commit_ambiguous }
+            );
+        }
     }
 
     #[test]
