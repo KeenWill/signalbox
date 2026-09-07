@@ -4,7 +4,7 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 exports_files([
     "Cargo.toml",
-    "src/lib.rs",
+    "src/request.rs",
 ])
 
 cargo_toml_env_vars(
