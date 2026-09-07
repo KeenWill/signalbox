@@ -10,13 +10,14 @@ use sqlx::{
     types::Uuid,
 };
 
+use super::credential_pool::remap_preserves_preflight_limits;
 use super::{
     MAX_AVAILABILITY_BACKOFF, ModelCallCorruption, ModelCallIdentityCollision,
     ModelCallRepositoryError, StoredTerminalFrontierMember, ToolContinuationUsageLimit,
     availability_retry_backoff, cancellation_poll_interval, commit_failure_is_ambiguous,
     completed_terminal_frontier_matches, delegation_terminal_relation_decode_error,
     failed_terminal_frontier_matches, is_same_credential_retry_cause,
-    record_reclassified_turn_candidate, remap_preserves_preflight_limits,
+    record_reclassified_turn_candidate,
 };
 
 #[test]
