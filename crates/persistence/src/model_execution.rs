@@ -1371,6 +1371,12 @@ impl PostgresModelCallRepository {
                 ))?;
             return Ok(CountedActivationCheckpointOutcome::PoolExhausted(policy));
         };
+        let serving_evidence = prepared_serving_evidence(
+            self.credential_families.as_ref(),
+            &self.continuation_usage_limits,
+            prepared.call().target(),
+            fast_mode,
+        );
         insert_prepared_call(
             connection,
             prepared,
@@ -1378,11 +1384,7 @@ impl PostgresModelCallRepository {
             selected.policy.as_ref(),
             self.cache_inclusive_input_targets
                 .contains(&prepared.call().target()),
-            serving_pool_target(
-                self.credential_families.as_ref(),
-                prepared.call().target(),
-                fast_mode,
-            ),
+            serving_evidence,
         )
         .await?;
         consume_pool_member_actions(
@@ -1706,6 +1708,12 @@ impl PostgresModelCallRepository {
                     .ok_or(ModelCallRepositoryError::InvalidTransition(
                         "admitted credential pool omitted its selected member",
                     ))?;
+            let serving_evidence = prepared_serving_evidence(
+                self.credential_families.as_ref(),
+                &self.continuation_usage_limits,
+                prepared.call().target(),
+                fast_mode,
+            );
             insert_prepared_call(
                 &mut transaction,
                 &prepared,
@@ -1713,11 +1721,7 @@ impl PostgresModelCallRepository {
                 selected.policy.as_ref(),
                 self.cache_inclusive_input_targets
                     .contains(&prepared.call().target()),
-                serving_pool_target(
-                    self.credential_families.as_ref(),
-                    prepared.call().target(),
-                    fast_mode,
-                ),
+                serving_evidence,
             )
             .await?;
             consume_pool_member_actions(
@@ -1783,28 +1787,35 @@ impl PostgresModelCallRepository {
                 current.target(),
                 fast_mode,
             );
-            let stored_effective_identity = sqlx::query_scalar::<_, Uuid>(
-                "SELECT effective_provider_model_identity_id
+            let stored_serving_evidence = sqlx::query(
+                "SELECT effective_provider_model_identity_id,
+                        prepared_credential_model_family,
+                        prepared_max_output_tokens,
+                        prepared_context_window_tokens,
+                        prepared_provider_compaction_replay
                    FROM model_call
                   WHERE model_call_id = $1",
             )
             .bind(call.into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
-            let stored_effective_target = ResolvedProviderTarget::naming(
-                ProviderModelIdentity::from_uuid(stored_effective_identity),
-            );
+            let stored_effective_target =
+                ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                    stored_serving_evidence.try_get("effective_provider_model_identity_id")?,
+                ));
+            let stored_credential_model_family = stored_serving_evidence
+                .try_get::<Option<String>, _>("prepared_credential_model_family")?;
+            let stored_limit =
+                decode_prepared_usage_limit(&stored_serving_evidence, stored_effective_target)?;
+            let current_limit = self
+                .continuation_usage_limits
+                .get(&(current.target(), fast_mode));
             if stored_effective_target != current_effective_target
-                && (!same_credential_family(
+                && (!prepared_credential_family_matches(
                     self.credential_families.as_ref(),
-                    stored_effective_target,
+                    stored_credential_model_family.as_deref(),
                     current_effective_target,
-                ) || !remap_preserves_preflight_limits(
-                    &self.continuation_usage_limits,
-                    current.target(),
-                    fast_mode,
-                    stored_effective_target,
-                ))
+                ) || !remap_preserves_preflight_limits(stored_limit, current_limit.copied()))
             {
                 return Ok((false, AuthorizeModelCallOutcome::NoSend));
             }
@@ -3369,13 +3380,19 @@ where
             .ok_or(ModelCallRepositoryError::InvalidTransition(
                 "available continuation selection omitted a credential reference",
             ))?;
+    let serving_evidence = prepared_serving_evidence(
+        credential_families,
+        continuation_usage_limits,
+        prepared.call().target(),
+        fast_mode,
+    );
     insert_prepared_call(
         connection,
         &prepared,
         &credential_reference,
         selected.policy.as_ref(),
         cache_inclusive_input_targets.contains(&prepared.call().target()),
-        serving_pool_target(credential_families, prepared.call().target(), fast_mode),
+        serving_evidence,
     )
     .await?;
     consume_pool_member_actions(
@@ -6793,32 +6810,41 @@ fn serving_pool_target(
     })
 }
 
-fn same_credential_family(
-    families: Option<&crate::ModelCredentialFamilyCatalog>,
-    left: ResolvedProviderTarget,
-    right: ResolvedProviderTarget,
-) -> bool {
-    let Some(families) = families else {
-        return false;
-    };
-    match (families.family(left), families.family(right)) {
-        (Some(left), Some(right)) => left == right,
-        // A removed previous fast target has no current route to authenticate.
-        // The prepared call's frozen credential remains valid when the newly
-        // resolved serving target names a configured family.
-        (None, Some(_)) => true,
-        (Some(_) | None, None) => false,
-    }
+pub(crate) struct PreparedServingEvidence<'a> {
+    effective_target: ResolvedProviderTarget,
+    credential_model_family: Option<&'a str>,
+    limit: Option<ToolContinuationUsageLimit>,
 }
 
-fn remap_preserves_preflight_limits(
+pub(crate) fn prepared_serving_evidence<'a>(
+    families: Option<&'a crate::ModelCredentialFamilyCatalog>,
     limits: &ToolContinuationUsageLimitCatalog,
     selected_target: ResolvedProviderTarget,
     fast_mode: FastMode,
-    stored_effective_target: ResolvedProviderTarget,
+) -> PreparedServingEvidence<'a> {
+    let effective_target = serving_pool_target(families, selected_target, fast_mode);
+    PreparedServingEvidence {
+        effective_target,
+        credential_model_family: families.and_then(|families| families.family(effective_target)),
+        limit: limits.get(&(selected_target, fast_mode)).copied(),
+    }
+}
+
+fn prepared_credential_family_matches(
+    families: Option<&crate::ModelCredentialFamilyCatalog>,
+    prepared_family: Option<&str>,
+    right: ResolvedProviderTarget,
 ) -> bool {
-    let previous = limits.get(&(stored_effective_target, FastMode::Disabled));
-    let current = limits.get(&(selected_target, fast_mode));
+    matches!(
+        (prepared_family, families.and_then(|families| families.family(right))),
+        (Some(prepared), Some(current)) if prepared == current
+    )
+}
+
+fn remap_preserves_preflight_limits(
+    previous: Option<ToolContinuationUsageLimit>,
+    current: Option<ToolContinuationUsageLimit>,
+) -> bool {
     match (previous, current) {
         (Some(previous), Some(current)) => {
             let previous_input_allowance = previous
@@ -6830,10 +6856,46 @@ fn remap_preserves_preflight_limits(
             current_input_allowance >= previous_input_allowance
                 && current.replays_provider_compaction() == previous.replays_provider_compaction()
         }
-        // A removed serving target has no current limit entry. The replacement
-        // target's configured limit is the only available deployment evidence.
-        (None, Some(_)) | (None, None) => true,
-        (Some(_), None) => false,
+        _ => false,
+    }
+}
+
+fn decode_prepared_usage_limit(
+    row: &PgRow,
+    target: ResolvedProviderTarget,
+) -> Result<Option<ToolContinuationUsageLimit>, ModelCallRepositoryError> {
+    let max_output_tokens = row.try_get::<Option<Decimal>, _>("prepared_max_output_tokens")?;
+    let context_window_tokens =
+        row.try_get::<Option<Decimal>, _>("prepared_context_window_tokens")?;
+    let provider_compaction_replay =
+        row.try_get::<Option<bool>, _>("prepared_provider_compaction_replay")?;
+    match (
+        max_output_tokens,
+        context_window_tokens,
+        provider_compaction_replay,
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(max_output_tokens), Some(context_window_tokens), Some(replays)) => {
+            let max_output_tokens = positive_u64_from_numeric(max_output_tokens)
+                .map_err(|_| ModelCallCorruption::Inconsistent("prepared maximum output tokens"))?;
+            let context_window_tokens = positive_u64_from_numeric(context_window_tokens)
+                .map_err(|_| ModelCallCorruption::Inconsistent("prepared context window tokens"))?;
+            let limit = ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                max_output_tokens,
+                context_window_tokens,
+            );
+            Ok(Some(if replays {
+                limit.with_provider_compaction_replay()
+            } else {
+                limit
+            }))
+        }
+        _ => Err(
+            ModelCallCorruption::Inconsistent("prepared serving limit evidence completeness")
+                .into(),
+        ),
     }
 }
 
@@ -7365,7 +7427,7 @@ pub(crate) async fn insert_prepared_call(
     credential_reference: &ModelCallCredentialReference,
     credential_pool_policy: Option<&CredentialPoolRuntimePolicy>,
     input_includes_cache_tokens: bool,
-    effective_target: ResolvedProviderTarget,
+    serving_evidence: PreparedServingEvidence<'_>,
 ) -> Result<(), ModelCallRepositoryError> {
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
@@ -7523,10 +7585,13 @@ pub(crate) async fn insert_prepared_call(
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id, frozen_model_alias_id,
              frozen_alias_selected_direct_id, resolved_provider_model_identity_id,
-             effective_provider_model_identity_id, context_frontier_id, credential_reference,
+             effective_provider_model_identity_id, prepared_credential_model_family,
+             prepared_max_output_tokens, prepared_context_window_tokens,
+             prepared_provider_compaction_replay, context_frontier_id, credential_reference,
              usage_input_includes_cache_tokens, turn_instruction_manifest_id, state_kind,
              terminal_disposition_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'prepared', NULL)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                 $15, $16, $17, $18, 'prepared', NULL)",
     )
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(prepared.turn()))
@@ -7537,7 +7602,23 @@ pub(crate) async fn insert_prepared_call(
     .bind(alias)
     .bind(alias_selected)
     .bind(call.target().identity().into_uuid())
-    .bind(effective_target.identity().into_uuid())
+    .bind(serving_evidence.effective_target.identity().into_uuid())
+    .bind(serving_evidence.credential_model_family)
+    .bind(
+        serving_evidence
+            .limit
+            .map(|limit| Decimal::from(limit.max_output_tokens())),
+    )
+    .bind(
+        serving_evidence
+            .limit
+            .map(|limit| Decimal::from(limit.context_window_tokens())),
+    )
+    .bind(
+        serving_evidence
+            .limit
+            .map(ToolContinuationUsageLimit::replays_provider_compaction),
+    )
     .bind(call.frontier().snapshot().into_uuid())
     .bind(credential_reference.as_str())
     .bind(input_includes_cache_tokens)
@@ -10852,7 +10933,10 @@ mod tests {
     use std::{borrow::Cow, collections::BTreeSet, error::Error, fmt, io, time::Duration};
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
-    use signalbox_domain::{ModelCallId, ProviderModelCallFailureCause, TurnId};
+    use signalbox_domain::{
+        FastMode, ModelCallId, ProviderModelCallFailureCause, ProviderModelIdentity,
+        ResolvedProviderTarget, TurnId,
+    };
     use sqlx::{
         error::{DatabaseError, ErrorKind},
         types::Uuid,
@@ -10860,12 +10944,21 @@ mod tests {
 
     use super::{
         MAX_AVAILABILITY_BACKOFF, ModelCallCorruption, ModelCallIdentityCollision,
-        ModelCallRepositoryError, StoredTerminalFrontierMember, availability_retry_backoff,
-        cancellation_poll_interval, commit_failure_is_ambiguous,
+        ModelCallRepositoryError, StoredTerminalFrontierMember, ToolContinuationUsageLimit,
+        availability_retry_backoff, cancellation_poll_interval, commit_failure_is_ambiguous,
         completed_terminal_frontier_matches, delegation_terminal_relation_decode_error,
         failed_terminal_frontier_matches, is_same_credential_retry_cause,
-        record_reclassified_turn_candidate,
+        record_reclassified_turn_candidate, remap_preserves_preflight_limits,
     };
+
+    #[test]
+    fn remapped_call_rejects_missing_preparation_limit_evidence() {
+        let target =
+            ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(1)));
+        let current = ToolContinuationUsageLimit::new(target, FastMode::Enabled, 10, 100);
+
+        assert!(!remap_preserves_preflight_limits(None, Some(current)));
+    }
 
     #[test]
     fn same_credential_retry_causes_are_closed() {

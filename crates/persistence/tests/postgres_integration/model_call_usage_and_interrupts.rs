@@ -736,7 +736,13 @@ async fn effective_target_authorization_records_changed_mapping_after_restart()
         targets.clone(),
         model_credential_reference(),
     )
-    .with_session_credentials(old_families);
+    .with_session_credentials(old_families)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        100,
+    )]);
     assert!(matches!(
         repository
             .prepare_initial_call(
@@ -757,6 +763,31 @@ async fn effective_target_authorization_records_changed_mapping_after_restart()
             .await?,
         PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
     ));
+    let prepared_evidence: (
+        Option<String>,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<bool>,
+    ) = sqlx::query_as(
+        "SELECT prepared_credential_model_family,
+                    prepared_max_output_tokens,
+                    prepared_context_window_tokens,
+                    prepared_provider_compaction_replay
+               FROM model_call
+              WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        prepared_evidence,
+        (
+            Some("test-model-family".to_owned()),
+            Some(Decimal::from(10)),
+            Some(Decimal::from(100)),
+            Some(false),
+        )
+    );
 
     let mutation = sqlx::query(
         "UPDATE model_call
@@ -772,10 +803,22 @@ async fn effective_target_authorization_records_changed_mapping_after_restart()
         mutation.as_database_error().and_then(|error| error.code()),
         Some("23514".into())
     );
+    let mutation = sqlx::query(
+        "UPDATE model_call
+            SET prepared_context_window_tokens = 99
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a prepared call's headroom evidence is immutable");
+    assert_eq!(
+        mutation.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
+    );
 
     let different_families = ModelCredentialFamilyCatalog::try_new([
         (selected_target, Arc::<str>::from("test-model-family"), None),
-        (old_fast_target, Arc::<str>::from("test-model-family"), None),
         (
             new_fast_target,
             Arc::<str>::from("other-model-family"),
@@ -813,7 +856,6 @@ async fn effective_target_authorization_records_changed_mapping_after_restart()
 
     let narrower_families = ModelCredentialFamilyCatalog::try_new([
         (selected_target, Arc::<str>::from("test-model-family"), None),
-        (old_fast_target, Arc::<str>::from("test-model-family"), None),
         (new_fast_target, Arc::<str>::from("test-model-family"), None),
     ])
     .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
@@ -824,10 +866,12 @@ async fn effective_target_authorization_records_changed_mapping_after_restart()
         model_credential_reference(),
     )
     .with_session_credentials(narrower_families)
-    .with_continuation_usage_limits([
-        ToolContinuationUsageLimit::new(old_fast_target, FastMode::Disabled, 10, 100),
-        ToolContinuationUsageLimit::new(selected_target, FastMode::Enabled, 10, 50),
-    ]);
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        50,
+    )]);
     assert!(matches!(
         narrower.authorize_send(session, call).await?,
         AuthorizeModelCallOutcome::NoSend

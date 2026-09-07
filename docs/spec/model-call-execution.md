@@ -434,25 +434,30 @@ context guard uses those retained-iteration measures as its post-compaction
 baseline; it never treats billed iteration input or aggregate multi-iteration
 output as model-visible retained usage. A retained baseline is eligible only
 when its call used the same effective target the next request will use after
-applying fast-mode target mapping. Refusal output remains discarded from that
-baseline even when its final-iteration count is retained as evidence, and
-projected-content headroom excludes opaque compaction bytes when the effective
-target will omit the block. The dedicated compaction call rejects every tool and
-suppressed-tool part and accepts a summary only from a completion that ended by
-end turn or stop sequence, because its completion must be whole summary text.
-Classification is an adapter contract consuming the full-request-send boundary;
-the daemon never reinterprets SDK errors by retryability or exception type. The
-identity relation applies to every identity the exchange reported, early
-observations and terminal evidence alike, because it is timing-sensitive.
-Different lineage is a substitution: the provider served a model the daemon
-never authorized, and it is never collapsed into the alias case or into an
-ordinary provider failure. When the Anthropic adapter sees the server-side
-fallback block, the response can never complete as the resolved target's output,
-whatever the block names; a block naming the configured target itself classifies
-as ambiguity rather than substitution, because no durable marker-only evidence
-exists to carry a substitution. Every classified outcome and every fail-closed
-bridge defect carries a stable sanitized cause code alongside the shared
-operator failure class defined in [runtime-substrate](runtime-substrate.md).
+applying fast-mode target mapping. A prepared call retains that effective
+target, its credential family, and its context ceiling, output reservation, and
+provider-compaction replay decision. Send authorization admits a remapped target
+only when its configured family matches the retained family and its limits
+preserve the retained input allowance and replay decision; missing preparation
+evidence fails closed. Refusal output remains discarded from that baseline even
+when its final-iteration count is retained as evidence, and projected-content
+headroom excludes opaque compaction bytes when the effective target will omit
+the block. The dedicated compaction call rejects every tool and suppressed-tool
+part and accepts a summary only from a completion that ended by end turn or stop
+sequence, because its completion must be whole summary text. Classification is
+an adapter contract consuming the full-request-send boundary; the daemon never
+reinterprets SDK errors by retryability or exception type. The identity relation
+applies to every identity the exchange reported, early observations and terminal
+evidence alike, because it is timing-sensitive. Different lineage is a
+substitution: the provider served a model the daemon never authorized, and it is
+never collapsed into the alias case or into an ordinary provider failure. When
+the Anthropic adapter sees the server-side fallback block, the response can
+never complete as the resolved target's output, whatever the block names; a
+block naming the configured target itself classifies as ambiguity rather than
+substitution, because no durable marker-only evidence exists to carry a
+substitution. Every classified outcome and every fail-closed bridge defect
+carries a stable sanitized cause code alongside the shared operator failure
+class defined in [runtime-substrate](runtime-substrate.md).
 
 A model-call transaction that both appends an outbox event and locks shared
 credential-pool action heads first takes one global transaction-scoped ordering

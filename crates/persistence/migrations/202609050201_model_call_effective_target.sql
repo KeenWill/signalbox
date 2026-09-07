@@ -1,7 +1,28 @@
--- Record the exact serving target selected after fast-mode mapping.
+-- Record the exact serving target and target-dependent preparation evidence.
 
 ALTER TABLE model_call
-    ADD COLUMN effective_provider_model_identity_id uuid NOT NULL;
+    ADD COLUMN effective_provider_model_identity_id uuid NOT NULL,
+    ADD COLUMN prepared_credential_model_family text,
+    ADD COLUMN prepared_max_output_tokens numeric(20, 0),
+    ADD COLUMN prepared_context_window_tokens numeric(20, 0),
+    ADD COLUMN prepared_provider_compaction_replay boolean,
+    ADD CONSTRAINT model_call_prepared_credential_family_nonempty CHECK (
+        prepared_credential_model_family IS NULL
+        OR prepared_credential_model_family <> ''
+    ),
+    ADD CONSTRAINT model_call_prepared_limit_evidence_complete CHECK (
+        (
+            prepared_max_output_tokens IS NULL
+            AND prepared_context_window_tokens IS NULL
+            AND prepared_provider_compaction_replay IS NULL
+        ) OR (
+            prepared_max_output_tokens > 0
+            AND prepared_max_output_tokens = trunc(prepared_max_output_tokens)
+            AND prepared_context_window_tokens > 0
+            AND prepared_context_window_tokens = trunc(prepared_context_window_tokens)
+            AND prepared_provider_compaction_replay IS NOT NULL
+        )
+    );
 
 CREATE OR REPLACE FUNCTION reject_model_call_invalid_change() RETURNS trigger
     LANGUAGE plpgsql
@@ -34,7 +55,11 @@ BEGIN
         OLD.resolved_provider_model_identity_id,
         OLD.effective_provider_model_identity_id,
         OLD.context_frontier_id,
-        OLD.credential_reference
+        OLD.credential_reference,
+        OLD.prepared_credential_model_family,
+        OLD.prepared_max_output_tokens,
+        OLD.prepared_context_window_tokens,
+        OLD.prepared_provider_compaction_replay
     ) IS DISTINCT FROM ROW(
         NEW.model_call_id,
         NEW.turn_id,
@@ -47,7 +72,11 @@ BEGIN
         NEW.resolved_provider_model_identity_id,
         NEW.effective_provider_model_identity_id,
         NEW.context_frontier_id,
-        NEW.credential_reference
+        NEW.credential_reference,
+        NEW.prepared_credential_model_family,
+        NEW.prepared_max_output_tokens,
+        NEW.prepared_context_window_tokens,
+        NEW.prepared_provider_compaction_replay
     ) AND NOT (
         OLD.state_kind = 'prepared'
         AND NEW.state_kind = 'in_flight'
@@ -62,7 +91,11 @@ BEGIN
             OLD.frozen_alias_selected_direct_id,
             OLD.resolved_provider_model_identity_id,
             OLD.context_frontier_id,
-            OLD.credential_reference
+            OLD.credential_reference,
+            OLD.prepared_credential_model_family,
+            OLD.prepared_max_output_tokens,
+            OLD.prepared_context_window_tokens,
+            OLD.prepared_provider_compaction_replay
         ) IS NOT DISTINCT FROM ROW(
             NEW.model_call_id,
             NEW.turn_id,
@@ -74,7 +107,11 @@ BEGIN
             NEW.frozen_alias_selected_direct_id,
             NEW.resolved_provider_model_identity_id,
             NEW.context_frontier_id,
-            NEW.credential_reference
+            NEW.credential_reference,
+            NEW.prepared_credential_model_family,
+            NEW.prepared_max_output_tokens,
+            NEW.prepared_context_window_tokens,
+            NEW.prepared_provider_compaction_replay
         )
     ) THEN
         RAISE EXCEPTION 'model call authorization facts are immutable'

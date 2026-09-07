@@ -61,7 +61,7 @@ use crate::{
     },
     model_execution::{
         insert_prepared_call, insert_snapshot, lock_delegated_child_endpoint_sessions,
-        lock_delegated_turn_terminal_frontier,
+        lock_delegated_turn_terminal_frontier, prepared_serving_evidence,
     },
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
@@ -1315,12 +1315,12 @@ impl PostgresToolLoopRepository {
                     .into());
                 }
             };
-            let effective_target = self
-                .credential_families
-                .as_ref()
-                .map_or(prepared.call().target(), |families| {
-                    families.serving_target_for_call(prepared.call().target(), fast_mode)
-                });
+            let serving_evidence = prepared_serving_evidence(
+                self.credential_families.as_ref(),
+                &self.continuation_usage_limits,
+                prepared.call().target(),
+                fast_mode,
+            );
             insert_prepared_call(
                 &mut transaction,
                 prepared,
@@ -1328,7 +1328,7 @@ impl PostgresToolLoopRepository {
                 None,
                 self.cache_inclusive_input_targets
                     .contains(&prepared.call().target()),
-                effective_target,
+                serving_evidence,
             )
             .await
             .map_err(map_model_call_error)?;
