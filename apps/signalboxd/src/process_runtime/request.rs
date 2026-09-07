@@ -52,7 +52,15 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
         Ok(OauthCredentialHandlingOutcome::Pending) => ErrorCode::Unavailable,
         Err(OauthCredentialRepositoryError::Database(_)) => ErrorCode::Unavailable,
         Err(OauthCredentialRepositoryError::CommitAmbiguous(_)) => ErrorCode::CommitAmbiguous,
-        Err(OauthCredentialRepositoryError::Corruption) => ErrorCode::Internal,
+        Err(OauthCredentialRepositoryError::Corruption) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(None, InternalDiagnostic::OauthCredentialCorruption),
+            )
+            .await;
+        }
         Err(OauthCredentialRepositoryError::InvalidProfile) => ErrorCode::InvalidRequest,
     };
     write_error(
