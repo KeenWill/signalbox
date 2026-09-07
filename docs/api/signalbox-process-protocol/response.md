@@ -2,10 +2,65 @@
 
 # response
 
+## OauthCredentialOutcome
+
+```rust
+pub enum OauthCredentialOutcome {
+    Provisioned {},
+    AlreadyProvisioned {},
+    Reprovisioned {},
+    Deleted {},
+    AlreadyDeleted {},
+    NotProvisioned {},
+    Abandoned {},
+    Superseded {},
+    Failed { reason: OauthCredentialFailure },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## OauthCredentialFailure
+
+```rust
+pub enum OauthCredentialFailure {
+    UnknownProfile,
+    NonOauthProfile,
+    RegistrationChanged,
+    DeviceEndpointRejected,
+    DeviceEndpointFailed,
+    AccessDenied,
+    PollingExpired,
+    TokenEndpointFailed,
+    TokenResponseWithoutIdentity,
+    AccountIndependenceFailed,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## validate_oauth_authorization
+
+```rust
+pub fn validate_oauth_authorization(
+    user_code: &str,
+    verification_uri: &str,
+) -> result::Result<(), FrameValidationError>;
+```
+
 ## ServerMessage
 
 ```rust
 pub enum ServerMessage {
+    OauthCredentialAuthorization {
+        command_id: CommandId,
+        profile: string::String,
+        user_code: string::String,
+        verification_uri: string::String,
+    },
+    OauthCredentialReceipt {
+        command_id: CommandId,
+        profile: string::String,
+        outcome: OauthCredentialOutcome,
+    },
     SessionCreated {
         session_id: CanonicalUuid,
         model_settings: ModelSettingsSnapshot,

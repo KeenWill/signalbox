@@ -38,6 +38,7 @@ mod lifecycle_metrics;
 mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
 mod model_credentials_and_tool_batches;
+mod oauth_credential;
 mod outbox_dispatch_and_process_read;
 mod ownership_seam_grants;
 mod restart_recovery_and_submit;

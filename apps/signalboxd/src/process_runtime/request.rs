@@ -1,5 +1,106 @@
 use super::*;
 
+async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: signalbox_process_protocol::CommandId,
+    profile: String,
+    operation: signalbox_persistence::oauth_credential::OauthCredentialOperation,
+    services: &ConnectionServices,
+) -> Result<(), ProcessConnectionError> {
+    use signalbox_persistence::oauth_credential::{
+        OauthCredentialCommand, OauthCredentialFailure, OauthCredentialHandlingOutcome,
+        OauthCredentialOutcome, OauthCredentialRepository, OauthCredentialRepositoryError,
+    };
+    let command = OauthCredentialCommand {
+        command_id: DurableCommandId::from_uuid(command_id.into_uuid()),
+        operation,
+        profile: profile.clone(),
+    };
+    let result = OauthCredentialRepository::new(services.pool.clone())
+        .record(&command, || {
+            let reason = match services.model_configuration.credential_profile(&profile) {
+                None => OauthCredentialFailure::UnknownProfile,
+                Some(profile) => match profile.delivery() {
+                    crate::credential_pools::CredentialDelivery::Ambient
+                    | crate::credential_pools::CredentialDelivery::File { .. }
+                    | crate::credential_pools::CredentialDelivery::CodexHome { .. } => {
+                        OauthCredentialFailure::NonOauthProfile
+                    }
+                },
+            };
+
+            OauthCredentialOutcome::Failed(reason)
+        })
+        .await;
+    let code = match result {
+        Ok(OauthCredentialHandlingOutcome::Recorded(outcome)) => {
+            return write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::OauthCredentialReceipt {
+                    command_id,
+                    profile,
+                    outcome: wire_oauth_outcome(outcome),
+                },
+            )
+            .await;
+        }
+        Ok(OauthCredentialHandlingOutcome::ConflictingReuse) => ErrorCode::ConflictingReuse,
+        Ok(OauthCredentialHandlingOutcome::Pending) => ErrorCode::Unavailable,
+        Err(OauthCredentialRepositoryError::Database(_)) => ErrorCode::Unavailable,
+        Err(OauthCredentialRepositoryError::CommitAmbiguous(_)) => ErrorCode::CommitAmbiguous,
+        Err(OauthCredentialRepositoryError::Corruption) => ErrorCode::Internal,
+        Err(OauthCredentialRepositoryError::InvalidProfile) => ErrorCode::InvalidRequest,
+    };
+    write_error(
+        writer,
+        version,
+        request_id,
+        ProtocolError::without_detail(code),
+    )
+    .await
+}
+
+fn wire_oauth_outcome(
+    value: signalbox_persistence::oauth_credential::OauthCredentialOutcome,
+) -> signalbox_process_protocol::OauthCredentialOutcome {
+    use signalbox_persistence::oauth_credential::{
+        OauthCredentialFailure as StoredFailure, OauthCredentialOutcome as Stored,
+    };
+    use signalbox_process_protocol::{
+        OauthCredentialFailure as WireFailure, OauthCredentialOutcome as Wire,
+    };
+    match value {
+        Stored::Provisioned => Wire::Provisioned {},
+        Stored::AlreadyProvisioned => Wire::AlreadyProvisioned {},
+        Stored::Reprovisioned => Wire::Reprovisioned {},
+        Stored::Deleted => Wire::Deleted {},
+        Stored::AlreadyDeleted => Wire::AlreadyDeleted {},
+        Stored::NotProvisioned => Wire::NotProvisioned {},
+        Stored::Abandoned => Wire::Abandoned {},
+        Stored::Superseded => Wire::Superseded {},
+        Stored::Failed(reason) => Wire::Failed {
+            reason: match reason {
+                StoredFailure::UnknownProfile => WireFailure::UnknownProfile,
+                StoredFailure::NonOauthProfile => WireFailure::NonOauthProfile,
+                StoredFailure::RegistrationChanged => WireFailure::RegistrationChanged,
+                StoredFailure::DeviceEndpointRejected => WireFailure::DeviceEndpointRejected,
+                StoredFailure::DeviceEndpointFailed => WireFailure::DeviceEndpointFailed,
+                StoredFailure::AccessDenied => WireFailure::AccessDenied,
+                StoredFailure::PollingExpired => WireFailure::PollingExpired,
+                StoredFailure::TokenEndpointFailed => WireFailure::TokenEndpointFailed,
+                StoredFailure::TokenResponseWithoutIdentity => {
+                    WireFailure::TokenResponseWithoutIdentity
+                }
+                StoredFailure::AccountIndependenceFailed => WireFailure::AccountIndependenceFailed,
+            },
+        },
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "request execution keeps connection I/O and durable correlation explicit"
@@ -46,6 +147,51 @@ where
         return write_bulk_ingest_rejection(writer, version, request_id, active_kind).await;
     }
     match request {
+        ClientRequest::ProvisionOauthCredential {
+            command_id,
+            profile,
+        } => {
+            handle_oauth_credential(
+                writer,
+                version,
+                request_id,
+                command_id,
+                profile,
+                signalbox_persistence::oauth_credential::OauthCredentialOperation::Provision,
+                services,
+            )
+            .await
+        }
+        ClientRequest::ReprovisionOauthCredential {
+            command_id,
+            profile,
+        } => {
+            handle_oauth_credential(
+                writer,
+                version,
+                request_id,
+                command_id,
+                profile,
+                signalbox_persistence::oauth_credential::OauthCredentialOperation::Reprovision,
+                services,
+            )
+            .await
+        }
+        ClientRequest::DeleteOauthCredential {
+            command_id,
+            profile,
+        } => {
+            handle_oauth_credential(
+                writer,
+                version,
+                request_id,
+                command_id,
+                profile,
+                signalbox_persistence::oauth_credential::OauthCredentialOperation::Delete,
+                services,
+            )
+            .await
+        }
         ClientRequest::CreateSession {
             command_id,
             initial_model_selection,
