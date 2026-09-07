@@ -54,6 +54,7 @@ use signalbox_persistence::{
     turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
+use signalboxd::GUARD_CHECK_INTERVAL;
 use signalboxd::runner_protocol_runtime::{
     PostgresRunnerRegistrationService, RunnerProtocolRuntime, RunnerProtocolRuntimeError,
     RunnerRegistrationFailureCause,
@@ -95,7 +96,6 @@ const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
 const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
-const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 fn graceful_shutdown_window(
     model_exchange_timeout: Option<Duration>,
