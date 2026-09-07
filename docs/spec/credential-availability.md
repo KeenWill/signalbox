@@ -101,11 +101,13 @@ same-credential attempts remaining with adapter proof that the provider never
 accepted the request, or the pinned action is `switch_now` and a member remains.
 `switch_now` also admits credential rejection without separate non-acceptance
 proof; rejection never admits same-credential retry. Every other availability
-successor requires the adapter's pre-stream proof. The turn stays active and
-keeps its slot; the predecessor attempt ends KnownFailure without terminalizing,
-and the same commit prepares a successor attempt. That commit appends no
-`TurnFailed`: one commit never both terminalizes the turn and authorizes a
-successor. The rotation and transient retry tests pin this ending.
+successor requires the adapter's [non-acceptance proof](runtime-substrate.md);
+for Codex this requires the typed failed-turn gate, without assistant activity
+or an earlier retryable error. The turn stays active and keeps its slot; the
+predecessor attempt ends KnownFailure without terminalizing, and the same commit
+prepares a successor attempt. That commit appends no `TurnFailed`: one commit
+never both terminalizes the turn and authorizes a successor. The rotation and
+transient retry tests pin this ending.
 
 A same-credential retry additionally requires the failed member itself to remain
 admitted when the observation commits. If a durable action already excludes it,

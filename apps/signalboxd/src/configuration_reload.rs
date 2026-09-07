@@ -55,6 +55,37 @@ impl ConfigurationCatalogs {
     }
 }
 
+/// Persistence failure classified by whether reload effects need recovery.
+#[derive(Debug)]
+pub enum ConfigurationReloadError {
+    BeforeEffect(ReloadRepositoryError),
+    RecoveryRequired(ReloadRepositoryError),
+}
+
+impl std::fmt::Display for ConfigurationReloadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BeforeEffect(error) | Self::RecoveryRequired(error) => {
+                std::fmt::Display::fmt(error, formatter)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigurationReloadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BeforeEffect(error) | Self::RecoveryRequired(error) => Some(error),
+        }
+    }
+}
+
+impl From<ReloadRepositoryError> for ConfigurationReloadError {
+    fn from(error: ReloadRepositoryError) -> Self {
+        Self::BeforeEffect(error)
+    }
+}
+
 /// One daemon-wide reload mutex and one atomically replaced catalog pair.
 #[derive(Clone)]
 pub struct ConfigurationReload {
@@ -277,7 +308,7 @@ impl ConfigurationReload {
         replacement: ConfigurationCatalogs,
         recovering: bool,
     ) -> Result<ReloadLookup, ReloadRepositoryError> {
-        if let Some(watch) = &self.watch {
+        let prepared_watch = if let Some(watch) = &self.watch {
             let prepared = match watch.prepare_reload(replacement.clone()).await {
                 Ok(prepared) => prepared,
                 Err(_) if recovering => {
@@ -333,21 +364,26 @@ impl ConfigurationReload {
                     ReloadRepositoryError::Corruption("prior reload worker preparation failed")
                 })?;
                 self.reconcile(&prior).await?;
-                watch.install_reload(prepared).await;
                 *self
                     .current
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = prior;
+                watch.install_reload(prepared).await;
                 self.repository.finish(request, &refusal).await?;
                 return Ok(ReloadLookup::Recorded(refusal));
             }
             self.reconcile(&replacement).await?;
-            watch.install_reload(prepared).await;
-        }
+            Some((watch, prepared))
+        } else {
+            None
+        };
         *self
             .current
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = replacement;
+        if let Some((watch, prepared)) = prepared_watch {
+            watch.install_reload(prepared).await;
+        }
         self.repository
             .finish(request, &ReloadResult::Reloaded)
             .await?;
@@ -366,7 +402,7 @@ impl ConfigurationReload {
     pub async fn reload(
         &self,
         request: ReloadConfiguration,
-    ) -> Result<ReloadLookup, ReloadRepositoryError> {
+    ) -> Result<ReloadLookup, ConfigurationReloadError> {
         let found = self.repository.lookup(request).await?;
         if found != ReloadLookup::Unclaimed {
             return Ok(found);
@@ -416,17 +452,29 @@ impl ConfigurationReload {
             Err(result) => {
                 return match self.repository.claim(request, Err(&result)).await? {
                     ReloadClaim::Settled(outcome) => Ok(outcome),
-                    ReloadClaim::Retained => Err(ReloadRepositoryError::Corruption(
-                        "rejection retained an install intent",
+                    ReloadClaim::Retained => Err(ConfigurationReloadError::RecoveryRequired(
+                        ReloadRepositoryError::Corruption("rejection retained an install intent"),
                     )),
                 };
             }
         };
-        let claimed = self.repository.claim(request, Ok(&intent)).await?;
+        let claimed = self
+            .repository
+            .claim(request, Ok(&intent))
+            .await
+            .map_err(|error| {
+                if matches!(error, ReloadRepositoryError::CommitAmbiguous(_)) {
+                    ConfigurationReloadError::RecoveryRequired(error)
+                } else {
+                    error.into()
+                }
+            })?;
         if let ReloadClaim::Settled(outcome) = claimed {
             return Ok(outcome);
         }
-        self.deliver(request, &intent, replacement, false).await
+        self.deliver(request, &intent, replacement, false)
+            .await
+            .map_err(ConfigurationReloadError::RecoveryRequired)
     }
 
     fn read_replacement(&self) -> Result<ConfigurationCatalogs, ReloadResult> {
@@ -538,6 +586,28 @@ mod tests {
         )
         .expect("reload composition");
         (directory, reload)
+    }
+
+    #[tokio::test]
+    async fn lookup_database_failure_does_not_require_recovery() {
+        let (_directory, mut reload) = fixture();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .expect("lazy pool");
+        pool.close().await;
+        reload.repository = ReloadConfigurationRepository::new(pool);
+        let error = reload
+            .reload(ReloadConfiguration {
+                command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            })
+            .await
+            .expect_err("closed pool rejects lookup");
+        assert!(matches!(
+            error,
+            ConfigurationReloadError::BeforeEffect(ReloadRepositoryError::Database(
+                sqlx::Error::PoolClosed
+            ))
+        ));
     }
 
     #[tokio::test]

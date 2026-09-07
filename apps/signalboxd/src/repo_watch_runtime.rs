@@ -527,6 +527,13 @@ impl RuntimeState {
         {
             return Err(RepositoryWatchRuntimeError::Dispatch);
         }
+        if self
+            .sweep
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            return Err(RepositoryWatchRuntimeError::Sweep);
+        }
         Ok(())
     }
 
@@ -617,5 +624,38 @@ impl RuntimeState {
             .await
             .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn health_rejects_a_finished_convergence_sweep() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .expect("lazy pool");
+        let (eligibility_nudge, _work) = signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let runtime = RepositoryWatchRuntime::unstarted(
+            pool.clone(),
+            RepositoryWatchServices {
+                core_pool: pool,
+                models: Arc::new(
+                    crate::configuration::checked_in_example_configuration().expect("models"),
+                ),
+                templates: Arc::new(SessionTemplateConfiguration::default()),
+                eligibility_nudge,
+                tool_dispatch_gate: InProcessToolDispatchGate::default(),
+            },
+        );
+        let (shutdown, _receiver) = watch::channel(false);
+        let mut task = tokio::spawn(async {});
+        (&mut task).await.expect("sweep exits unexpectedly");
+        let mut state = runtime.state.lock().await;
+        state.sweep = Some((shutdown, task));
+        assert_eq!(state.health(), Err(RepositoryWatchRuntimeError::Sweep));
     }
 }
