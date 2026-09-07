@@ -2555,6 +2555,12 @@ struct RuntimeHookFixture<'a> {
 fn runtime_configuration(
     hook: &RuntimeHookFixture<'_>,
 ) -> Result<signalboxd::HubModelConfiguration, Box<dyn Error>> {
+    Ok(signalboxd::HubModelConfiguration::parse(
+        &runtime_configuration_source(hook)?,
+    )?)
+}
+
+fn runtime_configuration_source(hook: &RuntimeHookFixture<'_>) -> Result<String, Box<dyn Error>> {
     let catalog = include_str!("../../../config/signalboxd.example.toml")
         .replace(
             "/usr/local/bin/signalbox-exec-supervisor",
@@ -2564,7 +2570,7 @@ fn runtime_configuration(
             "repository_watch_webhook_retention = \"604800s\"",
             &format!("repository_watch_webhook_retention = {:?}", hook.retention),
         );
-    Ok(signalboxd::HubModelConfiguration::parse(&format!(
+    Ok(format!(
         r#"{catalog}
 [repository_watch]
 version = 1
@@ -2600,7 +2606,7 @@ template = "{template}"
         id = hook.id,
         secret = hook.secret.display(),
         poll_credential = hook.secret.with_extension("missing-token").display(),
-    ))?)
+    ))
 }
 
 async fn unused_webhook_address() -> Result<std::net::SocketAddr, std::io::Error> {
@@ -2640,6 +2646,46 @@ async fn wait_for_blocked_webhook_admission(pool: &PgPool) -> Result<(), Box<dyn
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT FROM pg_locks
                  WHERE relation = 'webhook_delivery'::regclass AND NOT granted)",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+/// Waits until rule activation is blocked after the listener pause.
+async fn wait_for_blocked_reload_activation(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT FROM pg_locks
+                 WHERE relation = 'reload_activation'::regclass AND NOT granted)",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+/// Waits until reconciliation cannot yet restore eligibility through its target transaction.
+async fn wait_for_blocked_target_reconciliation(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT FROM pg_locks
+                 WHERE relation = 'convergence_sweep_target'::regclass AND NOT granted)",
             )
             .fetch_one(pool)
             .await?;
@@ -3381,5 +3427,311 @@ system_prompt = "Inspect workflow failures."
         .expect("orderly shutdown after rejected reloads");
     core_pool.close().await;
     drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn durable_reload_replays_activated_intent_and_disables_live_workers()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
+    use signalbox_module_repo_watch_v2::{ReloadIntentInput, repository_rule_set_digest};
+    use signalbox_persistence::{
+        reload_configuration::{
+            ReloadClaim, ReloadConfiguration, ReloadConfigurationRepository, ReloadIntent,
+            ReloadLookup, ReloadPhase, ReloadResult,
+        },
+        scheduler::PostgresEligibilitySweep,
+    };
+    use signalboxd::{
+        SessionTemplateConfiguration,
+        configuration_reload::ConfigurationReload,
+        repo_watch_runtime::{
+            RepositoryWatchRuntime, RepositoryWatchServices, connect_repository_watch_pool,
+        },
+    };
+    use std::sync::Arc;
+
+    let (_container, core_pool, _) = postgres().await?;
+    migrate(&core_pool).await?;
+    let module_pool = connect_repository_watch_pool(&core_pool)
+        .await
+        .expect("module pool");
+    let files = tempfile::tempdir()?;
+    let secret = files.path().join("secret");
+    std::fs::write(&secret, "hook-secret")?;
+    let mut hook = RuntimeHookFixture {
+        address: unused_webhook_address().await?,
+        path: "/reload",
+        id: 17,
+        secret: &secret,
+        enabled: false,
+        rule_version: 1,
+        template: "watch",
+        mode: "shadow",
+        retention: "604800s",
+    };
+    let prior_source = runtime_configuration_source(&hook)?;
+    let models = runtime_configuration(&hook)?;
+    let templates_source = "version = 1\n[[templates]]\nname = \"watch\"\nversion = 1\nalias = \"540ce009-c2ec-4a04-b823-c411ea189778\"\ndangerous_tool_auto_approval = false\nsystem_prompt = \"Inspect repository activity.\"\n";
+    let template_path = files.path().join("templates.toml");
+    std::fs::write(&template_path, templates_source)?;
+    let templates = SessionTemplateConfiguration::read(&template_path, || None, &models)?;
+    let model_path = files.path().join("models.toml");
+    let (nudge, _work) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(core_pool.clone()));
+    let runtime = RepositoryWatchRuntime::unstarted(
+        module_pool.clone(),
+        RepositoryWatchServices {
+            core_pool: core_pool.clone(),
+            models: Arc::new(models.clone()),
+            templates: Arc::new(templates.clone()),
+            eligibility_nudge: nudge,
+            tool_dispatch_gate: InProcessToolDispatchGate::default(),
+        },
+    );
+    let reload = ConfigurationReload::new(
+        core_pool.clone(),
+        models,
+        templates,
+        model_path.clone(),
+        template_path.clone(),
+        None,
+    )
+    .expect("reload composition")
+    .with_repository_watch(runtime.clone());
+    hook.enabled = true;
+    let replacement_source = runtime_configuration_source(&hook)?;
+    let replacement = runtime_configuration(&hook)?;
+    let watch = replacement.repository_watch().expect("watch configuration");
+    let sets = watch
+        .repositories()
+        .iter()
+        .map(|repo| RepositoryRuleSet::new(repo.repository(), watch.rules()))
+        .collect::<Vec<_>>();
+    let digest = repository_rule_set_digest(&sets)?;
+    let snapshot = |source: &str| -> Result<String, Box<dyn Error>> {
+        let mut document = source.parse::<toml_edit::DocumentMut>()?;
+        document.as_table_mut().retain(|key, _| {
+            ["models", "serving_targets", "aliases", "repository_watch"].contains(&key)
+        });
+        Ok(serde_json::json!({"model_catalog":document.to_string(), "session_templates":templates_source}).to_string())
+    };
+    let request = ReloadConfiguration {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+    };
+    let repository = ReloadConfigurationRepository::new(core_pool.clone());
+    let intent = ReloadIntent {
+        replacement_snapshot: snapshot(&replacement_source)?,
+        prior_snapshot: snapshot(&prior_source)?,
+        rule_set_digest: digest,
+    };
+    assert_eq!(
+        repository.claim(request, Ok(&intent)).await?,
+        ReloadClaim::Retained
+    );
+    let store = RepoWatchStore::new(module_pool.clone());
+    let input = ReloadIntentInput {
+        command_id: request.command_id,
+        repositories: &sets,
+        rule_set_digest: digest,
+    };
+    assert!(matches!(
+        store
+            .activate_reload(input, OffsetDateTime::now_utc())
+            .await?,
+        RuleReconciliationAdmission::Applied { .. }
+    ));
+    let first_tails: String = sqlx::query_scalar(
+        "SELECT activation_tails::text FROM reload_activation WHERE command_id = $1",
+    )
+    .bind(request.command_id.as_uuid())
+    .fetch_one(&module_pool)
+    .await?;
+    // No model file exists: recovery must use the checked intent after the activation commit.
+    std::fs::remove_file(&template_path)?;
+    reload.recover().await?;
+    std::fs::write(&template_path, templates_source)?;
+    assert_eq!(
+        repository.lookup(request).await?,
+        ReloadLookup::Recorded(ReloadResult::Reloaded)
+    );
+    let replay_tails: String = sqlx::query_scalar(
+        "SELECT activation_tails::text FROM reload_activation WHERE command_id = $1",
+    )
+    .bind(request.command_id.as_uuid())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(first_tails, replay_tails);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&first_tails)?,
+        serde_json::json!({"runtime/project":"0"})
+    );
+    assert!(
+        sqlx::query("DELETE FROM reload_activation")
+            .execute(&module_pool)
+            .await
+            .is_err()
+    );
+    let (shutdown, stopped) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(runtime.run(stopped));
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(hook.address).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        webhook_status(&hook, b"wrong-secret").await?,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    // Pause after delivery admission starts, while rule activation remains blocked.
+    let delivery = RuntimeWebhookDelivery {
+        id: Uuid::now_v7(),
+        event: "push",
+        body: RUNTIME_WEBHOOK_BODY,
+    };
+    let mut admission_lock = module_pool.begin().await?;
+    sqlx::query("LOCK TABLE webhook_delivery IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *admission_lock)
+        .await?;
+    let mut activation_lock = module_pool.begin().await?;
+    sqlx::query("LOCK TABLE reload_activation IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *activation_lock)
+        .await?;
+    hook.mode = "primary";
+    std::fs::write(&model_path, runtime_configuration_source(&hook)?)?;
+    let (response_sent, response_received) = tokio::sync::oneshot::channel();
+    let control_pool = module_pool.clone();
+    let delivery_id = delivery.id;
+    let hook_id = hook.id;
+    let (response, installed, controls) = tokio::join!(
+        async {
+            let response = webhook_delivery_status(&hook, b"hook-secret", &delivery).await?;
+            let _ = response_sent.send(response);
+            Ok::<_, Box<dyn Error>>(response)
+        },
+        async {
+            wait_for_blocked_webhook_admission(&module_pool).await?;
+            Ok::<_, Box<dyn Error>>(
+                reload
+                    .reload(ReloadConfiguration {
+                        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+                    })
+                    .await?,
+            )
+        },
+        async move {
+            wait_for_blocked_reload_activation(&control_pool).await?;
+            admission_lock.commit().await?;
+            assert_eq!(
+                response_received.await?,
+                reqwest::StatusCode::SERVICE_UNAVAILABLE
+            );
+            let pending: String = sqlx::query_scalar("SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2")
+                .bind(Decimal::from(hook_id)).bind(delivery_id).fetch_one(&control_pool).await?;
+            assert_eq!(pending, "pending");
+            activation_lock.commit().await?;
+            Ok::<_, Box<dyn Error>>(())
+        }
+    );
+    controls?;
+    assert_eq!(response?, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(installed?, ReloadLookup::Recorded(ReloadResult::Reloaded));
+    assert_eq!(
+        webhook_delivery_status(&hook, b"hook-secret", &delivery).await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    let applied: String = sqlx::query_scalar(
+        "SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(hook.id))
+    .bind(delivery.id)
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(applied, "applied");
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let running_address = hook.address;
+    hook.address = occupied.local_addr()?;
+    std::fs::write(&model_path, runtime_configuration_source(&hook)?)?;
+    let bind_failure = ReloadConfiguration {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+    };
+    assert!(matches!(
+        reload.reload(bind_failure).await?,
+        ReloadLookup::Recorded(ReloadResult::Failed {
+            phase: ReloadPhase::Install,
+            ..
+        })
+    ));
+    hook.address = running_address;
+    assert_eq!(
+        webhook_status(&hook, b"wrong-secret").await?,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    hook.enabled = false;
+    hook.rule_version = 2;
+    std::fs::write(&model_path, runtime_configuration_source(&hook)?)?;
+    let disable = ReloadConfiguration {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+    };
+    let mut target_lock = core_pool.begin().await?;
+    sqlx::query("LOCK TABLE convergence_sweep_target IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *target_lock)
+        .await?;
+    let (disabled, published_before_restoration) = tokio::join!(reload.reload(disable), async {
+        wait_for_blocked_target_reconciliation(&core_pool).await?;
+        let published = !reload
+            .catalogs()
+            .models
+            .repository_watch()
+            .expect("watch")
+            .enabled();
+        target_lock.commit().await?;
+        Ok::<_, Box<dyn Error>>(published)
+    });
+    assert!(
+        published_before_restoration?,
+        "replacement catalogs precede eligibility restoration"
+    );
+    assert_eq!(disabled?, ReloadLookup::Recorded(ReloadResult::Reloaded));
+    assert!(tokio::net::TcpStream::connect(hook.address).await.is_err());
+    hook.enabled = true;
+    hook.rule_version = 1;
+    std::fs::write(&model_path, runtime_configuration_source(&hook)?)?;
+    let stale = ReloadConfiguration {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+    };
+    assert!(matches!(
+        reload.reload(stale).await?,
+        ReloadLookup::Recorded(ReloadResult::Failed {
+            phase: ReloadPhase::Activate,
+            ..
+        })
+    ));
+    assert!(
+        !reload
+            .catalogs()
+            .models
+            .repository_watch()
+            .expect("prior watch")
+            .enabled()
+    );
+    assert!(tokio::net::TcpStream::connect(hook.address).await.is_err());
+    assert!(matches!(
+        store
+            .activate_reload(input, OffsetDateTime::now_utc())
+            .await?,
+        RuleReconciliationAdmission::Applied { .. }
+    ));
+    let active_count: i64 = sqlx::query_scalar("SELECT count(*) FROM rule")
+        .fetch_one(&module_pool)
+        .await?;
+    assert_eq!(
+        active_count, 0,
+        "replaying an older activation cannot undo a later disable"
+    );
+    shutdown.send(true)?;
+    worker.await?.expect("clean worker shutdown");
     Ok(())
 }

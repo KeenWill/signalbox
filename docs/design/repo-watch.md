@@ -6,35 +6,13 @@ when no planned capability remains.
 
 ## Goal
 
-Four capabilities are committed. Dispatched sessions record repository watch as
+Two capabilities are committed. Dispatched sessions record repository watch as
 their cause and actor, with durable provenance that resolves the dispatch they
 came from. The poll cache survives a daemon restart with an unchanged reviewer
 set, so the first complete poll sends conditional requests instead of one
-complete unconditional fetch. The module runtime composes and reloads the
-webhook listener and repository polling tasks.
+complete unconditional fetch.
 
 ## Design
-
-Reload reconciles `repository_watch.enabled`: disabling stops and joins the
-pollers, webhook listener, command worker, and convergence sweep; enabling
-composes them from the current configuration where configured. While disabled,
-the effective worker inventory is empty.
-
-While enabled, the repository-watch runtime starts a polling task for each added
-repository, stops each removed repository's task, and replaces a repository's
-task when its poll interval, polling credential file, or
-`repository_watch.signal_reviewers` changes. A signal-reviewer change stops and
-joins the old pollers, then invalidates persisted poll validators and accepted
-snapshots before starting replacement pollers.
-
-While enabled, adding `[repository_watch.webhook]` on reload composes the
-listener; removing it stops the listener.
-
-Webhook listener: the module runtime composes the listener; a reload that keeps
-the bind address swaps the running listener's path and hook map atomically. Only
-an address change binds a replacement before retiring the running listener; a
-bind failure keeps the running listener and fails the reload. Deliveries in
-flight are retried.
 
 Provenance: session creation accepts a repository-watch creation cause and
 module actor identity. A durable provenance record is linked to

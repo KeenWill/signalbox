@@ -9,11 +9,11 @@ from the terminal client's existing `spawn_session` half.
 
 Future implementation of these surfaces under protocol version 1 must pair each
 daemon handler with its terminal-client consumer in the same change:
-credential-exclusion administration, configuration reload, program-run
-cancellation, runner placement facts, `spawn_session`, cascade metadata on stop
-receipts, and the typed projection of credential-pool exhaustion and of the
-credential-availability wait. The terminal client already sends `spawn_session`
-and validates its receipt, so that surface needs only its daemon transaction.
+credential-exclusion administration, program-run cancellation, runner placement
+facts, `spawn_session`, cascade metadata on stop receipts, and the typed
+projection of credential-pool exhaustion and of the credential-availability
+wait. The terminal client already sends `spawn_session` and validates its
+receipt, so that surface needs only its daemon transaction.
 
 ## Design
 
@@ -50,28 +50,6 @@ record an earlier command already cleared is `already_cleared`. Success returns
 durable. An equal `command_id` replay returns its stored receipt before current
 state is evaluated. Both operations are authorized as every other request is:
 reaching the owner-private socket is the authority.
-
-Startup reload replay shares the serial request-reload boundary. Reload pauses
-sweep admission and stops and joins active sweep attempts and affected ingestion
-tasks before rule activation and event-tail capture. Only after that activation
-commits does core reconcile convergence targets from the retained intent. On a
-stale or conflicting rule-revision rejection, recovery first validates the prior
-snapshot against the current startup-only sections. If invalid, it terminalizes
-the intent with `configuration_reload_failed` without resuming workers, and
-startup recovery fails. Otherwise it resumes ingestion and sweep admission under
-the prior snapshot before terminalizing the intent with
-`configuration_reload_failed`, without replacing the running configuration.
-Other failures after either stops leave the intent pending until recovery
-installs the replacement snapshot and resumes them before terminalizing the
-claim. The [reload-intent input](ownership-seam.md) delivers rule activation
-only, and the module activates the rules atomically and idempotently by command
-identity and digest. The activation transaction captures each repository's
-current event tail and retains it for idempotent replay. Before replay activates
-any retained effects, startup validates the retained reloadable snapshot
-together with the on-disk startup-only sections; incompatibility fails startup
-and leaves the intent pending. Startup replays any undelivered intent from its
-retained payload even if the configuration files changed, before terminalizing
-its claim.
 
 Program-run cancellation is the request
 `cancel_program_run { run_id, command_id }` and the receipt

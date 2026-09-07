@@ -27,10 +27,10 @@ use std::{
 };
 
 use signalbox_application::{
-    ClassifyOperatorFailure, EligibilityNudge, GoalAwareEligibilityPass,
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop,
-    SchedulerLoopExit, SchedulerPassOccupancyBound, StaleActiveTurnBound, StartupScanService,
+    ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+    SchedulerPassOccupancyBound, StaleActiveTurnBound, StartupScanService,
     TurnLivenessScanInterval, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
@@ -48,10 +48,10 @@ use signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version;
 use signalbox_model_runtime_openai::OpenAiConstructionError;
 use signalbox_persistence::{
     automatic_reconciliation::RETRY_LADDER_ARITY, blob::BlobCatalogRepository,
-    convergence_sweep::PostgresConvergenceSweepStore, hub_fence::FENCED_POOL_MAX_CONNECTIONS,
-    migrate, model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
-    session_deadline::SessionDeadlineBounds, start_eligible_turn::StartEligibleTurnRepository,
-    startup::PostgresStartupScanRepository, turn_liveness::TurnLivenessPersistenceBounds,
+    hub_fence::FENCED_POOL_MAX_CONNECTIONS, migrate, model_execution::PostgresModelCallRepository,
+    scheduler::PostgresEligibilitySweep, session_deadline::SessionDeadlineBounds,
+    start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
+    turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
 use signalboxd::runner_protocol_runtime::{
@@ -61,17 +61,16 @@ use signalboxd::runner_protocol_runtime::{
 use signalboxd::{
     AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs, BlobStoreRegistry, BlobTools,
     CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds, ConfiguredApprovalPostureError,
-    ContextGuardedTurnPass, ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
-    DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
-    ExpiredPassRecoveryPolicy, FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
-    FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
-    GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError,
-    LifecycleDeadlineRuntime, LifecycleMetricsRuntime, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, OtlpRuntime, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    ReportedUsageCompaction, SessionTemplateConfiguration, SessionTemplateConfigurationError,
-    SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
-    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    ContextGuardedTurnPass, ConvergenceSweepNumericBounds, DaemonTools,
+    DaemonToolsConstructionError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FencedPoolFloorReconciliation, FileCredentialAccess,
+    GitHubCodeHostTransport, GoalModeNumericBounds, HubModelConfiguration,
+    HubModelConfigurationError, LifecycleDeadlineRuntime, LifecycleMetricsRuntime,
+    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, OtlpRuntime,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
     TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
     reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
@@ -517,7 +516,6 @@ enum RuntimeTaskExit {
     FencedPoolFloor,
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
-    ConvergenceSweep,
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
     WebHttp(Result<(), WebHttpRuntimeError>),
     TurnLiveness,
@@ -563,7 +561,6 @@ enum RuntimeTaskDefect {
     FencedPoolFloorCompletedBeforeShutdown,
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
-    ConvergenceSweepCompletedBeforeShutdown,
     RepositoryWatchCompletedBeforeShutdown,
     WebHttpCompletedBeforeShutdown,
     TurnLivenessCompletedBeforeShutdown,
@@ -584,9 +581,6 @@ impl RuntimeTaskDefect {
             }
             Self::ProcessCompletedBeforeShutdown => "process_runtime_completed_before_shutdown",
             Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
-            Self::ConvergenceSweepCompletedBeforeShutdown => {
-                "convergence_sweep_completed_before_shutdown"
-            }
             Self::RepositoryWatchCompletedBeforeShutdown => {
                 "repository_watch_completed_before_shutdown"
             }
@@ -653,13 +647,7 @@ fn report_database_close_failure(error: &SingleHubGuardError) {
     );
 }
 
-async fn migrate_hub_database(
-    pool: &sqlx::PgPool,
-    oauth_registrations: &[(
-        String,
-        signalbox_persistence::oauth_credential::OauthRegistration,
-    )],
-) -> Result<(), HubRuntimeError> {
+async fn migrate_hub_database(pool: &sqlx::PgPool) -> Result<(), HubRuntimeError> {
     migrate(pool).await.map_err(|error| {
         tracing::error!(migration_detail = %error, "database migration rejected");
         erase_startup_cause(
@@ -668,6 +656,16 @@ async fn migrate_hub_database(
         )
     })?;
     tracing::info!(phase = ?RuntimePhase::Migration, "daemon startup phase completed");
+    Ok(())
+}
+
+async fn install_oauth_registrations(
+    pool: &sqlx::PgPool,
+    oauth_registrations: &[(
+        String,
+        signalbox_persistence::oauth_credential::OauthRegistration,
+    )],
+) -> Result<(), HubRuntimeError> {
     signalbox_persistence::oauth_credential::OauthCredentialRepository::new(pool.clone())
         .replace_registrations(oauth_registrations)
         .await
@@ -980,7 +978,6 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::FencedPoolFloor)
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
-        | Ok(RuntimeTaskExit::ConvergenceSweep)
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness)
@@ -1150,14 +1147,20 @@ async fn run_hub(
         )
     })?;
     let prometheus_runtime = initialize_prometheus(telemetry_configuration).await;
-    let model_configuration = HubModelConfiguration::read(configuration.model_configuration_file())
-        .map_err(|error| {
+    let on_disk = fs::read_to_string(configuration.model_configuration_file()).map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::ModelConfiguration(&HubModelConfigurationError::Read),
+        )
+    })?;
+    let bootstrap_bounds =
+        HubModelConfiguration::startup_numeric_bounds(&on_disk).map_err(|error| {
             erase_startup_cause(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
-    let numeric_bounds = model_configuration.numeric_bounds();
+    let numeric_bounds = &bootstrap_bounds;
     let configured_duration = |field| numeric_bounds.duration(field).flatten();
     let configured_usize = |field| {
         numeric_bounds
@@ -1194,16 +1197,6 @@ async fn run_hub(
                 SanitizedStartupCause::Static("invalid_codex_cli_version_probe_bound"),
             )
         })?;
-    if let Some(codex_cli) = model_configuration.codex_cli() {
-        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
-            .await
-            .map_err(|_| {
-                erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
-                )
-            })?;
-    }
     let fenced_pool_min_connections =
         validate_fenced_pool_min_connections(configured_u32("fenced_pool_min_connections")?)
             .ok_or_else(|| {
@@ -1387,6 +1380,71 @@ async fn run_hub(
         configured_usize("max_code_host_result_items")?,
         configured_usize("max_repository_file_content_bytes")?,
     );
+    let mut database = FencedHubDatabase::connect_production(
+        configuration.database_url(),
+        fenced_pool_min_connections,
+    )
+    .await
+    .map_err(|error| {
+        let phase = match &error {
+            FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
+            FencedHubDatabaseError::ParseOptions(_)
+            | FencedHubDatabaseError::ConnectBootstrap(_)
+            | FencedHubDatabaseError::AcquireGuard(_)
+            | FencedHubDatabaseError::AdvanceFence(_)
+            | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
+        };
+        erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
+    })?;
+    let pool = database.pool().clone();
+    let fenced_pool_floor_pool = pool.clone();
+    migrate_hub_database(&pool).await?;
+    let pending_reload =
+        signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
+            pool.clone(),
+        )
+        .pending()
+        .await
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("configuration_reload_intent_read_failed"),
+            )
+        })?;
+    let retained_startup = pending_reload
+        .first()
+        .map(|(_, intent)| {
+            signalboxd::configuration_reload::ConfigurationReload::startup_snapshot(
+                &on_disk,
+                &intent.replacement_snapshot,
+            )
+        })
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("configuration_reload_snapshot_incompatible"),
+            )
+        })?;
+    let model_configuration = match &retained_startup {
+        Some(catalogs) => (*catalogs.models).clone(),
+        None => HubModelConfiguration::parse(&on_disk).map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::ModelConfiguration(&error),
+            )
+        })?,
+    };
+    if let Some(codex_cli) = model_configuration.codex_cli() {
+        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
+            .await
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
+                )
+            })?;
+    }
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,
@@ -1398,31 +1456,20 @@ async fn run_hub(
         ));
     }
     let daemon_tool_configuration = model_configuration.daemon_tools();
-    let tool_composition = match daemon_tool_configuration {
-        Some(_) => DaemonToolComposition::WithMappedFamilies,
-        None => DaemonToolComposition::Base,
+    let template_configuration = match retained_startup {
+        Some(catalogs) => (*catalogs.templates).clone(),
+        None => SessionTemplateConfiguration::read(
+            configuration.template_configuration_file(),
+            || env::var_os("HOME").map(PathBuf::from),
+            &model_configuration,
+        )
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::TemplateConfiguration(&error),
+            )
+        })?,
     };
-    DaemonToolCatalog::validate_approval_postures_for_composition(
-        model_configuration.tool_approval_postures(),
-        tool_composition,
-    )
-    .map_err(|error| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
-        )
-    })?;
-    let template_configuration = SessionTemplateConfiguration::read(
-        configuration.template_configuration_file(),
-        || env::var_os("HOME").map(PathBuf::from),
-        &model_configuration,
-    )
-    .map_err(|error| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::TemplateConfiguration(&error),
-        )
-    })?;
     if let Some(repository_watch) = model_configuration.repository_watch() {
         repository_watch
             .validate_convergence_template(template_configuration.summaries().map(|(name, _)| name))
@@ -1464,23 +1511,6 @@ async fn run_hub(
             )
         })?
         .with_convergence_policy(model_configuration.convergence().cloned());
-    let mut database = FencedHubDatabase::connect_production(
-        configuration.database_url(),
-        fenced_pool_min_connections,
-    )
-    .await
-    .map_err(|error| {
-        let phase = match &error {
-            FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
-            FencedHubDatabaseError::ParseOptions(_)
-            | FencedHubDatabaseError::ConnectBootstrap(_)
-            | FencedHubDatabaseError::AcquireGuard(_)
-            | FencedHubDatabaseError::AdvanceFence(_)
-            | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
-        };
-        erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
-    })?;
-    let pool = database.pool().clone();
     let oauth_registrations = model_configuration.oauth_registrations();
     let root_path = oauth_credential_root(configuration.process_socket_path());
     let retained_root = match root_path.symlink_metadata() {
@@ -1516,7 +1546,6 @@ async fn run_hub(
     } else {
         None
     };
-    let fenced_pool_floor_pool = pool.clone();
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
         .map(|configuration| configuration.exec_supervisor_executable().to_path_buf());
@@ -1569,11 +1598,10 @@ async fn run_hub(
     );
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
-    let migration_pool = pool.clone();
     let migration_oauth_registrations = model_configuration.oauth_registrations();
     let scan_pool = pool.clone();
     let startup = migrate_scan_then_schedule(
-        migrate_hub_database(&migration_pool, &migration_oauth_registrations),
+        install_oauth_registrations(&pool, &migration_oauth_registrations),
         async move {
             let mut scan = StartupScanService::new(
                 UuidV7StartupScanIdGenerator,
@@ -1618,24 +1646,6 @@ async fn run_hub(
         let _ = database.close().await;
         return Ok(ShutdownOutcome::GuardLost);
     }
-    let configured_convergence_targets =
-        model_configuration
-            .repository_watch()
-            .map_or_else(Vec::new, |configuration| {
-                if configuration.convergence_sweep().is_none() {
-                    return Vec::new();
-                }
-                configuration
-                    .repositories()
-                    .iter()
-                    .flat_map(|repository| {
-                        repository
-                            .convergence_pull_requests()
-                            .iter()
-                            .map(|pull_request| (repository.repository().clone(), *pull_request))
-                    })
-                    .collect()
-            });
     let blob_store_registry = match await_while_guarded(
         &mut database,
         BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone()),
@@ -1877,74 +1887,11 @@ async fn run_hub(
         nudge_buffer_capacity,
     );
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
-    let convergence_sweep_runtime = match model_configuration.repository_watch() {
-        Some(configuration) => match ConvergenceSweepRuntime::try_new(
-            pool.clone(),
-            configuration,
-            template_configuration.clone(),
-            model_configuration.clone(),
-            eligibility_nudge.clone(),
-            convergence_sweep_numeric_bounds,
-        ) {
-            Ok(runtime) => runtime,
-            Err(_) => {
-                let failure = erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static(
-                        "convergence_sweep_transport_construction_failed",
-                    ),
-                );
-                let _ = listener.cleanup();
-                let _ = runner_listener.cleanup();
-                drop(blob_executor);
-                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-                drop(blob_store_registry);
-                let _ = database.close().await;
-                return Err(failure);
-            }
-        },
-        None => None,
-    };
-    let convergence_sweep_store = PostgresConvergenceSweepStore::new(pool.clone());
-    let convergence_target_admission =
-        convergence_sweep_store.reconcile_configured_targets(&configured_convergence_targets);
-    match await_while_guarded(&mut database, convergence_target_admission).await {
-        GuardedAwait::Completed(Ok(restored)) => {
-            for session in restored {
-                let _ = eligibility_nudge.nudge(session);
-            }
-        }
-        GuardedAwait::Completed(Err(_)) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static("convergence_target_admission_failed"),
-            );
-            let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
-            drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
-        }
-        GuardedAwait::GuardLost => {
-            let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
-            if let Some(registry) = blob_store_registry.as_ref() {
-                registry.disarm_staging_sweep();
-            }
-            drop(blob_executor);
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Ok(ShutdownOutcome::GuardLost);
-        }
-    }
-    let repository_watch_runtime = if model_configuration.repository_watch().is_some() {
+    let repository_watch_runtime = {
         let start = async {
             let module_pool = connect_repository_watch_pool(&pool).await?;
-            RepositoryWatchRuntime::new(
+            Ok::<_, RepositoryWatchRuntimeError>(RepositoryWatchRuntime::unstarted(
                 module_pool,
-                model_configuration.repository_watch().cloned(),
                 RepositoryWatchServices {
                     core_pool: pool.clone(),
                     models: Arc::new(model_configuration.clone()),
@@ -1952,8 +1899,7 @@ async fn run_hub(
                     eligibility_nudge: eligibility_nudge.clone(),
                     tool_dispatch_gate: tool_dispatch_gate.clone(),
                 },
-            )
-            .await
+            ))
         };
         match await_while_guarded(&mut database, start).await {
             GuardedAwait::Completed(Ok(runtime)) => Some(runtime),
@@ -1982,8 +1928,6 @@ async fn run_hub(
                 return Ok(ShutdownOutcome::GuardLost);
             }
         }
-    } else {
-        None
     };
     tool_executor = tool_executor.with_blob_executor(blob_executor);
     let configuration_reload = signalboxd::configuration_reload::ConfigurationReload::new(
@@ -2003,6 +1947,51 @@ async fn run_hub(
     let configuration_reload = configuration_reload
         .with_runtime_factory(runtime_factory.clone())
         .with_github_tool_credential(configuration.github_token_file());
+    let configuration_reload = match &repository_watch_runtime {
+        Some(watch) => {
+            watch
+                .set_sweep_bounds(convergence_sweep_numeric_bounds)
+                .await;
+            configuration_reload.with_repository_watch(watch.clone())
+        }
+        None => configuration_reload,
+    };
+    let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
+    let repository_watch_worker = match repository_watch_runtime {
+        Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
+        None => None,
+    };
+    let recovery_failure =
+        match await_while_guarded(&mut database, configuration_reload.recover()).await {
+            GuardedAwait::Completed(Ok(())) => None,
+            GuardedAwait::Completed(Err(_)) => Some(Err(erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
+            ))),
+            GuardedAwait::GuardLost => Some(Ok(ShutdownOutcome::GuardLost)),
+        };
+    if let Some(outcome) = recovery_failure {
+        if matches!(outcome, Ok(ShutdownOutcome::GuardLost)) {
+            if let Some(registry) = blob_store_registry.as_ref() {
+                registry.disarm_staging_sweep();
+            }
+        } else {
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+        }
+        let _ = repository_watch_shutdown.send(true);
+        if let Some(worker) = repository_watch_worker {
+            let _ = worker.await;
+        }
+        let _ = listener.cleanup();
+        let _ = runner_listener.cleanup();
+        drop(tool_executor);
+        drop(blob_store_registry);
+        let _ = database.close().await;
+        return outcome;
+    }
+    let recovered_catalogs = configuration_reload.catalogs();
+    let model_configuration = (*recovered_catalogs.models).clone();
+    let template_configuration = (*recovered_catalogs.templates).clone();
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
         signalboxd::model_catalog_runtime::CatalogContextCompactionModel::new(
             configuration_reload.catalogs().models,
@@ -2205,8 +2194,6 @@ async fn run_hub(
     let (fenced_pool_floor_shutdown, fenced_pool_floor_shutdown_receiver) = watch::channel(false);
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
-    let (convergence_sweep_shutdown, convergence_sweep_shutdown_receiver) = watch::channel(false);
-    let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
@@ -2241,20 +2228,12 @@ async fn run_hub(
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::WebHttp(web_http_runtime.run(web_http_shutdown_receiver).await)
     });
-    if let Some(convergence_sweep_runtime) = convergence_sweep_runtime {
-        runtime_tasks.spawn(async move {
-            convergence_sweep_runtime
-                .run(convergence_sweep_shutdown_receiver)
-                .await;
-            RuntimeTaskExit::ConvergenceSweep
-        });
-    }
-    if let Some(repository_watch_runtime) = repository_watch_runtime {
+    if let Some(worker) = repository_watch_worker {
         runtime_tasks.spawn(async move {
             RuntimeTaskExit::RepositoryWatch(
-                repository_watch_runtime
-                    .run(repository_watch_shutdown_receiver)
-                    .await,
+                worker
+                    .await
+                    .unwrap_or(Err(RepositoryWatchRuntimeError::RepositoryWorker)),
             )
         });
     }
@@ -2321,12 +2300,6 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
-                    Some(Ok(RuntimeTaskExit::ConvergenceSweep)) => {
-                        report_runtime_task_defect(
-                            RuntimeTaskDefect::ConvergenceSweepCompletedBeforeShutdown,
-                        );
-                        RuntimeStopCause::RuntimeDefect
-                    }
                     Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
                         tracing::error!(?error, "repository-watch runtime failed");
                         RuntimeStopCause::RuntimeFailed
@@ -2381,6 +2354,7 @@ async fn run_hub(
             }
         };
 
+        let _ = repository_watch_shutdown.send(true);
         if cause == RuntimeStopCause::GuardLost {
             runtime_tasks.abort_all();
             while runtime_tasks.join_next().await.is_some() {}
@@ -2391,8 +2365,6 @@ async fn run_hub(
             let _ = fenced_pool_floor_shutdown.send(true);
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
-            let _ = convergence_sweep_shutdown.send(true);
-            let _ = repository_watch_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);
             let _ = lifecycle_deadline_shutdown.send(true);
@@ -3057,9 +3029,15 @@ mod tests {
             device_authorization_url: "https://authorization.example/device".into(),
             scopes: vec!["openid".into()],
         };
-        super::migrate_hub_database(database.pool(), &[("startup-profile".into(), registration)])
+        super::migrate_hub_database(database.pool())
             .await
-            .map_err(|_| "OAuth startup migration failed")?;
+            .map_err(|_| "startup migration failed")?;
+        super::install_oauth_registrations(
+            database.pool(),
+            &[("startup-profile".into(), registration)],
+        )
+        .await
+        .map_err(|_| "OAuth startup migration failed")?;
         let profile: String =
             sqlx::query_scalar("SELECT profile FROM oauth_credential_registration")
                 .fetch_one(database.pool())

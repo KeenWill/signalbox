@@ -15,21 +15,6 @@ and scrubs a granted credential for the work it dispatches.
 
 ## Design
 
-A reload that adds, edits, or removes `repository_watch.rules` commits
-activations and deactivations in the
-[reconciliation transaction](../spec/repo-watch.md) that records each
-activation's repository event tail, inside the reload boundary. A reload pauses
-sweep admission and stops and joins active sweep attempts before re-running
-convergence configured-target reconciliation after rule activation and
-event-tail capture commit, inside the reload boundary, using an empty effective
-target set when repository watch is disabled; sweep admission resumes under the
-replacement snapshot on success or the prior snapshot on rule-revision rejection
-only if that snapshot validates against the current startup-only sections, as
-[reload recovery](process-protocol.md) requires. Enabling convergence while
-repository watch is enabled composes the sweep task; disabling either terminates
-the task. A running sweep reads the new targets, template, interval, and
-credential path at its next attempt.
-
 A model entry carries zero or more `[[models.rate_windows]]` entries, each one
 dated price window over that entry's own `provider_model`. A window names the
 commercial provider that published the rates, a channel of `api` or `batch_api`,

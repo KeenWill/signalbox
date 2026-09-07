@@ -469,22 +469,24 @@ absolute path when a template uses a `$HOME/` prompt reference. The
 database-channel refusal names the offending channel, never its contents, and
 happens before any database contact.
 
-A missing required value, an unreadable or invalid catalog, an invalid prompt
-file, or a failed provider transport construction fails startup at the
-Configuration phase before database contact. After the database connects, an
-invalid configured workspace root or a failed tool-suite construction fails at
-the same phase. A derived per-session root is composed on first use, so its
-failures are per-session tool failures. Startup and shutdown logs carry the
-phase, an operator failure class, and small typed fields. Every tool dependency
-is supplied by parsed configuration, the database pool, or explicit credential
-and transport values; no tool family discovers ambient authority.
+Missing required values, unreadable model catalogs, and invalid startup-only
+sections fail startup in the Configuration phase before database contact.
+Reloadable catalogs and prompt files are validated after the pending reload
+intent is read; failed provider transport construction also fails in
+Configuration. After the database connects, an invalid configured workspace root
+or a failed tool-suite construction fails at the same phase. A derived
+per-session root is composed on first use, so its failures are per-session tool
+failures. Startup and shutdown logs carry the phase, an operator failure class,
+and small typed fields. Every tool dependency is supplied by parsed
+configuration, the database pool, or explicit credential and transport values;
+no tool family discovers ambient authority.
 
-The deployment paths are accepted without I/O at environment parsing; both
-catalogs and every template prompt file are read during startup. Provider and
-integration credential files are never read at boot, so a missing or unsynced
-one cannot block startup or the recovery scan. The credential of a currently
-routed S3 blob store is the sole exception, read after the recovery scan and
-before socket admission, as [blob storage](blob-storage.md) requires.
+The deployment paths are accepted without I/O at environment parsing; the
+selected catalogs and template prompt contents are validated during startup.
+Provider and integration credential files are never read at boot, so a missing
+or unsynced one cannot block startup or the recovery scan. The credential of a
+currently routed S3 blob store is the sole exception, read after the recovery
+scan and before socket admission, as [blob storage](blob-storage.md) requires.
 
 Unauthenticated session, search, usage, attention, and blob reads require a
 loopback `Host` authority; another authority receives a 403
@@ -539,9 +541,9 @@ its text. An unknown or invalid field is rejected without its name, so
 `config/signalboxd.example.toml` is the operator's guide. A profile name is
 opaque to code: no build-provided constant is compared against it. Catalogs are
 read at startup. `reload_configuration` validates the complete replacement and
-atomically replaces the model and alias catalog and session-template catalog.
-Repository-watch edits, startup-only edits, and model or template edits while
-repository watch is enabled require restart and leave the running configuration
+atomically replaces the model and alias catalog, session-template catalog, and
+repository-watch configuration; every other section is startup-only. A
+replacement whose startup-only sections differ leaves the running configuration
 in place. Reload never rewrites evidence already recorded. File watching and
 polling are external callers of the verb.
 
@@ -721,6 +723,20 @@ do not use it.
 
 Each request and execution pass uses one immutable catalog snapshot.
 
+A reload that adds, edits, or removes `repository_watch.rules` commits
+activations and deactivations in the [reconciliation transaction](repo-watch.md)
+that records each activation's repository event tail, inside the reload
+boundary. A reload pauses sweep admission and stops and joins active sweep
+attempts before re-running convergence configured-target reconciliation after
+rule activation and event-tail capture commit, inside the reload boundary, using
+an empty effective target set when repository watch is disabled; sweep admission
+resumes under the replacement snapshot on success or the prior snapshot on
+rule-revision rejection only if that snapshot validates against the current
+startup-only sections, as [reload recovery](process-protocol.md) requires.
+Enabling convergence while repository watch is enabled composes the sweep task;
+disabling either terminates the task. A running sweep reads the new targets,
+template, interval, and credential path at its next attempt.
+
 Startup installs the OAuth registration catalog after database migrations. OAuth
 provisioning runs the configured device exchange, retains refresh and identity
 tokens with the canonical configuration tuple and generation, and stores no
@@ -784,8 +800,6 @@ advances the retained generation, and preserves registration and history.
 
 - Input-modality declarations on model and serving-target records, and the blob
   catalog they feed: [design](../design/configuration-and-credentials.md).
-- Repository-watch reload activation and startup replay:
-  [design](../design/configuration-and-credentials.md).
 - Dated rate windows on a model entry; the present grammar admits one flat rate,
   which is one window across all time:
   [design](../design/configuration-and-credentials.md).
