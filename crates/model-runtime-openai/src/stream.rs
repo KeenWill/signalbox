@@ -458,6 +458,39 @@ impl StreamDecoder {
                 if let Err(detail) = self.observe_item_kind(index, kind) {
                     return self.violation(detail);
                 }
+                let completed_content = match event.kind.as_str() {
+                    "response.output_text.done" => Some(("output_text", event.text)),
+                    "response.refusal.done" => Some(("refusal", event.refusal)),
+                    "response.function_call_arguments.done" => {
+                        Some(("function_call_arguments", event.arguments))
+                    }
+                    _ => None,
+                };
+                if let Some((content_kind, value)) = completed_content {
+                    let Some(value) = value else {
+                        return self.violation("content completion lacks its value");
+                    };
+                    let tool_arguments = content_kind == "function_call_arguments";
+                    let content_index = if tool_arguments {
+                        0
+                    } else if let Some(content_index) = event.content_index {
+                        content_index
+                    } else {
+                        return self.violation("content completion lacks content index");
+                    };
+                    let layout = self.item_parts.entry(index).or_default();
+                    if let Err(detail) =
+                        layout.observe_snapshot(content_index, content_kind, &value, true)
+                    {
+                        return self.violation(detail);
+                    }
+                    if let Err(detail) =
+                        layout.observe_part(content_index, tool_arguments || !value.is_empty())
+                    {
+                        return self.violation(detail);
+                    }
+                    layout.complete |= tool_arguments;
+                }
                 if matches!(
                     event.kind.as_str(),
                     "response.content_part.added" | "response.content_part.done"
@@ -847,6 +880,125 @@ mod tests {
             })
         ));
     }
+    #[test]
+    fn content_done_values_reconcile_with_deltas_and_terminal_snapshots() {
+        for (family, field) in [
+            ("output_text", "text"),
+            ("refusal", "refusal"),
+            ("function_call_arguments", "arguments"),
+        ] {
+            // Both spellings are valid JSON so argument failures test byte integrity.
+            for (with_delta, done_value, terminal_value) in [
+                (true, "{ }", "{}"),
+                (false, "{}", "{ }"),
+                (true, "{}", "{}"),
+                (false, "{}", "{}"),
+            ] {
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                if with_delta {
+                    assert!(matches!(
+                        apply(
+                            &mut decoder,
+                            json!({
+                                "type":format!("response.{family}.delta"),"output_index":0,
+                                "content_index":0,"item_id":"msg_fixture","delta":"{}"
+                            }),
+                            &mut sink
+                        ),
+                        StreamStep::Continue
+                    ));
+                    assert_eq!(sink.len(), 1, "the delta reached the sink");
+                }
+                let mut done = json!({
+                    "type":format!("response.{family}.done"),"output_index":0,
+                    "content_index":0,"item_id":"msg_fixture"
+                });
+                done[field] = json!(done_value);
+                let step = apply(&mut decoder, done, &mut sink);
+                let evidence = if with_delta && done_value != "{}" {
+                    let StreamStep::Terminal(evidence) = step else {
+                        panic!("{family} done must reject rewritten delta bytes");
+                    };
+                    evidence
+                } else {
+                    assert!(matches!(step, StreamStep::Continue));
+                    let mut event = terminal();
+                    if family == "function_call_arguments" {
+                        event["response"]["output"][0] = json!({
+                            "type":"function_call","id":"msg_fixture","status":"completed",
+                            "call_id":"call_fixture","name":"lookup","arguments":terminal_value
+                        });
+                    } else {
+                        let mut part = json!({"type":family});
+                        part[field] = json!(terminal_value);
+                        event["response"]["output"][0]["content"] = json!([part]);
+                    }
+                    let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink)
+                    else {
+                        panic!("terminal must terminate");
+                    };
+                    evidence
+                };
+                if done_value == terminal_value {
+                    if family == "refusal" {
+                        assert!(matches!(*evidence, TerminalEvidence::Refused(_)));
+                    } else {
+                        assert!(matches!(*evidence, TerminalEvidence::Completed(_)));
+                    }
+                } else {
+                    assert!(
+                        matches!(
+                            *evidence,
+                            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                                cause: LossCause::StreamProtocolViolation { .. },
+                                ..
+                            })
+                        ),
+                        "{family}"
+                    );
+                    assert!(!sink.iter().any(|observation| matches!(
+                        observation.fact,
+                        ObservationFact::FinishReported(_)
+                    )));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn content_done_requires_its_value_and_message_content_index() {
+        for (family, field) in [
+            ("output_text", "text"),
+            ("refusal", "refusal"),
+            ("function_call_arguments", "arguments"),
+        ] {
+            for missing in [field, "content_index"] {
+                if family == "function_call_arguments" && missing == "content_index" {
+                    continue;
+                }
+                let mut event = json!({
+                    "type":format!("response.{family}.done"),"output_index":0,
+                    "content_index":0,"item_id":"msg_fixture"
+                });
+                event[field] = json!("{}");
+                event.as_object_mut().unwrap().remove(missing);
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                assert!(
+                    matches!(apply(&mut decoder, event, &mut sink),
+                        StreamStep::Terminal(evidence) if matches!(*evidence,
+                            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                                cause: LossCause::StreamProtocolViolation { .. }, ..
+                            })
+                        )
+                    ),
+                    "{family} missing {missing}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn terminal_content_must_match_published_delta_bytes_and_type() {
         for (delta_type, fragment, item, expected_finish) in [
@@ -2055,6 +2207,18 @@ mod tests {
                     &mut sink,
                 );
                 let mut event = json!({"type":kind,"output_index":0,"item_id":id});
+                match kind {
+                    "response.output_text.done" => {
+                        event["content_index"] = json!(0);
+                        event["text"] = json!("ready");
+                    }
+                    "response.refusal.done" => {
+                        event["content_index"] = json!(0);
+                        event["refusal"] = json!("declined");
+                    }
+                    "response.function_call_arguments.done" => event["arguments"] = json!("{}"),
+                    _ => {}
+                }
                 if kind.starts_with("response.reasoning_summary_part.") {
                     event["summary_index"] = json!(0);
                     event["part"] = json!({"type":"summary_text","text":"summary"});
