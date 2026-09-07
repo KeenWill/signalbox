@@ -17,23 +17,18 @@
 //!
 //! # Boundary rules (docs/spec/runtime-substrate.md, binding)
 //!
-//! - This crate depends on no Signalbox domain, application, persistence, or
-//!   hub crate, and none of those crates may depend on it. Caller identity
-//!   enters as the opaque correlation parameter `C` threaded through
-//!   [`ModelOperation`], every [`Observation`], and the final
-//!   [`TerminalReport`]; no domain identifier type is imported or redefined
-//!   here.
-//! - One operation, one interaction: nothing in this layer retries, falls
-//!   back, or repeats a request after the provider could have accepted it.
-//!   There is no retry machinery to disable.
-//! - Evidence, not classification: adapters report what provably
-//!   happened — possibly accepted, definitive response, incomplete
-//!   stream — and the caller classifies dispositions. See [`TerminalEvidence`]
-//!   for the intended mapping onto the disposition vocabulary in
+//! - This crate depends on no Signalbox domain, application, persistence, or hub crate, and none of
+//!   those crates may depend on it. Caller identity enters as the opaque correlation parameter `C`
+//!   threaded through [`ModelOperation`], every [`Observation`], and the final [`TerminalReport`];
+//!   no domain identifier type is imported or redefined here.
+//! - One operation, one interaction: nothing in this layer retries, falls back, or repeats a
+//!   request after the provider could have accepted it. There is no retry machinery to disable.
+//! - Evidence, not classification: adapters report what provably happened — possibly accepted,
+//!   definitive response, incomplete stream — and the caller classifies dispositions. See
+//!   [`TerminalEvidence`] for the intended mapping onto the disposition vocabulary in
 //!   docs/spec/model-call-execution.md.
-//! - Structured-output parsing and tool-call decoding are pure functions.
-//!   Parsing never performs a model call; a repair call is a new, explicitly
-//!   authorized operation owned by the caller.
+//! - Structured-output parsing and tool-call decoding are pure functions. Parsing never performs a
+//!   model call; a repair call is a new, explicitly authorized operation owned by the caller.
 //!
 //! The two-stage [`ModelRuntime`] interface conforms to the
 //! provider-interaction boundary in docs/spec/runtime-substrate.md. It
@@ -85,8 +80,8 @@ pub use evidence::{
     BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, ProvenUnsentEvidence,
     ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderRequestId,
-    RefusalEvidence, StreamInterruption, TerminalEvidence, TerminalReport, ToolCallsAtLoss,
-    TransportFacts, UnsentCause, parse_retry_after,
+    RateLimitSnapshot, RateLimitWindow, RefusalEvidence, StreamInterruption, TerminalEvidence,
+    TerminalReport, ToolCallsAtLoss, TransportFacts, UnsentCause, parse_retry_after,
 };
 pub use input_count::{InputTokenCountOutcome, ModelInputTokenCounter};
 pub use message::{

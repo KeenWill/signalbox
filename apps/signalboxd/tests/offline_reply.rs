@@ -281,18 +281,15 @@ fn execution_failure_turn(goal: &Goal) -> TurnId {
     provenance.turn()
 }
 
-/// the complete offline
-/// chain creates a session, submits input, lets the scheduler activate it,
-/// invokes the application provider port, and atomically persists the exact
-/// selection, resolved target, consumed frontier, Prepared-to-InFlight
-/// checkpoint sequence, assistant reply, and terminal lifecycle facts.
-/// the bridge receives a one-action runtime script, so any repeated
-/// physical interaction exhausts the script and fails the test.
-/// the fixture configures an undated provider-model spelling while the
-/// scripted response echoes that family's canonical dated form, so the chain
-/// also proves the provider-target normalization law of
-/// docs/spec/model-call-execution.md end to end: the call completes and the
-/// supervisor never raises a fatal signal.
+/// the complete offline chain creates a session, submits input, lets the scheduler activate it,
+/// invokes the application provider port, and atomically persists the exact selection, resolved
+/// target, consumed frontier, Prepared-to-InFlight checkpoint sequence, assistant reply, and
+/// terminal lifecycle facts. the bridge receives a one-action runtime script, so any repeated
+/// physical interaction exhausts the script and fails the test. the fixture configures an undated
+/// provider-model spelling while the scripted response echoes that family's canonical dated form,
+/// so the chain also proves the provider-target normalization law of
+/// docs/spec/model-call-execution.md end to end: the call completes and the supervisor never raises
+/// a fatal signal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dyn Error>> {

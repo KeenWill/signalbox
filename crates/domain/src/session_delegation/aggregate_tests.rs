@@ -300,8 +300,7 @@ fn relation_reconstitution_rejects_cross_wired_message_direction() {
     );
 }
 
-/// restart rejects two parent authorities that
-/// reuse one durable command identity.
+/// restart rejects two parent authorities that reuse one durable command identity.
 #[test]
 fn reconstitution_rejects_reused_parent_command_identity() {
     let policy = ChildRelationshipPolicy::Background;
@@ -399,8 +398,8 @@ fn wait_reconstitution_rejects_same_session_endpoints() {
     );
 }
 
-/// immutable endpoint facts reconstitute an exact
-/// wait without loading the relationship event stream.
+/// immutable endpoint facts reconstitute an exact wait without loading the relationship event
+/// stream.
 #[test]
 fn wait_reconstitution_uses_stored_endpoints_and_mode() {
     let relation = relation(ChildRelationshipPolicy::Background);
@@ -668,8 +667,7 @@ fn delegation_public_errors_implement_standard_error_contract() {
     assert_standard_error::<DelegationTransitionError>();
 }
 
-/// spawn retains the exact sealed request facts
-/// and derives delegated creation without ancestry.
+/// spawn retains the exact sealed request facts and derives delegated creation without ancestry.
 #[test]
 fn aggregate_spawn_retains_policy_task_and_provenance() {
     let policy = ChildRelationshipPolicy::Bound {
@@ -905,8 +903,7 @@ fn message_delivery_ordinals_are_contiguous() {
     assert_eq!(second.ordinal().get(), 3);
 }
 
-/// nonterminal messages preserve the final
-/// relationship ordinal for a typed terminal outcome.
+/// nonterminal messages preserve the final relationship ordinal for a typed terminal outcome.
 #[test]
 fn message_reserves_terminal_event_ordinal() {
     let policy = ChildRelationshipPolicy::Background;

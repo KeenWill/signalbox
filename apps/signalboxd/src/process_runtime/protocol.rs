@@ -814,6 +814,27 @@ pub(super) async fn interrupt_for_closure(
     live_turn: TurnId,
     expected_version: SessionConfigurationDefaultsVersion,
 ) -> Result<(), ()> {
+    interrupt_for_committed_closure(
+        &services.pool,
+        &services.model_configuration,
+        &services.eligibility_nudge,
+        &services.tool_dispatch_gate,
+        command,
+        live_turn,
+        expected_version,
+    )
+    .await
+}
+
+pub(crate) async fn interrupt_for_committed_closure(
+    pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
+    eligibility_nudge: &InProcessEligibilityNudge,
+    tool_dispatch_gate: &InProcessToolDispatchGate,
+    command: &SessionLifecycleCommand,
+    live_turn: TurnId,
+    expected_version: SessionConfigurationDefaultsVersion,
+) -> Result<(), ()> {
     let session = command.session();
     let (descendant_scope, cascade_root_kind) = match command.operation() {
         SessionLifecycleOperation::Stop {
@@ -833,7 +854,7 @@ pub(super) async fn interrupt_for_closure(
     )
     .bind(live_turn.into_uuid())
     .bind(session.into_uuid())
-    .fetch_optional(&services.pool)
+    .fetch_optional(pool)
     .await
     .map_err(|error| {
         tracing::warn!(session = %session.into_uuid(), cause = %error,
@@ -862,13 +883,13 @@ pub(super) async fn interrupt_for_closure(
     let mut service = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
         ConfiguredSubmitInputTransaction {
-            repository: SubmitInputRepository::new(services.pool.clone()),
-            model_configuration: services.model_configuration.as_ref(),
+            repository: SubmitInputRepository::new(pool.clone()),
+            model_configuration,
             principal: CommandPrincipal::Core,
             cascade_root_kind,
         },
-        services.eligibility_nudge.clone(),
-        services.tool_dispatch_gate.clone(),
+        eligibility_nudge.clone(),
+        tool_dispatch_gate.clone(),
     );
     match service.execute(request).await {
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(_))) => Ok(()),
@@ -880,7 +901,7 @@ pub(super) async fn interrupt_for_closure(
             },
         ))) if rejected_session == session && active_turn == live_turn => Ok(()),
         Ok(other) => {
-            if closure_settled(services, session).await {
+            if closure_settled_in_pool(pool, session).await {
                 return Ok(());
             }
             tracing::warn!(session = %session.into_uuid(), outcome = ?other,
@@ -899,8 +920,12 @@ pub(super) async fn interrupt_for_closure(
 /// already settled through the deferred trigger; the interrupt's rejection is
 /// then not a failure to report.
 pub(super) async fn closure_settled(services: &ConnectionServices, session: SessionId) -> bool {
+    closure_settled_in_pool(&services.pool, session).await
+}
+
+async fn closure_settled_in_pool(pool: &PgPool, session: SessionId) -> bool {
     matches!(
-        SessionLifecycleRepository::new(services.pool.clone())
+        SessionLifecycleRepository::new(pool.clone())
             .load(session)
             .await,
         Ok(Some(record)) if record.state().is_terminal()

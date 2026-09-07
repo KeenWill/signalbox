@@ -11,12 +11,10 @@ use super::{
     RepositoryReadFileArguments,
 };
 /// Maximum source bytes inspected to serve one requested line range.
-// numeric-bound: guard - one ranged repository-file read exhausting process memory
 pub(super) const MAX_REPOSITORY_FILE_SCAN_BYTES: usize = 1024 * 1024;
 /// Maximum entries GitHub can expose through one contents response.
-// numeric-bound: not-a-bound - GitHub's fixed contents-endpoint entry exposure
+// GitHub's repository contents endpoint exposes at most 1,000 directory entries.
 pub(super) const MAX_OBSERVED_DIRECTORY_ENTRIES: usize = 1_000;
-// numeric-bound: not-a-bound - fixed maximum UTF-8 continuation width
 const MAX_UTF8_BOUNDARY_DISCARD_BYTES: usize = 3;
 
 /// Kind of one repository path observed through GitHub's contents endpoint.

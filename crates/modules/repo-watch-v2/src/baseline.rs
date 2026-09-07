@@ -55,6 +55,7 @@ pub(crate) fn observation_payload(
 fn merged_pull_request_payload(baseline: &RepoWatchMergedPullRequestBaselineV1) -> Value {
     json!({
         "number": baseline.number().get(),
+        "head_repository": baseline.head_repository().as_str(),
         "head_sha": baseline.head_sha().as_str(),
         "signal_reviewers": baseline
             .signal_reviewers()
@@ -256,6 +257,10 @@ mod tests {
 
     fn merged_baseline(number: u64) -> RepoWatchMergedPullRequestBaselineV1 {
         RepoWatchMergedPullRequestBaselineV1::try_new(RepoWatchMergedPullRequestBaselineInputV1 {
+            head_repository: signalbox_ownership_seam::RepositorySlug::try_new(String::from(
+                "example/fork",
+            ))
+            .expect("fixture head repository"),
             number: PullRequestNumber::new(
                 NonZeroU64::new(number).expect("fixture number is positive"),
             ),

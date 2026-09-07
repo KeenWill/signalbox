@@ -935,6 +935,124 @@ async fn provider_compaction_releases_tool_continuation_input_headroom()
     Ok(())
 }
 
+/// A restarted continuation cannot reuse any usage from a producing call
+/// served by the previous fast target. It prepares without that target's
+/// reported-usage baseline, so the old usage cannot decide B's headroom.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn changed_fast_target_discards_tool_continuation_usage_baseline()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7efa_1900;
+    let old_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 0x30),
+    ));
+    let new_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 0x31),
+    ));
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"retained summary"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let (fixture, _, _, requests) = checkpoint_fast_tool_batch_with_provider_compaction(
+        &pool,
+        seed,
+        old_fast_target,
+        compaction,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("fixture has one request");
+    };
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                *request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22)),
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("2026-09-05T00:00:00Z"))
+                            .expect("fixture result is bounded"),
+                    ),
+                }),
+        )
+        .await?;
+
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one target forms a catalog");
+    let families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (new_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(target, new_fast_target)]))
+    .expect("the replacement fast target shares the fixture credential family");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_session_credentials(families)
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Enabled,
+                10,
+                100,
+            )
+            .with_provider_compaction_replay()]);
+    let outcome = repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x26,
+                ))],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+            ),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(_)
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// a returning foreground delegation result is model-visible
 /// continuation content. The same-turn headroom bound counts its delivered
 /// child-result bytes alongside executed tool results, so a round whose child
@@ -1205,11 +1323,10 @@ async fn tool_continuation_headroom_counts_delegation_results() -> Result<(), Bo
     Ok(())
 }
 
-/// a NextSafePoint input accepted while a tool
-/// round executes is consumed by the same-turn continuation call, and the
-/// committed continuation shape reloads through the scheduling projection —
-/// the next submit is accepted and the startup scan classifies the prepared
-/// call instead of leaving the session permanently unloadable.
+/// a NextSafePoint input accepted while a tool round executes is consumed by the same-turn
+/// continuation call, and the committed continuation shape reloads through the scheduling
+/// projection — the next submit is accepted and the startup scan classifies the prepared call
+/// instead of leaving the session permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn steering_consumed_at_continuation_reloads_and_scans() -> Result<(), Box<dyn Error>> {
@@ -1433,11 +1550,10 @@ async fn steering_consumed_at_continuation_reloads_and_scans() -> Result<(), Box
     Ok(())
 }
 
-/// an interrupt applied while the
-/// prepared continuation call of a completed tool round awaits send cancels
-/// the turn naming that call, and the committed terminal shape reloads
-/// through the scheduling projection — the interrupt successor activates
-/// instead of leaving the session permanently unloadable.
+/// an interrupt applied while the prepared continuation call of a completed tool round awaits send
+/// cancels the turn naming that call, and the committed terminal shape reloads through the
+/// scheduling projection — the interrupt successor activates instead of leaving the session
+/// permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn interrupted_continuation_call_reloads_and_activates_successor()
@@ -1683,11 +1799,9 @@ fn announcement_for_classifies_each_outcome() {
     );
 }
 
-/// an executor that cannot establish whether its
-/// external effect happened terminalizes the attempt ambiguous and parks the
-/// turn on a durable recovery wait naming that exact attempt, so the effect is
-/// never silently repeated and the batch is never reported definitively
-/// failed.
+/// an executor that cannot establish whether its external effect happened terminalizes the attempt
+/// ambiguous and parks the turn on a durable recovery wait naming that exact attempt, so the effect
+/// is never silently repeated and the batch is never reported definitively failed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn ambiguous_external_effect_parks_a_durable_recovery_wait() -> Result<(), Box<dyn Error>> {
@@ -1796,11 +1910,10 @@ async fn ambiguous_external_effect_parks_a_durable_recovery_wait() -> Result<(),
     Ok(())
 }
 
-/// a provider refusal on the continuation model call of
-/// a completed tool round terminalizes the turn naming that call, and the
-/// committed refused terminal shape reloads through the scheduling
-/// projection — the startup scan completes and the next submit is accepted
-/// instead of the session becoming permanently unloadable.
+/// a provider refusal on the continuation model call of a completed tool round terminalizes the
+/// turn naming that call, and the committed refused terminal shape reloads through the scheduling
+/// projection — the startup scan completes and the next submit is accepted instead of the session
+/// becoming permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn refused_continuation_call_reloads_and_scans() -> Result<(), Box<dyn Error>> {
@@ -1901,12 +2014,10 @@ async fn refused_continuation_call_reloads_and_scans() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// a daemon restart with the continuation model call
-/// of a completed tool round in flight classifies the call as ambiguous and
-/// parks the turn awaiting a user recovery decision — the committed
-/// recovery wait reloads through the scheduling projection, the reconcile
-/// verb's precondition still names the parked turn, and the reconciling
-/// interrupt terminalizes the turn naming that call.
+/// a daemon restart with the continuation model call of a completed tool round in flight classifies
+/// the call as ambiguous and parks the turn awaiting a user recovery decision — the committed
+/// recovery wait reloads through the scheduling projection, the reconcile verb's precondition still
+/// names the parked turn, and the reconciling interrupt terminalizes the turn naming that call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn in_flight_continuation_call_restart_parks_recovery() -> Result<(), Box<dyn Error>> {
@@ -2024,11 +2135,10 @@ async fn in_flight_continuation_call_restart_parks_recovery() -> Result<(), Box<
     Ok(())
 }
 
-/// a daemon restart with a stop-requested
-/// continuation call classifies it as ambiguous under its applied interrupt
-/// and terminalizes the turn as reconciliation-required naming that call —
-/// the committed terminal shape reloads through the scheduling projection
-/// instead of leaving the session permanently unloadable.
+/// a daemon restart with a stop-requested continuation call classifies it as ambiguous under its
+/// applied interrupt and terminalizes the turn as reconciliation-required naming that call — the
+/// committed terminal shape reloads through the scheduling projection instead of leaving the
+/// session permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn stop_requested_continuation_call_restart_reconciles() -> Result<(), Box<dyn Error>> {
@@ -2316,9 +2426,8 @@ async fn interrupt_closes_checkpointed_tool_execution() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// an interrupt against a parked approval wait
-/// records the authoritative typed rejection instead of failing the submit
-/// transaction, the wait remains durably parked with no accepted input, and
+/// an interrupt against a parked approval wait records the authoritative typed rejection instead of
+/// failing the submit transaction, the wait remains durably parked with no accepted input, and
 /// equal replay returns the recorded rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -2436,12 +2545,11 @@ async fn parked_approval_interrupt_records_typed_rejection() -> Result<(), Box<d
     Ok(())
 }
 
-/// a parked-approval interrupt rejection is
-/// authoritative only against a turn the database still records as active on
-/// its approval wait. The row shape proves only that the receipt names the
-/// turn the command expected, so the deferred correlation trigger proves the
-/// phase: a directly inserted receipt naming a running or a terminal turn
-/// cannot commit and therefore never replays as authoritative.
+/// a parked-approval interrupt rejection is authoritative only against a turn the database still
+/// records as active on its approval wait. The row shape proves only that the receipt names the
+/// turn the command expected, so the deferred correlation trigger proves the phase: a directly
+/// inserted receipt naming a running or a terminal turn cannot commit and therefore never replays
+/// as authoritative.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn parked_approval_rejection_requires_a_recorded_approval_wait() -> Result<(), Box<dyn Error>>
@@ -2984,10 +3092,9 @@ async fn move_delta_member(
     Ok(())
 }
 
-/// denial never dispatches,
-/// schema failure is durable result evidence, external-effect crash loss parks
-/// on exact recovery authority, and effect-free loss closes every request
-/// before the turn fails.
+/// denial never dispatches, schema failure is durable result evidence, external-effect crash loss
+/// parks on exact recovery authority, and effect-free loss closes every request before the turn
+/// fails.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn tool_failures_close_durably() -> Result<(), Box<dyn Error>> {
@@ -4009,10 +4116,9 @@ async fn stopped_compacting_tool_round_persists_retained_iteration_usage()
     Ok(())
 }
 
-/// the terminal shape committed when a
-/// stop request races a tool-using response reloads through the scheduling
-/// projection, so the interrupt successor activates instead of leaving the
-/// session permanently unloadable.
+/// the terminal shape committed when a stop request races a tool-using response reloads through the
+/// scheduling projection, so the interrupt successor activates instead of leaving the session
+/// permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn stopped_tool_round_reloads_and_activates_successor() -> Result<(), Box<dyn Error>> {
@@ -4043,8 +4149,8 @@ async fn stopped_tool_round_reloads_and_activates_successor() -> Result<(), Box<
     Ok(())
 }
 
-/// a stopped tool response's cancellation
-/// remains dispatchable when its correlated producing call completed.
+/// a stopped tool response's cancellation remains dispatchable when its correlated producing call
+/// completed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn stopped_tool_round_cancellation_dispatches() -> Result<(), Box<dyn Error>> {
@@ -4079,8 +4185,8 @@ async fn stopped_tool_round_cancellation_dispatches() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// a cancellation naming a completed terminal call
-/// is dispatchable only with the correlated closed-by-turn-end tool round.
+/// a cancellation naming a completed terminal call is dispatchable only with the correlated
+/// closed-by-turn-end tool round.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn completed_cancellation_requires_closed_tool_round() -> Result<(), Box<dyn Error>> {

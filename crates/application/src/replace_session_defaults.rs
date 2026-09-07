@@ -397,8 +397,8 @@ mod tests {
         }
     }
 
-    /// reserved command identities fail before
-    /// canonical command construction or any transaction call.
+    /// reserved command identities fail before canonical command construction or any transaction
+    /// call.
     #[test]
     fn sentinel_rejection_calls_no_transaction() {
         let target = session_id(1);
@@ -428,8 +428,8 @@ mod tests {
         assert!(service.into_transaction().observed.is_empty());
     }
 
-    /// orchestration forwards exactly the
-    /// four-field canonical command and calls the atomic port once.
+    /// orchestration forwards exactly the four-field canonical command and calls the atomic port
+    /// once.
     #[test]
     fn forwards_exact_command_once() {
         let request = ReplaceSessionDefaultsRequest::try_new(
@@ -467,8 +467,7 @@ mod tests {
         assert_eq!(observed.replacement(), request.replacement());
     }
 
-    /// a recorded applied replay result passes
-    /// through without recomputation or reshaping.
+    /// a recorded applied replay result passes through without recomputation or reshaping.
     #[test]
     fn recorded_applied_result_passes_through() {
         let command = DomainReplaceSessionDefaults::new(
@@ -498,8 +497,8 @@ mod tests {
         assert_eq!(service.into_transaction().observed, [command]);
     }
 
-    /// a recorded authoritative-rejected replay
-    /// result passes through without recomputation or reshaping.
+    /// a recorded authoritative-rejected replay result passes through without recomputation or
+    /// reshaping.
     #[test]
     fn recorded_rejected_result_passes_through() {
         let command = DomainReplaceSessionDefaults::new(
@@ -534,8 +533,8 @@ mod tests {
         assert_eq!(service.into_transaction().observed, [command]);
     }
 
-    /// conflicting user-global reuse is returned unchanged and
-    /// does not acquire a replacement meaning in application code.
+    /// conflicting user-global reuse is returned unchanged and does not acquire a replacement
+    /// meaning in application code.
     #[test]
     fn conflicting_reuse_is_returned_unchanged() {
         let request = ReplaceSessionDefaultsRequest::try_new(
@@ -558,8 +557,8 @@ mod tests {
         assert_eq!(service.into_transaction().observed.len(), 1);
     }
 
-    /// a transaction failure is returned after one call; the
-    /// application does not retry or reinterpret it as a terminal result.
+    /// a transaction failure is returned after one call; the application does not retry or
+    /// reinterpret it as a terminal result.
     #[test]
     fn transaction_failure_is_returned_without_retry() {
         let request = ReplaceSessionDefaultsRequest::try_new(

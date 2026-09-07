@@ -184,9 +184,8 @@ impl CanonicalCallTarget {
 
 /// One recorded provider-target observation for one model call.
 ///
-/// The record deliberately carries no copy of the exact target:
-/// docs/spec/model-call-execution.md derives the target from the canonical
-/// call record inside the serialized transition. Raw parts
+/// The record deliberately carries no copy of the exact target: docs/spec/model-call-execution.md
+/// derives the target from the canonical call record inside the serialized transition. Raw parts
 /// cannot claim a recorded evidence fact:
 ///
 /// ```compile_fail
@@ -534,13 +533,11 @@ impl ProviderTargetEvidenceReuseError {
 
 /// The typed invalidation of one completed current-authority call.
 ///
-/// docs/spec/model-call-execution.md makes this value unique by
-/// `invalidated_call`: the first valid mismatch fixes it, structurally
-/// equal evidence replay is idempotent, and later observations cannot
-/// duplicate or replace it. The value carries no exact target and no
-/// authority generation; both derive from the canonical call and transfer
-/// chain inside the serialized transition. Raw identities
-/// cannot claim an invalidation:
+/// docs/spec/model-call-execution.md makes this value unique by `invalidated_call`: the first valid
+/// mismatch fixes it, structurally equal evidence replay is idempotent, and later observations
+/// cannot duplicate or replace it. The value carries no exact target and no authority generation;
+/// both derive from the canonical call and transfer chain inside the serialized transition. Raw
+/// identities cannot claim an invalidation:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{
@@ -881,10 +878,9 @@ mod tests {
         record_against(target(), evidence, SUBJECT_CALL, mismatch(reported))
     }
 
-    /// identifier lookup precedes any other validation; a
-    /// fresh consistent record appends, an equal replay returns the
-    /// recorded result, and reuse with a different call or payload is
-    /// rejected unchanged.
+    /// identifier lookup precedes any other validation; a fresh consistent record appends, an equal
+    /// replay returns the recorded result, and reuse with a different call or payload is rejected
+    /// unchanged.
     #[test]
     fn evidence_identifier_replay_and_reuse_boundaries_are_exact() {
         let mut log = ProviderTargetEvidenceLog::new();
@@ -930,9 +926,8 @@ mod tests {
         assert_eq!(log.lookup(evidence_id(1)), Some(&evidence));
     }
 
-    /// a fresh identifier is durably recorded only when the
-    /// claimed variant is consistent with the exact target derived from the
-    /// canonical call record.
+    /// a fresh identifier is durably recorded only when the claimed variant is consistent with the
+    /// exact target derived from the canonical call record.
     #[test]
     fn recording_rejects_observations_that_contradict_the_target() {
         let mut log = ProviderTargetEvidenceLog::new();
@@ -972,10 +967,9 @@ mod tests {
         assert_eq!(log.lookup(evidence_id(1)), None);
     }
 
-    /// a correlated mismatch on an issued nonterminal call
-    /// produces exactly the sealed nonterminal-observation fact; unsent calls,
-    /// cross-wired calls, non-mismatch payloads, and target-equal reports
-    /// are rejected.
+    /// a correlated mismatch on an issued nonterminal call produces exactly the sealed
+    /// nonterminal-observation fact; unsent calls, cross-wired calls, non-mismatch payloads, and
+    /// target-equal reports are rejected.
     #[test]
     fn nonterminal_mismatch_producer_validates_the_canonical_call() {
         let call = current_call(SUBJECT_CALL);
@@ -1050,9 +1044,8 @@ mod tests {
         );
     }
 
-    /// mismatch evidence resolving terminal ambiguity leaves
-    /// the physical disposition unchanged and produces the resolution
-    /// fact only for an `Ambiguous` call.
+    /// mismatch evidence resolving terminal ambiguity leaves the physical disposition unchanged and
+    /// produces the resolution fact only for an `Ambiguous` call.
     #[test]
     fn ambiguity_resolution_producer_requires_a_terminal_ambiguous_call() {
         let ambiguous = ended_call(SUBJECT_CALL, ModelCallDisposition::Ambiguous);
@@ -1087,9 +1080,8 @@ mod tests {
         );
     }
 
-    /// the completed-call invalidation is unique by
-    /// invalidated call — the first valid mismatch fixes it, structurally
-    /// equal replay is idempotent, and later observations cannot duplicate
+    /// the completed-call invalidation is unique by invalidated call — the first valid mismatch
+    /// fixes it, structurally equal replay is idempotent, and later observations cannot duplicate
     /// or replace it.
     #[test]
     fn invalidation_is_unique_by_invalidated_call() {
@@ -1152,8 +1144,8 @@ mod tests {
         );
     }
 
-    /// invalidation validates the canonical completed call
-    /// and correlated mismatch before uniqueness is even considered.
+    /// invalidation validates the canonical completed call and correlated mismatch before
+    /// uniqueness is even considered.
     #[test]
     fn invalidation_rejects_uncompleted_calls_and_uncorrelated_evidence() {
         assert_uncompleted_disposition_rejects_invalidation(ModelCallDisposition::KnownFailed);
@@ -1205,10 +1197,9 @@ mod tests {
         );
     }
 
-    /// recording reads the call identity and its exact target
-    /// together from one canonical call record, so a match observation is
-    /// validated against the call's own target and cannot be cross-wired to
-    /// another call's target through the public conversions.
+    /// recording reads the call identity and its exact target together from one canonical call
+    /// record, so a match observation is validated against the call's own target and cannot be
+    /// cross-wired to another call's target through the public conversions.
     #[test]
     fn recording_binds_the_call_and_target_from_one_canonical_record() {
         let current = current_call(2);
@@ -1251,10 +1242,9 @@ mod tests {
         );
     }
 
-    /// the invalidation log owns the per-call uniqueness, so
-    /// the first valid mismatch fixes the entry and a later observation for
-    /// the same call is rejected without the caller tracking the existing
-    /// value.
+    /// the invalidation log owns the per-call uniqueness, so the first valid mismatch fixes the
+    /// entry and a later observation for the same call is rejected without the caller tracking the
+    /// existing value.
     #[test]
     fn invalidation_log_enforces_uniqueness_without_caller_tracking() {
         let completed = ended_call(SUBJECT_CALL, ModelCallDisposition::Completed);

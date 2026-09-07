@@ -8,7 +8,7 @@ reaches a provider without being stored or logged.
 
 Configuration is loaded once at startup from the process environment and two
 versioned TOML documents: the model catalog and the session-template catalog.
-The parser in `apps/signalboxd/src/configuration.rs` and
+The parser in `apps/signalboxd/src/configuration/mod.rs` and
 `apps/signalboxd/src/credential_pools.rs` admits a document fail-closed. The
 subsystem also owns the runner's startup configuration, the refusals that keep
 ambient settings away from the production database channel, and the bridge that
@@ -157,6 +157,11 @@ member while that member remains admissible and otherwise walks members in
 priority order, skipping excluded ones and breaking ties by the snapshot's rule.
 Trigger actions and the exclusions they create are durable. Every availability
 ending is owned by [credential availability](credential-availability.md).
+
+The model-call observation commit retains a reported capacity snapshot against
+the call's credential reference, including each window's remaining percentage,
+reported duration and reset instant. The latest observation time wins across
+calls; an absent snapshot preserves the retained evidence.
 
 The session-template catalog is read after the model catalog. Each template
 binds a name and version to a model or alias, a system prompt, and a
@@ -656,6 +661,11 @@ successful code-host result, is scrubbed of that value and its JSON-escaped form
 before it crosses into evidence. An `ambient` or `codex_home` profile gives the
 daemon no value, so a CLI child's output receives only the credential-shape
 redaction owned by [runtime substrate](runtime-substrate.md).
+
+The optional `[repository_watch]` section composes the
+[repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
+true; false disables module polling, webhook listening, and command dispatch,
+including convergence-sweep target enrollment and session commissioning.
 
 The optional `[convergence]` table deserializes the
 [shared convergence policy](../../crates/convergence/README.md), including its

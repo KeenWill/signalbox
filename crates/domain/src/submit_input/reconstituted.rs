@@ -1,4 +1,5 @@
-//! Checked submit-input replay values and reconstruction failures for `docs/spec/turn-lifecycle-and-scheduling.md`.
+//! Checked submit-input replay values and reconstruction failures for
+//! `docs/spec/turn-lifecycle-and-scheduling.md`.
 
 use super::SubmitInput;
 use super::SubmitInputResult;

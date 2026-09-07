@@ -10,8 +10,9 @@ without becoming module input.
 The output boundary exposes checked wrappers for the existing typed
 create-session, submit-input, goal attach and resume, release-start, sticky
 stop, adopt, and ownership-release commands. Modules do not mint turn, input, or
-frontier identities. Runtime submission is not wired while module dispatch is
-off; settlement events remain replayable lifecycle input.
+frontier identities. Repository watch is the first composed module consumer; its
+daemon-owned command sink submits through core command repositories, and
+settlement events remain replayable lifecycle input.
 
 Each module owns reconstructible or module-local state in a `mod_` PostgreSQL
 schema. The schema is owned by a dedicated login role with no membership path

@@ -131,6 +131,7 @@ impl CreateSessionRepositoryError {
 pub struct CreateSessionRepository {
     pool: PgPool,
     credential_pin: crate::SessionCredentialPin,
+    principal: signalbox_domain::CommandPrincipal,
 }
 
 impl CreateSessionRepository {
@@ -139,7 +140,14 @@ impl CreateSessionRepository {
         Self {
             pool,
             credential_pin,
+            principal: signalbox_domain::CommandPrincipal::Operator,
         }
+    }
+
+    /// Records this explicit issuer on newly claimed creation commands.
+    pub fn with_principal(mut self, principal: signalbox_domain::CommandPrincipal) -> Self {
+        self.principal = principal;
+        self
     }
 
     /// Claims and applies a new command, or resolves replay from the winner.
@@ -197,8 +205,7 @@ impl CreateSessionRepository {
             None => {}
         }
 
-        let issuer =
-            crate::command_registry::issuer_columns(signalbox_domain::CommandPrincipal::Operator);
+        let issuer = crate::command_registry::issuer_columns(self.principal);
         let claimed = sqlx::query(
             "INSERT INTO durable_command
                 (command_id, command_kind, storage_version, claimed_at,
@@ -1286,8 +1293,8 @@ mod tests {
         corruption
     }
 
-    /// the ordinary creation reader cannot silently discard a
-    /// delegated spawning identity from an interactive session row.
+    /// the ordinary creation reader cannot silently discard a delegated spawning identity from an
+    /// interactive session row.
     #[test]
     fn interactive_creation_rejects_spawning_request() {
         let error = decode_provenance(

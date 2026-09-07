@@ -28,35 +28,31 @@
 //! row first.
 //!
 //! Additional row-lock protocols:
-//! - `review_workflow::append_finding_event`: ordinary events lock every
-//!   `review_finding` for the target `FOR NO KEY UPDATE`, by `finding_id`;
-//!   publication reconciliation takes the external link before its finding.
-//! - `runner_protocol::load_enrollment_request_facts`:
-//!   `runner_enrollment_request_receipt` by request `FOR SHARE`.
-//! - `runner_protocol::lock_runner_lease_claim_connection_authority`:
-//!   `runner_enrollment`, then `runner_connection_authority_head`, both by
-//!   enrollment `FOR SHARE`.
-//! - `context_compaction::complete`: source `context_frontier` `FOR SHARE`
-//!   after the lifecycle session lock.
+//! - `review_workflow::append_finding_event`: ordinary events lock every `review_finding` for the
+//!   target `FOR NO KEY UPDATE`, by `finding_id`; publication reconciliation takes the external
+//!   link before its finding.
+//! - `runner_protocol::load_enrollment_request_facts`: `runner_enrollment_request_receipt` by
+//!   request `FOR SHARE`.
+//! - `runner_protocol::lock_runner_lease_claim_connection_authority`: `runner_enrollment`, then
+//!   `runner_connection_authority_head`, both by enrollment `FOR SHARE`.
+//! - `context_compaction::complete`: source `context_frontier` `FOR SHARE` after the lifecycle
+//!   session lock.
 //!
 //! Advisory-lock protocols:
 //! - `hub_fence::advance_hub_fence`: after `HUB_FENCE_GENERATION`, exclusive
-//!   `pg_advisory_xact_lock` on the prior generation's `advisory_key`, then
-//!   `pg_try_advisory_lock` on that same key to retain it across commit.
-//!   `AdvancedHubFence::connect_pool` takes `pg_advisory_lock_shared` on the
-//!   pool generation for each connection's lifetime;
+//!   `pg_advisory_xact_lock` on the prior generation's `advisory_key`, then `pg_try_advisory_lock`
+//!   on that same key to retain it across commit. `AdvancedHubFence::connect_pool` takes
+//!   `pg_advisory_lock_shared` on the pool generation for each connection's lifetime;
 //!   `retire_hub_fence_generation` takes exclusive `pg_advisory_lock` on it.
-//! - The following use exclusive `pg_advisory_xact_lock` with
-//!   `hashtextextended(key, 0)`:
+//! - The following use exclusive `pg_advisory_xact_lock` with `hashtextextended(key, 0)`:
 //!   - `model_execution::acquire_model_call_outbox_order_guard`: the
 //!     `MODEL_CALL_OUTBOX_ORDER_GUARD` key before credential or outbox locks;
-//!     `lock_credential_pool_action_head`: `credential_pool_action_head:`
-//!     plus profile reference, in sorted profile order for several profiles.
-//!   - `commissioned_dispatch::lock_pull_request_target`:
-//!     `commissioned-dispatch:` plus repository and pull-request number,
-//!     before target admission or release.
-//!   - `search::SearchRepository::publish`: source kind
-//!     and artifact identity joined with `chr(31)`, before identity checks/write.
+//!     `lock_credential_pool_action_head`: `credential_pool_action_head:` plus profile reference,
+//!     in sorted profile order for several profiles.
+//!   - `commissioned_dispatch::lock_pull_request_target`: `commissioned-dispatch:` plus repository
+//!     and pull-request number, before target admission or release.
+//!   - `search::SearchRepository::publish`: source kind and artifact identity joined with
+//!     `chr(31)`, before identity checks/write.
 //!
 //! SQL lock sites below name functions in migration files, grouped by family.
 //! Arrows describe acquisition within a function; row sets name their SQL sort
@@ -70,11 +66,10 @@
 //!   `outbox_sequence_state FOR UPDATE` before timeline fact writes.
 //! - `guard_session_model_credential_head`,
 //!   `reject_session_model_credential_entry_after_publication`: `session FOR UPDATE`.
-//! - `guard_session_plan_event_append`: `session FOR NO KEY UPDATE` ->
-//!   authorized `tool_attempt FOR SHARE`.
+//! - `guard_session_plan_event_append`: `session FOR NO KEY UPDATE` -> authorized `tool_attempt FOR
+//!   SHARE`.
 //! - `next_session_plan_event_ordinal`: `session FOR NO KEY UPDATE`.
-//! - `reject_sealed_session_metadata_receipt_satellite_insert`:
-//!   `durable_command FOR UPDATE`.
+//! - `reject_sealed_session_metadata_receipt_satellite_insert`: `durable_command FOR UPDATE`.
 //!
 //! `turns`:
 //! - `assert_turn_runner_recovery_complete`, `recheck_session_turn_runner_recovery`:
@@ -82,99 +77,93 @@
 //! - `require_pending_steering_active_source`: source `turn_lifecycle FOR UPDATE`.
 //!
 //! `tool_loop` (also `lifecycle_commands` for decision authority):
-//! - `reject_tool_approval_judge_call_invalid_change`: `tool_request FOR UPDATE`
-//!   -> active approval-waiting `turn_lifecycle FOR UPDATE` on insertion.
+//! - `reject_tool_approval_judge_call_invalid_change`: `tool_request FOR UPDATE` -> active
+//!   approval-waiting `turn_lifecycle FOR UPDATE` on insertion.
 //! - `require_tool_approval_decision_authority`: `tool_request FOR UPDATE`.
 //!
 //! `delegation`:
 //! - `guard_session_delegation_event_append`: `session_delegation FOR UPDATE`.
 //! - `guard_session_pending_delivery_append`: recipient `session FOR NO KEY UPDATE`.
 //! - `lock_delegation_parent_for_spawn`: parent `session FOR NO KEY UPDATE`.
-//! - `lock_delegation_termination_session_frontier`: `session FOR NO KEY UPDATE`,
-//!   by session identity; `lock_delegation_termination_frontier`:
-//!   calls that session prefix, then takes `session_delegation FOR UPDATE`,
-//!   by spawning tool-request identity.
-//! - `require_delegation_cascade_disposition_count`: sessions in session order
-//!   `FOR NO KEY UPDATE` -> relations in spawning tool-request order `FOR UPDATE`.
+//! - `lock_delegation_termination_session_frontier`: `session FOR NO KEY UPDATE`, by session
+//!   identity; `lock_delegation_termination_frontier`: calls that session prefix, then takes
+//!   `session_delegation FOR UPDATE`, by spawning tool-request identity.
+//! - `require_delegation_cascade_disposition_count`: sessions in session order `FOR NO KEY UPDATE`
+//!   -> relations in spawning tool-request order `FOR UPDATE`.
 //!
 //! `goals` (also `session_lifecycle_satellite` for event continuity):
 //! - `credit_goal_turn_generation_work_fact`, `refresh_session_live_goal_queue`,
-//!   `refresh_session_live_queued_turn`: `outbox_sequence_state FOR UPDATE`
-//!   before fact/queue writes.
+//!   `refresh_session_live_queued_turn`: `outbox_sequence_state FOR UPDATE` before fact/queue
+//!   writes.
 //! - `enforce_goal_scheduler_failure_turn`: failed `turn_lifecycle FOR SHARE`.
-//! - `goal_event_names_current_goal_turn`, `require_goal_event_continuity`:
-//!   `session FOR NO KEY UPDATE`.
+//! - `goal_event_names_current_goal_turn`, `require_goal_event_continuity`: `session FOR NO KEY
+//!   UPDATE`.
 //!
 //! `runners`:
-//! - `guard_runner_claimed_retry_attempt_authority`:
-//!   source `runner_current_lease_event FOR UPDATE`.
+//! - `guard_runner_claimed_retry_attempt_authority`: source `runner_current_lease_event FOR
+//!   UPDATE`.
 //! - `guard_runner_connection_event_insert`: active `runner_enrollment FOR UPDATE`.
-//! - `guard_runner_lease_generation`: `runner_current_session_placement FOR SHARE`
-//!   -> `runner_enrollment FOR SHARE` -> `tool_attempt FOR UPDATE` ->
-//!   `runner_current_registration FOR SHARE` -> credential-bearing
-//!   `runner_current_credential_grant_audit FOR SHARE`.
-//! - `guard_runner_placement_record`: prior `runner_current_credential_grant_audit
-//!   FOR SHARE`; `guard_runner_registration_insert`: `runner_enrollment FOR SHARE`.
-//! - `lock_runner_loss_identity`: advisory key `signalbox.runner-loss-identity.`
-//!   plus runner identity, also called by the Rust runner store,
-//!   `serialize_runner_enrollment_loss_identity`, and completion in
-//!   `guard_runner_connection_loss_propagation`.
-//! - `lock_scheduler_before_runner_recovery_dependency_insert`:
-//!   `session_scheduler FOR UPDATE`.
+//! - `guard_runner_lease_generation`: `runner_current_session_placement FOR SHARE` ->
+//!   `runner_enrollment FOR SHARE` -> `tool_attempt FOR UPDATE` -> `runner_current_registration FOR
+//!   SHARE` -> credential-bearing `runner_current_credential_grant_audit FOR SHARE`.
+//! - `guard_runner_placement_record`: prior `runner_current_credential_grant_audit FOR SHARE`;
+//!   `guard_runner_registration_insert`: `runner_enrollment FOR SHARE`.
+//! - `lock_runner_loss_identity`: advisory key `signalbox.runner-loss-identity.` plus runner
+//!   identity, also called by the Rust runner store, `serialize_runner_enrollment_loss_identity`,
+//!   and completion in `guard_runner_connection_loss_propagation`.
+//! - `lock_scheduler_before_runner_recovery_dependency_insert`: `session_scheduler FOR UPDATE`.
 //! - `reject_runner_lease_claim_after_connection_loss` and
-//!   `reject_runner_lease_generation_after_connection_loss`:
-//!   `runner_enrollment FOR SHARE` -> `runner_connection_authority_head FOR SHARE`;
-//!   generation validation then takes `runner_current_connection_loss FOR SHARE`.
+//!   `reject_runner_lease_generation_after_connection_loss`: `runner_enrollment FOR SHARE` ->
+//!   `runner_connection_authority_head FOR SHARE`; generation validation then takes
+//!   `runner_current_connection_loss FOR SHARE`.
 //! - `require_runner_retryable_loss_live_attempt`: `tool_attempt FOR SHARE`.
-//! - `serialize_runner_placement_loss_identity`: `session_scheduler FOR UPDATE`
-//!   -> selected runner's `lock_runner_loss_identity`.
-//! - `set_runner_placement_loss_baseline`: `session_scheduler FOR UPDATE` ->
-//!   `runner_enrollment FOR SHARE` -> `runner_connection_authority_head FOR SHARE`
-//!   -> `runner_current_connection_loss FOR SHARE`.
+//! - `serialize_runner_placement_loss_identity`: `session_scheduler FOR UPDATE` -> selected
+//!   runner's `lock_runner_loss_identity`.
+//! - `set_runner_placement_loss_baseline`: `session_scheduler FOR UPDATE` -> `runner_enrollment FOR
+//!   SHARE` -> `runner_connection_authority_head FOR SHARE` -> `runner_current_connection_loss FOR
+//!   SHARE`.
 //!
 //! Migration-only sites in `repo_watch`, `session_lifecycle_satellite`, and
 //! `session_deadline_runtime`: `202609050105_drop_repo_watch_v1.sql` removes
 //! these locks from the installed schema.
-//! - `adjust_repo_watch_pull_request_work_count`:
-//!   `repo_watch_current_pull_request_work_count FOR UPDATE`.
-//! - `repo_watch_owe_dispatch_requeue`: singleton-key advisory lock ->
-//!   `repo_watch_rule_activation FOR UPDATE`.
-//! - `repo_watch_release_completed_dispatch_batches_for_turn`:
-//!   candidate `repo_watch_dispatch_batch FOR UPDATE`.
+//! - `adjust_repo_watch_pull_request_work_count`: `repo_watch_current_pull_request_work_count FOR
+//!   UPDATE`.
+//! - `repo_watch_owe_dispatch_requeue`: singleton-key advisory lock -> `repo_watch_rule_activation
+//!   FOR UPDATE`.
+//! - `repo_watch_release_completed_dispatch_batches_for_turn`: candidate `repo_watch_dispatch_batch
+//!   FOR UPDATE`.
 //! - `repo_watch_release_dispatch_obligation_park_for_progress`,
-//!   `repo_watch_release_parked_dispatch_obligation`: obligation-identity advisory
-//!   lock using `repo_watch_dispatch_obligation_lock_key` -> subject
-//!   `session_lifecycle FOR UPDATE` in session order ->
-//!   `repo_watch_dispatch_obligation FOR UPDATE`. The `repo_watch` definitions
-//!   contain the obligation row lock.
-//! - `project_session_lifecycle_from_goal`: unreleased dispatch cohort
-//!   `session_lifecycle FOR UPDATE` in session order.
-//! - `lock_repo_watch_deactivation_session_lifecycles`: subject
-//!   `session_lifecycle FOR UPDATE` in session order.
+//!   `repo_watch_release_parked_dispatch_obligation`: obligation-identity advisory lock using
+//!   `repo_watch_dispatch_obligation_lock_key` -> subject `session_lifecycle FOR UPDATE` in session
+//!   order -> `repo_watch_dispatch_obligation FOR UPDATE`. The `repo_watch` definitions contain the
+//!   obligation row lock.
+//! - `project_session_lifecycle_from_goal`: unreleased dispatch cohort `session_lifecycle FOR
+//!   UPDATE` in session order.
+//! - `lock_repo_watch_deactivation_session_lifecycles`: subject `session_lifecycle FOR UPDATE` in
+//!   session order.
 //!
 //! `repo_watch_v2_dispatch`:
-//! - `enforce_dispatch_reference_origin`:
-//!   advisory key `dispatch:` plus dispatch reference before origin checking.
+//! - `enforce_dispatch_reference_origin`: advisory key `dispatch:` plus dispatch reference before
+//!   origin checking.
 //!
 //! `review`:
-//! - `authenticate_review_finding_event_head`: subject/referenced
-//!   `review_finding_event_head FOR UPDATE` in finding order.
-//! - `guard_review_external_link_attachment_insert`:
-//!   `review_external_link FOR NO KEY UPDATE` -> advisory external-object key
-//!   (provider, object kind, external object key separated by `chr(31)`).
+//! - `authenticate_review_finding_event_head`: subject/referenced `review_finding_event_head FOR
+//!   UPDATE` in finding order.
+//! - `guard_review_external_link_attachment_insert`: `review_external_link FOR NO KEY UPDATE` ->
+//!   advisory external-object key (provider, object kind, external object key separated by
+//!   `chr(31)`).
 //! - `guard_review_external_object_identity_insert`: that external-object key.
-//! - `require_review_external_observation_sequence`,
-//!   `require_review_pass_external_result`: `review_external_link FOR NO KEY UPDATE`.
-//! - `require_review_finding_event_sequence`: subject/referenced
-//!   `review_finding FOR NO KEY UPDATE` in finding order.
+//! - `require_review_external_observation_sequence`, `require_review_pass_external_result`:
+//!   `review_external_link FOR NO KEY UPDATE`.
+//! - `require_review_finding_event_sequence`: subject/referenced `review_finding FOR NO KEY UPDATE`
+//!   in finding order.
 //!
 //! `blobs_and_web`:
-//! - `bounded_web_usage_profile`, `enforce_web_usage_oversized_profile_identity`:
-//!   advisory key equal to the exact profile reference's MD5 digest.
+//! - `bounded_web_usage_profile`, `enforce_web_usage_oversized_profile_identity`: advisory key
+//!   equal to the exact profile reference's MD5 digest.
 //!
 //! `programs` and `operator_attention`:
-//! - `require_program_journal_append_sequence`:
-//!   `program_run_journal_sequence_state FOR UPDATE`.
+//! - `require_program_journal_append_sequence`: `program_run_journal_sequence_state FOR UPDATE`.
 //! - `next_operator_attention_change_sequence`: `outbox_sequence_state FOR UPDATE`.
 
 use signalbox_domain::SessionId;

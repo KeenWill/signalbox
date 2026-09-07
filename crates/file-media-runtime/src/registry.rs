@@ -13,41 +13,25 @@ use crate::{
     StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
 };
 
-// numeric-bound: ceiling - bounds process-lifetime provider inventory memory
 const MAX_REGISTRY_PROVIDERS: usize = 256;
-// numeric-bound: ceiling - bounds per-provider reader inventory memory and startup work
 pub const MAX_READERS_PER_PROVIDER: usize = 256;
-// numeric-bound: ceiling - bounds aggregate process-lifetime reader inventory memory
 pub const MAX_REGISTRY_READERS: usize = 256;
-// numeric-bound: ceiling - bounds per-reader media-claim memory and conflict checks
 const MAX_MEDIA_TYPES_PER_READER: usize = 256;
-// numeric-bound: ceiling - bounds aggregate process-lifetime media-claim memory
 const MAX_REGISTRY_MEDIA_TYPES: usize = 4_096;
-// numeric-bound: ceiling - bounds per-reader model-visible view inventory memory
 const MAX_VIEWS_PER_READER: usize = 256;
-// numeric-bound: ceiling - reserves tool-result space for fixed inspection facts and metadata
 const MAX_INSPECTION_VIEW_INVENTORY_BYTES: usize = 512 * 1_024;
-// numeric-bound: ceiling - reserves effective result space for fixed inspection facts and metadata
 const INSPECTION_NON_VIEW_RESERVE_BYTES: usize = 64 * 1_024;
-// numeric-bound: ceiling - bounds aggregate process-lifetime view inventory memory
 const MAX_REGISTRY_VIEWS: usize = 4_096;
-// numeric-bound: ceiling - bounds aggregate retained view-schema bytes
 const MAX_REGISTRY_SCHEMA_BYTES: usize = 16 * 1_024 * 1_024;
-// numeric-bound: ceiling - bounds per-reader sanitized reason inventory memory
 const MAX_REASON_CODES_PER_READER: usize = 256;
-// numeric-bound: ceiling - bounds aggregate process-lifetime reason inventory memory
 const MAX_REGISTRY_REASON_CODES: usize = 4_096;
-// numeric-bound: ceiling - bounds one inspection's aggregate probe source I/O
 const MAX_INSPECTION_PROBE_BYTES: u64 = 16 * 1_024 * 1_024;
-// numeric-bound: ceiling - bounds one inspection's aggregate probe request fan-out
 const MAX_INSPECTION_PROBE_READS: u32 = 1_024;
-// numeric-bound: ceiling - bounds collision-validation worker fan-out and source I/O
 const MAX_COLLISION_VALIDATION_CANDIDATES: usize = 2;
-// numeric-bound: ceiling - the tool contract permits this many input containers
 const MAX_READ_INPUT_CONTAINERS: u32 = 256;
-// numeric-bound: ceiling - every JSON node emits at least one serialized byte
+// Every JSON node emits at least one serialized byte.
 const MAX_READ_OPTIONS_NODES: usize = MAX_READ_OPTIONS_BYTES;
-// numeric-bound: ceiling - reserves processor-frame space for structured-body JSON escaping
+// Structured-body JSON escaping shares the processor frame with its envelope.
 const MAX_STRUCTURED_BODY_BYTES: usize = 500 * 1_024;
 #[derive(signalbox_derive::Accessors)]
 /// Immutable process-lifetime registry snapshot.

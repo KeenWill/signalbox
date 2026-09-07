@@ -38,8 +38,7 @@ fn tool_response_parts(count: usize) -> Vec<AssistantResponsePart> {
         .collect()
 }
 
-/// request names are exact and restricted to the recorded
-/// ASCII spelling.
+/// request names are exact and restricted to the recorded ASCII spelling.
 #[test]
 fn tool_name_rejects_empty_long_and_unsafe_spelling() {
     assert_eq!(
@@ -65,8 +64,8 @@ fn tool_name_rejects_empty_long_and_unsafe_spelling() {
     );
 }
 
-/// valid JSON is canonicalized recursively,
-/// while malformed provider text remains exact bounded evidence.
+/// valid JSON is canonicalized recursively, while malformed provider text remains exact bounded
+/// evidence.
 #[test]
 fn arguments_are_canonical_or_exactly_undecodable() {
     let json = NormalizedToolArguments::try_from_provider_text(String::from(
@@ -83,8 +82,8 @@ fn arguments_are_canonical_or_exactly_undecodable() {
     assert_eq!(malformed.as_str(), malformed_text);
 }
 
-/// a complete JSON prefix followed by any non-whitespace
-/// provider text remains exact undecodable evidence.
+/// a complete JSON prefix followed by any non-whitespace provider text remains exact undecodable
+/// evidence.
 #[test]
 fn arguments_reject_trailing_non_whitespace() {
     let provider_text = String::from(r#"{"timezone":"UTC"} trailing"#);
@@ -95,8 +94,8 @@ fn arguments_reject_trailing_non_whitespace() {
     assert_eq!(normalized.as_str(), provider_text);
 }
 
-/// literal U+0000 cannot enter the durable text
-/// vocabulary even when the remaining provider text is undecodable JSON.
+/// literal U+0000 cannot enter the durable text vocabulary even when the remaining provider text is
+/// undecodable JSON.
 #[test]
 fn arguments_reject_literal_null() {
     let value = String::from("{\"timezone\":\0");
@@ -107,8 +106,7 @@ fn arguments_reject_literal_null() {
     assert_eq!(error.failure(), ToolArgumentsFailure::ContainsNull);
 }
 
-/// reconstitution rejects a competing noncanonical JSON
-/// representation.
+/// reconstitution rejects a competing noncanonical JSON representation.
 #[test]
 fn stored_json_must_be_canonical() {
     let error = NormalizedToolArguments::try_from_stored(
@@ -123,8 +121,8 @@ fn stored_json_must_be_canonical() {
     );
 }
 
-/// canonicalization preserves JSON numeric values outside
-/// the native integer and floating-point ranges without rounding.
+/// canonicalization preserves JSON numeric values outside the native integer and floating-point
+/// ranges without rounding.
 #[test]
 fn arguments_preserve_arbitrary_precision_numbers() {
     let normalized = NormalizedToolArguments::try_from_provider_text(String::from(
@@ -139,8 +137,8 @@ fn arguments_preserve_arbitrary_precision_numbers() {
     );
 }
 
-/// the byte bound, rather than serde's default recursion
-/// cutoff, governs syntactically valid nested JSON.
+/// the byte bound, rather than serde's default recursion cutoff, governs syntactically valid nested
+/// JSON.
 #[test]
 fn deeply_nested_arguments_remain_json() {
     let depth = 512;
@@ -152,8 +150,8 @@ fn deeply_nested_arguments_remain_json() {
     assert_eq!(normalized.as_str(), value);
 }
 
-/// malformed input is classified before any recursively
-/// owned JSON tree exists, even after a deeply nested complete child.
+/// malformed input is classified before any recursively owned JSON tree exists, even after a deeply
+/// nested complete child.
 #[test]
 fn deep_partial_json_is_dropped_stack_safely() {
     let depth = 100_000;
@@ -403,8 +401,7 @@ fn denial_reason_derivation_output_is_always_admissible() {
     assert!(ToolDenialReason::try_new(derived.into_string()).is_ok());
 }
 
-/// a restored session-blanket approval requires the
-/// approve-all posture frozen for that turn.
+/// a restored session-blanket approval requires the approve-all posture frozen for that turn.
 #[test]
 fn session_blanket_reconstitution_requires_frozen_authority() {
     let request = tool_request_id(4);
@@ -432,8 +429,8 @@ fn session_blanket_reconstitution_requires_frozen_authority() {
     );
 }
 
-/// credential-boundary suppression constructs an
-/// inert proposal and restores only the fixed automatic denial provenance.
+/// credential-boundary suppression constructs an inert proposal and restores only the fixed
+/// automatic denial provenance.
 #[test]
 fn runtime_safety_denial_is_non_executable() {
     let request = tool_request_id(4);
@@ -460,8 +457,7 @@ fn runtime_safety_denial_is_non_executable() {
     assert!(!restored.is_approved());
 }
 
-/// only the user-command preparation path can construct
-/// user-sourced approval.
+/// only the user-command preparation path can construct user-sourced approval.
 #[test]
 fn user_command_preparation_preserves_agency() {
     let request = request(4);
@@ -489,8 +485,8 @@ fn user_command_preparation_preserves_agency() {
     assert!(applied.resolution().is_approved());
 }
 
-/// one provider response admits at most the recorded 32
-/// logical tool requests without accepting a partial prefix.
+/// one provider response admits at most the recorded 32 logical tool requests without accepting a
+/// partial prefix.
 #[test]
 fn tool_response_request_count_is_bounded() {
     let admitted = ToolUsingAssistantResponse::try_from_parts(tool_response_parts(32))
@@ -525,8 +521,7 @@ fn tool_decision_rejects_reserved_command_identities() {
     assert_eq!(max_error.command_id(), max_command_id);
 }
 
-/// only an applied user command can restore
-/// user-command approval authority.
+/// only an applied user command can restore user-command approval authority.
 #[test]
 fn rejected_user_command_cannot_restore_approval() {
     let command = DecideToolRequest::new(
@@ -547,8 +542,8 @@ fn rejected_user_command_cannot_restore_approval() {
     );
 }
 
-/// denial admission follows the persisted POSIX-whitespace contract
-/// without silently broadening it to every Unicode space scalar.
+/// denial admission follows the persisted POSIX-whitespace contract without silently broadening it
+/// to every Unicode space scalar.
 #[test]
 fn denial_reason_rejects_posix_edges_and_preserves_nonbreaking_space() {
     for value in [" denied", "denied\n", "\tdenied", "denied\u{000c}"] {
@@ -565,8 +560,7 @@ fn denial_reason_rejects_posix_edges_and_preserves_nonbreaking_space() {
     assert_eq!(admitted.as_str(), "\u{00a0}denied\u{00a0}");
 }
 
-/// the admission bound is inclusive, so a result of exactly the
-/// bounded size is admitted exactly.
+/// the admission bound is inclusive, so a result of exactly the bounded size is admitted exactly.
 #[test]
 fn result_text_admits_exactly_the_bounded_size() {
     let at_bound = "r".repeat(MAX_TOOL_RESULT_TEXT_BYTES);
@@ -576,8 +570,8 @@ fn result_text_admits_exactly_the_bounded_size() {
     assert_eq!(admitted.as_str(), at_bound);
 }
 
-/// one byte past the bound is refused, and the refusal reports the
-/// observed size while retaining the rejected text without rewriting it.
+/// one byte past the bound is refused, and the refusal reports the observed size while retaining
+/// the rejected text without rewriting it.
 #[test]
 fn result_text_rejects_one_byte_past_the_bound() {
     let past_bound = "r".repeat(MAX_TOOL_RESULT_TEXT_BYTES + 1);
@@ -594,8 +588,8 @@ fn result_text_rejects_one_byte_past_the_bound() {
     assert_eq!(error.value(), past_bound);
 }
 
-/// literal U+0000 cannot enter the durable result vocabulary, and the
-/// refusal retains the rejected text without rewriting it.
+/// literal U+0000 cannot enter the durable result vocabulary, and the refusal retains the rejected
+/// text without rewriting it.
 #[test]
 fn result_text_rejects_a_literal_null() {
     let value = String::from("head\0tail");
@@ -624,8 +618,7 @@ fn decision_command_equality_excludes_only_command_identity() {
     assert_ne!(approve, deny);
 }
 
-/// denials remain request-bound logical resolutions and
-/// cannot name a physical attempt.
+/// denials remain request-bound logical resolutions and cannot name a physical attempt.
 #[test]
 fn denial_resolution_names_only_the_request() {
     let request = tool_request_id(9);
@@ -1109,9 +1102,8 @@ fn user_override_initial_approval_records_override_provenance() {
     assert!(!approval.requires_decision());
 }
 
-/// a restored user-override approval requires the
-/// delegated posture frozen on its request — the posture the judge would
-/// otherwise decide.
+/// a restored user-override approval requires the delegated posture frozen on its request — the
+/// posture the judge would otherwise decide.
 #[test]
 fn user_override_reconstitution_requires_delegated_posture() {
     const CONSUMING_REQUEST_SEED: u128 = 73;

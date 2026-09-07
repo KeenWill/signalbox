@@ -815,8 +815,8 @@ mod tests {
         );
     }
 
-    /// Running accepts either singleton stop; stopped
-    /// values replay/union compatible causes; Prepared accepts neither.
+    /// Running accepts either singleton stop; stopped values replay/union compatible causes;
+    /// Prepared accepts neither.
     #[test]
     fn stop_request_transition_matrix_preserves_complete_causes() {
         let cancellation = cancellation_stopped();
@@ -892,8 +892,7 @@ mod tests {
         );
     }
 
-    /// Prepared accepts exactly
-    /// the restricted unsent and startup terminal branches from
+    /// Prepared accepts exactly the restricted unsent and startup terminal branches from
     /// docs/spec/turn-lifecycle-and-scheduling.md.
     #[test]
     fn prepared_terminal_matrix_is_complete() {
@@ -1011,8 +1010,7 @@ mod tests {
         .assert_eq(&print(&rows));
     }
 
-    /// Running may
-    /// enter every type-valid terminal branch once slice 5 establishes guards.
+    /// Running may enter every type-valid terminal branch once slice 5 establishes guards.
     #[test]
     fn running_accepts_every_type_valid_terminal_value() {
         let causes_without_interrupt =
@@ -1207,8 +1205,7 @@ mod tests {
         );
     }
 
-    /// CancellationOnly ends
-    /// only as AfterCancellation with its exact proof and any honest result.
+    /// CancellationOnly ends only as AfterCancellation with its exact proof and any honest result.
     #[test]
     fn cancellation_stopped_terminal_matrix_is_complete() {
         let matching_fatal = FatalMismatchStopCauses::new(
@@ -1361,8 +1358,7 @@ mod tests {
         .assert_eq(&print(&rows));
     }
 
-    /// FatalMismatch ends only as
-    /// AfterFatalMismatch with the exact complete cause value.
+    /// FatalMismatch ends only as AfterFatalMismatch with the exact complete cause value.
     #[test]
     fn fatal_stopped_terminal_matrix_is_complete() {
         let exact_without_interrupt = fatal_causes(&fatal_stopped());
@@ -1631,8 +1627,8 @@ mod tests {
         assert!(!causes.contains(failure(3)));
     }
 
-    /// fatal failure and applied interrupt addition is
-    /// idempotent and event-order independent without losing either fact.
+    /// fatal failure and applied interrupt addition is idempotent and event-order independent
+    /// without losing either fact.
     #[test]
     fn stop_union_is_idempotent_and_event_order_independent() {
         let interrupt_then_failure = TurnAttemptStopCauses::cancellation_only(proof(1))
@@ -1914,8 +1910,7 @@ mod tests {
         ));
     }
 
-    /// startup loss retains the terminal family matching the
-    /// complete recovered stop causes.
+    /// startup loss retains the terminal family matching the complete recovered stop causes.
     #[test]
     fn lost_is_representable_in_all_three_matching_terminal_families() {
         let fatal = FatalMismatchStopCauses::new(

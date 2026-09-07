@@ -24,7 +24,7 @@ sandbox profile; the daemon catalog that would admit such claims is empty, and
 the runner sends an empty reconnect inventory and executes nothing. Leases,
 dispatch, workspaces, sandboxes, and recovery are listed under Planned.
 
-The domain lives in `crates/domain/src/runner.rs` and the wire vocabulary in
+The domain lives in `crates/domain/src/runner/` and the wire vocabulary in
 `crates/runner-wire`. A `RunnerEnrollment` binds the daemon-issued runner,
 enrollment, and authentication-reference identities to the capability classes
 the daemon allows. A `ValidatedRunnerRegistration` is one revision of a runner's

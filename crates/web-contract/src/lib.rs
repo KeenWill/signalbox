@@ -29,7 +29,8 @@ pub const MAX_NDJSON_ITEM_BYTES: usize = 64 * 1024;
 /// Hard safety ceiling on one ephemeral provider text fragment. Production
 /// splits deltas at this bound, so the generated decoder rejects anything
 /// larger as a value the server cannot emit.
-// numeric-bound: hard safety - leaves room for worst-case JSON escaping and the event envelope
+// Six-byte JSON escapes expand 8 KiB to 48 KiB, leaving 16 KiB of the NDJSON item
+// for its envelope.
 pub const MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES: usize = 8_192;
 
 /// Identity of the one exact browser contract this daemon serves.
@@ -162,6 +163,18 @@ impl WebContractBootstrap {
             },
         }
     }
+}
+
+/// An idempotent text submission using the session's current defaults.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSubmitInputRequest {
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub command_id: String,
+    #[schemars(length(min = 1))]
+    pub message: String,
 }
 
 /// Small generated-contract fixture proving Rust/TypeScript round trips.
@@ -2205,6 +2218,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebContractBootstrap",
             decoder: "decodeWebContractBootstrap",
             schema: canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value()),
+        },
+        ContractSchema {
+            name: "WebSubmitInputRequest",
+            decoder: "decodeWebSubmitInputRequest",
+            schema: canonical_schema(schemars::schema_for!(WebSubmitInputRequest).to_value()),
         },
         ContractSchema {
             name: "WebContractExample",

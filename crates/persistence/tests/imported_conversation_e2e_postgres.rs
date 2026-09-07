@@ -277,10 +277,9 @@ async fn assert_session_reloads(
     Ok(())
 }
 
-/// synthetic Claude JSONL is
-/// ingested losslessly, an interior imported boundary seeds one later session,
-/// the exact prefix plus native origin reaches the provider, and the ordinary
-/// native turn completes and reconstitutes from PostgreSQL.
+/// synthetic Claude JSONL is ingested losslessly, an interior imported boundary seeds one later
+/// session, the exact prefix plus native origin reaches the provider, and the ordinary native turn
+/// completes and reconstitutes from PostgreSQL.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn import_seed_and_native_turn_complete_end_to_end() -> Result<(), Box<dyn Error>> {
@@ -687,9 +686,8 @@ async fn import_seed_and_native_turn_complete_end_to_end() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// one 300-entry imported seed remains
-/// exact when the production scheduling projection derives its first native
-/// successor, while physical storage adds only the one-entry suffix.
+/// one 300-entry imported seed remains exact when the production scheduling projection derives its
+/// first native successor, while physical storage adds only the one-entry suffix.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn long_frontier_projection_uses_linear_physical_deltas() -> Result<(), Box<dyn Error>> {
@@ -850,8 +848,8 @@ async fn long_frontier_projection_uses_linear_physical_deltas() -> Result<(), Bo
     Ok(())
 }
 
-/// the process reader preserves the exact order, identities,
-/// and content of one transcript with hundreds of entries.
+/// the process reader preserves the exact order, identities, and content of one transcript with
+/// hundreds of entries.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_read_preserves_long_imported_transcript() -> Result<(), Box<dyn Error>> {

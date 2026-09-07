@@ -39,7 +39,6 @@ use crate::tests::support::{
     workspace_root_identity,
 };
 
-// numeric-bound: test fixture - exceeds the dogfood supervisor's former descriptor ceiling
 const WIDE_ADMINISTRATIVE_SIBLING_COUNT: usize = 1_100;
 
 fn wide_administrative_layout() -> Fixture {

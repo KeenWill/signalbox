@@ -2,83 +2,6 @@
 
 # model_execution
 
-## ModelTargetDefinition
-
-```rust
-pub struct ModelTargetDefinition {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelTargetDefinition {
-    pub const fn new(selection: DirectModelSelection, target: ResolvedProviderTarget) -> Self;
-    pub const fn selection(&self) -> DirectModelSelection;
-    pub const fn target(&self) -> ResolvedProviderTarget;
-}
-```
-
-## ModelTargetCatalog
-
-```rust
-pub struct ModelTargetCatalog {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelTargetCatalog {
-    pub fn try_from_definitions(
-        definitions: impl collect::IntoIterator<Item = ModelTargetDefinition>,
-    ) -> result::Result<Self, ModelTargetCatalogError>;
-    pub fn resolve(
-        &self,
-        selection: FrozenModelSelection,
-    ) -> result::Result<ResolvedModelSelection, ModelTargetResolutionError>;
-}
-```
-
-## ModelTargetCatalogError
-
-```rust
-pub enum ModelTargetCatalogError {
-    DuplicateSelection { selection: DirectModelSelection },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ResolvedModelSelection
-
-```rust
-pub struct ResolvedModelSelection {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ResolvedModelSelection {
-    pub const fn selection(&self) -> FrozenModelSelection;
-    pub const fn target(&self) -> ResolvedProviderTarget;
-}
-```
-
-## ModelTargetResolutionError
-
-```rust
-pub struct ModelTargetResolutionError {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelTargetResolutionError {
-    pub const fn selection(&self) -> FrozenModelSelection;
-    pub const fn direct_selection(&self) -> DirectModelSelection;
-}
-```
-
-## ModelCallOriginContent
-
-```rust
-pub struct ModelCallOriginContent {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelCallOriginContent {
-    pub const fn from_goal_turn(accepted_input: AcceptedInputId, content: UserContent) -> Self;
-    pub fn from_pending_steering(pending: &PendingSteeringInput, content: UserContent) -> Self;
-    pub fn from_consumed_steering(consumed: &ConsumedSteeringInput, content: UserContent) -> Self;
-    pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> option::Option<Self>;
-    pub fn from_reconstituted_turn_origin(
-        origin: &SubmitInputTurnOriginReconstitutionInput,
-    ) -> option::Option<Self>;
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn content(&self) -> &UserContent;
-}
-```
-
 ## ModelCallExecutionReconstitutionInput
 
 ```rust
@@ -283,6 +206,24 @@ impl ModelCallExecution {
         producing_call: ModelCallId,
         failure_identities: FailedModelCallTurnIdentities,
     ) -> result::Result<ContextHeadroomExhaustedModelCallTurn, ModelCallClosureError>;
+}
+```
+
+## ModelCallOriginContent
+
+```rust
+pub struct ModelCallOriginContent {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelCallOriginContent {
+    pub const fn from_goal_turn(accepted_input: AcceptedInputId, content: UserContent) -> Self;
+    pub fn from_pending_steering(pending: &PendingSteeringInput, content: UserContent) -> Self;
+    pub fn from_consumed_steering(consumed: &ConsumedSteeringInput, content: UserContent) -> Self;
+    pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> option::Option<Self>;
+    pub fn from_reconstituted_turn_origin(
+        origin: &SubmitInputTurnOriginReconstitutionInput,
+    ) -> option::Option<Self>;
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn content(&self) -> &UserContent;
 }
 ```
 
@@ -495,6 +436,8 @@ pub enum ProviderModelCallFailureCause {
 pub struct CorrelatedModelCallTerminalObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl CorrelatedModelCallTerminalObservation {
+    pub fn with_rate_limits(self, snapshot: option::Option<ProviderRateLimitSnapshot>) -> Self;
+    pub fn rate_limits(&self) -> option::Option<&ProviderRateLimitSnapshot>;
     pub const fn call(&self) -> ModelCallId;
     pub const fn correlation(&self) -> &IssuedModelCallCorrelation;
     pub const fn observation(&self) -> &ModelCallTerminalObservation;
@@ -537,6 +480,65 @@ impl ModelCallTerminalObservation {
     pub const fn retained_input_tokens(&self) -> option::Option<u64>;
     pub const fn retained_output_tokens(&self) -> option::Option<u64>;
     pub const fn disposition(&self) -> ModelCallDisposition;
+}
+```
+
+## ModelTargetDefinition
+
+```rust
+pub struct ModelTargetDefinition {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelTargetDefinition {
+    pub const fn new(selection: DirectModelSelection, target: ResolvedProviderTarget) -> Self;
+    pub const fn selection(&self) -> DirectModelSelection;
+    pub const fn target(&self) -> ResolvedProviderTarget;
+}
+```
+
+## ModelTargetCatalog
+
+```rust
+pub struct ModelTargetCatalog {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelTargetCatalog {
+    pub fn try_from_definitions(
+        definitions: impl collect::IntoIterator<Item = ModelTargetDefinition>,
+    ) -> result::Result<Self, ModelTargetCatalogError>;
+    pub fn resolve(
+        &self,
+        selection: FrozenModelSelection,
+    ) -> result::Result<ResolvedModelSelection, ModelTargetResolutionError>;
+}
+```
+
+## ModelTargetCatalogError
+
+```rust
+pub enum ModelTargetCatalogError {
+    DuplicateSelection { selection: DirectModelSelection },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ResolvedModelSelection
+
+```rust
+pub struct ResolvedModelSelection {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ResolvedModelSelection {
+    pub const fn selection(&self) -> FrozenModelSelection;
+    pub const fn target(&self) -> ResolvedProviderTarget;
+}
+```
+
+## ModelTargetResolutionError
+
+```rust
+pub struct ModelTargetResolutionError {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelTargetResolutionError {
+    pub const fn selection(&self) -> FrozenModelSelection;
+    pub const fn direct_selection(&self) -> DirectModelSelection;
 }
 ```
 

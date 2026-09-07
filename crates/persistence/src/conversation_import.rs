@@ -1379,7 +1379,6 @@ pub(crate) async fn finish_projection(
 
 /// Requires a resolved stored display title to agree exactly with pure
 /// re-derivation from the reconstituted records.
-///
 fn validate_display_title(
     conversation: &ImportedConversation,
     display_title: Option<String>,
@@ -1692,8 +1691,8 @@ mod tests {
         );
     }
 
-    /// shared raw-blob keys are emitted in one deterministic
-    /// acquisition order independent of physical transcript order.
+    /// shared raw-blob keys are emitted in one deterministic acquisition order independent of
+    /// physical transcript order.
     #[test]
     fn raw_blob_acquisition_is_content_hash_ordered() {
         let larger = encoded_raw(2);
@@ -1732,8 +1731,8 @@ mod tests {
         assert_eq!(super::total_expected_bytes([expected, expected]), Ok(6));
     }
 
-    /// globally unique entry keys are emitted in one
-    /// deterministic acquisition order independent of transcript order.
+    /// globally unique entry keys are emitted in one deterministic acquisition order independent of
+    /// transcript order.
     #[test]
     fn entry_acquisition_is_identity_ordered() {
         let larger = encoded_entry(2);

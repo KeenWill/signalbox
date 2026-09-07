@@ -74,6 +74,7 @@ pub struct CreateSessionRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl create_session::CreateSessionRepository {
     pub fn new(pool: sqlx_postgres::PgPool, credential_pin: SessionCredentialPin) -> Self;
+    pub fn with_principal(self, principal: signalbox_domain::CommandPrincipal) -> Self;
     pub async fn handle(
         &self,
         prepared: signalbox_domain::PreparedCreateSession,

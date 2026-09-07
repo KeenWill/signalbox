@@ -102,8 +102,15 @@ async fn rates_read_counts_only_the_requested_sessions() -> Result<(), Box<dyn E
             },
         )?)
         .await?;
-    let router =
-        signalboxd::web_http::production_router(None, Some(pool.clone()), None, None, None, None);
+    let router = signalboxd::web_http::production_router(
+        None,
+        Some(pool.clone()),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let response = router
         .oneshot(
             Request::get(format!(

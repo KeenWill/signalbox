@@ -585,8 +585,7 @@ mod tests {
         }
     }
 
-    /// the first compiled declaration is exactly auto-approved and
-    /// effect-free.
+    /// the first compiled declaration is exactly auto-approved and effect-free.
     #[test]
     fn current_time_definition_carries_exact_policy() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
@@ -602,9 +601,8 @@ mod tests {
         assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
     }
 
-    /// the derived schema remains byte-identical to the canonical
-    /// artifact produced from the hand-written schema that shipped before
-    /// derivation.
+    /// the derived schema remains byte-identical to the canonical artifact produced from the
+    /// hand-written schema that shipped before derivation.
     #[test]
     fn current_time_derived_schema_is_byte_identical_to_shipped_schema() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
@@ -634,8 +632,8 @@ mod tests {
         );
     }
 
-    /// an explicit `timezone: null` is not the omitted-member default;
-    /// the declared plain-string schema and the decoder reject it together.
+    /// an explicit `timezone: null` is not the omitted-member default; the declared plain-string
+    /// schema and the decoder reject it together.
     #[test]
     fn current_time_rejects_explicit_null_timezone() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
@@ -649,8 +647,7 @@ mod tests {
         ));
     }
 
-    /// the declaration schema accepts the empty object and rejects
-    /// unexpected fields.
+    /// the declaration schema accepts the empty object and rejects unexpected fields.
     #[test]
     fn current_time_schema_rejects_unexpected_fields() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
@@ -671,8 +668,8 @@ mod tests {
         ));
     }
 
-    /// executor dispatch observes its injected clock exactly once instead
-    /// of consulting ambient wall-clock state.
+    /// executor dispatch observes its injected clock exactly once instead of consulting ambient
+    /// wall-clock state.
     #[tokio::test]
     async fn current_time_executor_uses_only_the_injected_clock() {
         let clock_reads = Arc::new(AtomicUsize::new(0));
@@ -762,8 +759,8 @@ mod tests {
         );
     }
 
-    /// IANA lookup preserves a recognized alias and applies the zone's
-    /// offset to the injected instant.
+    /// IANA lookup preserves a recognized alias and applies the zone's offset to the injected
+    /// instant.
     #[test]
     fn current_time_preserves_selected_iana_alias() {
         let evidence = current_time_evidence(
@@ -844,8 +841,8 @@ mod tests {
         ));
     }
 
-    /// an injected instant outside the supported civil-time range is a
-    /// typed known failure rather than executor infrastructure failure.
+    /// an injected instant outside the supported civil-time range is a typed known failure rather
+    /// than executor infrastructure failure.
     #[test]
     fn current_time_reports_out_of_range_clock_as_known_failure() {
         let outside_jiff_range =
@@ -865,8 +862,8 @@ mod tests {
         );
     }
 
-    /// a historical sub-minute IANA offset is a typed known failure
-    /// rather than a minute-truncated timestamp for another instant.
+    /// a historical sub-minute IANA offset is a typed known failure rather than a minute-truncated
+    /// timestamp for another instant.
     #[test]
     fn current_time_rejects_offset_rfc3339_cannot_represent() {
         let start_of_1900_utc = SystemTime::UNIX_EPOCH
