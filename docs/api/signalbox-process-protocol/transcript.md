@@ -240,6 +240,9 @@ impl ImportedTextPreview {
 
 ```rust
 pub enum TranscriptEntry {
+    RunnerPlacementChanged {
+        placement_revision: PositiveCanonicalU64,
+    },
     DelegatedTask {
         spawning_request_id: CanonicalUuid,
         parent_session_id: CanonicalUuid,
@@ -293,6 +296,10 @@ pub enum TranscriptEntry {
         content: string::String,
     },
     ToolDenied {
+        tool_request_id: CanonicalUuid,
+        content: string::String,
+    },
+    ToolInadmissible {
         tool_request_id: CanonicalUuid,
         content: string::String,
     },

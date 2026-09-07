@@ -58,27 +58,14 @@ through the typed projection-writer port, so a read returns them with a reveal
 address like every other class. A producer adopting the port publishes only text
 its durable contract explicitly supplies, and only after its own source exists.
 
-Relocation boundary entry. One entry kind references the complete checked
-successor placement record at a relocation boundary, and the referenced record
-is the authority for whether the runner or the working directory moved. Except
-for [runner design's](runner-protocol.md) pre-continuation takeover, every
-transaction for a pinned loss replacement or a user-directed move of a healthy
-session or of its working directory appends one such entry after the latest
-authoritative semantic frontier, or establishes a one-entry root when no
-frontier exists, and advances a session placement-frontier pointer with the
-placement revision. Active continuation and the next eligible origin both extend
-that exact boundary before any execution on the successor placement, except
-pre-continuation takeover: successor tool execution uses the installed placement
-fence, and the boundary appends after all batch results. A same-revision,
-missing-record, non-prefix, cross-session, or second placement boundary fails
-closed. When the installing command runs while an authorized model call is in
-flight, the boundary is appended only after that call's observation commits, so
-the call's own entries precede it and the prefix-only law holds. The entry
-copies no runner advertisement, workspace path, credential fact, or tool output;
-the placement record remains its content authority, and the checked placement
-transactions are its only producers. The provider projection resolves the record
-to a rendered placement event; that rendering is planned on
-[model-call-execution](../spec/model-call-execution.md).
+Active relocation boundary. A replacement staged behind an authorized model call
+appends its placement boundary only after that call's observation commits.
+Active continuation extends the exact boundary after all batch results and
+before the next call. In [runner design's](runner-protocol.md) pre-continuation
+takeover, successor tool execution uses the installed placement fence while the
+entry remains deferred until every batch result is appended. Healthy-session and
+working-directory moves use the same reference-only boundary and
+placement-frontier pointer.
 
 Delegation terminal-result reconstitution. A durable reconstitution surface
 yields one sealed projection of an ended call and its turn. Result sealing

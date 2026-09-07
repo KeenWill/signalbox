@@ -64,6 +64,7 @@ pub struct RepositoryEntry {
 
 ```rust
 pub struct Advertisement {
+    pub default_working_directory: option::Option<string::String>,
     pub capability_classes: vec::Vec<CapabilityName>,
     pub tools: vec::Vec<WireToolName>,
     pub workspace_capabilities: vec::Vec<WorkspaceCapability>,

@@ -29,6 +29,7 @@ tokio = { version = "1.53.0", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+signalbox-test-bin = { path = "../test-bin" }
 rusty_mp3 = "0.7.0"
 
 [lints]

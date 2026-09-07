@@ -1711,12 +1711,14 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::ProviderCompaction { .. }
                 | ProcessTranscriptEntry::ProviderReasoning { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
+                | ProcessTranscriptEntry::ToolInadmissible { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }
                 | ProcessTranscriptEntry::TurnFailed { .. }
                 | ProcessTranscriptEntry::TurnCompleted { .. }
                 | ProcessTranscriptEntry::TurnCancelled { .. }
                 | ProcessTranscriptEntry::ImportedText { .. }
                 | ProcessTranscriptEntry::Imported { .. } => None,
+                ProcessTranscriptEntry::RunnerPlacementChanged { .. } => None,
             })
             .collect::<BTreeSet<_>>();
         let requests = transcript
@@ -1755,12 +1757,14 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::ProviderReasoning { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
                 | ProcessTranscriptEntry::ToolDenied { .. }
+                | ProcessTranscriptEntry::ToolInadmissible { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }
                 | ProcessTranscriptEntry::TurnFailed { .. }
                 | ProcessTranscriptEntry::TurnCompleted { .. }
                 | ProcessTranscriptEntry::TurnCancelled { .. }
                 | ProcessTranscriptEntry::ImportedText { .. }
                 | ProcessTranscriptEntry::Imported { .. } => None,
+                ProcessTranscriptEntry::RunnerPlacementChanged { .. } => None,
             })
             .collect();
         let model_calls = i64::try_from(

@@ -69,6 +69,21 @@ pub enum ServerMessage {
         run_id: CanonicalUuid,
         outcome: ProgramRunCancellationOutcome,
     },
+    RunnerReplacementReceipt {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        outcome: RunnerReplacementOutcome,
+    },
+    RunnerAbandonmentReceipt {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        outcome: RunnerAbandonmentOutcome,
+    },
+    RunnerPromotionReceipt {
+        command_id: CommandId,
+        enrollment_request_id: CanonicalUuid,
+        outcome: RunnerPromotionOutcome,
+    },
     OauthCredentialAuthorization {
         command_id: CommandId,
         profile: string::String,

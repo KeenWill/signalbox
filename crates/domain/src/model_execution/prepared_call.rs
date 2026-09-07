@@ -143,9 +143,39 @@ pub struct PreparedModelCallRequest {
     pub(super) frontier_entries: Box<[SemanticTranscriptEntry]>,
     pub(super) origin_contents: BTreeMap<AcceptedInputId, UserContent>,
     pub(super) attachment_blob_facts: BTreeMap<crate::BlobDigest, std::num::NonZeroU64>,
+    pub(super) runner_placements: BTreeMap<
+        crate::SemanticTranscriptEntryRef,
+        (crate::RunnerGeneration, crate::RunnerSandboxProfile),
+    >,
 }
 
 impl PreparedModelCallRequest {
+    /// Correlates one loaded successor record with its reference-only frontier entry.
+    pub fn resolve_runner_placement(
+        &mut self,
+        source: crate::SemanticTranscriptEntryRef,
+        revision: crate::RunnerGeneration,
+        sandbox: crate::RunnerSandboxProfile,
+    ) -> Result<(), crate::RunnerDomainError> {
+        if !self.frontier_entries.iter().any(|entry| entry.reference() == source
+            && matches!(entry.payload(), crate::SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision } if *placement_revision == revision))
+            || self.runner_placements.contains_key(&source)
+        { return Err(crate::RunnerDomainError::CorrelationMismatch); }
+        self.runner_placements.insert(source, (revision, sandbox));
+        Ok(())
+    }
+
+    /// Resolves the exact checked successor profile for one frontier reference.
+    pub fn runner_placement_sandbox(
+        &self,
+        source: crate::SemanticTranscriptEntryRef,
+        revision: crate::RunnerGeneration,
+    ) -> Option<crate::RunnerSandboxProfile> {
+        self.runner_placements
+            .get(&source)
+            .filter(|(recorded, _)| *recorded == revision)
+            .map(|(_, sandbox)| *sandbox)
+    }
     /// Returns the owning session.
     pub const fn session(&self) -> SessionId {
         self.session

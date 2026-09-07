@@ -52,15 +52,15 @@ const PROFILE_COMMON_FIELDS: [&str; 4] = ["name", "adapter", "billing_kind", "de
 
 /// How one credential profile's secret reaches its provider.
 ///
-/// The variants below are the deliveries this build supplies. The grammar also
-/// recognizes `oauth`; parsing rejects it as undelivered so a deployment learns
-/// at startup that no surface honors it, rather than from
-/// a call that silently authenticated as some other account.
+/// The variants below are the deliveries this build supplies; OAuth uses
+/// daemon-owned authorization for Codex dispatch.
 #[derive(Clone, Eq, PartialEq)]
 pub enum CredentialDelivery {
     /// The adapter's own client resolves its login and the daemon supplies no
     /// credential material. The Codex CLI owns its external login this way.
     Ambient,
+    /// Daemon-owned device authorization; configuration admission requires dispatch support.
+    Oauth(Box<OauthDelivery>),
     /// An absolute deployment-owned file read per preparation and never cached.
     File {
         /// Absolute path the deployment writes the credential value to.
@@ -77,6 +77,30 @@ pub enum CredentialDelivery {
         /// Optional per-home process concurrency declaration.
         max_concurrent_invocations: Option<NonZeroU32>,
     },
+}
+
+/// Validated OAuth configuration, separate from its durable registration record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OauthDelivery {
+    client_id: String,
+    token_url: Url,
+    refresh_token_url: Url,
+    device_authorization_url: Url,
+    scopes: Vec<String>,
+}
+
+impl OauthDelivery {
+    pub(crate) fn registration(
+        &self,
+    ) -> signalbox_persistence::oauth_credential::OauthRegistration {
+        signalbox_persistence::oauth_credential::OauthRegistration {
+            client_id: self.client_id.clone(),
+            token_url: self.token_url.to_string(),
+            refresh_token_url: self.refresh_token_url.to_string(),
+            device_authorization_url: self.device_authorization_url.to_string(),
+            scopes: self.scopes.clone(),
+        }
+    }
 }
 
 /// Typed startup failure for one configured credential home.
@@ -115,6 +139,7 @@ impl fmt::Debug for CredentialDelivery {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ambient => formatter.write_str("Ambient"),
+            Self::Oauth(_) => formatter.write_str("Oauth"),
             Self::File { env_key, .. } => formatter
                 .debug_struct("File")
                 .field("path", &"[credential file path]")
@@ -137,6 +162,7 @@ impl CredentialDelivery {
     pub const fn key(&self) -> &'static str {
         match self {
             Self::Ambient => "ambient",
+            Self::Oauth(_) => "oauth",
             Self::File { .. } => "file",
             Self::CodexHome { .. } => "codex_home",
         }
@@ -145,7 +171,7 @@ impl CredentialDelivery {
     /// Absolute deployment path this delivery references, where it has one.
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Ambient => None,
+            Self::Ambient | Self::Oauth(_) => None,
             Self::File { path, .. } => Some(path),
             Self::CodexHome { path, .. } => Some(path),
         }
@@ -154,7 +180,7 @@ impl CredentialDelivery {
     /// Process environment key a spawned adapter supplies the value under.
     pub fn env_key(&self) -> Option<&str> {
         match self {
-            Self::Ambient => None,
+            Self::Ambient | Self::Oauth(_) => None,
             Self::File { env_key, .. } => env_key.as_deref(),
             Self::CodexHome { .. } => None,
         }
@@ -216,12 +242,12 @@ impl CredentialDelivery {
                 allowed.extend_from_slice(&[
                     "client_id",
                     "token_url",
+                    "refresh_token_url",
                     "device_authorization_url",
                     "scopes",
                 ]);
                 reject_unknown_fields(profile, &allowed)?;
-                parse_oauth_delivery(profile)?;
-                Err(undelivered(key))
+                parse_oauth_delivery(profile).map(Box::new).map(Self::Oauth)
             }
             _ => Err(HubModelConfigurationError::InvalidCredentialDelivery),
         }
@@ -388,12 +414,13 @@ fn parse_max_concurrent_invocations(
         .transpose()
 }
 
-fn parse_oauth_delivery(profile: &Table) -> Result<(), HubModelConfigurationError> {
+fn parse_oauth_delivery(profile: &Table) -> Result<OauthDelivery, HubModelConfigurationError> {
     let client_id = required_string(profile, "client_id")?;
     if client_id.is_empty() || client_id.len() > 1_024 || client_id.contains('\0') {
         return Err(HubModelConfigurationError::InvalidCredentialDelivery);
     }
     validate_https_url(required_string(profile, "token_url")?)?;
+    validate_https_url(required_string(profile, "refresh_token_url")?)?;
     validate_https_url(required_string(profile, "device_authorization_url")?)?;
     let scopes = profile
         .get("scopes")
@@ -415,7 +442,19 @@ fn parse_oauth_delivery(profile: &Table) -> Result<(), HubModelConfigurationErro
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
     }
-    Ok(())
+    Ok(OauthDelivery {
+        client_id: client_id.to_owned(),
+        token_url: Url::parse(required_string(profile, "token_url")?)
+            .map_err(|_| HubModelConfigurationError::InvalidCredentialDelivery)?,
+        refresh_token_url: Url::parse(required_string(profile, "refresh_token_url")?)
+            .map_err(|_| HubModelConfigurationError::InvalidCredentialDelivery)?,
+        device_authorization_url: Url::parse(required_string(profile, "device_authorization_url")?)
+            .map_err(|_| HubModelConfigurationError::InvalidCredentialDelivery)?,
+        scopes: scopes
+            .iter()
+            .filter_map(|scope| scope.as_str().map(str::to_owned))
+            .collect(),
+    })
 }
 
 /// Reports whether one byte is an RFC 6749 `scope-token` character.

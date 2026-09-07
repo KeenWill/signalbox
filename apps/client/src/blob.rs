@@ -142,6 +142,10 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
         | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::DeploymentLimits { .. }
+        | ServerMessage::RunnerReplacementReceipt { .. }
+        | ServerMessage::RunnerAbandonmentReceipt { .. }
+        | ServerMessage::RunnerPromotionReceipt { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
         | ServerMessage::CredentialPoolPolicy { .. }
@@ -149,8 +153,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }
         | ServerMessage::CredentialExclusionEnd { .. }
-        | ServerMessage::CredentialExclusionCleared { .. }
-        | ServerMessage::DeploymentLimits { .. } => BlobUploadResponse::Unexpected,
+        | ServerMessage::CredentialExclusionCleared { .. } => BlobUploadResponse::Unexpected,
     }
 }
 

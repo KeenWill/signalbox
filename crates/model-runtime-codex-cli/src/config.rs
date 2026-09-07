@@ -6,8 +6,7 @@ use std::{collections::HashMap, path::PathBuf};
 /// Configuration for [`crate::CodexCliRuntime`].
 ///
 /// It carries model controls, paths, bounds, and a non-secret credential
-/// reference only. The CLI resolves its own subscription login; the adapter
-/// never receives a credential value.
+/// references only. OAuth values arrive through the daemon delivery boundary.
 #[derive(Debug, Clone)]
 pub struct CodexCliConfig {
     /// Exact per-model reasoning, fast-mode, and service-tier capabilities.
@@ -26,6 +25,8 @@ pub struct CodexCliConfig {
     /// never reads their auth material. See
     /// `docs/spec/configuration-and-credentials.md`.
     pub credential_homes: HashMap<signalbox_model_runtime::CredentialReference, PathBuf>,
+    /// References whose authentication is supplied by daemon-owned OAuth delivery.
+    pub oauth_profiles: std::collections::HashSet<signalbox_model_runtime::CredentialReference>,
     /// Optional positive whole-process timeout representable by the runtime clock.
     pub exchange_timeout: Option<Duration>,
     /// Grace after a cancellation interrupt before force-killing the process.
@@ -54,6 +55,7 @@ impl CodexCliConfig {
             working_directory: working_directory.into(),
             credential_reference,
             credential_homes: HashMap::new(),
+            oauth_profiles: std::collections::HashSet::new(),
             exchange_timeout: None,
             interrupt_grace: Duration::from_secs(2),
             post_kill_reap_bound,

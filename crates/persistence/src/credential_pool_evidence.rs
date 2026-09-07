@@ -3,6 +3,7 @@ use super::*;
 use crate::credential_pool_exhaustion::{
     CredentialPoolExclusion as Exclusion, CredentialPoolMemberEvidence as Member,
 };
+use signalbox_domain::TurnAttemptId;
 use sqlx::types::time::OffsetDateTime;
 
 struct Candidate {

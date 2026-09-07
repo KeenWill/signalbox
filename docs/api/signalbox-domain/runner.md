@@ -180,6 +180,11 @@ impl RunnerAdvertisement {
         sandboxes: impl collect::IntoIterator<Item = RunnerSandboxProfile>,
         repositories: impl collect::IntoIterator<Item = RunnerRepositoryEntry>,
     ) -> Self;
+    pub fn with_default_working_directory(
+        self,
+        directory: option::Option<RunnerWorkingDirectory>,
+    ) -> Self;
+    pub fn default_working_directory(&self) -> option::Option<&RunnerWorkingDirectory>;
     pub fn classes(&self) -> impl iterator::Iterator<Item = &RunnerCapabilityClass>;
     pub fn tools(&self) -> impl iterator::Iterator<Item = &ToolName>;
     pub fn profiles(&self) -> impl iterator::Iterator<Item = &CredentialProfileName>;
@@ -292,6 +297,7 @@ pub struct CredentialProfileChange {
 
 ```rust
 pub enum RunnerEnrollmentState {
+    Pending,
     Active,
     Revoked,
 }
@@ -308,6 +314,15 @@ impl cmp::PartialEq for RunnerEnrollment {
 }
 impl cmp::Eq for RunnerEnrollment {}
 impl RunnerEnrollment {
+    pub fn new_pending(
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        authentication: RunnerAuthenticationId,
+        allowed_classes: impl collect::IntoIterator<Item = RunnerCapabilityClass>,
+        advertisement: RunnerAdvertisement,
+        catalog: &RunnerCatalog,
+    ) -> result::Result<(Self, ValidatedRunnerRegistration), RunnerDomainError>;
+    pub fn promote_pending_in_place(&mut self) -> result::Result<(), RunnerDomainError>;
     pub fn new(
         enrollment: RunnerEnrollmentId,
         runner: RunnerId,
@@ -401,6 +416,7 @@ impl ValidatedRunnerRegistration {
     pub fn profiles(&self) -> impl iterator::Iterator<Item = &CredentialProfilePolicy>;
     pub fn workspaces(&self) -> impl iterator::Iterator<Item = WorkspaceCapability> + '_;
     pub fn sandboxes(&self) -> impl iterator::Iterator<Item = RunnerSandboxProfile> + '_;
+    pub fn default_working_directory(&self) -> option::Option<&RunnerWorkingDirectory>;
     pub fn repositories(&self) -> impl iterator::Iterator<Item = &RunnerRepositoryEntry>;
     pub fn reconstitute(
         enrollment: &RunnerEnrollment,
@@ -424,6 +440,7 @@ pub struct ValidatedRunnerRegistrationReconstitutionInput {
     pub workspaces: set::BTreeSet<WorkspaceCapability>,
     pub sandboxes: set::BTreeSet<RunnerSandboxProfile>,
     pub repositories: vec::Vec<RunnerRepositoryEntry>,
+    pub default_working_directory: option::Option<RunnerWorkingDirectory>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -1109,4 +1126,142 @@ pub struct CredentialProfilePlacementReplacement {
     pub grant: CredentialProfileGrantReplacement,
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerProvisioningFailureKind
+
+```rust
+pub enum RunnerProvisioningFailureKind {
+    CredentialUnavailable,
+    RepositoryUnavailable,
+    SandboxUnavailable,
+    WorkspaceConflict,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerPlacementBoundary
+
+```rust
+pub struct RunnerPlacementBoundary {/* private */}
+// derives: fmt::Debug
+impl RunnerPlacementBoundary {
+    pub fn prepare(
+        replacement: &RunnerPlacementReplacement,
+        entry: SemanticTranscriptEntryId,
+        frontier: ContextFrontierId,
+        prior: option::Option<&ResolvedContextFrontierSnapshot>,
+    ) -> result::Result<Self, RunnerDomainError>;
+    pub fn entry(&self) -> &SemanticTranscriptEntry;
+    pub fn frontier(&self) -> &ResolvedContextFrontierSnapshot;
+}
+```
+
+## RunnerReplacementProvisioning
+
+```rust
+pub struct RunnerReplacementProvisioning {
+    pub authorization: RunnerProvisioningAuthorizationId,
+    pub command: DurableCommandId,
+    pub enrollment: RunnerEnrollmentId,
+    pub registration_revision: RunnerGeneration,
+    pub session: SessionId,
+    pub placement_revision: RunnerGeneration,
+    pub runner: RunnerId,
+    pub repository: option::Option<WorkspaceRepositoryKey>,
+    pub sandbox: RunnerSandboxProfile,
+    pub credential_profile: option::Option<CredentialProfileName>,
+    pub recovery: option::Option<WorkspaceRecovery>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReplaceLostRunner
+
+```rust
+pub struct ReplaceLostRunner {
+    pub command_id: DurableCommandId,
+    pub session: SessionId,
+    pub revision: option::Option<WorkspaceRevision>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq
+impl cmp::PartialEq for ReplaceLostRunner {
+    fn eq(&self, other: &Self) -> bool;
+}
+```
+
+## AbandonLostRunner
+
+```rust
+pub struct AbandonLostRunner {
+    pub command_id: DurableCommandId,
+    pub session: SessionId,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq
+impl cmp::PartialEq for AbandonLostRunner {
+    fn eq(&self, other: &Self) -> bool;
+}
+```
+
+## PromotePendingRunner
+
+```rust
+pub struct PromotePendingRunner {
+    pub command_id: DurableCommandId,
+    pub enrollment_request: RunnerEnrollmentRequestId,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq
+impl cmp::PartialEq for PromotePendingRunner {
+    fn eq(&self, other: &Self) -> bool;
+}
+```
+
+## RunnerRecoveryRejection
+
+```rust
+pub enum RunnerRecoveryRejection {
+    SessionNotFound,
+    PlacementNotLost,
+    ExistingControlRequired,
+    PendingRunnerNotFound,
+    RunnerUnavailable,
+    ReplacementPending,
+    PlacementUnavailable,
+    RevisionWithoutRepository,
+    ProvisioningFailed,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReplaceLostRunnerResult
+
+```rust
+pub enum ReplaceLostRunnerResult {
+    Replaced {
+        runner: RunnerId,
+        placement_revision: RunnerGeneration,
+    },
+    Rejected(RunnerRecoveryRejection),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## AbandonLostRunnerResult
+
+```rust
+pub enum AbandonLostRunnerResult {
+    Abandoned,
+    Rejected(RunnerRecoveryRejection),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## PromotePendingRunnerResult
+
+```rust
+pub enum PromotePendingRunnerResult {
+    Promoted { runner: RunnerId },
+    Rejected(RunnerRecoveryRejection),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

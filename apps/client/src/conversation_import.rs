@@ -137,6 +137,10 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
         | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::DeploymentLimits { .. }
+        | ServerMessage::RunnerReplacementReceipt { .. }
+        | ServerMessage::RunnerAbandonmentReceipt { .. }
+        | ServerMessage::RunnerPromotionReceipt { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
         | ServerMessage::CredentialPoolPolicy { .. }
@@ -144,8 +148,9 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }
         | ServerMessage::CredentialExclusionEnd { .. }
-        | ServerMessage::CredentialExclusionCleared { .. }
-        | ServerMessage::DeploymentLimits { .. } => ConversationImportResponse::Unexpected,
+        | ServerMessage::CredentialExclusionCleared { .. } => {
+            ConversationImportResponse::Unexpected
+        }
     }
 }
 
