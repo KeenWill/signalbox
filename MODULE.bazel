@@ -134,7 +134,7 @@ http_archive(
 )
 
 bazel_dep(name = "aspect_rules_ts", version = "3.10.1")
-bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "bazel_skylib", version = "1.9.2")
 
 pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
 pnpm.pnpm(pnpm_version = "10.34.5")
