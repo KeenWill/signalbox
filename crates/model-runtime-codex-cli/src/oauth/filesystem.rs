@@ -149,7 +149,7 @@ fn invalid() -> io::Error {
     )
 }
 
-fn owned(fd: &OwnedFd, permissions: u32) -> io::Result<()> {
+fn owned(fd: &OwnedFd, permissions: rustix::fs::RawMode) -> io::Result<()> {
     let stat = fstat(fd)?;
     if stat.st_uid != rustix::process::geteuid().as_raw() || stat.st_mode & 0o7777 != permissions {
         return Err(invalid());
