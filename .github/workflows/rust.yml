@@ -33,8 +33,8 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
 
 jobs:
-  # Keep the required `validate` and `postgres-integration` checks present on
-  # every pull-request head. Their aggregate jobs below accept skipped Rust
+  # Keep the required `validate` check present on
+  # every pull-request head. The aggregate jobs below accept skipped Rust
   # work only when this job proves no changed path can reach the Rust build:
   # every path is either non-binding Markdown/`docs/` prose or browser-client
   # source under `clients/web/` (the generated contract under
@@ -157,16 +157,26 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14'
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-version: 1.29.0
       - name: Report domain API digest
         continue-on-error: true
         env:
+          BAZEL_REMOTE_CACHE: ${{ vars.BAZEL_REMOTE_CACHE }}
           DOMAIN_SPINE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           rustdoc_toolchain=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("docs/api/crates.toml").read_text())["rustdoc_toolchain"])')
           rustup toolchain install "$rustdoc_toolchain" --profile minimal
           export PATH="$PATH:${CARGO_HOME:-$HOME/.cargo}/bin"
           command -v cargo-public-api || cargo install cargo-public-api --locked
-          python3 scripts/domain_spine_digest.py >> "$GITHUB_STEP_SUMMARY"
+          cache_args=()
+          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
+            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
+          fi
+          bazel build --config=api --jobs=4 "${cache_args[@]}" //:api_json
+          mapfile -t json_dirs < <(bazel cquery --config=api //:api_json --output=files | tr ' ' '\n')
+          python3 scripts/domain_spine_digest.py --json-dir "${json_dirs[@]}" >> "$GITHUB_STEP_SUMMARY"
   checker-and-format-tests:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 10
@@ -186,9 +196,7 @@ jobs:
           if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
             cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
           fi
-          bazel test --jobs=4 --local_test_jobs=1 "${cache_args[@]}" //:python_checker_tests //:markdown_format //:generated_artifact_tests
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+          bazel test --jobs=4 --local_test_jobs=1 "${cache_args[@]}" //:python_checker_tests //:markdown_format //:generated_artifact_tests //:rust_format_tests
       # The scan rejects row-lock clauses and advisory-lock calls outside the
       # inventory in production Rust. This performs no Rust or SQL parsing.
       - name: Check explicit-lock inventory
@@ -207,99 +215,10 @@ jobs:
             printf 'explicit lock outside inventory:\n%s\n' "$unexpected"
             exit 1
           }
-  rust-checks:
-    needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.skip_rust != 'true'
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
-    # The self-hosted pool starts with cold caches; give the workspace check
-    # headroom until they warm.
-    timeout-minutes: 30
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Use the node-local cargo target cache
-        # Self-hosted runners expose a persistent per-node cache directory
-        # through /home/runner/_work/_ci-cache, provisioned by the runner pod
-        # template outside this repository. Each run gets its own target dir,
-        # cloned copy-on-write (reflink, same XFS filesystem) from the last
-        # published run with the same lockfile/toolchain key, so concurrent
-        # runs never share a cargo lock and nothing one run writes leaks into
-        # another. GitHub-hosted runners have no such directory and keep the
-        # default. Run dirs older than a day are pruned across every key and
-        # job, except the directory a key's "latest" seed points at.
-        id: nodecache
-        shell: bash
-        run: |
-          cache=/home/runner/_work/_ci-cache
-          if [ -d "$cache/target" ]; then
-            # Prune expired run dirs under every key/job, keeping current seeds.
-            find "$cache/target" -mindepth 4 -maxdepth 4 -type d -path '*/runs/*' -mtime +0 -print0 2>/dev/null \
-              | while IFS= read -r -d '' dir; do
-                  base="$(dirname "$(dirname "$dir")")"
-                  seed="$(readlink -f "$base/latest" 2>/dev/null || true)"
-                  [ "$dir" = "$seed" ] || rm -rf "$dir"
-                done
-            find "$cache/target" -mindepth 1 -maxdepth 3 -type d -empty -delete 2>/dev/null || true
-            key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
-            job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
-            base="$cache/target/$key/$job"
-            mkdir -p "$base/runs"
-            target="$base/runs/${{ github.run_id }}-${{ github.run_attempt }}"
-            rm -rf "$target"
-            if [ -d "$base/latest" ] && cp --reflink=always --no-preserve=timestamps -a "$base/latest/." "$target" 2>/dev/null; then
-              echo "seeded $target from the last published run (reflink)"
-            else
-              rm -rf "$target"; mkdir -p "$target"
-              echo "no seed available; fresh target dir $target"
-            fi
-            touch "$target"
-            echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
-            echo "NODECACHE_BASE=$base" >> "$GITHUB_ENV"
-            echo "active=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "active=false" >> "$GITHUB_OUTPUT"
-            echo "no node-local cache directory; using the default target dir"
-          fi
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-on-failure: true
-          # With the node-local target dir active, uploading/extracting target
-          # archives through the GitHub cache is pure write amplification.
-          cache-targets: ${{ steps.nodecache.outputs.active != 'true' }}
-          shared-key: rust
-          save-if: false
-      - name: Check workspace
-        run: cargo check --workspace --all-targets --all-features
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Build documentation
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-
-  # Preserve the existing implementation-check name while its independent
-  # repository contracts, checker tests, formatting, and Rust compilation run
-  # concurrently. This aggregate keeps the required `validate` check bound to
-  # every command it covered before the split.
-      - name: Publish this run's target dir as the cache seed
-        # Seeds come only from pushes and same-repository pull requests, never
-        # from forks; a unique temporary link keeps concurrent publishers from
-        # racing each other before the atomic rename.
-        if: >-
-          success() && steps.nodecache.outputs.active == 'true'
-          && (github.event_name != 'pull_request'
-              || github.event.pull_request.head.repo.full_name == github.repository)
-        shell: bash
-        run: |
-          tmp="$NODECACHE_BASE/latest.tmp.${{ github.run_id }}-${{ github.run_attempt }}"
-          ln -sfn "$CARGO_TARGET_DIR" "$tmp" && mv -T "$tmp" "$NODECACHE_BASE/latest"
-          echo "cache seed -> $CARGO_TARGET_DIR"
   validate-checks:
     if: ${{ always() }}
     needs:
-      [rust-change-scope, contract-checks, checker-and-format-tests, rust-checks]
+      [contract-checks, checker-and-format-tests]
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 1
     steps:
@@ -307,16 +226,9 @@ jobs:
         env:
           CONTRACT_RESULT: ${{ needs.contract-checks.result }}
           CHECKER_RESULT: ${{ needs.checker-and-format-tests.result }}
-          RUST_RESULT: ${{ needs.rust-checks.result }}
-          SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
         run: |
           test "$CONTRACT_RESULT" = success
           test "$CHECKER_RESULT" = success
-          if [ "$SKIP_RUST" = true ]; then
-            test "$RUST_RESULT" = skipped
-          else
-            test "$RUST_RESULT" = success
-          fi
 
   # The workspace test binaries build and run here rather than at the end of
   # `validate-checks`, so the two compilations overlap instead of queueing. The
@@ -404,7 +316,7 @@ jobs:
   validate:
     name: validate
     if: ${{ always() }}
-    needs: [rust-change-scope, validate-checks, workspace-tests]
+    needs: [rust-change-scope, validate-checks, workspace-tests, bazel]
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 1
     steps:
@@ -412,13 +324,16 @@ jobs:
         env:
           CHECKS_RESULT: ${{ needs.validate-checks.result }}
           TESTS_RESULT: ${{ needs.workspace-tests.result }}
+          BAZEL_RESULT: ${{ needs.bazel.result }}
           SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
         run: |
           test "$CHECKS_RESULT" = success
           if [ "$SKIP_RUST" = true ]; then
             test "$TESTS_RESULT" = skipped
+            test "$BAZEL_RESULT" = skipped
           else
             test "$TESTS_RESULT" = success
+            test "$BAZEL_RESULT" = success
           fi
 
   # Report-only by owner decision: this job publishes deterministic counts
@@ -502,18 +417,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$benchmark_status"
 
-  # Compiles every PostgreSQL integration suite once. Previously each suite
-  # compiled itself behind its own rust-cache key, so three large caches
-  # competed for the repository's shared cache allowance and evicted one
-  # another; an evicted key meant a full cold compile, and three of them could
-  # go cold at once. One key here is one cache entry to keep warm, and the
-  # shards below inherit the compiled binaries as artifacts instead of
-  # rebuilding them.
-  #
-  # A nextest archive carries the test binaries, the build-script output
-  # directories, and the linked search paths, which is everything the run job
-  # needs; it deliberately does not carry the source tree, so the run job
-  # checks the sources out and passes `--workspace-remap`.
       - name: Publish this run's target dir as the cache seed
         # Seeds come only from pushes and same-repository pull requests, never
         # from forks; a unique temporary link keeps concurrent publishers from
@@ -527,265 +430,8 @@ jobs:
           tmp="$NODECACHE_BASE/latest.tmp.${{ github.run_id }}-${{ github.run_attempt }}"
           ln -sfn "$CARGO_TARGET_DIR" "$tmp" && mv -T "$tmp" "$NODECACHE_BASE/latest"
           echo "cache seed -> $CARGO_TARGET_DIR"
-  postgres-integration-build:
-    name: postgres-integration (build)
+
+  bazel:
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
-    # Generous by design: this job now absorbs all five suites' compilation,
-    # which a cold cache serializes into one runner instead of spreading it
-    # across three.
-    timeout-minutes: 35
-    outputs:
-      matrix: ${{ steps.suites.outputs.matrix }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Install Python checker dependencies
-        run: python3 -m pip install --user --break-system-packages -r tooling/requirements-mdformat.txt
-      # First, so a malformed manifest fails before any compilation. The run
-      # job expands this into its shard matrix, which is why adding a shard is
-      # a one-line manifest edit and touches nothing here.
-      - name: Derive the shard matrix from the suite manifest
-        id: suites
-        run: |
-          printf 'matrix=%s\n' \
-            "$(python3 scripts/postgres_integration_suites.py --matrix)" \
-            >> "$GITHUB_OUTPUT"
-      - name: Use the node-local cargo target cache
-        # Self-hosted runners expose a persistent per-node cache directory
-        # through /home/runner/_work/_ci-cache, provisioned by the runner pod
-        # template outside this repository. Each run gets its own target dir,
-        # cloned copy-on-write (reflink, same XFS filesystem) from the last
-        # successful run with the same lockfile/toolchain key, so concurrent
-        # runs never share a cargo lock and nothing one run writes leaks into
-        # another. GitHub-hosted runners have no such directory and keep the
-        # default. Run dirs untouched for a day are pruned at job start.
-        id: nodecache
-        shell: bash
-        run: |
-          cache=/home/runner/_work/_ci-cache
-          if [ -d "$cache/target" ]; then
-            key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
-            job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
-            base="$cache/target/$key/$job"
-            mkdir -p "$base/runs"
-            find "$base/runs" -mindepth 1 -maxdepth 1 -type d -mtime +0 -exec rm -rf {} + 2>/dev/null || true
-            target="$base/runs/${{ github.run_id }}-${{ github.run_attempt }}"
-            if [ -d "$base/latest" ] && cp --reflink=always -a "$base/latest/." "$target" 2>/dev/null; then
-              echo "seeded $target from the last successful run (reflink)"
-            else
-              rm -rf "$target"; mkdir -p "$target"
-              echo "no seed available; fresh target dir $target"
-            fi
-            echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
-            echo "NODECACHE_BASE=$base" >> "$GITHUB_ENV"
-            echo "active=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "active=false" >> "$GITHUB_OUTPUT"
-            echo "no node-local cache directory; using the default target dir"
-          fi
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-on-failure: true
-          # With the node-local target dir active, uploading/extracting target
-          # archives through the GitHub cache is pure write amplification.
-          cache-targets: ${{ steps.nodecache.outputs.active != 'true' }}
-          shared-key: rust
-          save-if: false
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
-        with:
-          tool: cargo-nextest@0.9.143
-      # One archive per suite, each built with exactly the package selection
-      # and feature set the manifest declares, so no suite links a dependency
-      # compiled under features it did not previously see. The runner suite
-      # repeats the persistence package archive with the same feature set so a
-      # positive binary filter can isolate that target; Cargo reuses the build
-      # artifacts. Other suites retain their independent feature resolution.
-      #
-      # The loop reads the manifest rather than restating it: package and
-      # feature selection exist in exactly one place, which is the same place
-      # `scripts/check_docs_consistency.py` reads them from.
-      - name: Archive every suite
-        run: |
-          python3 scripts/postgres_integration_suites.py --archive-plan \
-            > "$RUNNER_TEMP/suites.tsv"
-          while IFS=$'\t' read -r suite package features; do
-            echo "::group::archive $suite"
-            if [ -n "$features" ]; then
-              cargo nextest archive -p "$package" --features "$features" \
-                --archive-file "$RUNNER_TEMP/$suite.tar.zst"
-            else
-              cargo nextest archive -p "$package" \
-                --archive-file "$RUNNER_TEMP/$suite.tar.zst"
-            fi
-            echo "::endgroup::"
-          done < "$RUNNER_TEMP/suites.tsv"
-      # Uploaded as one artifact per suite so a shard downloads only the
-      # archive it runs from. These steps name the suites because an upload
-      # action cannot be looped; `check_docs_consistency.py` holds the set of
-      # names here equal to the manifest's.
-      - name: Upload the persistence archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: postgres-integration-archive-persistence
-          path: ${{ runner.temp }}/persistence.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-      - name: Upload the program-runtime archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: postgres-integration-archive-program-runtime
-          path: ${{ runner.temp }}/program-runtime.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-      - name: Upload the signalboxd archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: postgres-integration-archive-signalboxd
-          path: ${{ runner.temp }}/signalboxd.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-      - name: Upload the runner archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: postgres-integration-archive-runner
-          path: ${{ runner.temp }}/runner.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-      - name: Upload the terminal-client archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: postgres-integration-archive-terminal-client
-          path: ${{ runner.temp }}/terminal-client.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-  # The dedicated Docker fleet gives each shard an isolated DinD daemon. The
-  # build and run jobs share the same runner image and absolute work-path shape,
-  # which keeps paths embedded in nextest archives valid across their pods.
-  # Each test starts its own pinned PostgreSQL container through testcontainers,
-  # so concurrent test processes never share database state.
-  #
-  # The matrix is generated from `.github/postgres-integration-suites.toml`:
-  # one runner per shard, so a suite declaring one shard costs one runner and
-  # still travels the same archive-and-partition path a sharded suite does.
-  # Persistence is sharded according to its measured test-execution cost; every
-  # other suite runs whole because it fits well inside the job timeout.
-  #
-  # The run matrix currently expands to ten shards after the one shared
-  # build.
-  # The shards compile nothing and run for minutes; the build's single cache
-  # key replaces the old per-suite keys that evicted one another.
-      - name: Publish this run's target dir as the cache seed
-        # Seeds come only from pushes and same-repository pull requests, never
-        # from forks; a unique temporary link keeps concurrent publishers from
-        # racing each other before the atomic rename.
-        if: >-
-          success() && steps.nodecache.outputs.active == 'true'
-          && (github.event_name != 'pull_request'
-              || github.event.pull_request.head.repo.full_name == github.repository)
-        shell: bash
-        run: |
-          tmp="$NODECACHE_BASE/latest.tmp.${{ github.run_id }}-${{ github.run_attempt }}"
-          ln -sfn "$CARGO_TARGET_DIR" "$tmp" && mv -T "$tmp" "$NODECACHE_BASE/latest"
-          echo "cache seed -> $CARGO_TARGET_DIR"
-  postgres-integration-run:
-    name: >-
-      postgres-integration
-      (${{ matrix.suite }} ${{ matrix.partition }}/${{ matrix.partitions }})
-    needs: postgres-integration-build
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
-    # Keep security-sensitive sockets and filesystem fixtures off the NFS
-    # workspace: their permission and atomicity contracts require local /tmp.
-    env:
-      TMPDIR: /tmp
-    # Measured against the shards rather than guessed. With database state in
-    # memory and sixteen tests per shard, the recombined shards run about two
-    # to nine minutes clean.
-    #
-    # A shard whose tests actually fail runs about two minutes longer than a
-    # clean one, and a job the cap kills is reported as `cancelled`, which
-    # reads as an infrastructure problem and hides the test failure underneath
-    # it. Fifteen minutes leaves the longest clean shard two-thirds of the cap
-    # and still bounds a genuinely hung job.
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.postgres-integration-build.outputs.matrix) }}
-    steps:
-      # The archive holds no sources. Tests that read fixtures relative to
-      # their manifest directory need this checkout, which `--workspace-remap`
-      # points them at.
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
-        with:
-          tool: cargo-nextest@0.9.143
-      - name: Download the ${{ matrix.suite }} archive
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: postgres-integration-archive-${{ matrix.suite }}
-          path: ${{ runner.temp }}/archive
-      # Flag for flag against the `cargo test` invocation this replaces:
-      # `--run-ignored only` is `-- --ignored`, `--no-fail-fast` is unchanged,
-      # and the archive fixes the package and feature selection at build time.
-      # nextest runs each test in its own process rather than on a shared
-      # thread pool; sixteen concurrent tests is the cap. Each test can consume
-      # a 512 MiB PostgreSQL tmpfs, so the cap permits 8 GiB of tmpfs per job
-      # before PostgreSQL process memory; re-check the externally provisioned
-      # signalbox-docker pod memory limit before raising it. One per-test retry
-      # absorbs a transient container-start failure without rerunning a whole
-      # shard, while a repeat failure still fails the gate.
-      - name: Run the ${{ matrix.suite }} partition
-        env:
-          SUITE: ${{ matrix.suite }}
-          PARTITION: ${{ matrix.partition }}
-          PARTITIONS: ${{ matrix.partitions }}
-          FILTER: ${{ matrix.filter }}
-          # nextest runs each ignored integration test in its own libtest
-          # process. Keep deeply composed scheduler fixtures from exhausting
-          # the platform's smaller default test-thread stack.
-          RUST_MIN_STACK: "8388608"
-        run: >-
-          cargo nextest run
-          --archive-file "$RUNNER_TEMP/archive/$SUITE.tar.zst"
-          --workspace-remap .
-          --partition "count:$PARTITION/$PARTITIONS"
-          --run-ignored only
-          --no-fail-fast
-          --retries 1
-          --test-threads 16
-          -E "$FILTER"
-
-  # Preserve the existing required-check name while the suites build once and
-  # run as a fail-fast-disabled partition matrix.
-  postgres-integration:
-    name: postgres-integration
-    if: ${{ always() }}
-    needs:
-      [rust-change-scope, postgres-integration-build, postgres-integration-run]
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
-    timeout-minutes: 1
-    steps:
-      - name: Confirm every PostgreSQL integration partition passed
-        env:
-          BUILD_RESULT: ${{ needs.postgres-integration-build.result }}
-          RUN_RESULT: ${{ needs.postgres-integration-run.result }}
-          SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
-        run: |
-          if [ "$SKIP_RUST" = true ]; then
-            test "$BUILD_RESULT" = skipped
-            test "$RUN_RESULT" = skipped
-          else
-            test "$BUILD_RESULT" = success
-            test "$RUN_RESULT" = success
-          fi
+    uses: ./.github/workflows/bazel.yml

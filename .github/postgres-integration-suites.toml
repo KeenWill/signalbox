@@ -1,45 +1,14 @@
-# The PostgreSQL integration suites, and how CI runs them.
+# PostgreSQL CI suite authority. Bazel reads features, filters and shard counts;
+# scripts/postgres_integration_suites.py derives one workflow matrix row per
+# suite and checks agreement with the workspace and documented local commands.
+# Coverage measures its own report-only selection.
 #
-# This file is the single authority for what the `postgres-integration` check
-# executes. The workflow and validation command read it without restating its
-# contents:
-#
-#   * `.github/workflows/rust.yml` builds one nextest archive per suite from
-#     `package`/`features`, and derives its run matrix from `shards`/`skip`,
-#     through `scripts/postgres_integration_suites.py`.
-#   * `python3 scripts/check_docs_consistency.py` validates agreement with
-#     the workspace, workflow, and documented local commands.
-#
-# The checker used to recover this by regex-parsing the workflow's `cargo test`
-# shell commands. That coupling broke the moment the workflow moved to nextest:
-# the parser silently recognized zero ignored-test runs, which would have
-# dropped every PostgreSQL integration test from its inferred inventory. A
-# manifest both sides read cannot drift that way.
-#
-# Changing a suite's shard count is a one-line edit here: the run matrix is
-# generated, so nothing in the workflow needs to move.
-#
-# `.github/workflows/coverage.yml` measures the same package set, with the two
-# persistence target partitions folded into one command, and is deliberately
-# NOT derived from this file. That job is report-only, every suite in it is
-# `continue-on-error`, and it skips one further test that only its own
-# instrumented supervisor perturbs — so it is not a statement about what CI
-# enforces.
-#
-# Fields:
-#   name     — suite identifier; names the archive artifact and the check.
-#   package  — the Cargo package archived and run (`-p`).
-#   features — features enabled for the archive build (`--features`); the
-#              suite's ignored tests are compiled out without them.
-#   shards   — how many partitions the suite's tests are split across
-#              (`--partition count:i/N`). 1 runs the suite whole.
-#   skip     — test-name substrings excluded from the run. Rendered into a
-#              nextest filterset as `not test(<substring>)`, which matches a
-#              substring of the test path exactly as libtest's `--skip` did.
-#   include_binaries — optional exact Cargo test-target names selected by the
-#              run. Multiple names are joined as one positive binary filter.
-#   exclude_binaries — optional exact Cargo test-target names excluded from the
-#              run. This partitions two suites that archive the same package.
+# name: suite identifier; target //:postgres_<name with underscores>.
+# package: Cargo package containing the test binaries.
+# features: additional Cargo features whose local implications Bazel enables.
+# shards: libtest partitions per Bazel test target.
+# skip: test-name substrings passed to libtest --skip.
+# include_binaries / exclude_binaries: exact Cargo test-target names.
 
 [[suite]]
 name = "persistence"

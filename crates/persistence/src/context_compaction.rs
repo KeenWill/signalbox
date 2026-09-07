@@ -852,6 +852,11 @@ async fn load_compaction_source(
             SELECT result_frontier_id
               FROM context_compaction
              WHERE session_id = $1
+            UNION ALL
+            SELECT boundary.context_frontier_id
+              FROM runner_session_placement_frontier AS head
+              JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision)
+             WHERE head.session_id = $1
          )
          SELECT frontier.context_frontier_id, frontier.member_count
            FROM candidate

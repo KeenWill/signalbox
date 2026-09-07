@@ -4,11 +4,25 @@ on:
   pull_request:
     paths:
       - "clients/web/**"
+      - "tooling/bazel/**"
+      - "BUILD.bazel"
+      - ".gitignore"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - ".bazelrc"
+      - ".bazelversion"
       - ".github/workflows/web.yml"
   push:
     branches: [main]
     paths:
       - "clients/web/**"
+      - "tooling/bazel/**"
+      - "BUILD.bazel"
+      - ".gitignore"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - ".bazelrc"
+      - ".bazelversion"
       - ".github/workflows/web.yml"
 
 concurrency:
@@ -22,31 +36,30 @@ permissions:
 
 jobs:
   web:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: clients/web
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
+    env:
+      BAZEL_REMOTE_CACHE: ${{ vars.BAZEL_REMOTE_CACHE }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          node-version: 26
-          cache: npm
-          cache-dependency-path: clients/web/package-lock.json
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run check
-      - run: npm test
-      - run: npx playwright install --with-deps chromium firefox webkit
-      - run: npm run test:browser
+          python-version: '3.14'
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-version: 1.29.0
+      - name: Lint, typecheck, unit, build, and browser tests
+        run: |
+          cache_args=()
+          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
+            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
+          fi
+          bazel test --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 "${cache_args[@]}" //clients/web/...
       - name: Upload browser evidence on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: web-playwright-evidence
-          path: |
-            clients/web/playwright-report
-            clients/web/test-results
+          path: bazel-testlogs/clients/web/browser_tests/test.outputs
           retention-days: 14

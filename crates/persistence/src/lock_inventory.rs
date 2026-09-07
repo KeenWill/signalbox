@@ -28,6 +28,8 @@
 //! row first.
 //!
 //! Additional row-lock protocols:
+//! - `tool_loop::placement_loss::close_lost_runner_requests_after_observation`: after the
+//!   session scheduler, `tool_request FOR UPDATE` in proposal order.
 //! - `review_workflow::append_finding_event`: ordinary events lock every `review_finding` for the
 //!   target `FOR NO KEY UPDATE`, by `finding_id`; publication reconciliation takes the external
 //!   link before its finding.
@@ -100,6 +102,12 @@
 //!   UPDATE`.
 //!
 //! `runners`:
+//! - `lock_replacement_enrollments`: loss identity locks in runner order -> the lost, candidate,
+//!   and candidate predecessor `runner_enrollment FOR UPDATE` in enrollment order -> their
+//!   `runner_connection_authority_head FOR SHARE` in enrollment order.
+//! - `RunnerProtocolStore::record_replacement_workspace_released`: `session_lifecycle FOR NO
+//!   KEY UPDATE` -> `session_scheduler FOR UPDATE` -> `runner_enrollment FOR UPDATE` ->
+//!   `runner_connection_authority_head FOR SHARE`.
 //! - `guard_runner_claimed_retry_attempt_authority`: source `runner_current_lease_event FOR
 //!   UPDATE`.
 //! - `guard_runner_connection_event_insert`: active `runner_enrollment FOR UPDATE`.

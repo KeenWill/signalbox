@@ -1,5 +1,6 @@
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_doc_test", "rust_library", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:testing.bzl", "rust_quality_tests")
 
 rust_package(exports = [])
 
@@ -25,3 +26,10 @@ rust_test(
         "--deny=warnings",
     ],
 )
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_newtype",
+)
+
+rust_quality_tests(documented_crates = [":signalbox_newtype"])

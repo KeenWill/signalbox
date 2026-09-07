@@ -1,6 +1,7 @@
+load("@postgres_suites//:defs.bzl", "SUITES")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_COMPILE_DATA = [
     "//:config/session-templates.example.toml",
@@ -8,7 +9,7 @@ CRATE_COMPILE_DATA = [
     "//crates/convergence:examples/repository.toml",
 ]
 
-CRATE_FEATURES = ["test-support"]
+CRATE_FEATURES = SUITES["signalboxd"]["crate_features"]
 
 CRATE_PROC_MACRO_DEPS = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"]
 
@@ -171,3 +172,369 @@ rust_unit_test(
     crate_features = CRATE_FEATURES,
     deps = TEST_DEPS,
 )
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalboxd_lib",
+    crate_features = ["test-support"],
+)
+
+rust_integration_test(
+    name = "live_tool_evals",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_features = ["test-support"],
+    crate_root = "tests/live_tool_evals/main.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":approval-judge-eval",
+        ":signalbox-debug",
+        ":signalboxd",
+    ],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
+        "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
+        "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_approval-judge-eval": "$(rootpath :approval-judge-eval)",
+        "CARGO_BIN_EXE_signalbox-debug": "$(rootpath :signalbox-debug)",
+        "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
+)
+
+rust_integration_test(
+    name = "live_tool_exercise",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_features = ["test-support"],
+    crate_root = "tests/live_tool_exercise.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":approval-judge-eval",
+        ":signalbox-debug",
+        ":signalboxd",
+    ],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
+        "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
+        "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_approval-judge-eval": "$(rootpath :approval-judge-eval)",
+        "CARGO_BIN_EXE_signalbox-debug": "$(rootpath :signalbox-debug)",
+        "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
+)
+
+rust_integration_test(
+    name = "offline_reply",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_features = ["test-support"],
+    crate_root = "tests/offline_reply.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":approval-judge-eval",
+        ":signalbox-debug",
+        ":signalboxd",
+    ],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
+        "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
+        "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_approval-judge-eval": "$(rootpath :approval-judge-eval)",
+        "CARGO_BIN_EXE_signalbox-debug": "$(rootpath :signalbox-debug)",
+        "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
+)
+
+rust_integration_test(
+    name = "offline_tool_loop",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_features = ["test-support"],
+    crate_root = "tests/offline_tool_loop.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":approval-judge-eval",
+        ":signalbox-debug",
+        ":signalboxd",
+        "//crates/convergence:fixtures",
+    ],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
+        "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
+        "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_approval-judge-eval": "$(rootpath :approval-judge-eval)",
+        "CARGO_BIN_EXE_signalbox-debug": "$(rootpath :signalbox-debug)",
+        "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
+)
+
+rust_integration_test(
+    name = "process_protocol_runtime",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_features = ["test-support"],
+    crate_root = "tests/process_protocol_runtime/main.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":approval-judge-eval",
+        ":signalbox-debug",
+        ":signalboxd",
+        "//:config/session-templates.example.toml",
+    ],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
+        "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
+        "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_approval-judge-eval": "$(rootpath :approval-judge-eval)",
+        "CARGO_BIN_EXE_signalbox-debug": "$(rootpath :signalbox-debug)",
+        "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
+)
+
+rust_integration_test(
+    name = "process_substrate",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_features = ["test-support"],
+    crate_root = "tests/process_substrate.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":approval-judge-eval",
+        ":signalbox-debug",
+        ":signalboxd",
+    ],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
+        "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
+        "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_approval-judge-eval": "$(rootpath :approval-judge-eval)",
+        "CARGO_BIN_EXE_signalbox-debug": "$(rootpath :signalbox-debug)",
+        "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
+)
+
+rust_integration_test(
+    name = "repo_watch_v2_postgres",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_features = ["test-support"],
+    crate_root = "tests/repo_watch_v2_postgres.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":approval-judge-eval",
+        ":signalbox-debug",
+        ":signalboxd",
+    ],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
+        "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
+        "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_approval-judge-eval": "$(rootpath :approval-judge-eval)",
+        "CARGO_BIN_EXE_signalbox-debug": "$(rootpath :signalbox-debug)",
+        "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
+)
+
+rust_integration_test(
+    name = "web_http",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_features = ["test-support"],
+    crate_root = "tests/web_http.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":approval-judge-eval",
+        ":signalbox-debug",
+        ":signalboxd",
+    ],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
+        "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
+        "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_approval-judge-eval": "$(rootpath :approval-judge-eval)",
+        "CARGO_BIN_EXE_signalbox-debug": "$(rootpath :signalbox-debug)",
+        "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
+)
+
+rust_integration_test(
+    name = "web_session_input",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_features = ["test-support"],
+    crate_root = "tests/web_session_input.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":approval-judge-eval",
+        ":signalbox-debug",
+        ":signalboxd",
+    ],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
+        "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
+        "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_approval-judge-eval": "$(rootpath :approval-judge-eval)",
+        "CARGO_BIN_EXE_signalbox-debug": "$(rootpath :signalbox-debug)",
+        "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
+)
+
+rust_quality_tests(documented_crates = [
+    ":signalboxd_lib",
+    ":approval-judge-eval",
+    ":signalbox-debug",
+    ":signalboxd",
+])

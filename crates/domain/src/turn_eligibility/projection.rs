@@ -572,6 +572,7 @@ impl AcceptedInputSchedulingProjection {
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
                 | SemanticTranscriptEntryPayload::ToolClosed { .. }
                 | SemanticTranscriptEntryPayload::TurnCompleted { .. }
                 | SemanticTranscriptEntryPayload::Imported { .. } => None,

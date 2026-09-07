@@ -695,6 +695,19 @@ pub enum ProcessTranscriptEntry {
         content: String,
     },
     /// The turn ended before one tool request resolved ordinarily.
+    ToolInadmissible {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Exact inadmissible request.
+        request: ToolRequestId,
+        /// Exact provider-visible inadmissibility content.
+        content: String,
+    },
+    /// The request closed when its turn ended.
     ToolClosed {
         /// Zero-based position in the projected frontier.
         entry_index: u64,

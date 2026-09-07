@@ -453,6 +453,7 @@ pub(super) fn tool_round_terminal_producing_call(
     terminal_marker: SemanticTranscriptEntryRef,
     terminal_tool_attempts: &[crate::EndedToolAttempt],
     terminal_tool_denials: &[ToolApprovalResolution],
+    inadmissible_requests: &[crate::ToolRequest],
     model_calls: &BTreeMap<crate::ModelCallId, ReconstitutedModelCall>,
     assistant_by_call: &BTreeMap<crate::ModelCallId, BTreeSet<SemanticTranscriptEntryRef>>,
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
@@ -468,6 +469,7 @@ pub(super) fn tool_round_terminal_producing_call(
         ToolRoundResultWindow::TerminalClosure,
         terminal_tool_attempts,
         terminal_tool_denials,
+        inadmissible_requests,
         model_calls,
         assistant_by_call,
         snapshots,
@@ -489,6 +491,7 @@ pub(super) fn tool_round_continuation_producing_call(
     results_end: usize,
     round_tool_attempts: &[crate::EndedToolAttempt],
     round_tool_denials: &[ToolApprovalResolution],
+    inadmissible_requests: &[crate::ToolRequest],
     model_calls: &BTreeMap<crate::ModelCallId, ReconstitutedModelCall>,
     assistant_by_call: &BTreeMap<crate::ModelCallId, BTreeSet<SemanticTranscriptEntryRef>>,
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
@@ -501,6 +504,7 @@ pub(super) fn tool_round_continuation_producing_call(
         ToolRoundResultWindow::Continuation,
         round_tool_attempts,
         round_tool_denials,
+        inadmissible_requests,
         model_calls,
         assistant_by_call,
         snapshots,
@@ -531,6 +535,7 @@ fn tool_round_producing_call_in_window(
     window: ToolRoundResultWindow,
     terminal_tool_attempts: &[crate::EndedToolAttempt],
     terminal_tool_denials: &[ToolApprovalResolution],
+    inadmissible_requests: &[crate::ToolRequest],
     model_calls: &BTreeMap<crate::ModelCallId, ReconstitutedModelCall>,
     assistant_by_call: &BTreeMap<crate::ModelCallId, BTreeSet<SemanticTranscriptEntryRef>>,
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
@@ -652,8 +657,24 @@ fn tool_round_producing_call_in_window(
                                 && denied_requests.contains(actual)
                                 && observed_denials.insert(*actual)
                         }
+                        Some(SemanticTranscriptEntryPayload::ToolInadmissible {
+                            request: actual,
+                        }) => {
+                            *actual == request
+                                && inadmissible_requests.iter().any(|record| {
+                                    record.id() == request
+                                        && record.session() == terminal.frontier().owning_session()
+                                        && record.turn() == turn
+                                        && record.producing_call() == **call_id
+                                        && record.inadmissible_reason().is_some()
+                                })
+                        }
                         Some(SemanticTranscriptEntryPayload::ToolClosed { request: actual }) => {
-                            window == ToolRoundResultWindow::TerminalClosure && *actual == request
+                            window == ToolRoundResultWindow::TerminalClosure
+                                && *actual == request
+                                && !inadmissible_requests
+                                    .iter()
+                                    .any(|record| record.id() == request)
                         }
                         _ => false,
                     }

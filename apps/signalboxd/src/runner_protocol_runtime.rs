@@ -2436,6 +2436,7 @@ mod tests {
 
     fn empty_advertisement() -> signalbox_runner_wire::Advertisement {
         signalbox_runner_wire::Advertisement {
+            default_working_directory: None,
             capability_classes: Vec::new(),
             tools: Vec::new(),
             workspace_capabilities: Vec::new(),
@@ -2451,6 +2452,7 @@ mod tests {
         )
         .expect("the configured credential profile is checked");
         signalbox_runner_wire::Advertisement {
+            default_working_directory: None,
             capability_classes: Vec::new(),
             tools: Vec::new(),
             workspace_capabilities: Vec::new(),

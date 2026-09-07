@@ -1013,6 +1013,7 @@ impl ContinuationRoundReconstitutionInput {
 /// collections needed by any stored start or failed-terminal frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedInputSchedulingReconstitutionInput {
+    pub(super) inadmissible_requests: Vec<crate::ToolRequest>,
     pub(super) runner_placement_frontiers: Vec<ContextFrontierId>,
     pub(super) session: Session,
     pub(super) imported_session: Option<ReconstitutedImportedSession>,
@@ -1039,6 +1040,12 @@ pub struct AcceptedInputSchedulingReconstitutionInput {
 }
 
 impl AcceptedInputSchedulingReconstitutionInput {
+    /// Supplies request-level terminal reasons referenced by this projection.
+    pub fn with_inadmissible_requests(mut self, requests: Vec<crate::ToolRequest>) -> Self {
+        self.inadmissible_requests = requests;
+        self
+    }
+
     /// Supplies every checked placement boundary in placement-revision order.
     pub fn with_runner_placement_frontiers(mut self, frontiers: Vec<ContextFrontierId>) -> Self {
         self.runner_placement_frontiers = frontiers;
@@ -1056,6 +1063,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
             session,
             imported_session: None,
             runner_placement_frontiers: Vec::new(),
+            inadmissible_requests: Vec::new(),
             turns,
             semantic_entries,
             snapshots,

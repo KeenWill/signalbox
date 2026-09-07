@@ -44,9 +44,14 @@ pub(super) struct UsageCallsHttpQuery {
 }
 
 pub(super) async fn usage_summary(
-    State(state): State<WebApiState>,
+    State(mut state): State<WebApiState>,
+    reload: Option<axum::Extension<crate::configuration_reload::ConfigurationReload>>,
     query: Result<Query<UsageSummaryHttpQuery>, QueryRejection>,
 ) -> Response {
+    if let Some(axum::Extension(reload)) = reload {
+        state.model_configuration = Some(reload.catalogs().models);
+    }
+
     let Query(query) = match query {
         Ok(query) => query,
         Err(_) => return invalid_usage_query(),
@@ -92,9 +97,14 @@ pub(super) async fn usage_summary(
 }
 
 pub(super) async fn usage_calls(
-    State(state): State<WebApiState>,
+    State(mut state): State<WebApiState>,
+    reload: Option<axum::Extension<crate::configuration_reload::ConfigurationReload>>,
     query: Result<Query<UsageCallsHttpQuery>, QueryRejection>,
 ) -> Response {
+    if let Some(axum::Extension(reload)) = reload {
+        state.model_configuration = Some(reload.catalogs().models);
+    }
+
     let Query(query) = match query {
         Ok(query) => query,
         Err(_) => return invalid_usage_query(),

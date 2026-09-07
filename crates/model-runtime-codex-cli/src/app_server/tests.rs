@@ -40,6 +40,10 @@ fn running() -> Client {
         .receive(&peer::response(&initialize))
         .expect("initialize");
     next(&mut client);
+    let limits = next(&mut client);
+    client
+        .receive(&peer::response(&limits))
+        .expect("rate limits read");
     let thread = next(&mut client);
     client
         .receive(&peer::response(&thread))
@@ -59,6 +63,11 @@ fn handshake_creates_one_ephemeral_read_only_thread_and_one_turn() {
         .receive(&peer::response(&initialize))
         .expect("initialize response");
     assert_eq!(next(&mut client), json!({"method":"initialized"}));
+    let limits = next(&mut client);
+    assert_eq!(limits["method"], "account/rateLimits/read");
+    client
+        .receive(&peer::response(&limits))
+        .expect("rate limits read");
     let thread = next(&mut client);
     assert_eq!(thread["method"], "thread/start");
     assert_eq!(
@@ -865,6 +874,10 @@ fn assistant_items_in_the_turn_start_response_exclude_non_acceptance_proof() {
         .receive(&peer::response(&initialize))
         .expect("initialize");
     next(&mut client);
+    let limits = next(&mut client);
+    client
+        .receive(&peer::response(&limits))
+        .expect("rate limits read");
     let thread = next(&mut client);
     client
         .receive(&peer::response(&thread))
@@ -946,4 +959,75 @@ fn sparse_rate_limit_notifications_preserve_a_previous_window() {
             .retry_after(UNIX_EPOCH + Duration::from_secs(1000)),
         Some(Duration::from_secs(100))
     );
+}
+
+#[test]
+fn capacity_windows_preserve_unknown_duration_and_signed_reset_time() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let limits: super::frame::RateLimits = serde_json::from_value(json!({
+        "primary":{"usedPercent":105,"resetsAt":-1},
+        "secondary":{"usedPercent":20,"windowDurationMins":-1}
+    }))
+    .expect("native rate-limit windows");
+    let observed_at = UNIX_EPOCH + Duration::from_secs(1000);
+    let snapshot = limits.capacity_snapshot(observed_at).expect("capacity");
+    assert_eq!(snapshot.observed_at, observed_at);
+    assert_eq!(
+        snapshot.windows,
+        vec![
+            signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: -5,
+                window_duration: None,
+                resets_at: Some(UNIX_EPOCH - Duration::from_secs(1)),
+            },
+            signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: 80,
+                window_duration: None,
+                resets_at: None,
+            },
+        ]
+    );
+}
+
+#[test]
+fn absent_capacity_does_not_emit_a_snapshot() {
+    for value in [json!({}), json!({"primary":null,"secondary":null})] {
+        let limits: super::frame::RateLimits =
+            serde_json::from_value(value.clone()).expect("rate-limit fixture");
+        assert_eq!(
+            limits.capacity_snapshot(std::time::UNIX_EPOCH),
+            None,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn fractional_capacity_rounds_remaining_percentage_down() {
+    for (used_percent, remaining_percent) in [(0.25, 99), (99.5, 0), (100.25, -1)] {
+        let limits: super::frame::RateLimits = serde_json::from_value(json!({
+            "primary":{"usedPercent":used_percent},
+            "secondary":{"usedPercent":61}
+        }))
+        .expect("fractional rate-limit fixture");
+        let snapshot = limits
+            .capacity_snapshot(std::time::UNIX_EPOCH)
+            .expect("fractional usage retains the snapshot");
+        assert_eq!(
+            snapshot.windows,
+            vec![
+                signalbox_model_runtime::RateLimitWindow {
+                    remaining_percent,
+                    window_duration: None,
+                    resets_at: None,
+                },
+                signalbox_model_runtime::RateLimitWindow {
+                    remaining_percent: 39,
+                    window_duration: None,
+                    resets_at: None,
+                },
+            ],
+            "usedPercent={used_percent}"
+        );
+    }
 }

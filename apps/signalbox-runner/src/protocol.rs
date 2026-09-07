@@ -1096,6 +1096,7 @@ mod tests {
 
     fn empty_advertisement() -> Advertisement {
         Advertisement {
+            default_working_directory: None,
             capability_classes: Vec::new(),
             tools: Vec::new(),
             workspace_capabilities: Vec::new(),

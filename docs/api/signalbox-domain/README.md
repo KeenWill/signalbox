@@ -37,7 +37,7 @@
 | session_placement | 18 | 0 | 0 | [session_placement](session_placement.md) |
 | session_template | 6 | 0 | 0 | [session_template](session_template.md) |
 | submit_input | 37 | 0 | 0 | [submit_input](submit_input.md) |
-| tool | 53 | 0 | 0 | [tool](tool.md) |
+| tool | 54 | 0 | 0 | [tool](tool.md) |
 | tool_attempt | 27 | 0 | 0 | [tool_attempt](tool_attempt.md) |
 | tool_execution | 20 | 0 | 0 | [tool_execution](tool_execution.md) |
 | turn_attempt | 13 | 0 | 0 | [turn_attempt](turn_attempt.md) |

@@ -251,7 +251,12 @@ pub enum SemanticTranscriptEntryPayload {
         /// The exact denied logical request.
         request: ToolRequestId,
     },
-    /// An undecided request closed because its turn terminalized.
+    /// A request resolved before dispatch by its stored inadmissibility reason.
+    ToolInadmissible {
+        /// The logical request carrying its closed inadmissibility reason.
+        request: ToolRequestId,
+    },
+    /// The turn ended before this request was resolved.
     ToolClosed {
         /// The exact closed logical request.
         request: ToolRequestId,

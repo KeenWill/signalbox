@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 rust_package()
 
@@ -27,3 +27,32 @@ rust_api_json(
     name = "api_json",
     crate = ":signalbox_tools_github",
 )
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_tools_github",
+)
+
+rust_integration_test(
+    name = "live_smoke",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    crate_root = "tests/live_smoke.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [],
+    proc_macro_deps = ["//crates/derive:signalbox_derive"],
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/tools-github"},
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/domain:signalbox_domain",
+        "//crates/egress-transport:signalbox_egress_transport",
+        "//crates/model-runtime:signalbox_model_runtime",
+        "//crates/tool-contract:signalbox_tool_contract",
+        "//crates/tools-github:signalbox_tools_github",
+    ],
+)
+
+rust_quality_tests(documented_crates = [":signalbox_tools_github"])

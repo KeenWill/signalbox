@@ -874,6 +874,11 @@ pub(super) fn transcript_entry_reference(
             entry,
             ..
         }
+        | ProcessTranscriptEntry::ToolInadmissible {
+            source_session,
+            entry,
+            ..
+        }
         | ProcessTranscriptEntry::ToolClosed {
             source_session,
             entry,
@@ -1167,6 +1172,19 @@ pub(super) async fn context_compaction_entry_value(
         } => serde_json::json!({
             "position": entry_index + 1, "source_session_id": source_session_id, "entry_id": entry_id,
             "type": "runner_placement_changed", "placement_revision": placement_revision.get().to_string(),
+        }),
+        ProcessTranscriptEntry::ToolInadmissible {
+            entry_index,
+            request,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "tool_inadmissible",
+            "tool_request_id": request.into_uuid().hyphenated().to_string(),
+            "content": content,
         }),
         ProcessTranscriptEntry::ToolClosed {
             entry_index,

@@ -4,7 +4,9 @@ use super::*;
 /// durable and streaming fan-outs, and one guarded Unix listener.
 #[derive(Debug)]
 pub struct ProcessRuntime {
+    configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     recovery_reporter: Option<FatalRecoveryReporter>,
+    oauth_service: Option<Arc<crate::OauthCredentialService>>,
     listener: LocalProcessListener,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
@@ -24,9 +26,16 @@ pub(super) struct ProcessFanouts {
     pub(super) durable: broadcast::Sender<ProcessUpdate>,
     pub(super) streaming: broadcast::Sender<ProcessUpdate>,
     pub(super) monitor: broadcast::Sender<ProcessMonitorUpdate>,
+    pub(super) runner_recovery: watch::Sender<()>,
 }
 
 impl ProcessRuntime {
+    /// Shares model dispatch's OAuth cache with credential administration.
+    pub fn with_oauth_service(mut self, service: Arc<crate::OauthCredentialService>) -> Self {
+        self.oauth_service = Some(service);
+        self
+    }
+
     /// Composes the guarded listener, fenced database, nudge, and static models.
     pub fn new(
         listener: LocalProcessListener,
@@ -61,8 +70,11 @@ impl ProcessRuntime {
         let (durable_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         let (streaming_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         let (monitor_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
+        let (runner_recovery, _) = watch::channel(());
         Self {
+            configuration_reload: None,
             recovery_reporter: None,
+            oauth_service: None,
             listener,
             pool,
             eligibility_nudge,
@@ -78,8 +90,18 @@ impl ProcessRuntime {
                 durable: durable_updates,
                 streaming: streaming_updates,
                 monitor: monitor_updates,
+                runner_recovery,
             },
         }
+    }
+
+    /// Shares the daemon's serial configuration reload and atomic catalog holder.
+    pub fn with_configuration_reload(
+        mut self,
+        reload: crate::configuration_reload::ConfigurationReload,
+    ) -> Self {
+        self.configuration_reload = Some(reload);
+        self
     }
 
     /// Wires the goal-mode disposition that arms automatic resumption when an adopt
@@ -150,9 +172,34 @@ impl ProcessRuntime {
     /// Serves requests and dispatches durable updates until `shutdown` changes
     /// to true or its sender closes.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), ProcessRuntimeError> {
+        let mut recovery_listener = sqlx::postgres::PgListener::connect_with(&self.pool)
+            .await
+            .map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
+        recovery_listener
+            .listen("runner_recovery")
+            .await
+            .map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
+        let oauth = signalbox_persistence::oauth_credential::OauthCredentialRepository::new(
+            self.pool.clone(),
+        );
+        oauth
+            .abandon_pending()
+            .await
+            .map_err(ProcessRuntimeError::OauthRecovery)?;
+        oauth
+            .replace_registrations(&self.model_configuration.oauth_registrations())
+            .await
+            .map_err(ProcessRuntimeError::OauthRecovery)?;
         let fanouts = self.fanouts;
+        let recovery_notifications = forward_runner_recovery_notifications(
+            recovery_listener,
+            fanouts.runner_recovery.clone(),
+            shutdown.clone(),
+        );
         let connection_dependencies = ConnectionDependencies {
+            configuration_reload: self.configuration_reload,
             recovery_reporter: self.recovery_reporter,
+            oauth_service: self.oauth_service,
             pool: self.pool.clone(),
             eligibility_nudge: self.eligibility_nudge.clone(),
             tool_dispatch_gate: self.tool_dispatch_gate,
@@ -172,11 +219,33 @@ impl ProcessRuntime {
             self.metrics,
             shutdown,
         );
-        let result = tokio::try_join!(server, dispatcher);
+        let result = tokio::try_join!(server, dispatcher, recovery_notifications);
         let cleanup = self.listener.cleanup();
 
         result?;
         cleanup.map_err(ProcessRuntimeError::CleanupSocket)
+    }
+}
+
+async fn forward_runner_recovery_notifications(
+    mut listener: sqlx::postgres::PgListener,
+    notifications: watch::Sender<()>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), ProcessRuntimeError> {
+    loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
+        tokio::select! {
+            notification = listener.try_recv() => {
+                notification.map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
+                // A reconnect also rechecks durable results after missed notifications.
+                notifications.send_replace(());
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() { return Ok(()); }
+            }
+        }
     }
 }
 
@@ -493,4 +562,78 @@ fn observe_model_call_metrics(metrics: &TelemetryMetrics, state: DispatchedModel
         DispatchedModelCallDisposition::Ambiguous => ModelMetricDisposition::Ambiguous,
     };
     metrics.observe_model_terminal(disposition);
+}
+
+#[cfg(test)]
+mod runner_recovery_tests {
+    use super::*;
+    use signalbox_persistence::{
+        disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
+        disposable_test_container_labels, local_test_connection_options,
+    };
+    use testcontainers_modules::{
+        postgres::Postgres,
+        testcontainers::{ImageExt, runners::AsyncRunner},
+    };
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn recovery_waiters_share_one_listener_and_leave_pool_capacity_for_progress()
+    -> Result<(), Box<dyn Error>> {
+        const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+        const DATABASE_USER: &str = "signalbox";
+        const DATABASE_PASSWORD: &str = "signalbox-test";
+        const DATABASE_NAME: &str = "signalbox";
+        const POOL_CONNECTIONS: u32 = 2;
+        const PENDING_REPLAYS: usize = 128;
+        const COMPLETION_DEADLINE: Duration = Duration::from_secs(10);
+        let container = Postgres::default()
+            .with_db_name(DATABASE_NAME)
+            .with_user(DATABASE_USER)
+            .with_password(DATABASE_PASSWORD)
+            .with_cmd(disposable_postgres_server_args())
+            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
+            .with_tag(POSTGRES_IMAGE_TAG)
+            .with_labels(disposable_test_container_labels())
+            .start()
+            .await?;
+        let host = container.get_host().await?;
+        let port = container.get_host_port_ipv4(5432).await?;
+        let database_url =
+            format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(POOL_CONNECTIONS)
+            .connect_with(local_test_connection_options(&database_url)?)
+            .await?;
+        let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
+        listener.listen("runner_recovery").await?;
+        let (notifications, _) = watch::channel(());
+        let mut waiters: Vec<_> = (0..PENDING_REPLAYS)
+            .map(|_| notifications.subscribe())
+            .collect();
+        let (shutdown, receiver) = watch::channel(false);
+        let forwarder = tokio::spawn(forward_runner_recovery_notifications(
+            listener,
+            notifications,
+            receiver,
+        ));
+        tokio::time::timeout(
+            COMPLETION_DEADLINE,
+            sqlx::query("SELECT pg_notify('runner_recovery', '')").execute(&pool),
+        )
+        .await??;
+        for waiter in &mut waiters {
+            tokio::time::timeout(COMPLETION_DEADLINE, waiter.changed()).await??;
+        }
+        let probe: i32 = tokio::time::timeout(
+            COMPLETION_DEADLINE,
+            sqlx::query_scalar("SELECT 1").fetch_one(&pool),
+        )
+        .await??;
+        assert_eq!(probe, 1);
+        shutdown.send(true)?;
+        tokio::time::timeout(COMPLETION_DEADLINE, forwarder).await???;
+        pool.close().await;
+        Ok(())
+    }
 }

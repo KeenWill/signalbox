@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_proc_macro")
-load("//tooling/bazel:testing.bzl", "rust_integration_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 TEST_DEPS = ["//crates/tool-contract:signalbox_tool_contract"]
 
@@ -24,3 +24,35 @@ rust_integration_test(
     proc_macro_deps = [":signalbox_tool_schema_derive"],
     deps = TEST_DEPS,
 )
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_tool_schema_derive",
+)
+
+rust_integration_test(
+    name = "compile_fail",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    crate_root = "tests/compile_fail.rs",
+    data = ["Cargo.toml"] + glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [],
+    env = {"SIGNALBOX_TEST_MANIFEST": "$(rootpath Cargo.toml)"},
+    env_inherit = [
+        "HOME",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+    ],
+    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"],
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/tool-schema-derive"},
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = ["//crates/tool-contract:signalbox_tool_contract"],
+)
+
+rust_quality_tests(documented_crates = [":signalbox_tool_schema_derive"])
