@@ -139,9 +139,12 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ReviewOrchestration { .. }
         | ServerMessage::ConfigurationReloaded { .. }
         | ServerMessage::ConfigurationReloadFailed { .. }
+        | ServerMessage::DeploymentLimits { .. }
+        | ServerMessage::RunnerReplacementReceipt { .. }
+        | ServerMessage::RunnerAbandonmentReceipt { .. }
+        | ServerMessage::RunnerPromotionReceipt { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
-        | ServerMessage::OauthCredentialReceipt { .. }
-        | ServerMessage::DeploymentLimits { .. } => ConversationImportResponse::Unexpected,
+        | ServerMessage::OauthCredentialReceipt { .. } => ConversationImportResponse::Unexpected,
     }
 }
 
