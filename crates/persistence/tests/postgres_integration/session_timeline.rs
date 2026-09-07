@@ -8,9 +8,8 @@
 use std::{error::Error, num::NonZeroU64};
 
 use signalbox_application::{
-    SessionTimelineDetailBody, SessionTimelineEventKind, TimelineAddress, TimelineBlobReference,
-    TimelineContinuation, TimelineDetailLimits, TimelineTextExcerpt, TimelineWindowAnchor,
-    TimelineWindowLimits,
+    SessionTimelineDetailBody, TimelineAddress, TimelineBlobReference, TimelineContinuation,
+    TimelineDetailLimits, TimelineTextExcerpt, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{
     AcceptedInputId, BlobDigest, CreateSession, DirectModelSelection, DurableCommandId,
@@ -156,7 +155,9 @@ async fn item_and_region_details_share_the_stable_creation_address() -> Result<(
     assert_eq!(item.items[0].address, address);
     assert!(matches!(
         item.items[0].body,
-        SessionTimelineDetailBody::EventFact { .. }
+        SessionTimelineDetailBody::SessionCreated {
+            imported_evidence: None
+        }
     ));
     assert!(item.projected_body_bytes > 0);
     assert!(item.projected_body_bytes <= limits.max_projected_bytes());
@@ -335,7 +336,7 @@ async fn input_detail_rejects_a_header_beyond_the_allocator() -> Result<(), Box<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_detail_validates_body_shape_without_projecting_body_text()
+async fn delegation_detail_projects_message_content_and_rejects_corrupt_shape()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) = prepared_complete_delegation_outbox(0x9970).await?;
     let sequence: i64 = sqlx::query_scalar(
@@ -357,9 +358,9 @@ async fn delegation_detail_validates_body_shape_without_projecting_body_text()
         .expect("the delegation detail exists");
     assert!(matches!(
         detail.items[0].body,
-        SessionTimelineDetailBody::EventFact {
-            kind: SessionTimelineEventKind::DelegationUpdate
-        }
+        SessionTimelineDetailBody::Delegation(
+            signalbox_application::TimelineDelegationDetail::SessionMessage { .. }
+        )
     ));
 
     sqlx::query(
@@ -1365,4 +1366,195 @@ async fn projected_addresses(
     assert_eq!(window.continuation_before, TimelineContinuation::Exhausted);
     assert_eq!(window.continuation_after, TimelineContinuation::Exhausted);
     Ok(window.items.iter().map(|item| item.address).collect())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn proposed_tool_detail_is_unchanged_after_attempt_preparation() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _) = migrated_postgres().await?;
+    let (fixture, _, _, request) =
+        super::checkpoint_confirmed_tool_round(&pool, 0x995600, "current_time", "{}").await?;
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT event_sequence::bigint FROM tool_batch_transition_outbox_event
+         WHERE producing_model_call_id = $1 AND transition_kind = 'proposed'",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let address =
+        TimelineAddress::new(NonZeroU64::new(u64::try_from(sequence)?).expect("committed address"));
+    let repository = SessionTimelineRepository::new(pool.clone());
+    let limits = TimelineDetailLimits::new(1, 256).expect("bounded detail");
+    let before = repository
+        .read_item_details(fixture.session, address, None, limits)
+        .await?
+        .expect("proposed detail");
+    let tool_loop = signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(pool.clone());
+    tool_loop
+        .decide(
+            super::decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x9956d0)),
+                request,
+                signalbox_domain::ToolApprovalDecision::Approve,
+            ),
+            || signalbox_domain::TurnAttemptId::from_uuid(Uuid::from_u128(0x9956e0)),
+        )
+        .await?;
+    tool_loop
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            signalbox_domain::ToolAttemptId::from_uuid(Uuid::from_u128(0x9956e1)),
+            signalbox_domain::ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("approved request prepares");
+    let after = repository
+        .read_item_details(fixture.session, address, None, limits)
+        .await?
+        .expect("same proposed detail");
+    assert_eq!(
+        after, before,
+        "historical tool members must remain immutable"
+    );
+    let SessionTimelineDetailBody::ToolBatch { tools, .. } = &after.items[0].body else {
+        panic!("tool body")
+    };
+    assert_eq!(tools[0].request_id, request);
+    assert_eq!(tools[0].attempt_id, None);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tool_detail_continues_at_the_next_request_member() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let (fixture, _, _, requests) = super::checkpoint_confirmed_tool_batch(
+        &pool,
+        0x995700,
+        &[
+            ("current_time", "{}"),
+            ("current_time", "{\"second\":true}"),
+        ],
+    )
+    .await?;
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT event_sequence::bigint FROM tool_batch_transition_outbox_event
+         WHERE producing_model_call_id = $1 AND transition_kind = 'proposed'",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let address =
+        TimelineAddress::new(NonZeroU64::new(u64::try_from(sequence)?).expect("committed address"));
+    let repository = SessionTimelineRepository::new(pool.clone());
+    let limits = TimelineDetailLimits::new(1, 256).expect("bounded detail");
+    let first = repository
+        .read_item_details(fixture.session, address, None, limits)
+        .await?
+        .expect("first member");
+    let Some(signalbox_application::TimelineDetailContinuation::MoreBody(next)) =
+        first.continuation
+    else {
+        panic!("next member is explicit")
+    };
+    assert_eq!(next.member_index, 1);
+    assert_eq!(next.offset_bytes, 0);
+    let second = repository
+        .read_item_details(
+            fixture.session,
+            address,
+            Some(signalbox_application::TimelineDetailCursor {
+                address,
+                field: Some(next.field),
+                member_index: next.member_index,
+                offset_bytes: next.offset_bytes,
+            }),
+            limits,
+        )
+        .await?
+        .expect("second member");
+    let SessionTimelineDetailBody::ToolBatch { tools, .. } = &second.items[0].body else {
+        panic!("tool body")
+    };
+    assert_eq!(tools[0].request_id, requests[1]);
+    assert_eq!(
+        tools[0].arguments.as_ref().expect("arguments").text,
+        "{\"second\":true}"
+    );
+    assert_eq!(second.continuation, None);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn completed_tool_detail_continues_from_arguments_to_the_recorded_result()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let (fixture, _, _, _) =
+        super::authorize_continuation_after_completed_round(&pool, 0x995800).await?;
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT event_sequence::bigint FROM tool_batch_transition_outbox_event
+         WHERE producing_model_call_id = $1 AND transition_kind = 'results_projected'",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let recorded_result: String = sqlx::query_scalar(
+        "SELECT result_text FROM tool_attempt WHERE session_id = $1 AND state_kind = 'terminal'",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let address =
+        TimelineAddress::new(NonZeroU64::new(u64::try_from(sequence)?).expect("committed address"));
+    let repository = SessionTimelineRepository::new(pool.clone());
+    let limits = TimelineDetailLimits::new(1, 256).expect("bounded detail");
+    let first = repository
+        .read_item_details(fixture.session, address, None, limits)
+        .await?
+        .expect("arguments page");
+    let Some(signalbox_application::TimelineDetailContinuation::MoreBody(next)) =
+        first.continuation
+    else {
+        panic!("result has an explicit continuation")
+    };
+    assert_eq!(
+        next.field,
+        signalbox_application::TimelineBodyField::ToolResult
+    );
+    let result = repository
+        .read_item_details(
+            fixture.session,
+            address,
+            Some(signalbox_application::TimelineDetailCursor {
+                address,
+                field: Some(next.field),
+                member_index: next.member_index,
+                offset_bytes: next.offset_bytes,
+            }),
+            limits,
+        )
+        .await?
+        .expect("result page");
+    let SessionTimelineDetailBody::ToolBatch { tools, .. } = &result.items[0].body else {
+        panic!("tool body")
+    };
+    assert_eq!(
+        tools[0].state,
+        Some(signalbox_application::TimelineToolState::Completed)
+    );
+    assert_eq!(
+        tools[0].result.as_ref().expect("recorded result").text,
+        recorded_result
+    );
+    assert_eq!(result.continuation, None);
+    pool.close().await;
+    drop(container);
+    Ok(())
 }

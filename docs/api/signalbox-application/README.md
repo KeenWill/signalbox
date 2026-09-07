@@ -24,7 +24,7 @@
 | session_delegation | 0 | 1 | 0 | [session_delegation](session_delegation.md) |
 | session_live | 8 | 1 | 1 | [session_live](session_live.md) |
 | session_metadata | 8 | 4 | 0 | [session_metadata](session_metadata.md) |
-| session_timeline | 28 | 1 | 7 | [session_timeline](session_timeline.md) |
+| session_timeline | 53 | 1 | 7 | [session_timeline](session_timeline.md) |
 | start_eligible_turn | 3 | 2 | 0 | [start_eligible_turn](start_eligible_turn.md) |
 | startup_scan | 5 | 2 | 0 | [startup_scan](startup_scan.md) |
 | submit_input | 5 | 2 | 0 | [submit_input](submit_input.md) |

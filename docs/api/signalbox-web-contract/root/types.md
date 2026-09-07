@@ -678,6 +678,13 @@ pub struct WebSessionTimelineWindow {
 pub enum WebTimelineBodyField {
     InputText,
     ModelResponse,
+    ToolArguments,
+    ToolResult,
+    ToolFailure,
+    ApprovalRationale,
+    GoalText,
+    CompactionSummary,
+    DelegationContent,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
@@ -790,6 +797,22 @@ pub struct WebTimelineModelUsage {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebToolName
+
+```rust
+pub struct WebToolName(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl WebToolName {
+    #[must_use]
+    pub fn from_checked(value: string::String) -> Self;
+}
+impl<'de> de::Deserialize<'de> for WebToolName {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
+    where
+        D: de::Deserializer<'de>;
+}
+```
+
 ## WebTimelineTurnLifecycleKind
 
 ```rust
@@ -800,10 +823,666 @@ pub enum WebTimelineTurnLifecycleKind {
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebTimelineToolState
+
+```rust
+pub enum WebTimelineToolState {
+    Prepared,
+    InFlight,
+    AwaitingChild,
+    Completed,
+    KnownFailed,
+    Ambiguous,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineToolBatchState
+
+```rust
+pub enum WebTimelineToolBatchState {
+    Proposed { frontier_id: WebSessionId },
+    ResultsProjected { frontier_id: WebSessionId },
+    RecoveryRequired { tool_attempt_id: WebSessionId },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineToolApprovalPosture
+
+```rust
+pub enum WebTimelineToolApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineToolEffectPosture
+
+```rust
+pub enum WebTimelineToolEffectPosture {
+    EffectFree,
+    ExternalEffect,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineToolSandboxPosture
+
+```rust
+pub enum WebTimelineToolSandboxPosture {
+    Unsandboxed,
+    Sandboxed,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineToolFailureCause
+
+```rust
+pub enum WebTimelineToolFailureCause {
+    UnknownTool,
+    InvalidArguments,
+    ExecutionFailed,
+    ResultTooLarge,
+    CrashLost,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineToolAttemptEvidence
+
+```rust
+pub enum WebTimelineToolAttemptEvidence {
+    RequestOnly {},
+    PhysicalAttempt {
+        attempt_id: WebSessionId,
+        result: option::Option<WebTimelineTextExcerpt>,
+        failure: option::Option<WebTimelineTextExcerpt>,
+        result_present: bool,
+        failure_present: bool,
+        effect_posture: WebTimelineToolEffectPosture,
+        sandbox_posture: option::Option<WebTimelineToolSandboxPosture>,
+        state: WebTimelineToolState,
+        cause: option::Option<WebTimelineToolFailureCause>,
+    },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineToolAttempt
+
+```rust
+pub struct WebTimelineToolAttempt {
+    pub request_id: WebSessionId,
+    pub tool_name: WebToolName,
+    pub arguments: option::Option<WebTimelineTextExcerpt>,
+    pub approval_posture: WebTimelineToolApprovalPosture,
+    pub approval_judge_escalated: bool,
+    pub evidence: WebTimelineToolAttemptEvidence,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineApprovalSource
+
+```rust
+pub enum WebTimelineApprovalSource {
+    Policy,
+    Delegate,
+    User,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineApprovalDecision
+
+```rust
+pub enum WebTimelineApprovalDecision {
+    Approve,
+    Deny,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineApprovalDecider
+
+```rust
+pub enum WebTimelineApprovalDecider {
+    User {
+        command_id: WebSessionId,
+    },
+    Delegate {
+        model_selection_id: WebSessionId,
+        model_call_id: WebSessionId,
+    },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineApprovalActor
+
+```rust
+pub enum WebTimelineApprovalActor {
+    Policy {},
+    User {
+        command_id: WebSessionId,
+    },
+    Delegate {
+        model_selection_id: WebSessionId,
+        model_call_id: WebSessionId,
+    },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineRunnerSandboxPosture
+
+```rust
+pub enum WebTimelineRunnerSandboxPosture {
+    Unsandboxed,
+    Sandboxed,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineRunnerState
+
+```rust
+pub enum WebTimelineRunnerState {
+    Pinned,
+    Suspect,
+    Connected,
+    RunnerLostBeforePin,
+    RunnerLost,
+    Replaced,
+    WorkingDirectoryChanged,
+    Abandoned,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineGoalEventKind
+
+```rust
+pub enum WebTimelineGoalEventKind {
+    Commissioned,
+    Blocked,
+    Resumed,
+    Achieved,
+    UserStopped,
+    Superseded,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineGoalBlockedReason
+
+```rust
+pub enum WebTimelineGoalBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+    FinishCheckFailed,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineGoalEvent
+
+```rust
+pub enum WebTimelineGoalEvent {
+    Commissioned {
+        generation: WebPositiveU64,
+        text: WebTimelineTextExcerpt,
+    },
+    Blocked {
+        generation: WebPositiveU64,
+        reason: WebTimelineGoalBlockedReason,
+        text: WebTimelineTextExcerpt,
+    },
+    Resumed {
+        generation: WebPositiveU64,
+        text: option::Option<WebTimelineTextExcerpt>,
+    },
+    Achieved {
+        generation: WebPositiveU64,
+        text: WebTimelineTextExcerpt,
+    },
+    UserStopped {
+        generation: WebPositiveU64,
+    },
+    SessionClosed {
+        generation: WebPositiveU64,
+        outcome: WebTimelineSessionOutcome,
+    },
+    Superseded {
+        generation: WebPositiveU64,
+        text: WebTimelineTextExcerpt,
+    },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineBoundChildAction
+
+```rust
+pub enum WebTimelineBoundChildAction {
+    KeepRunning,
+    Stop,
+    Cancel,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineDelegationPolicy
+
+```rust
+pub enum WebTimelineDelegationPolicy {
+    Background,
+    Bound {
+        on_parent_stopped: WebTimelineBoundChildAction,
+        on_parent_cancelled: WebTimelineBoundChildAction,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineDelegationWaitMode
+
+```rust
+pub enum WebTimelineDelegationWaitMode {
+    Foreground,
+    Background,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineDelegationOutcome
+
+```rust
+pub enum WebTimelineDelegationOutcome {
+    ResultReturned,
+    ChildFailed,
+    ChildStopped,
+    ChildCancelled,
+    ContinueRunning,
+    AlreadyTerminal,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineDelegationReason
+
+```rust
+pub enum WebTimelineDelegationReason {
+    ChildCompleted,
+    ChildExecutionFailed,
+    ChildResultUnavailable,
+    ChildCancelled,
+    ParentStoppedWithDescendants,
+    ParentCancelledWithDescendants,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineDelegationProvenance
+
+```rust
+pub enum WebTimelineDelegationProvenance {
+    ParentLifecycleCommand {
+        session_id: WebSessionId,
+        command_id: WebSessionId,
+    },
+    ChildTurn {
+        session_id: WebSessionId,
+        turn_id: WebSessionId,
+    },
+    ParentTurnCommand {
+        session_id: WebSessionId,
+        turn_id: WebSessionId,
+        command_id: WebSessionId,
+    },
+    ParentGoalCommand {
+        session_id: WebSessionId,
+        goal_generation: WebPositiveU64,
+        command_id: WebSessionId,
+    },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineDelegationDetail
+
+```rust
+pub enum WebTimelineDelegationDetail {
+    ChildSpawned {
+        relationship_id: WebSessionId,
+        child_session_id: WebSessionId,
+        policy: WebTimelineDelegationPolicy,
+    },
+    ChildWaiting {
+        relationship_id: WebSessionId,
+        child_session_id: WebSessionId,
+        awaiting_request_id: WebSessionId,
+        mode: WebTimelineDelegationWaitMode,
+    },
+    ChildLifecycleDisposition {
+        relationship_id: WebSessionId,
+        child_session_id: WebSessionId,
+        event_ordinal: WebPositiveU64,
+        outcome: WebTimelineDelegationOutcome,
+        reason: WebTimelineDelegationReason,
+        provenance: WebTimelineDelegationProvenance,
+    },
+    ChildResult {
+        relationship_id: WebSessionId,
+        child_session_id: WebSessionId,
+        outcome: WebTimelineDelegationOutcome,
+        reason: WebTimelineDelegationReason,
+        provenance: WebTimelineDelegationProvenance,
+        content: option::Option<WebTimelineTextExcerpt>,
+    },
+    SessionMessage {
+        relationship_id: WebSessionId,
+        message_id: WebSessionId,
+        sender_session_id: WebSessionId,
+        recipient_session_id: WebSessionId,
+        message_ordinal: WebPositiveU64,
+        delivery_sequence: WebPositiveU64,
+        content: WebTimelineTextExcerpt,
+    },
+    ResultWake {
+        relationship_id: WebSessionId,
+        awaiting_request_id: option::Option<WebSessionId>,
+    },
+    MessageWake {
+        relationship_id: WebSessionId,
+        message_id: WebSessionId,
+    },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineImportedEvidence
+
+```rust
+pub struct WebTimelineImportedEvidence {
+    pub imported_conversation_id: WebSessionId,
+    pub imported_entry_id: WebSessionId,
+    pub imported_position: WebU64,
+    pub relationship: WebTimelineImportedRelationship,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineImportedRelationship
+
+```rust
+pub enum WebTimelineImportedRelationship {
+    Resume,
+    Fork,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineReconciliationOperation
+
+```rust
+pub enum WebTimelineReconciliationOperation {
+    ModelCall { model_call_id: WebSessionId },
+    ToolAttempt { tool_attempt_id: WebSessionId },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineReasoningLevel
+
+```rust
+pub enum WebTimelineReasoningLevel {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+    Ultra,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineFastMode
+
+```rust
+pub enum WebTimelineFastMode {
+    Disabled,
+    Enabled,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineAnthropicServiceTier
+
+```rust
+pub enum WebTimelineAnthropicServiceTier {
+    Auto,
+    StandardOnly,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineOpenAiServiceTier
+
+```rust
+pub enum WebTimelineOpenAiServiceTier {
+    Auto,
+    Default,
+    Flex,
+    Scale,
+    Priority,
+    Fast,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineCodexCliServiceTier
+
+```rust
+pub enum WebTimelineCodexCliServiceTier {
+    Default,
+    Priority,
+    Flex,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineServiceTier
+
+```rust
+pub enum WebTimelineServiceTier {
+    Anthropic(WebTimelineAnthropicServiceTier),
+    OpenAi(WebTimelineOpenAiServiceTier),
+    CodexCli(WebTimelineCodexCliServiceTier),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineSettingOverlay
+
+```rust
+pub enum WebTimelineSettingOverlay<ValueT> {
+    Inherit,
+    ProviderDefault,
+    Value(ValueT),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineFastModeOverlay
+
+```rust
+pub enum WebTimelineFastModeOverlay {
+    Inherit,
+    Value(WebTimelineFastMode),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineModelSettingsOverlay
+
+```rust
+pub struct WebTimelineModelSettingsOverlay {
+    pub reasoning_level: WebTimelineSettingOverlay<WebTimelineReasoningLevel>,
+    pub fast_mode: WebTimelineFastModeOverlay,
+    pub service_tier: WebTimelineSettingOverlay<WebTimelineServiceTier>,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineModelSettingSource
+
+```rust
+pub enum WebTimelineModelSettingSource {
+    PerCall,
+    Session,
+    Profile,
+    GlobalDefault,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineModelSettingsPrecedence
+
+```rust
+pub struct WebTimelineModelSettingsPrecedence {
+    pub per_call: WebTimelineModelSettingsOverlay,
+    pub session: WebTimelineModelSettingsOverlay,
+    pub profile: WebTimelineModelSettingsOverlay,
+    pub global_default: WebTimelineModelSettingsOverlay,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineEffectiveModelSettings
+
+```rust
+pub struct WebTimelineEffectiveModelSettings {
+    pub reasoning_level: option::Option<WebTimelineReasoningLevel>,
+    pub fast_mode: WebTimelineFastMode,
+    pub service_tier: option::Option<WebTimelineServiceTier>,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineModelSettingsSnapshot
+
+```rust
+pub struct WebTimelineModelSettingsSnapshot {
+    pub precedence: WebTimelineModelSettingsPrecedence,
+    pub effective: WebTimelineEffectiveModelSettings,
+    pub reasoning_source: option::Option<WebTimelineModelSettingSource>,
+    pub fast_mode_source: option::Option<WebTimelineModelSettingSource>,
+    pub service_tier_source: option::Option<WebTimelineModelSettingSource>,
+    pub validated_for_selection_id: option::Option<WebSessionId>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineModelSelection
+
+```rust
+pub enum WebTimelineModelSelection {
+    Direct { selection_id: WebSessionId },
+    Alias { alias_id: WebSessionId },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineModelChangeAdjustment
+
+```rust
+pub enum WebTimelineModelChangeAdjustment {
+    ReasoningLevelClamped {
+        from: WebTimelineReasoningLevel,
+        to: WebTimelineReasoningLevel,
+    },
+    ReasoningLevelCleared {
+        from: WebTimelineReasoningLevel,
+    },
+    FastModeDisabled {},
+    ServiceTierCleared {
+        from: WebTimelineServiceTier,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineModelSettingsDetail
+
+```rust
+pub enum WebTimelineModelSettingsDetail {
+    SessionDefaultsChanged {
+        command_id: WebSessionId,
+        prior_defaults_version: WebU64,
+        installed_defaults_version: WebU64,
+        prior_model: WebTimelineModelSelection,
+        installed_model: WebTimelineModelSelection,
+        prior_settings: WebTimelineModelSettingsSnapshot,
+        installed_settings: WebTimelineModelSettingsSnapshot,
+        caller_override: WebTimelineModelSettingsOverlay,
+        adjustments: vec::Vec<WebTimelineModelChangeAdjustment>,
+    },
+    TurnResolved {
+        accepted_input_id: WebSessionId,
+        turn_id: WebSessionId,
+        defaults_version: WebU64,
+        requested_model: WebTimelineModelSelection,
+        selected_direct_id: WebSessionId,
+        per_call_override: WebTimelineModelSettingsOverlay,
+        settings: WebTimelineModelSettingsSnapshot,
+        adjusted_from_selection_id: option::Option<WebSessionId>,
+        adjustments: vec::Vec<WebTimelineModelChangeAdjustment>,
+    },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebSessionTimelineDetailBody
 
 ```rust
 pub enum WebSessionTimelineDetailBody {
+    SessionState {
+        state: WebTimelineSessionState,
+    },
+    SessionTerminal {
+        outcome: WebTimelineSessionOutcome,
+    },
+    CommandSettlement {
+        command_id: WebSessionId,
+        rejection: option::Option<string::String>,
+    },
+    InjectionSettlement {
+        command_id: WebSessionId,
+        delivered: bool,
+        turn_id: option::Option<WebSessionId>,
+        rejection: option::Option<string::String>,
+    },
+    Ownership {
+        transition: WebTimelineOwnershipTransition,
+    },
+    EventFact {
+        kind: WebSessionTimelineEventKind,
+    },
+    SessionCreated {
+        imported_evidence: option::Option<WebTimelineImportedEvidence>,
+    },
+    ModelSettings {
+        detail: WebTimelineModelSettingsDetail,
+    },
     UserInput {
         turn_id: WebSessionId,
         text: WebTimelineTextExcerpt,
@@ -819,13 +1498,54 @@ pub enum WebSessionTimelineDetailBody {
         usage: WebTimelineModelUsage,
         provider_failure_cause: option::Option<WebProviderModelCallFailureCause>,
     },
+    ToolBatch {
+        turn_id: WebSessionId,
+        producing_model_call_id: WebSessionId,
+        state: WebTimelineToolBatchState,
+        projected_member_index: option::Option<u32>,
+        tools: vec::Vec<WebTimelineToolAttempt>,
+        goal_events: vec::Vec<WebTimelineGoalEvent>,
+    },
+    ToolApprovalDecision {
+        turn_id: WebSessionId,
+        request_id: WebSessionId,
+        tool_name: WebToolName,
+        decision: WebTimelineApprovalDecision,
+        actor: WebTimelineApprovalActor,
+        rationale: option::Option<WebTimelineTextExcerpt>,
+        approval_judge_escalated: bool,
+    },
+    GoalEvent {
+        session_id: WebSessionId,
+        event: WebTimelineGoalEvent,
+    },
+    ContextCompaction {
+        compaction_id: WebSessionId,
+        model_call_id: WebSessionId,
+        through_position: WebU64,
+        summary_entry_id: WebSessionId,
+        result_frontier_id: WebSessionId,
+        summary: WebTimelineTextExcerpt,
+    },
     TurnLifecycle {
         turn_id: WebSessionId,
         lifecycle: WebTimelineTurnLifecycleKind,
         cause_code: string::String,
     },
-    EventFact {
-        kind: WebSessionTimelineEventKind,
+    Reconciliation {
+        turn_id: WebSessionId,
+        operation: WebTimelineReconciliationOperation,
+        terminal_frontier_id: WebSessionId,
+    },
+    Runner {
+        runner_id: WebSessionId,
+        placement_revision: WebPositiveU64,
+        sandbox_posture: WebTimelineRunnerSandboxPosture,
+        working_directory: option::Option<string::String>,
+        state: WebTimelineRunnerState,
+    },
+    Delegation {
+        detail: WebTimelineDelegationDetail,
     },
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
@@ -1261,70 +1981,6 @@ impl WebUsageRateVersion {
     pub fn from_configured(value: string::String) -> Self;
 }
 impl<'de> de::Deserialize<'de> for WebUsageRateVersion {
-    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
-    where
-        D: de::Deserializer<'de>;
-}
-```
-
-## WebUsageCost
-
-```rust
-pub enum WebUsageCost {
-    Derived {
-        amount_usd: WebDollarAmount,
-        rate_version: WebUsageRateVersion,
-        label: WebUsageCostLabel,
-    },
-    Unavailable {
-        reason: WebUsageCostUnavailableReason,
-    },
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageProfileId
-
-```rust
-pub struct WebUsageProfileId(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl WebUsageProfileId {
-    #[must_use]
-    pub fn from_bounded(value: string::String) -> Self;
-}
-impl<'de> de::Deserialize<'de> for WebUsageProfileId {
-    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
-    where
-        D: de::Deserializer<'de>;
-}
-```
-
-## WebUsageCallCount
-
-```rust
-pub struct WebUsageCallCount(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl WebUsageCallCount {
-    #[must_use]
-    pub fn from_positive(value: u64) -> Self;
-}
-impl<'de> de::Deserialize<'de> for WebUsageCallCount {
-    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
-    where
-        D: de::Deserializer<'de>;
-}
-```
-
-## WebUsageTimestampMicros
-
-```rust
-pub struct WebUsageTimestampMicros(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl WebUsageTimestampMicros {
-    #[must_use]
-    pub fn from_application(value: u64) -> Self;
-}
-impl<'de> de::Deserialize<'de> for WebUsageTimestampMicros {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
     where
         D: de::Deserializer<'de>;

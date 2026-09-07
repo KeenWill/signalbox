@@ -513,9 +513,13 @@ Every selected row is decoded through the same fail-closed typed outbox
 projection as durable dispatch, under one repeatable-read transaction. A detail
 response reports its projected body bytes and never silently truncates: an
 oversized text is a typed bounded excerpt carrying its total length and exact
-continuation, never a summary that appears complete. A known category without a
-richer typed body is a closed event fact; an unknown durable event or state is
-corruption, never a generic body or guessed prose.
+continuation, never a summary that appears complete. Detail bodies carry typed
+session and turn lifecycle facts, model settings and provider responses, tool
+arguments and execution evidence, approval decisions, goals, compaction, runner
+placement, and delegation; a retired turn remains a closed event fact. Repeated
+tool and goal members continue by member index. Tool-transition members freeze
+attempt state and payloads when the transition commits. An unknown durable event
+or state is corruption, never a generic body or guessed prose.
 
 A search result's address is directly usable with the timeline around read even
 when the matching region is not loaded, and each returned source is correlated

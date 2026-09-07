@@ -261,6 +261,13 @@ impl TimelineDetailLimits {
 pub enum TimelineBodyField {
     InputText,
     ModelResponse,
+    ToolArguments,
+    ToolResult,
+    ToolFailure,
+    ApprovalRationale,
+    GoalText,
+    CompactionSummary,
+    DelegationContent,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -369,10 +376,401 @@ pub enum TimelineTurnLifecycleKind {
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
+## TimelineToolState
+
+```rust
+pub enum TimelineToolState {
+    Prepared,
+    InFlight,
+    AwaitingChild,
+    Completed,
+    KnownFailed,
+    Ambiguous,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineToolAttempt
+
+```rust
+pub struct TimelineToolAttempt {
+    pub request_id: signalbox_domain::ToolRequestId,
+    pub attempt_id: option::Option<signalbox_domain::ToolAttemptId>,
+    pub tool_name: signalbox_domain::ToolName,
+    pub arguments: option::Option<TimelineTextExcerpt>,
+    pub result: option::Option<TimelineTextExcerpt>,
+    pub failure: option::Option<TimelineTextExcerpt>,
+    pub has_result: bool,
+    pub has_failure: bool,
+    pub approval_posture: TimelineToolApprovalPosture,
+    pub approval_judge_escalated: bool,
+    pub effect_posture: option::Option<TimelineToolEffectPosture>,
+    pub sandbox_posture: option::Option<TimelineToolSandboxPosture>,
+    pub state: option::Option<TimelineToolState>,
+    pub cause_code: option::Option<string::String>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineToolApprovalPosture
+
+```rust
+pub enum TimelineToolApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineToolEffectPosture
+
+```rust
+pub enum TimelineToolEffectPosture {
+    EffectFree,
+    ExternalEffect,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineToolSandboxPosture
+
+```rust
+pub enum TimelineToolSandboxPosture {
+    Unsandboxed,
+    Sandboxed,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineToolBatchState
+
+```rust
+pub enum TimelineToolBatchState {
+    Proposed {
+        frontier_id: signalbox_domain::ContextFrontierId,
+    },
+    ResultsProjected {
+        frontier_id: signalbox_domain::ContextFrontierId,
+    },
+    RecoveryRequired {
+        attempt_id: signalbox_domain::ToolAttemptId,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineApprovalDecision
+
+```rust
+pub enum TimelineApprovalDecision {
+    Approve,
+    Deny,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineApprovalActor
+
+```rust
+pub enum TimelineApprovalActor {
+    Policy,
+    User {
+        command_id: signalbox_domain::DurableCommandId,
+    },
+    Delegate {
+        model_selection_id: signalbox_domain::DirectModelSelection,
+        model_call_id: signalbox_domain::ModelCallId,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineRunnerSandboxPosture
+
+```rust
+pub enum TimelineRunnerSandboxPosture {
+    Unsandboxed,
+    Sandboxed,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineRunnerState
+
+```rust
+pub enum TimelineRunnerState {
+    Pinned,
+    Suspect,
+    Connected,
+    RunnerLostBeforePin,
+    RunnerLost,
+    Replaced,
+    WorkingDirectoryChanged,
+    Abandoned,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineGoalBlockedReason
+
+```rust
+pub enum TimelineGoalBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+    FinishCheckFailed,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineGoalEvent
+
+```rust
+pub enum TimelineGoalEvent {
+    Commissioned {
+        generation: u64,
+        text: TimelineTextExcerpt,
+    },
+    Blocked {
+        generation: u64,
+        reason: TimelineGoalBlockedReason,
+        text: TimelineTextExcerpt,
+    },
+    Resumed {
+        generation: u64,
+        text: option::Option<TimelineTextExcerpt>,
+    },
+    Achieved {
+        generation: u64,
+        text: TimelineTextExcerpt,
+    },
+    UserStopped {
+        generation: u64,
+    },
+    SessionClosed {
+        generation: u64,
+        outcome: TimelineSessionOutcome,
+    },
+    Superseded {
+        generation: u64,
+        text: TimelineTextExcerpt,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineModelSettingsDetail
+
+```rust
+pub enum TimelineModelSettingsDetail {
+    SessionDefaultsChanged {
+        command_id: signalbox_domain::DurableCommandId,
+        prior_defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+        installed_defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+        prior_model: signalbox_domain::ModelSelectionRequest,
+        installed_model: signalbox_domain::ModelSelectionRequest,
+        prior_settings: signalbox_domain::ValidatedModelSettings,
+        installed_settings: signalbox_domain::ValidatedModelSettings,
+        caller_override: signalbox_domain::ModelSettingsOverlay,
+        adjustments: vec::Vec<signalbox_domain::ModelChangeAdjustment>,
+    },
+    TurnResolved {
+        accepted_input_id: signalbox_domain::AcceptedInputId,
+        turn_id: signalbox_domain::TurnId,
+        defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+        selection: signalbox_domain::FrozenModelSelection,
+        per_call_override: signalbox_domain::ModelSettingsOverlay,
+        settings: signalbox_domain::ValidatedModelSettings,
+        adjusted_from_selection_id: option::Option<signalbox_domain::DirectModelSelection>,
+        adjustments: vec::Vec<signalbox_domain::ModelChangeAdjustment>,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineBoundChildAction
+
+```rust
+pub enum TimelineBoundChildAction {
+    KeepRunning,
+    Stop,
+    Cancel,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineDelegationPolicy
+
+```rust
+pub enum TimelineDelegationPolicy {
+    Background,
+    Bound {
+        on_parent_stopped: TimelineBoundChildAction,
+        on_parent_cancelled: TimelineBoundChildAction,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineDelegationWaitMode
+
+```rust
+pub enum TimelineDelegationWaitMode {
+    Foreground,
+    Background,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineDelegationOutcome
+
+```rust
+pub enum TimelineDelegationOutcome {
+    ResultReturned,
+    ChildFailed,
+    ChildStopped,
+    ChildCancelled,
+    ContinueRunning,
+    AlreadyTerminal,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineDelegationReason
+
+```rust
+pub enum TimelineDelegationReason {
+    ChildCompleted,
+    ChildExecutionFailed,
+    ChildResultUnavailable,
+    ChildCancelled,
+    ParentStoppedWithDescendants,
+    ParentCancelledWithDescendants,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineDelegationProvenance
+
+```rust
+pub enum TimelineDelegationProvenance {
+    ParentLifecycleCommand {
+        session: signalbox_domain::SessionId,
+        command: signalbox_domain::DurableCommandId,
+    },
+    ChildTurn {
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+    },
+    ParentTurnCommand {
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+        command: signalbox_domain::DurableCommandId,
+    },
+    ParentGoalCommand {
+        session: signalbox_domain::SessionId,
+        goal_generation: u64,
+        command: signalbox_domain::DurableCommandId,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineDelegationDetail
+
+```rust
+pub enum TimelineDelegationDetail {
+    ChildSpawned {
+        relationship_id: signalbox_domain::ToolRequestId,
+        child: signalbox_domain::SessionId,
+        policy: TimelineDelegationPolicy,
+    },
+    ChildWaiting {
+        relationship_id: signalbox_domain::ToolRequestId,
+        child: signalbox_domain::SessionId,
+        awaiting_request: signalbox_domain::ToolRequestId,
+        mode: TimelineDelegationWaitMode,
+    },
+    ChildLifecycleDisposition {
+        relationship_id: signalbox_domain::ToolRequestId,
+        child: signalbox_domain::SessionId,
+        event_ordinal: u64,
+        outcome: TimelineDelegationOutcome,
+        reason: TimelineDelegationReason,
+        provenance: TimelineDelegationProvenance,
+    },
+    ChildResult {
+        relationship_id: signalbox_domain::ToolRequestId,
+        child: signalbox_domain::SessionId,
+        outcome: TimelineDelegationOutcome,
+        reason: TimelineDelegationReason,
+        provenance: TimelineDelegationProvenance,
+        content: option::Option<TimelineTextExcerpt>,
+    },
+    SessionMessage {
+        relationship_id: signalbox_domain::ToolRequestId,
+        message: signalbox_domain::DelegationMessageId,
+        sender: signalbox_domain::SessionId,
+        recipient: signalbox_domain::SessionId,
+        message_ordinal: u64,
+        delivery_sequence: u64,
+        content: TimelineTextExcerpt,
+    },
+    ResultWake {
+        relationship_id: signalbox_domain::ToolRequestId,
+        awaiting_request: option::Option<signalbox_domain::ToolRequestId>,
+    },
+    MessageWake {
+        relationship_id: signalbox_domain::ToolRequestId,
+        message: signalbox_domain::DelegationMessageId,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineImportedEvidence
+
+```rust
+pub struct TimelineImportedEvidence {
+    pub imported_conversation_id: signalbox_domain::ImportedConversationId,
+    pub imported_entry_id: signalbox_domain::ImportedTranscriptEntryId,
+    pub imported_position: u64,
+    pub relationship: signalbox_domain::ImportedSessionRelationship,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## SessionTimelineDetailBody
 
 ```rust
 pub enum SessionTimelineDetailBody {
+    SessionState {
+        state: TimelineSessionState,
+    },
+    SessionTerminal {
+        outcome: TimelineSessionOutcome,
+    },
+    CommandSettlement {
+        command_id: signalbox_domain::DurableCommandId,
+        rejection: option::Option<string::String>,
+    },
+    InjectionSettlement {
+        command_id: signalbox_domain::DurableCommandId,
+        delivered: bool,
+        turn_id: option::Option<signalbox_domain::TurnId>,
+        rejection: option::Option<string::String>,
+    },
+    Ownership {
+        transition: TimelineOwnershipTransition,
+    },
+    SessionCreated {
+        imported_evidence: option::Option<TimelineImportedEvidence>,
+    },
+    ModelSettings {
+        detail: TimelineModelSettingsDetail,
+    },
     UserInput {
         turn_id: signalbox_domain::TurnId,
         text: TimelineTextExcerpt,
@@ -388,16 +786,68 @@ pub enum SessionTimelineDetailBody {
         usage: TimelineModelUsage,
         provider_failure_cause: option::Option<signalbox_domain::ProviderModelCallFailureCause>,
     },
+    ToolBatch {
+        turn_id: signalbox_domain::TurnId,
+        producing_model_call_id: signalbox_domain::ModelCallId,
+        state: TimelineToolBatchState,
+        projected_member_index: option::Option<u32>,
+        tools: vec::Vec<TimelineToolAttempt>,
+        goal_events: vec::Vec<TimelineGoalEvent>,
+    },
+    ToolApprovalDecision {
+        turn_id: signalbox_domain::TurnId,
+        request_id: signalbox_domain::ToolRequestId,
+        tool_name: signalbox_domain::ToolName,
+        decision: TimelineApprovalDecision,
+        actor: TimelineApprovalActor,
+        rationale: option::Option<TimelineTextExcerpt>,
+        approval_judge_escalated: bool,
+    },
+    GoalEvent {
+        session_id: signalbox_domain::SessionId,
+        event: TimelineGoalEvent,
+    },
+    ContextCompaction {
+        compaction_id: signalbox_domain::ContextCompactionId,
+        model_call_id: signalbox_domain::ModelCallId,
+        through_position: u64,
+        summary_entry_id: signalbox_domain::SemanticTranscriptEntryId,
+        result_frontier_id: signalbox_domain::ContextFrontierId,
+        summary: TimelineTextExcerpt,
+    },
     TurnLifecycle {
         turn_id: signalbox_domain::TurnId,
         lifecycle: TimelineTurnLifecycleKind,
         cause_code: string::String,
     },
+    Reconciliation {
+        turn_id: signalbox_domain::TurnId,
+        operation: TimelineReconciliationOperation,
+        terminal_frontier_id: signalbox_domain::ContextFrontierId,
+    },
+    Runner {
+        runner_id: signalbox_domain::RunnerId,
+        placement_revision: u64,
+        sandbox_posture: TimelineRunnerSandboxPosture,
+        working_directory: option::Option<string::String>,
+        state: TimelineRunnerState,
+    },
     EventFact {
         kind: SessionTimelineEventKind,
     },
+    Delegation(TimelineDelegationDetail),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineReconciliationOperation
+
+```rust
+pub enum TimelineReconciliationOperation {
+    ModelCall(signalbox_domain::ModelCallId),
+    ToolAttempt(signalbox_domain::ToolAttemptId),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## SessionTimelineDetail
@@ -547,4 +997,48 @@ impl<Reader: SessionTimelineReader> ReadSessionTimelineService<Reader> {
         <Reader as SessionTimelineReader>::Error,
     >;
 }
+```
+
+## TimelineSessionState
+
+```rust
+pub enum TimelineSessionState {
+    Created,
+    Dispatched,
+    Active,
+    Waiting,
+    Recovering,
+    Blocked,
+    Parked,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineSessionOutcome
+
+```rust
+pub enum TimelineSessionOutcome {
+    AchievedVerified,
+    AchievedDeclared,
+    FailedRetryable,
+    FailedStructural,
+    FailedUnknown,
+    Stopped,
+    Superseded,
+    Abandoned,
+    Retired,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## TimelineOwnershipTransition
+
+```rust
+pub enum TimelineOwnershipTransition {
+    CreatedOwned,
+    CreatedUnmonitored,
+    Adopted,
+    Released,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
