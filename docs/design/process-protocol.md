@@ -89,16 +89,18 @@ reaching the owner-private socket is the authority.
 Configuration reload is one `reload_configuration { command_id }` request
 carrying a user-global command identity. An equal command retry reports busy
 while pending or replays its stored result without re-reading configuration.
-Core first commits the reload command with the complete checked repository-watch
-snapshot and rule-set digest as durable intent. The snapshot includes rules,
-convergence targets, template, interval, credential path, webhook listener
-settings, and hook map. Core reconciles convergence targets from the retained
-intent; the [reload-intent input](ownership-seam.md) delivers rule activation
-only, and the module activates the rules atomically and idempotently by command
-identity and digest. The activation transaction captures each repository's
-current event tail and retains it for idempotent replay. Startup replays any
-undelivered intent from its retained payload even if the configuration files
-changed, before terminalizing its claim. Success returns
+Core first commits the reload command with a complete checked snapshot of every
+reloadable section and the rule-set digest as durable intent. The snapshot
+contains the model catalog, session-template catalog, and repository-watch
+configuration, including rules, convergence targets, template, interval,
+credential path, webhook listener settings, and hook map. Core reconciles
+convergence targets from the retained intent; the
+[reload-intent input](ownership-seam.md) delivers rule activation only, and the
+module activates the rules atomically and idempotently by command identity and
+digest. The activation transaction captures each repository's current event tail
+and retains it for idempotent replay. Startup replays any undelivered intent
+from its retained payload even if the configuration files changed, before
+terminalizing its claim. Success returns
 `configuration_reloaded { command_id, reloaded_sections }`, whose sections are
 an array of the closed values `model_catalog`, `session_templates`, and
 `repo_watch`. Failure returns

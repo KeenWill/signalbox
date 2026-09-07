@@ -20,6 +20,9 @@ creates a delegated child and its initial task work.
 
 ## Design
 
+A runner-locus request whose placement is lost resolves as a retryable failure
+recorded in the batch before any approval wait parks the batch.
+
 A family declares an admissibility check for a condition it can evaluate before
 approval. Where a family declares one, that check takes precedence over the
 ordinary prepared-attempt `KnownFailed` route for the same condition; the two

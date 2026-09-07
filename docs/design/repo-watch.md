@@ -6,13 +6,18 @@ when no planned capability remains.
 
 ## Goal
 
-Three capabilities are committed. Dispatched sessions record repository watch as
+Four capabilities are committed. Dispatched sessions record repository watch as
 their cause and actor, with durable provenance that resolves the dispatch they
 came from. The poll cache survives a daemon restart, so the first complete poll
 after a restart sends conditional requests instead of one complete unconditional
-fetch. The module runtime composes and reloads the webhook listener.
+fetch. The module runtime composes and reloads the webhook listener and
+repository polling tasks.
 
 ## Design
+
+On reload, the repository-watch runtime starts a polling task for each added
+repository, stops each removed repository's task, and replaces a repository's
+task when its poll interval or polling credential file changes.
 
 Adding `[repository_watch.webhook]` on reload composes the listener; removing it
 stops the listener.

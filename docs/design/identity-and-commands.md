@@ -88,9 +88,11 @@ that adds the field states how each earlier version reconstitutes.
   it.
 - Imported-creation version 4 and create-session version 5 stay unwritten; no
   writer uses either number and the decoders keep rejecting them.
-- Only a replacement that provisions a workspace spans more than one
-  transaction; every other new kind, and every replacement that needs no
-  provisioning, is one claim-and-terminal-result transaction.
+- Workspace-provisioning replacement, OAuth provisioning and re-provisioning,
+  and configuration reload may span claim and terminal-result transactions;
+  every other new kind is one claim-and-terminal-result transaction.
+  [Process protocol](process-protocol.md) owns OAuth and reload startup
+  recovery.
 
 ## Acceptance criteria
 
