@@ -13,6 +13,7 @@ CREATE TABLE credential_pool_exhaustion_member (
     observed_at timestamptz NOT NULL,
     generation_ceiling bigint NOT NULL CHECK (generation_ceiling >= 0),
     action_id bigint REFERENCES credential_pool_member_action,
+    member_action_ids bigint[] NOT NULL,
     transient_observation_model_call_ids uuid[] NOT NULL,
     capacity_windows jsonb CHECK (jsonb_typeof(capacity_windows) = 'array'),
     record_generation bigint GENERATED ALWAYS AS ((evidence->'exclusion'->>'record_generation')::bigint) STORED REFERENCES credential_exclusion,
@@ -29,6 +30,10 @@ CREATE TRIGGER credential_pool_exhaustion_member_immutable BEFORE UPDATE OR DELE
 
 CREATE FUNCTION capture_credential_pool_exhaustion_reset_sources() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    SELECT COALESCE(array_agg(a.action_id ORDER BY a.action_id), '{}'::bigint[])
+      INTO NEW.member_action_ids
+      FROM credential_pool_member_action a
+      WHERE a.credential_reference = NEW.profile AND a.consumed_turn_id IS NULL;
     SELECT COALESCE(array_agg(x.observation_model_call_id ORDER BY x.observation_model_call_id), '{}'::uuid[])
       INTO NEW.transient_observation_model_call_ids
       FROM credential_pool_transient_exclusion x
@@ -45,19 +50,97 @@ $$;
 CREATE TRIGGER credential_pool_exhaustion_capture_reset_sources BEFORE INSERT ON credential_pool_exhaustion_member
     FOR EACH ROW EXECUTE FUNCTION capture_credential_pool_exhaustion_reset_sources();
 
-CREATE FUNCTION credential_pool_exhaustion_actual_reset(e credential_pool_exhaustion_member, reserve integer)
-RETURNS bigint LANGUAGE sql STABLE AS $$
-    SELECT max(reset_ms) FROM (
-        SELECT floor(extract(epoch FROM x.reset_at) * 1000)::bigint AS reset_ms
-          FROM credential_pool_transient_exclusion x
-          WHERE x.observation_model_call_id = ANY(e.transient_observation_model_call_ids)
-            AND x.credential_reference = e.profile AND x.reset_at > e.observed_at
-        UNION ALL
-        SELECT floor((capacity_window->>'resets_at')::numeric / 1000000)::bigint
-          FROM jsonb_array_elements(COALESCE(e.capacity_windows, '[]'::jsonb)) capacity_window
-          WHERE (capacity_window->>'remaining_percent')::bigint <= reserve
-            AND (capacity_window->>'resets_at')::numeric > extract(epoch FROM e.observed_at) * 1000000000
-    ) resets;
+CREATE FUNCTION credential_pool_exhaustion_reconstruct(e credential_pool_exhaustion_member)
+RETURNS TABLE (evidence jsonb, action_id bigint) LANGUAGE sql STABLE AS $$
+WITH context AS (
+    SELECT attempt.session_id, attempt.turn_id, lifecycle.acceptance_position,
+           policy.definition->>'name' AS pool_name,
+           COALESCE(member.headroom_reserve_percent, (policy.definition->>'headroom_reserve_percent')::integer) AS reserve
+      FROM turn_attempt attempt
+      JOIN turn_lifecycle lifecycle ON lifecycle.turn_id = attempt.turn_id
+      JOIN credential_pool_policy policy ON policy.pool_policy_id = e.pool_policy_id
+      JOIN credential_pool_policy_member member ON member.pool_policy_id = e.pool_policy_id AND member.ordinal = e.ordinal
+      WHERE attempt.turn_attempt_id = e.terminal_attempt_id AND member.profile = e.profile
+), projected AS (
+    SELECT x.* FROM credential_exclusion x
+      WHERE x.profile = e.profile AND x.record_generation <= e.generation_ceiling
+), active_projected AS (
+    SELECT x.* FROM projected x
+      WHERE NOT EXISTS (
+          SELECT 1 FROM projected newer
+            WHERE newer.record_generation > x.record_generation
+              AND newer.kind = x.kind AND newer.origin = x.origin
+              AND newer.pool_policy_id IS NOT DISTINCT FROM x.pool_policy_id
+              AND newer.session_id IS NOT DISTINCT FROM x.session_id)
+        AND NOT EXISTS (
+          SELECT 1 FROM clear_credential_exclusion_command cleared
+          JOIN durable_command command USING (command_id)
+            WHERE cleared.cleared_generation = x.record_generation
+              AND cleared.outcome = 'cleared' AND command.claimed_at <= e.observed_at)
+), windows AS (
+    SELECT (capacity_window->>'remaining_percent')::bigint AS remaining,
+           (capacity_window->>'resets_at')::numeric AS reset_nanos
+      FROM jsonb_array_elements(COALESCE(e.capacity_windows, '[]'::jsonb)) capacity_window
+), capacity AS (
+    SELECT min(remaining) AS observed,
+           max(floor(reset_nanos / 1000000)::bigint) FILTER (WHERE remaining <= context.reserve) AS reset_ms
+      FROM windows CROSS JOIN context
+      WHERE NOT EXISTS (SELECT 1 FROM windows invalid
+          WHERE invalid.reset_nanos IS NULL OR invalid.reset_nanos <= extract(epoch FROM e.observed_at) * 1000000000)
+      HAVING min(remaining) <= max(context.reserve)
+), candidates AS (
+    SELECT 0 AS rank, 0 AS source_order, x.record_generation, NULL::bigint AS action_id,
+           NULL::uuid AS correlation, NULL::bigint AS reset_ms,
+           jsonb_build_object('kind', x.kind, 'record_generation', x.record_generation) AS exclusion
+      FROM active_projected x
+      WHERE x.kind = 'profile_quarantine' AND x.origin <> 'pool_trigger'
+    UNION ALL
+    SELECT CASE a.action_kind WHEN 'quarantine' THEN 0 WHEN 'avoid_new_sessions' THEN 1 ELSE 2 END,
+           1, x.record_generation, a.action_id, NULL::uuid, NULL::bigint,
+           jsonb_build_object('kind', CASE a.action_kind WHEN 'quarantine' THEN 'profile_quarantine'
+               WHEN 'avoid_new_sessions' THEN 'membership_exclusion' ELSE 'session_displacement' END,
+               'record_generation', x.record_generation)
+      FROM credential_pool_member_action a CROSS JOIN context
+      LEFT JOIN projected x ON x.action_id = a.action_id
+      WHERE a.action_id = ANY(e.member_action_ids) AND a.credential_reference = e.profile
+        AND ((x.record_generation IS NULL AND (a.pool_name = context.pool_name OR a.action_kind = 'quarantine'))
+          OR (x.record_generation IN (SELECT record_generation FROM active_projected)
+              AND (x.kind = 'profile_quarantine' OR x.pool_policy_id = e.pool_policy_id)))
+        AND (a.action_kind <> 'switch_next_turn'
+          OR (a.observed_session_id = context.session_id AND a.observed_turn_id <> context.turn_id))
+        AND (a.action_kind <> 'avoid_new_sessions' OR NOT EXISTS (
+            SELECT 1 FROM model_call call
+            JOIN model_call_credential_pool_policy policy USING (model_call_id)
+            JOIN turn_lifecycle lifecycle ON lifecycle.turn_id = call.turn_id
+              WHERE call.session_id = context.session_id AND call.credential_reference = e.profile
+                AND policy.pool_name = context.pool_name AND call.state_kind = 'terminal'
+                AND call.terminal_disposition_kind = 'completed'
+                AND lifecycle.acceptance_position <= context.acceptance_position))
+    UNION ALL
+    SELECT 3, 0, NULL::bigint, NULL::bigint, chain.predecessor_model_call_id, NULL::bigint,
+           jsonb_build_object('kind', 'chain_exclusion', 'predecessor_model_call_id', chain.predecessor_model_call_id)
+      FROM credential_pool_chain_exclusion chain CROSS JOIN context
+      WHERE chain.session_id = context.session_id AND chain.turn_id = context.turn_id AND chain.credential_reference = e.profile
+    UNION ALL
+    SELECT 4, 0, NULL::bigint, NULL::bigint, transient.observation_model_call_id,
+           floor(extract(epoch FROM transient.reset_at) * 1000)::bigint,
+           jsonb_build_object('kind', 'transient_exclusion', 'observation_model_call_id', transient.observation_model_call_id)
+      FROM credential_pool_transient_exclusion transient
+      WHERE transient.observation_model_call_id = ANY(e.transient_observation_model_call_ids)
+        AND transient.credential_reference = e.profile AND transient.reset_at > e.observed_at
+    UNION ALL
+    SELECT 5, 0, NULL::bigint, NULL::bigint, NULL::uuid, capacity.reset_ms,
+           jsonb_build_object('kind', 'headroom_reserve', 'observed_headroom_percent', capacity.observed,
+               'reserve_percent', context.reserve)
+      FROM capacity CROSS JOIN context
+)
+SELECT jsonb_build_object('profile', e.profile, 'exclusion', selected.exclusion, 'reset_at_unix_ms',
+           (SELECT CASE WHEN count(reset_ms) = count(*) THEN max(reset_ms) END FROM candidates)),
+       selected.action_id
+  FROM candidates selected
+  ORDER BY selected.rank, selected.source_order, selected.record_generation DESC NULLS LAST,
+           selected.action_id DESC NULLS LAST, selected.reset_ms DESC NULLS LAST, selected.correlation
+  LIMIT 1;
 $$;
 
 CREATE FUNCTION credential_pool_exhaustion_evidence_valid(attempt uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
@@ -72,61 +155,11 @@ SELECT EXISTS (
       AND NOT EXISTS (
         SELECT 1 FROM credential_pool_exhaustion_member e
         LEFT JOIN credential_pool_policy_member m ON m.pool_policy_id = h.pool_policy_id AND m.ordinal = e.ordinal
+        LEFT JOIN LATERAL credential_pool_exhaustion_reconstruct(e) reconstructed ON true
         WHERE e.terminal_attempt_id = attempt AND NOT COALESCE(
-          e.pool_policy_id = h.pool_policy_id AND e.profile = m.profile AND e.evidence->>'profile' = e.profile
-          AND CASE e.evidence->'exclusion'->>'kind'
-            WHEN 'profile_quarantine' THEN e.evidence->'reset_at_unix_ms' = 'null'::jsonb
-            WHEN 'membership_exclusion' THEN e.evidence->'reset_at_unix_ms' = 'null'::jsonb
-            WHEN 'session_displacement' THEN e.evidence->'reset_at_unix_ms' = 'null'::jsonb
-            WHEN 'chain_exclusion' THEN e.evidence->'reset_at_unix_ms' = 'null'::jsonb
-            ELSE (e.evidence->>'reset_at_unix_ms')::bigint = credential_pool_exhaustion_actual_reset(e,
-                COALESCE(m.headroom_reserve_percent, (policy.definition->>'headroom_reserve_percent')::integer))
-          END
-          AND CASE
-          WHEN e.evidence->'exclusion'->>'kind' IN ('profile_quarantine', 'membership_exclusion', 'session_displacement') THEN
-            CASE WHEN e.record_generation IS NOT NULL THEN EXISTS (
-                SELECT 1 FROM credential_exclusion x WHERE x.record_generation = e.record_generation
-                  AND x.record_generation <= e.generation_ceiling AND x.profile = e.profile
-                  AND x.kind = e.evidence->'exclusion'->>'kind'
-                  AND (x.kind = 'profile_quarantine' OR x.pool_policy_id = h.pool_policy_id)
-                  AND (x.kind <> 'session_displacement' OR x.session_id = h.session_id)
-                  AND NOT EXISTS (SELECT 1 FROM credential_exclusion newer
-                      WHERE newer.record_generation > x.record_generation AND newer.record_generation <= e.generation_ceiling
-                        AND newer.profile = x.profile AND newer.kind = x.kind AND newer.origin = x.origin
-                        AND newer.pool_policy_id IS NOT DISTINCT FROM x.pool_policy_id
-                        AND newer.session_id IS NOT DISTINCT FROM x.session_id)
-            ) ELSE e.evidence->'exclusion'->'record_generation' = 'null'::jsonb AND EXISTS (
-                SELECT 1 FROM credential_pool_member_action a WHERE a.action_id = e.action_id
-                  AND a.credential_reference = e.profile
-                  AND (a.pool_name = h.pool_name OR a.action_kind = 'quarantine')
-                  AND CASE a.action_kind WHEN 'quarantine' THEN 'profile_quarantine' WHEN 'avoid_new_sessions' THEN 'membership_exclusion' ELSE 'session_displacement' END = e.evidence->'exclusion'->>'kind'
-                  AND (a.action_kind <> 'switch_next_turn' OR (a.observed_session_id = h.session_id AND a.observed_turn_id <> h.turn_id))
-                  AND NOT EXISTS (SELECT 1 FROM credential_exclusion x WHERE x.action_id = a.action_id AND x.record_generation <= e.generation_ceiling)
-            ) END
-          WHEN e.evidence->'exclusion'->>'kind' = 'chain_exclusion' THEN EXISTS (
-            SELECT 1 FROM credential_pool_chain_exclusion x WHERE x.session_id = h.session_id AND x.turn_id = h.turn_id AND x.credential_reference = e.profile AND x.predecessor_model_call_id = e.predecessor_model_call_id)
-          WHEN e.evidence->'exclusion'->>'kind' = 'transient_exclusion' THEN EXISTS (
-            SELECT 1 FROM credential_pool_transient_exclusion x WHERE x.observation_model_call_id = e.observation_model_call_id AND x.credential_reference = e.profile AND x.reset_at > e.observed_at
-              AND x.observation_model_call_id = ANY(e.transient_observation_model_call_ids))
-            AND NOT EXISTS (
-                SELECT 1 FROM credential_exclusion quarantine
-                WHERE quarantine.kind = 'profile_quarantine' AND quarantine.profile = e.profile
-                  AND quarantine.record_generation <= e.generation_ceiling
-                  AND NOT EXISTS (
-                      SELECT 1 FROM credential_exclusion newer
-                      WHERE newer.kind = quarantine.kind AND newer.profile = quarantine.profile
-                        AND newer.origin = quarantine.origin
-                        AND newer.record_generation > quarantine.record_generation
-                        AND newer.record_generation <= e.generation_ceiling)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM clear_credential_exclusion_command cleared
-                      JOIN durable_command command USING (command_id)
-                      WHERE cleared.cleared_generation = quarantine.record_generation
-                        AND cleared.outcome = 'cleared' AND command.claimed_at <= e.observed_at))
-          WHEN e.evidence->'exclusion'->>'kind' = 'headroom_reserve' THEN
-            (e.evidence->'exclusion'->>'reserve_percent')::integer = COALESCE(m.headroom_reserve_percent, (policy.definition->>'headroom_reserve_percent')::integer)
-            AND (e.evidence->'exclusion'->>'observed_headroom_percent')::bigint <= (e.evidence->'exclusion'->>'reserve_percent')::integer
-          ELSE false END, false)
+          e.pool_policy_id = h.pool_policy_id AND e.profile = m.profile
+          AND e.evidence = reconstructed.evidence
+          AND e.action_id IS NOT DISTINCT FROM reconstructed.action_id, false)
       )
 );
 $$;
