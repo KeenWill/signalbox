@@ -229,6 +229,7 @@ fn goal_completion_script() -> Script {
 
 fn goal_refusal_script() -> Script {
     Script::delivering(TerminalEvidence::Refused(RefusalEvidence {
+        reason: signalbox_model_runtime::RefusalReason::Unspecified,
         exchange: ExchangeFacts::default(),
         message_id: None,
         reported_model: Some(ProviderReportedModel::new(SERVED_PROVIDER_MODEL)),

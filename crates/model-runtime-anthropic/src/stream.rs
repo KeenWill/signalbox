@@ -997,6 +997,7 @@ impl StreamDecoder {
         }
         let evidence = match finish.completion_finish() {
             None => TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
                 exchange: self.exchange.clone(),
                 message_id: self.message_id.clone(),
                 reported_model: self.reported_model.clone(),

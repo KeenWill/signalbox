@@ -355,6 +355,11 @@ pub(crate) fn decode_response<C: Clone>(
             usage,
         }),
         None => TerminalEvidence::Refused(RefusalEvidence {
+            reason: if response.incomplete_details.as_ref().map(|details| details.reason.as_str()) == Some("content_filter") {
+                signalbox_model_runtime::RefusalReason::ContentPolicy
+            } else {
+                signalbox_model_runtime::RefusalReason::Unspecified
+            },
             exchange,
             message_id,
             reported_model,
