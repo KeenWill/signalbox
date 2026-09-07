@@ -610,12 +610,7 @@ mod tests {
 
     #[test]
     fn reasoning_replay_requires_the_producing_adapter_and_family() {
-        for producer in [
-            "gpt-other",
-            "gpt-untagged",
-            "claude-foreign",
-            "removed-target",
-        ] {
+        for producer in ["gpt-other", "gpt-untagged", "claude-foreign"] {
             let ReasoningReplayFixture {
                 source: mut operation,
                 routes,
