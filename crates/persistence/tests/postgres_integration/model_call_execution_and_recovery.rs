@@ -4786,8 +4786,9 @@ async fn restart_mid_recovery_neither_loses_nor_double_applies_the_attempt()
         "SELECT recovery.state_kind, recovery.attempt_count,
                 array_agg(attempt.outcome_kind ORDER BY attempt.attempt_ordinal) AS outcomes,
                 (SELECT count(*)
-                   FROM turn_reconciliation_required_outbox_event AS event
-                  WHERE event.turn_id = recovery.turn_id) AS reconciliation_events
+                   FROM turn_terminal_outbox_event AS event
+                  WHERE event.turn_id = recovery.turn_id
+                    AND event.disposition_kind = 'reconciliation_required') AS reconciliation_events
            FROM automatic_reconciliation AS recovery
            JOIN automatic_reconciliation_attempt AS attempt
              ON attempt.turn_id = recovery.turn_id
