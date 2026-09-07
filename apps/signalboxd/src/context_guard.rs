@@ -1382,6 +1382,28 @@ fn compaction_failure_closure_collision_is_retryable(error: &CommitActivationPre
 
 #[cfg(test)]
 mod tests {
+    use super::ReportedUsageCompactionError;
+    #[test]
+    fn reported_usage_activation_preview_failure_keeps_its_operator_cause() {
+        let error =
+            ReportedUsageCompactionError::Activation(StartEligibleTurnRepositoryError::Database {
+                source: sqlx::Error::PoolClosed,
+                commit_ambiguous: false,
+            });
+
+        assert_eq!(
+            error.operator_failure_cause_code(),
+            "reported_usage_activation_preview"
+        );
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }
+        );
+        assert_eq!(error.turn(), None);
+    }
+
     use std::{
         fmt,
         future::{Future, ready},

@@ -230,24 +230,26 @@ pub use review_workflow::{
     validate_complete_review_finding_reference_graph,
 };
 pub use runner::{
-    AbandonedRunnerPlacement, CanonicalCloneUrlDigest, CredentialDispatchAuthorization,
-    CredentialProfileChange, CredentialProfileGrant, CredentialProfileGrantReconstitutionInput,
-    CredentialProfileGrantReplacement, CredentialProfileGrantState, CredentialProfileName,
-    CredentialProfilePlacementReplacement, CredentialProfilePolicy, CredentialToolApproval,
-    LostPinnedRunnerPlacement, PinnedRunnerPlacement, PreparedRunnerRegistration,
-    ProvisionedWorkspace, RunnerAdvertisement, RunnerCapabilityClass, RunnerCatalog,
-    RunnerClaimedAttemptReplacement, RunnerCredentialGrantChange, RunnerCredentialGrantLineage,
-    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentReconstitutionInput,
-    RunnerEnrollmentState, RunnerGeneration, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseLoss,
-    RunnerLeaseNoExecutionProof, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
-    RunnerLeaseRetryAuthority, RunnerLeaseRetryPreparation, RunnerLeaseState, RunnerLostBeforePin,
-    RunnerPlacementChange, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
-    RunnerPlacementReplacement, RunnerPrePinReplacement, RunnerPrePinReplacementHistory,
-    RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization,
-    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
-    RunnerUnclaimedAttemptReauthorization, RunnerWorkingDirectory, SessionRunnerPin,
-    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    AbandonLostRunner, AbandonLostRunnerResult, AbandonedRunnerPlacement, CanonicalCloneUrlDigest,
+    CredentialDispatchAuthorization, CredentialProfileChange, CredentialProfileGrant,
+    CredentialProfileGrantReconstitutionInput, CredentialProfileGrantReplacement,
+    CredentialProfileGrantState, CredentialProfileName, CredentialProfilePlacementReplacement,
+    CredentialProfilePolicy, CredentialToolApproval, LostPinnedRunnerPlacement,
+    PinnedRunnerPlacement, PreparedRunnerRegistration, PromotePendingRunner,
+    PromotePendingRunnerResult, ProvisionedWorkspace, ReplaceLostRunner, ReplaceLostRunnerResult,
+    RunnerAdvertisement, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
+    RunnerCredentialGrantChange, RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment,
+    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerLease,
+    RunnerLeaseCorrelation, RunnerLeaseLoss, RunnerLeaseNoExecutionProof, RunnerLeaseOfferRequest,
+    RunnerLeaseReconstitutionInput, RunnerLeaseRetryAuthority, RunnerLeaseRetryPreparation,
+    RunnerLeaseState, RunnerLostBeforePin, RunnerPlacementBoundary, RunnerPlacementChange,
+    RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory, RunnerPlacementReplacement,
+    RunnerPrePinReplacement, RunnerPrePinReplacementHistory, RunnerProvisioningFailureKind,
+    RunnerRecoveryRejection, RunnerReplacementProvisioning, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
+    RunnerToolPermissionOverrides, RunnerUnclaimedAttemptReauthorization, RunnerWorkingDirectory,
+    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
     ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
     WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceRecovery,
@@ -359,10 +361,10 @@ pub use tool::{
     ToolApprovalResolutionReconstitutionInput, ToolArgumentsError, ToolArgumentsFailure,
     ToolArgumentsKind, ToolCallProposal, ToolDecisionRationale, ToolDecisionRationaleError,
     ToolDecisionSource, ToolDenialReason, ToolDenialReasonError, ToolDenialReasonFailure,
-    ToolEffectClass, ToolName, ToolNameError, ToolNameFailure, ToolPermissionDefault, ToolRequest,
-    ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent,
-    ToolResultText, ToolResultTextError, ToolResultTextFailure, ToolUsingAssistantResponse,
-    ToolUsingAssistantResponseError,
+    ToolEffectClass, ToolInadmissibleReason, ToolName, ToolNameError, ToolNameFailure,
+    ToolPermissionDefault, ToolRequest, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+    ToolRequestResolution, ToolResultContent, ToolResultText, ToolResultTextError,
+    ToolResultTextFailure, ToolUsingAssistantResponse, ToolUsingAssistantResponseError,
 };
 pub use tool_attempt::{
     ApprovedToolRequest, ApprovedToolRequestError, AuthorizedToolAttempt,
@@ -533,6 +535,11 @@ define_identity!(
 );
 
 define_identity!(
+    /// Identifies one runner-created enrollment request across reconnects.
+    RunnerEnrollmentRequestId
+);
+
+define_identity!(
     /// Identifies one enrollment-issued logical runner.
     RunnerId
 );
@@ -550,6 +557,11 @@ define_identity!(
 define_identity!(
     /// Identifies one stable runner-owned workspace manifest across lifecycle changes.
     WorkspaceManifestId
+);
+
+define_identity!(
+    /// Identifies one command-bound runner workspace provisioning authorization.
+    RunnerProvisioningAuthorizationId
 );
 
 define_identity!(

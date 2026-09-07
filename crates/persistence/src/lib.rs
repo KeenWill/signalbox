@@ -31,6 +31,7 @@ pub mod hub_fence;
 pub mod lifecycle_metrics;
 pub mod mapping;
 pub mod model_execution;
+pub mod oauth_credential;
 pub mod operator_status;
 pub mod outbox;
 pub mod plan;
@@ -715,3 +716,6 @@ mod tests {
         assert!(unbounded.tmpfs_options().is_none());
     }
 }
+
+/// Durable configuration reload intent and receipts.
+pub mod reload_configuration;

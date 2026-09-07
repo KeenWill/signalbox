@@ -333,7 +333,14 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
         | ServerMessage::ReviewOrchestration { .. }
-        | ServerMessage::DeploymentLimits { .. } => DelegationResponse::Unexpected,
+        | ServerMessage::ConfigurationReloaded { .. }
+        | ServerMessage::ConfigurationReloadFailed { .. }
+        | ServerMessage::DeploymentLimits { .. }
+        | ServerMessage::RunnerReplacementReceipt { .. }
+        | ServerMessage::RunnerAbandonmentReceipt { .. }
+        | ServerMessage::RunnerPromotionReceipt { .. }
+        | ServerMessage::OauthCredentialAuthorization { .. }
+        | ServerMessage::OauthCredentialReceipt { .. } => DelegationResponse::Unexpected,
     }
 }
 

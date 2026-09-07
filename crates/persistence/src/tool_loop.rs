@@ -4,6 +4,11 @@
 //! scheduler lock before asking the domain aggregate for authority. Executor
 //! work remains outside database transactions.
 
+mod placement_loss;
+pub(crate) use placement_loss::{
+    close_lost_runner_requests, resolve_lost_runner_batch, resolve_lost_runner_batch_after_judge,
+};
+
 use std::{
     collections::{BTreeMap, HashSet},
     num::NonZeroU64,
@@ -533,8 +538,15 @@ impl PostgresToolLoopRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ReloadConfiguration
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential
                 | CommandKind::SessionLifecycle
-                | CommandKind::OverrideDeniedToolRequest,
+                | CommandKind::OverrideDeniedToolRequest
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }
@@ -637,7 +649,10 @@ impl PostgresToolLoopRepository {
                             batch
                                 .requests()
                                 .iter()
-                                .filter(|request| batch.approval(request.id()).is_none())
+                                .filter(|request| {
+                                    request.inadmissible_reason().is_none()
+                                        && batch.approval(request.id()).is_none()
+                                })
                                 .count()
                                 == 1
                         })
@@ -702,7 +717,14 @@ impl PostgresToolLoopRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
-                | CommandKind::SessionLifecycle,
+                | CommandKind::ReloadConfiguration
+                | CommandKind::SessionLifecycle
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }
@@ -1848,7 +1870,9 @@ where
         let last_undecided = batch
             .requests()
             .iter()
-            .filter(|request| batch.approval(request.id()).is_none())
+            .filter(|request| {
+                request.inadmissible_reason().is_none() && batch.approval(request.id()).is_none()
+            })
             .count()
             == 1;
         let continuation = last_undecided.then(&mut *next_continuation);
@@ -2425,7 +2449,7 @@ async fn load_requests(
 ) -> Result<Vec<signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text, approval_posture
+                arguments_kind, arguments_text, approval_posture, inadmissible_reason
            FROM tool_request
           WHERE producing_model_call_id = $1
           ORDER BY request_ordinal",
@@ -2484,6 +2508,16 @@ pub(crate) fn decode_request(
         arguments,
     )
     .with_approval_posture(posture)
+    .with_inadmissible_reason(
+        match row
+            .try_get::<Option<String>, _>("inadmissible_reason")?
+            .as_deref()
+        {
+            None => None,
+            Some("placement_lost") => Some(signalbox_domain::ToolInadmissibleReason::PlacementLost),
+            Some(_) => return Err(ToolLoopCorruption::Inconsistent("inadmissible reason").into()),
+        },
+    )
     .into_request())
 }
 
@@ -2504,7 +2538,7 @@ async fn load_approvals(
              ON request.request_id = approval.request_id
            LEFT JOIN tool_approval_user_override AS recorded
              ON recorded.denied_request_id = approval.override_denied_request_id
-          WHERE request.producing_model_call_id = $1
+          WHERE request.producing_model_call_id = $1 AND request.inadmissible_reason IS NULL
           ORDER BY request.request_ordinal",
     )
     .bind(producing_call.into_uuid())
@@ -2760,7 +2794,7 @@ async fn load_user_decision_receipts(
                 approval.decision_source,
                 request.request_ordinal, request.tool_name,
                 request.arguments_kind, request.arguments_text,
-                request.approval_posture,
+                request.approval_posture, request.inadmissible_reason,
                 request.producing_model_call_id, request.session_id,
                 request.turn_id
            FROM decide_tool_request_command AS command
@@ -3881,13 +3915,18 @@ async fn load_recorded_override(
 
 /// Loads the request's durable terminal logical resolution, when it exists.
 ///
-/// The resolution is the request's materialized result entry: a denied
-/// result, an executed attempt's result, or the turn-end closure. A request
-/// whose round is still resolving has none.
+/// Loads request-level inadmissibility or a materialized logical result.
 async fn load_terminal_request_resolution(
     connection: &mut PgConnection,
     request: ToolRequestId,
 ) -> Result<Option<signalbox_domain::ToolRequestResolution>, ToolLoopRepositoryError> {
+    let closed: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tool_request WHERE request_id = $1 AND inadmissible_reason IS NOT NULL)")
+        .bind(request.into_uuid()).fetch_one(&mut *connection).await?;
+    if closed {
+        return Ok(Some(
+            signalbox_domain::ToolRequestResolution::ClosedInadmissible { request },
+        ));
+    }
     let row = sqlx::query(
         "SELECT entry.payload_kind, entry.tool_result_attempt_id
            FROM semantic_transcript_entry AS entry
@@ -3953,7 +3992,7 @@ async fn decision_exists(
     request: ToolRequestId,
 ) -> Result<bool, ToolLoopRepositoryError> {
     sqlx::query_scalar(
-        "SELECT EXISTS (
+        "SELECT EXISTS (SELECT 1 FROM tool_request WHERE request_id = $1 AND inadmissible_reason IS NOT NULL) OR EXISTS (
              SELECT 1
                FROM tool_approval_decision
               WHERE request_id = $1
@@ -3992,7 +4031,7 @@ pub(crate) async fn load_request_by_id(
 ) -> Result<Option<signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
     let row = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text, approval_posture,
+                arguments_kind, arguments_text, approval_posture, inadmissible_reason,
                 producing_model_call_id, session_id, turn_id
            FROM tool_request
           WHERE request_id = $1",
@@ -4023,7 +4062,7 @@ pub(crate) async fn load_requests_by_id(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text, approval_posture,
+                arguments_kind, arguments_text, approval_posture, inadmissible_reason,
                 producing_model_call_id, session_id, turn_id
            FROM tool_request
           WHERE request_id = ANY($1)",
@@ -4247,6 +4286,13 @@ pub(crate) async fn persist_result_entry_slice(
                 ),
                 SemanticTranscriptEntryPayload::ToolDenied { request } => (
                     "tool_denied",
+                    Some(tool_request_id_to_uuid(*request)),
+                    None,
+                    None,
+                    None,
+                ),
+                SemanticTranscriptEntryPayload::ToolInadmissible { request } => (
+                    "tool_inadmissible",
                     Some(tool_request_id_to_uuid(*request)),
                     None,
                     None,

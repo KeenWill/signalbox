@@ -86,6 +86,7 @@ pub(super) enum InternalDiagnostic {
     OperatorStatusCorruption,
     GoalRepositoryCorruption,
     SessionLifecycleCommandCorruption,
+    OauthCredentialCorruption,
 }
 
 impl InternalDiagnostic {
@@ -156,7 +157,8 @@ impl InternalDiagnostic {
             | Self::ProcessReadCorruption
             | Self::OperatorStatusCorruption
             | Self::GoalRepositoryCorruption
-            | Self::SessionLifecycleCommandCorruption => OperatorFailureClass::FailClosedCorruption,
+            | Self::SessionLifecycleCommandCorruption
+            | Self::OauthCredentialCorruption => OperatorFailureClass::FailClosedCorruption,
         }
     }
 
@@ -236,6 +238,7 @@ impl InternalDiagnostic {
             Self::OperatorStatusCorruption => "operator_status_corruption",
             Self::GoalRepositoryCorruption => "goal_repository_corruption",
             Self::SessionLifecycleCommandCorruption => "session_lifecycle_command_corruption",
+            Self::OauthCredentialCorruption => "oauth_credential_corruption",
         }
     }
 }
@@ -2176,6 +2179,8 @@ impl Error for ProcessConnectionError {
 /// Fatal local-process runtime failure.
 #[derive(Debug)]
 pub enum ProcessRuntimeError {
+    /// OAuth claim recovery or catalog installation failed before accepting work.
+    OauthRecovery(signalbox_persistence::oauth_credential::OauthCredentialRepositoryError),
     /// The guarded listener could not accept a connection.
     Accept(io::Error),
     /// A completed snapshot spool could not be read for transmission.
@@ -2207,6 +2212,7 @@ pub enum ProcessRuntimeError {
 impl fmt::Display for ProcessRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::OauthRecovery(_) => "OAuth credential startup recovery failed",
             Self::Accept(_) => "the local process listener failed",
             Self::SpoolIo(_) => "the local process server could not read a snapshot spool",
             Self::Encode(_) => "the local process server could not encode a frame",
@@ -2247,7 +2253,8 @@ impl Error for ProcessRuntimeError {
             Self::ConnectionTask(error) => Some(error),
             Self::Dispatch(error) => Some(error),
             Self::CleanupSocket(error) => Some(error),
-            Self::EncodeInvariant
+            Self::OauthRecovery(_)
+            | Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed
             | Self::ImportBudgetClosed
             | Self::ReviewCommandBudgetClosed

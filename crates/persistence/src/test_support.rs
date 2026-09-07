@@ -150,3 +150,29 @@ impl FleetSoakCensusRepository {
         })
     }
 }
+
+/// Makes deadline candidate reads raise a PostgreSQL exception with private
+/// message, detail, hint, and statement context in an isolated test database.
+pub async fn inject_deadline_diagnostic_failure(pool: &PgPool) -> Result<(), sqlx::Error> {
+    // A candidate view makes the real deadline query receive a PostgreSQL
+    // exception containing each payload-bearing diagnostic field.
+    sqlx::raw_sql(
+        "ALTER TABLE session_deadline RENAME TO saved_session_deadline;
+         CREATE FUNCTION private_deadline_source() RETURNS uuid LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION USING
+                 MESSAGE = 'private-deadline-message',
+                 DETAIL = 'private-deadline-detail',
+                 HINT = 'private-deadline-hint';
+         END;
+         $$;
+         CREATE VIEW session_deadline AS
+         SELECT private_deadline_source() AS session_id,
+                'admission'::text AS deadline_kind,
+                clock_timestamp() AS armed_at,
+                clock_timestamp() - INTERVAL '1 hour' AS expires_at;",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}

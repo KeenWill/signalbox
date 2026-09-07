@@ -501,10 +501,22 @@ The model-runtime layer imports and redefines no domain identifier type, and a
 runtime-generated identity is never authoritative correlation; the correlation
 the sealed issued call carries is.
 
+A runner-placement change entry, owned by
+[sessions-and-transcript](sessions-and-transcript.md), renders as a structured
+placement change carrying the positive placement revision and the selected
+sandbox profile. The bridge emits one of two exact injected user-role messages,
+chosen by profile, with the braces replaced by the canonical decimal revision.
+For `workspace-restricted`:
+`Signalbox session event: runner placement changed to revision {revision} with profile workspace-restricted; the prior placement can no longer execute. The successor writable root and working directory are now active. Relocation did not delete prior files; they may still exist, but only paths exposed inside the successor restricted workspace are reachable.`
+For `ambient`:
+`Signalbox session event: runner placement changed to revision {revision} with profile ambient; the prior placement can no longer execute. The successor working directory is now active. Relocation did not delete prior files, and they may remain reachable at their previous paths through the invoking user's filesystem; check before recreating or overwriting them.`
+Missing, stale, cross-session, or non-successor placement authority fails
+rendering instead of inventing text.
+
 ## Planned
 
 - Multipart attachment rendering ([design](../design/model-call-execution.md)).
-- Runner-placement rendering and the executable session-tool snapshot
+- The executable session-tool snapshot
   ([design](../design/model-call-execution.md)).
 - Reuse of a successful attachment verification within a turn
   ([design](../design/model-call-execution.md)).

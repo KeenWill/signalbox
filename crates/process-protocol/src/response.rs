@@ -44,10 +44,172 @@ use crate::transcript::{
 use crate::user_input::UserInputContent;
 use serde::{Deserialize, Serialize};
 
+/// Closed terminal OAuth administration outcomes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OauthCredentialOutcome {
+    /// Authorization was stored.
+    Provisioned {},
+    /// Authorization already exists.
+    AlreadyProvisioned {},
+    /// Authorization was replaced.
+    Reprovisioned {},
+    /// Authorization was deleted.
+    Deleted {},
+    /// No authorization remained.
+    AlreadyDeleted {},
+    /// Re-provisioning found no authorization.
+    NotProvisioned {},
+    /// Startup abandoned a pending exchange.
+    Abandoned {},
+    /// A newer generation won.
+    Superseded {},
+    /// The operation failed without installing authorization.
+    Failed {
+        /// Closed failure classification.
+        reason: OauthCredentialFailure,
+    },
+}
+
+/// Closed failures emitted by OAuth administration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OauthCredentialFailure {
+    /// The profile is undeclared.
+    UnknownProfile,
+    /// The profile does not use OAuth.
+    NonOauthProfile,
+    /// The registration changed during the exchange.
+    RegistrationChanged,
+    /// The device endpoint rejected the request or returned invalid details.
+    DeviceEndpointRejected,
+    /// The initial device request failed in transport.
+    DeviceEndpointFailed,
+    /// The operator denied authorization.
+    AccessDenied,
+    /// The authorization polling deadline expired.
+    PollingExpired,
+    /// The token endpoint failed.
+    TokenEndpointFailed,
+    /// The token response contained no identity token.
+    TokenResponseWithoutIdentity,
+    /// A pool co-member already holds the account identity.
+    AccountIndependenceFailed,
+}
+
+pub(crate) fn validate_oauth_profile(profile: &str) -> Result<(), FrameValidationError> {
+    if profile.is_empty()
+        || profile.len() > 256
+        || profile.trim() != profile
+        || profile.contains('\0')
+    {
+        return Err(FrameValidationError::OauthCredentialShape);
+    }
+    Ok(())
+}
+
+/// Checks device-authorization progress before it can be emitted.
+pub fn validate_oauth_authorization(
+    user_code: &str,
+    verification_uri: &str,
+) -> Result<(), FrameValidationError> {
+    if user_code.is_empty()
+        || user_code.len() > 256
+        || !user_code.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+        || verification_uri.is_empty()
+        || verification_uri.len() > 4096
+        || verification_uri
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+        // Url accepts repaired browser addresses; progress requires a URI authority.
+        || !verification_uri.split_once("://").is_some_and(|(_, rest)| {
+            rest.split(['/', '?', '#'])
+                .next()
+                .is_some_and(|authority| !authority.is_empty() && !authority.contains('@'))
+        })
+    {
+        return Err(FrameValidationError::OauthCredentialShape);
+    }
+    let uri = url::Url::parse(verification_uri)
+        .map_err(|_| FrameValidationError::OauthCredentialShape)?;
+    if uri.scheme() != "https"
+        || uri.host_str().is_none()
+        || !uri.username().is_empty()
+        || uri.password().is_some()
+        || uri.fragment().is_some()
+    {
+        return Err(FrameValidationError::OauthCredentialShape);
+    }
+    Ok(())
+}
+
 /// Closed versioned server message family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
+    /// The retained replacement configuration is installed.
+    ConfigurationReloaded {
+        /// Durable reload identity.
+        command_id: crate::CommandId,
+        /// Complete inventory installed by this reload.
+        reloaded_sections: Vec<ReloadedSection>,
+    },
+    /// Configuration reload was refused without replacing the running snapshot.
+    ConfigurationReloadFailed {
+        /// Durable reload identity.
+        command_id: crate::CommandId,
+        /// Operation that refused the reload.
+        phase: ConfigurationReloadPhase,
+        /// Bounded sanitized diagnostic, containing no configuration values.
+        reason: String,
+    },
+    /// Durable replacement receipt.
+    RunnerReplacementReceipt {
+        /// Command whose terminal result committed.
+        command_id: crate::CommandId,
+        /// Session the request named.
+        session_id: CanonicalUuid,
+        /// Committed installation or refusal.
+        outcome: crate::RunnerReplacementOutcome,
+    },
+    /// Durable abandonment receipt.
+    RunnerAbandonmentReceipt {
+        /// Command whose terminal result committed.
+        command_id: crate::CommandId,
+        /// Session the request named.
+        session_id: CanonicalUuid,
+        /// Committed retirement or refusal.
+        outcome: crate::RunnerAbandonmentOutcome,
+    },
+    /// Durable pending-enrollment promotion receipt.
+    RunnerPromotionReceipt {
+        /// Command whose terminal result committed.
+        command_id: crate::CommandId,
+        /// Exact pending enrollment request the command named.
+        enrollment_request_id: CanonicalUuid,
+        /// Committed promotion or refusal.
+        outcome: crate::RunnerPromotionOutcome,
+    },
+    /// Operator instructions for a pending OAuth exchange.
+    OauthCredentialAuthorization {
+        /// User-global durable command identity.
+        command_id: crate::CommandId,
+        /// Credential profile identity.
+        profile: String,
+        /// Printable ASCII device user code, at most 256 bytes.
+        user_code: String,
+        /// Absolute HTTPS verification URI, at most 4,096 bytes.
+        verification_uri: String,
+    },
+    /// Durable result of an OAuth administration command.
+    OauthCredentialReceipt {
+        /// User-global durable command identity.
+        command_id: crate::CommandId,
+        /// Credential profile identity.
+        profile: String,
+        /// Closed terminal result.
+        outcome: OauthCredentialOutcome,
+    },
     /// Session creation receipt.
     SessionCreated {
         /// Created session.
@@ -718,6 +880,16 @@ impl ServerMessage {
     pub(crate) fn validate(&self) -> Result<(), FrameValidationError> {
         validate_operator_status_message(self)?;
         match self {
+            Self::OauthCredentialAuthorization {
+                profile,
+                user_code,
+                verification_uri,
+                ..
+            } => {
+                validate_oauth_profile(profile)?;
+                validate_oauth_authorization(user_code, verification_uri)?;
+            }
+            Self::OauthCredentialReceipt { profile, .. } => validate_oauth_profile(profile)?,
             Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,
             Self::SessionAwaitRegistered {
                 mode: DelegationWaitMode::Foreground,
@@ -878,6 +1050,19 @@ impl ServerMessage {
                     return Err(FrameValidationError::MetadataShape);
                 }
             }
+            Self::ConfigurationReloaded {
+                reloaded_sections, ..
+            } if reloaded_sections.as_slice() != ReloadedSection::ALL => {
+                return Err(FrameValidationError::ConfigurationReloadShape);
+            }
+            Self::ConfigurationReloadFailed { reason, .. } => {
+                if reason.is_empty()
+                    || reason.len() > MAX_CONFIGURATION_RELOAD_REASON_BYTES
+                    || reason.chars().any(char::is_control)
+                {
+                    return Err(FrameValidationError::ConfigurationReloadShape);
+                }
+            }
             Self::ConversationSummary { conversation } => conversation.validate()?,
             Self::ModelCapabilityItem { capabilities, .. } => capabilities.validate()?,
             Self::ModelCapabilitiesEnd { capability_count }
@@ -1010,4 +1195,40 @@ impl ServerMessage {
         }
         Ok(())
     }
+}
+
+/// Maximum UTF-8 length of a sanitized reload diagnostic.
+pub const MAX_CONFIGURATION_RELOAD_REASON_BYTES: usize = 1024;
+
+/// Closed inventory of reloadable sections.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReloadedSection {
+    /// Models, aliases, and their rate catalog.
+    ModelCatalog,
+    /// Resolved session templates.
+    SessionTemplates,
+    /// Repository ingestion, rules, and convergence configuration.
+    RepoWatch,
+}
+
+impl ReloadedSection {
+    /// The complete catalog replacement inventory in wire order.
+    pub const ALL: [Self; 3] = [Self::ModelCatalog, Self::SessionTemplates, Self::RepoWatch];
+}
+
+/// Closed reload failure phases.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationReloadPhase {
+    /// A configured file could not be read.
+    Read,
+    /// Replacement configuration did not validate.
+    Validate,
+    /// Rule activation was refused.
+    Activate,
+    /// Convergence target reconciliation failed.
+    Reconcile,
+    /// Runtime installation failed.
+    Install,
 }

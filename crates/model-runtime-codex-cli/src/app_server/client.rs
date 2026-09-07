@@ -13,6 +13,7 @@ use super::frame::{
 #[derive(Debug)]
 pub(crate) enum Event {
     Ignored,
+    RateLimitsUpdated,
     ThreadStarted(String),
     AgentMessage {
         message: AgentMessage,
@@ -37,14 +38,23 @@ enum Phase {
     Closed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RateLimitsRead {
+    NotPending,
+    Pending,
+    Superseded,
+}
+
 pub(crate) struct Client {
     phase: Phase,
+    rate_limits_read: RateLimitsRead,
     thread_params: Value,
     turn_params: Value,
     outbound: VecDeque<Vec<u8>>,
     thread_id: Option<String>,
     turn_id: Option<String>,
     pub(crate) activity: TurnActivity,
+    pub(crate) rate_limits: super::frame::RateLimits,
 }
 
 impl Client {
@@ -56,12 +66,14 @@ impl Client {
         thread_params["approvalPolicy"] = json!("never");
         let mut client = Self {
             phase: Phase::Initialize,
+            rate_limits_read: RateLimitsRead::NotPending,
             thread_params,
             turn_params,
             outbound: VecDeque::new(),
             thread_id: None,
             turn_id: None,
             activity: TurnActivity::default(),
+            rate_limits: super::frame::RateLimits::default(),
         };
         client.queue(json!({"id":1,"method":"initialize","params":{
             "clientInfo":{"name":"signalbox","version":env!("CARGO_PKG_VERSION")}
@@ -87,6 +99,29 @@ impl Client {
         let object = value
             .as_object()
             .ok_or(ProtocolError("frame must be an object"))?;
+        // Capacity replies are independent of the model exchange, including a
+        // reply drained after the turn closes.
+        if !object.contains_key("method")
+            && object.get("id").and_then(Value::as_u64) == Some(4)
+            && self.rate_limits_read != RateLimitsRead::NotPending
+        {
+            if object.contains_key("error") == object.contains_key("result") {
+                return Err(ProtocolError(
+                    "response requires exactly one result or error",
+                ));
+            }
+            let read = std::mem::replace(&mut self.rate_limits_read, RateLimitsRead::NotPending);
+            if let Some(error) = object.get("error") {
+                let _: RpcError = decode(error)?;
+                return Ok(Event::Ignored);
+            }
+            let response: super::frame::AccountRateLimitsUpdated = decode(&object["result"])?;
+            if read == RateLimitsRead::Superseded {
+                return Ok(Event::Ignored);
+            }
+            self.rate_limits.merge(response.rate_limits);
+            return Ok(Event::RateLimitsUpdated);
+        }
         if self.is_terminal() {
             return Err(ProtocolError("frame follows terminal closure"));
         }
@@ -133,6 +168,8 @@ impl Client {
                     return Err(ProtocolError("initialize result must be an object"));
                 }
                 self.queue(json!({"method":"initialized"}));
+                self.queue(json!({"id":4,"method":"account/rateLimits/read"}));
+                self.rate_limits_read = RateLimitsRead::Pending;
                 self.queue(json!({"id":2,"method":"thread/start","params":self.thread_params}));
                 self.phase = Phase::ThreadStart;
                 Ok(Event::Ignored)
@@ -150,6 +187,11 @@ impl Client {
             }
             Phase::TurnStart => {
                 let response: TurnStartResponse = decode(result)?;
+                self.activity.assistant_output_observed |= response
+                    .turn
+                    .items
+                    .iter()
+                    .any(item_precludes_non_acceptance);
                 self.check_turn(&response.turn.id)?;
                 self.phase = Phase::Running;
                 Ok(Event::Ignored)
@@ -179,6 +221,17 @@ impl Client {
 
     fn notification(&mut self, method: &str, params: &Value) -> Result<Event, ProtocolError> {
         match method {
+            "account/rateLimits/updated" => {
+                let event: super::frame::AccountRateLimitsUpdated = decode(params)?;
+                if event.rate_limits.primary.is_none() && event.rate_limits.secondary.is_none() {
+                    return Ok(Event::Ignored);
+                }
+                if self.rate_limits_read == RateLimitsRead::Pending {
+                    self.rate_limits_read = RateLimitsRead::Superseded;
+                }
+                self.rate_limits.merge(event.rate_limits);
+                Ok(Event::RateLimitsUpdated)
+            }
             "item/agentMessage/delta" => {
                 let event: ItemTextDelta = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn_id)?;
@@ -210,14 +263,17 @@ impl Client {
                 let event: TokenUsageUpdated = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn_id)?;
                 let total = &event.token_usage.total;
-                if total.input_tokens > 0
-                    || total.cached_input_tokens > 0
-                    || total
-                        .cache_write_input_tokens
-                        .is_some_and(|count| count > 0)
-                    || total.output_tokens != 0
-                    || total.reasoning_output_tokens != 0
-                    || total.total_tokens > 0
+                if [
+                    total.input_tokens,
+                    total.cached_input_tokens,
+                    total.cache_write_input_tokens,
+                    total.output_tokens,
+                    total.reasoning_output_tokens,
+                    total.total_tokens,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|count| count > 0)
                 {
                     self.activity.assistant_output_observed = true;
                 }

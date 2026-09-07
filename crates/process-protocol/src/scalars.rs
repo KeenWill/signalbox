@@ -972,6 +972,9 @@ where
 /// A structurally invalid frame value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameValidationError {
+    #[error("OAuth credential frame shape is inconsistent")]
+    /// An OAuth profile or device-authorization detail violates its bounds.
+    OauthCredentialShape,
     #[error("frame version is unsupported")]
     /// In-memory frame used another version.
     UnsupportedVersion,
@@ -1060,6 +1063,9 @@ pub enum FrameValidationError {
     #[error("commissioned-session fence shape is inconsistent")]
     /// A commissioned-session authority fence carried an invalid shape.
     DispatchFenceShape,
+    #[error("configuration reload receipt shape is inconsistent")]
+    /// A reload receipt has an invalid section inventory or diagnostic.
+    ConfigurationReloadShape,
 }
 
 /// Stable classification of an incoming line failure.
