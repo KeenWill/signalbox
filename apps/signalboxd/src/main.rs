@@ -2289,6 +2289,7 @@ async fn run_hub(
             }
         };
 
+        let _ = repository_watch_shutdown.send(true);
         if cause == RuntimeStopCause::GuardLost {
             runtime_tasks.abort_all();
             while runtime_tasks.join_next().await.is_some() {}
@@ -2299,7 +2300,6 @@ async fn run_hub(
             let _ = fenced_pool_floor_shutdown.send(true);
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
-            let _ = repository_watch_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);
             let _ = lifecycle_deadline_shutdown.send(true);
