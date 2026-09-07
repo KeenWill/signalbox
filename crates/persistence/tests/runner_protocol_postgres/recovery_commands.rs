@@ -278,6 +278,14 @@ async fn recovery_pre_pin_replacement_promotes_and_replays_without_provisioning(
             .fetch_one(&pool)
             .await?;
     assert_eq!(authorizations, 0);
+    assert_recovery_event(
+        &pool,
+        session,
+        candidate.identities().runner(),
+        stored.placement().revision(),
+        DispatchedRunnerState::Replaced,
+    )
+    .await?;
     Ok(())
 }
 
@@ -316,6 +324,14 @@ async fn recovery_abandonment_terminalizes_the_lost_pre_pin_placement() -> Resul
             .state(),
         SessionRunnerPlacementState::RunnerAbandoned(_)
     ));
+    assert_recovery_event(
+        &pool,
+        session,
+        RunnerId::from_uuid(uuid(RUNNER)),
+        placement.revision(),
+        DispatchedRunnerState::Abandoned,
+    )
+    .await?;
     Ok(())
 }
 
@@ -479,6 +495,53 @@ async fn pinned_installation_preserves_seed(
     assert!(
         matches!(store.load_placement(command.session).await?.expect("the recovery fixture retains its required correlated fact").placement().state(), SessionRunnerPlacementState::Pinned(pinned) if pinned.runner == candidate.identities().runner())
     );
+    assert_recovery_event(
+        &pool,
+        command.session,
+        candidate.identities().runner(),
+        placement.placement().revision(),
+        DispatchedRunnerState::Replaced,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn assert_recovery_event(
+    pool: &PgPool,
+    session: SessionId,
+    runner: RunnerId,
+    revision: RunnerGeneration,
+    state: DispatchedRunnerState,
+) -> Result<(), Box<dyn Error>> {
+    let mut events = Vec::new();
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    loop {
+        let outcome = dispatcher
+            .dispatch_next(|event| {
+                if event.session() == Some(session)
+                    && let DispatchedOutboxEventKind::RunnerStateTransition {
+                        runner,
+                        placement_revision,
+                        state,
+                        ..
+                    } = event.kind()
+                    && matches!(
+                        state,
+                        DispatchedRunnerState::Replaced
+                            | DispatchedRunnerState::WorkingDirectoryChanged
+                            | DispatchedRunnerState::Abandoned
+                    )
+                {
+                    events.push((*runner, *placement_revision, *state));
+                }
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?;
+        if outcome == OutboxDispatchOutcome::Idle {
+            break;
+        }
+    }
+    assert_eq!(events, [(runner, revision, state)]);
     Ok(())
 }
 
