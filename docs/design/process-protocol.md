@@ -32,10 +32,14 @@ Each request ends with
 `provisioned`, `already_provisioned`, `reprovisioned`, `deleted`,
 `already_deleted`, `not_provisioned`, `abandoned`, `superseded`, or
 `failed { reason }`, where `reason` is one of the fieldless values
-`device_endpoint_rejected`, `device_endpoint_failed` for transport failure of
-the initial device-authorization request, `access_denied` for operator denial,
+`unknown_profile`, `non_oauth_profile`, `device_endpoint_rejected`,
+`device_endpoint_failed` for transport failure of the initial
+device-authorization request, `access_denied` for operator denial,
 `polling_expired`, `token_endpoint_failed`, `token_response_without_identity`,
-or `account_independence_failed`. Initial provisioning returns
+or `account_independence_failed`. A request naming an undeclared profile returns
+`failed { reason: unknown_profile }`; a request naming a profile whose delivery
+is not `oauth` returns `failed { reason: non_oauth_profile }`. Neither starts an
+exchange or mutates credential state. Initial provisioning returns
 `already_provisioned` without starting an exchange when the profile holds
 authorization. Re-provisioning returns `not_provisioned` without starting an
 exchange when no authorization is stored. Only re-provisioning replaces
