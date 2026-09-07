@@ -16,10 +16,11 @@ content-based reuse within a compatible native environment.
 ## Boundary contracts
 
 Cargo manifests and the Cargo lockfile remain the Rust dependency source. The
-Bazel module pins its Rust compiler to the workspace toolchain version.
-Remote-cache clients require identical native toolchains and compatible runtime
-environments; the Bazel graph does not yet declare host linker and system
-libraries.
+Bazel module pins its Rust compiler to the workspace toolchain version. The
+Linux Bazel graph pins GCC and its sysroot. Unit tests run with a pinned loader
+and runtime libraries included in their test inputs. Shared results require
+compatible x86-64 Linux kernels; host tools and external services are not
+covered by this unit-test contract.
 
 ## Planned
 

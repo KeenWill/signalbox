@@ -25,4 +25,11 @@ jobs:
         with:
           bazelisk-version: 1.29.0
       - name: Build and test the Bazel migration slice
-        run: bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 //:bazel_tests
+        env:
+          BAZEL_REMOTE_CACHE: ${{ vars.BAZEL_REMOTE_CACHE }}
+        run: |
+          cache_args=()
+          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
+            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
+          fi
+          bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 "${cache_args[@]}" //:bazel_tests

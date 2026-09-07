@@ -1,10 +1,10 @@
 # Bazel
 
-Install [Bazelisk](https://github.com/bazelbuild/bazelisk) and a C/C++ compiler
-with the platform development libraries. Bazelisk selects `.bazelversion`;
-`rules_rust` downloads the Rust compiler pinned in `MODULE.bazel`. Rust and
-rustfmt share that module's version constant. Renovate groups updates to it with
-`rust-toolchain.toml`; manual toolchain changes update both files.
+Install [Bazelisk](https://github.com/bazelbuild/bazelisk). Bazelisk selects
+`.bazelversion`; `rules_rust` downloads the Rust compiler pinned in
+`MODULE.bazel`. Rust and rustfmt share that module's version constant. Renovate
+groups updates to it with `rust-toolchain.toml`; manual toolchain changes update
+both files.
 
 ```bash
 bazel build //crates/newtype:signalbox_newtype
@@ -24,8 +24,9 @@ The syscall crate is a Cargo workspace member with its own unsafe-code lint
 policy. This lets the importer treat all in-repository crates as first-party
 packages rather than generating machine-specific external path dependencies.
 
-Use a remote cache only with an identical native compiler, sysroot, and runtime
-environment across its clients. To select an accessible endpoint:
+The Linux build downloads a pinned GCC toolchain and sysroot. Unit tests run
+through a pinned Ubuntu loader and runtime, included as Bazel test inputs.
+Clients require compatible x86-64 Linux kernels. To select an accessible cache:
 
 ```bash
 bazel test --remote_cache=grpc://CACHE_HOST:9092 //:bazel_tests
@@ -34,7 +35,10 @@ bazel test --remote_cache=grpc://CACHE_HOST:9092 //:bazel_tests
 Local endpoint settings can also live in the ignored `.bazelrc.local`. Each
 worktree uses its own Bazel output directory; the remote service shares action
 results and artifacts. No shared writable output directory or local disk cache
-is configured. Host linker and system libraries are not declared inputs, so
-Bazel cannot reliably invalidate their cached results when those tools change.
-Cross-host sharing requires a pinned native toolchain and compatible runtime;
-the current validation covers fresh output directories on the same host.
+is configured. Self-hosted CI uses the `BAZEL_REMOTE_CACHE` repository variable
+when configured; hosted jobs run without the private cache. On a private
+Tailscale client, use `--remote_cache=grpc://bazel-cache:9092`.
+
+The runtime launcher applies to the current unit-test binaries. Tests that
+invoke host programs or external services need those inputs declared before
+their results can join the shared cache.
