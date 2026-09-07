@@ -900,12 +900,8 @@ async fn reload_configuration_swaps_request_catalogs_and_replays_without_reading
             )),
         )
     };
-    let baseline = compose(&models)?;
-    let mut pass = signalboxd::model_catalog_runtime::CatalogEligibilityPass::new(
-        reload.clone(),
-        compose,
-        baseline,
-    );
+    let mut pass =
+        signalboxd::model_catalog_runtime::CatalogEligibilityPass::new(reload.clone(), compose);
     let selections = model_source["models"]
         .as_array_of_tables_mut()
         .expect("model tables");
