@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) struct ConnectionDependencies {
+    pub(super) configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     pub(super) recovery_reporter: Option<FatalRecoveryReporter>,
     pub(super) pool: PgPool,
     pub(super) eligibility_nudge: InProcessEligibilityNudge,
@@ -50,6 +51,7 @@ pub(super) async fn serve_connections(
         imported_storage,
     );
     let services = ConnectionServices {
+        configuration_reload: dependencies.configuration_reload,
         recovery_reporter: dependencies.recovery_reporter,
         pool: dependencies.pool,
         eligibility_nudge: dependencies.eligibility_nudge,
@@ -493,6 +495,7 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::ReadDeploymentLimits {}
         | ClientRequest::ListSessions {}
         | ClientRequest::ReadOperatorStatus {}
+        | ClientRequest::ReloadConfiguration { .. }
         | ClientRequest::UpdateSessionPlacement { .. }
         | ClientRequest::AttachGoal { .. }
         | ClientRequest::ReadGoal { .. }
@@ -705,7 +708,8 @@ impl SnapshotReaderAdmission {
             | ClientRequest::CommissionSession { .. }
             | ClientRequest::ListTemplates {}
             | ClientRequest::ReadDeploymentLimits {}
-            | ClientRequest::UpdateSessionPlacement { .. }
+            | ClientRequest::ReloadConfiguration { .. }
+        | ClientRequest::UpdateSessionPlacement { .. }
             | ClientRequest::AttachGoal { .. }
             | ClientRequest::ResumeGoal { .. }
             | ClientRequest::StopGoal { .. }

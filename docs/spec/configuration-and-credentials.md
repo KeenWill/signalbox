@@ -6,7 +6,7 @@ reaches a provider without being stored or logged.
 
 ## Overview
 
-Configuration is loaded once at startup from the process environment and two
+Configuration is loaded at startup from the process environment and two
 versioned TOML documents: the model catalog and the session-template catalog.
 The parser in `apps/signalboxd/src/configuration/mod.rs` and
 `apps/signalboxd/src/credential_pools.rs` admits a document fail-closed. The
@@ -511,9 +511,13 @@ and runner wire never receive a runner credential path or value.
 A catalog parse error is a typed sanitized value and no file content appears in
 its text. An unknown or invalid field is rejected without its name, so
 `config/signalboxd.example.toml` is the operator's guide. A profile name is
-opaque to code: no build-provided constant is compared against it. Every catalog
-is read once at startup; a change takes effect at the next restart and never
-rewrites evidence already recorded.
+opaque to code: no build-provided constant is compared against it. Catalogs are
+read at startup. `reload_configuration` validates the complete replacement and
+atomically replaces the model and alias catalog, session-template catalog, and
+repository-watch configuration; every other section is startup-only. A
+replacement whose startup-only sections differ leaves the running configuration
+in place. Reload never rewrites evidence already recorded. File watching and
+polling are external callers of the verb.
 
 Every serving record states its family, and the adapter mapping rather than the
 selectable record pointing at it supplies its adapter and credential pool. Input
@@ -693,7 +697,7 @@ do not use it.
 
 - Input-modality declarations on model and serving-target records, and the blob
   catalog they feed: [design](../design/configuration-and-credentials.md).
-- Configuration reload after startup:
+- Repository-watch reload activation and startup replay:
   [design](../design/configuration-and-credentials.md).
 - Dated rate windows on a model entry; the present grammar admits one flat rate,
   which is one window across all time:

@@ -17,6 +17,13 @@ pub(super) async fn handle_request<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let mut services = services.clone();
+    if let Some(reload) = &services.configuration_reload {
+        let catalogs = reload.catalogs();
+        services.model_configuration = catalogs.models;
+        services.template_configuration = catalogs.templates;
+    }
+    let services = &services;
     let review_request = is_review_mutation(&request);
     let ConnectionRequestResources {
         import_permit,
@@ -46,6 +53,9 @@ where
         return write_bulk_ingest_rejection(writer, version, request_id, active_kind).await;
     }
     match request {
+        ClientRequest::ReloadConfiguration { command_id } => {
+            super::reload::handle_reload(writer, version, request_id, command_id, services).await
+        }
         ClientRequest::CreateSession {
             command_id,
             initial_model_selection,

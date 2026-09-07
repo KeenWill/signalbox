@@ -1060,6 +1060,9 @@ pub enum FrameValidationError {
     #[error("commissioned-session fence shape is inconsistent")]
     /// A commissioned-session authority fence carried an invalid shape.
     DispatchFenceShape,
+    #[error("configuration reload receipt shape is inconsistent")]
+    /// A reload receipt has an invalid section inventory or diagnostic.
+    ConfigurationReloadShape,
 }
 
 /// Stable classification of an incoming line failure.

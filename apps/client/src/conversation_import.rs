@@ -137,6 +137,8 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
         | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::ConfigurationReloaded { .. }
+        | ServerMessage::ConfigurationReloadFailed { .. }
         | ServerMessage::DeploymentLimits { .. } => ConversationImportResponse::Unexpected,
     }
 }

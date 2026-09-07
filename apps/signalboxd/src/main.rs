@@ -2138,6 +2138,20 @@ async fn run_hub(
         None
     };
     tool_executor = tool_executor.with_blob_executor(blob_executor);
+    let configuration_reload = signalboxd::configuration_reload::ConfigurationReload::new(
+        scheduler_pool.clone(),
+        model_configuration.clone(),
+        template_configuration.clone(),
+        configuration.model_configuration_file().to_path_buf(),
+        configuration.template_configuration_file().to_path_buf(),
+        env::var_os("HOME").map(PathBuf::from),
+    )
+    .map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("configuration_reload_composition_failed"),
+        )
+    })?;
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),
@@ -2146,6 +2160,7 @@ async fn run_hub(
         model_configuration.clone(),
         template_configuration,
     )
+    .with_configuration_reload(configuration_reload)
     .with_context_compaction_model(Arc::clone(&context_compaction_model))
     .with_snapshot_reader_budget(snapshot_reader_budget);
     let process_runtime = match prometheus_runtime.as_ref() {

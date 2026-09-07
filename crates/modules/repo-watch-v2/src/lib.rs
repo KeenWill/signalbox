@@ -517,6 +517,33 @@ impl<'a> RepositoryRuleSet<'a> {
     }
 }
 
+/// Digests checked per-repository rule sets independently of configuration ordering.
+pub fn repository_rule_set_digest(
+    sets: &[RepositoryRuleSet<'_>],
+) -> Result<[u8; 32], serde_json::Error> {
+    let canonical: BTreeMap<_, BTreeMap<_, _>> = sets
+        .iter()
+        .map(|set| {
+            (
+                set.repository.as_str(),
+                set.rules
+                    .iter()
+                    .map(|rule| {
+                        (
+                            rule.id().as_str(),
+                            (
+                                rule.version().get(),
+                                rule.content_digest().as_bytes().to_vec(),
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    Ok(Sha256::digest(serde_json::to_vec(&canonical)?).into())
+}
+
 impl WebhookDisposition {
     const fn storage(self) -> &'static str {
         match self {

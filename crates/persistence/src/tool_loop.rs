@@ -533,6 +533,7 @@ impl PostgresToolLoopRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ReloadConfiguration
                 | CommandKind::SessionLifecycle
                 | CommandKind::OverrideDeniedToolRequest,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
@@ -702,6 +703,7 @@ impl PostgresToolLoopRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ReloadConfiguration
                 | CommandKind::SessionLifecycle,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }

@@ -142,6 +142,8 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
         | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::ConfigurationReloaded { .. }
+        | ServerMessage::ConfigurationReloadFailed { .. }
         | ServerMessage::DeploymentLimits { .. } => BlobUploadResponse::Unexpected,
     }
 }

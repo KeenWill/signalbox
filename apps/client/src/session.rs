@@ -565,3 +565,52 @@ pub(crate) async fn read_session_metadata_page(
         }
     }
 }
+
+/// Sends one durable reload and checks the receipt's command correlation.
+pub(crate) async fn reload_configuration(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+) -> Result<(), ClientError> {
+    let (command_id, _) = command_identity(None)?;
+    output.recovery_value(
+        "command_id",
+        &command_id.into_uuid().hyphenated().to_string(),
+    )?;
+    let mut connection = client
+        .mutation_request(ClientRequest::ReloadConfiguration { command_id })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::ConfigurationReloaded {
+            command_id: returned,
+            reloaded_sections,
+        } if returned == command_id => {
+            output.configuration_reloaded(&reloaded_sections)?;
+            Ok(())
+        }
+        ServerMessage::ConfigurationReloadFailed {
+            command_id: returned,
+            phase,
+            reason,
+        } if returned == command_id => {
+            use signalbox_process_protocol::ConfigurationReloadPhase;
+            output.recovery_value(
+                "phase",
+                match phase {
+                    ConfigurationReloadPhase::Read => "read",
+                    ConfigurationReloadPhase::Validate => "validate",
+                    ConfigurationReloadPhase::Activate => "activate",
+                    ConfigurationReloadPhase::Reconcile => "reconcile",
+                    ConfigurationReloadPhase::Install => "install",
+                },
+            )?;
+            output.recovery_value("reason", &reason)?;
+            Err(ClientError::Input("configuration reload failed"))
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("reload returned an incoherent receipt").mutation()),
+    }
+}

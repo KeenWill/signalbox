@@ -6,28 +6,19 @@ deleted when the work lands.
 
 ## Goal
 
-The daemon reloads its catalogs without a restart, prices a call against dated
-rate windows, declares each model's input modalities and workspace-instruction
-capacity, records the workspace roots it derives, binds a session to its
-workspace before its first turn when a template asks for it, and holds a
-daemon-owned OAuth authorization for a Codex CLI child without handing the child
-the refresh token. Credential exclusions expire, coalesce, and clear; sessions
-carry the complete pool policy they were created under; and a runner reads,
-injects, and scrubs a granted credential for the work it dispatches.
+The daemon prices a call against dated rate windows, declares each model's input
+modalities and workspace-instruction capacity, records the workspace roots it
+derives, binds a session to its workspace before its first turn when a template
+asks for it, and holds a daemon-owned OAuth authorization for a Codex CLI child
+without handing the child the refresh token. Credential exclusions expire,
+coalesce, and clear; sessions carry the complete pool policy they were created
+under; and a runner reads, injects, and scrubs a granted credential for the work
+it dispatches.
 
 ## Design
 
-Reload is one admin verb, `reload_configuration`, owned by
-[process protocol](../spec/process-protocol.md). It re-reads the configured
-paths, validates the complete replacement exactly as startup does, and swaps the
-in-memory catalogs atomically on success. The reloadable sections are the model
-and alias catalog with its rate windows, the session-template catalog, and
-repository-watch configuration; every other section is startup-only. A
-replacement whose startup-only sections differ leaves the running configuration
-in place. File watching and polling are external tooling that calls the verb;
-webhook listener and repository polling-task reload belong to
-[repository watch](repo-watch.md). A reload that adds, edits, or removes
-`repository_watch.rules` commits activations and deactivations in the
+A reload that adds, edits, or removes `repository_watch.rules` commits
+activations and deactivations in the
 [reconciliation transaction](../spec/repo-watch.md) that records each
 activation's repository event tail, inside the reload boundary. A reload pauses
 sweep admission and stops and joins active sweep attempts before re-running

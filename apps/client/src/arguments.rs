@@ -53,6 +53,7 @@ pub(crate) enum SendDeliveryArgument {
 
 #[derive(Debug)]
 pub(crate) enum Command {
+    ReloadConfiguration,
     Create {
         selection: Option<ModelSelection>,
         template: Option<String>,
@@ -411,6 +412,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Re-read and validate the daemon configuration and reload its catalogs.
+    ReloadConfiguration,
     /// Create a session.
     Create(CreateArguments),
     /// Append an explicit immutable placement update.
@@ -1934,6 +1937,7 @@ pub(crate) fn parse(
                 command_id: arguments.command_id,
             },
         }),
+        CliCommand::ReloadConfiguration => Command::ReloadConfiguration,
         CliCommand::Status => Command::Status,
         CliCommand::List => Command::List,
         CliCommand::Templates => Command::Templates,

@@ -101,9 +101,19 @@ use tool_settings::{
     parse_tool_approval_postures, parse_tool_mappings, parse_workspace_instruction_configuration,
 };
 
+#[derive(Clone)]
+struct CheckedConfigurationSource(Arc<str>);
+
+impl std::fmt::Debug for CheckedConfigurationSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CheckedConfigurationSource(<redacted>)")
+    }
+}
+
 /// Validated static model and alias definitions used by hub composition.
 #[derive(Clone, Debug)]
 pub struct HubModelConfiguration {
+    source: CheckedConfigurationSource,
     numeric_bounds: NumericBoundsConfiguration,
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
@@ -841,6 +851,7 @@ impl HubModelConfiguration {
         .and_then(|catalog| catalog.with_fast_targets(target_fast_targets))
         .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         Ok(Self {
+            source: CheckedConfigurationSource(Arc::from(content)),
             numeric_bounds,
             targets,
             runtime_models,
@@ -893,6 +904,11 @@ impl HubModelConfiguration {
             .split_once("\n# Blob bytes live outside PostgreSQL.")
             .ok_or(HubModelConfigurationError::InvalidDocument)?;
         Self::parse(&format!("{content}\n[numeric_bounds]{numeric_bounds}\n"))
+    }
+
+    /// Returns the checked source document for durable reload snapshots.
+    pub(crate) fn source(&self) -> &str {
+        &self.source.0
     }
 
     /// Returns the immutable domain target catalog used by persistence.

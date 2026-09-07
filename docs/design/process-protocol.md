@@ -104,18 +104,9 @@ durable. An equal `command_id` replay returns its stored receipt before current
 state is evaluated. Both operations are authorized as every other request is:
 reaching the owner-private socket is the authority.
 
-Configuration reload is one `reload_configuration { command_id }` request
-carrying a user-global command identity. An equal command retry reports busy
-while pending or replays its stored result without re-reading configuration.
-Reloads, including startup replay, run serially from configuration read through
-the terminal result. Core first commits the reload command with a complete
-checked snapshot of every reloadable section, the rule-set digest, and the prior
-snapshot for refusal recovery as durable intent. The replacement snapshot
-contains the model catalog, session-template catalog, and repository-watch
-configuration, including rules, convergence targets, template, interval,
-credential path, webhook listener settings, and hook map. Reload pauses sweep
-admission and stops and joins active sweep attempts and affected ingestion tasks
-before rule activation and event-tail capture. Only after that activation
+Startup reload replay shares the serial request-reload boundary. Reload pauses
+sweep admission and stops and joins active sweep attempts and affected ingestion
+tasks before rule activation and event-tail capture. Only after that activation
 commits does core reconcile convergence targets from the retained intent. On a
 stale or conflicting rule-revision rejection, recovery first validates the prior
 snapshot against the current startup-only sections. If invalid, it terminalizes
@@ -133,13 +124,7 @@ any retained effects, startup validates the retained reloadable snapshot
 together with the on-disk startup-only sections; incompatibility fails startup
 and leaves the intent pending. Startup replays any undelivered intent from its
 retained payload even if the configuration files changed, before terminalizing
-its claim. Success returns
-`configuration_reloaded { command_id, reloaded_sections }`, whose sections are
-an array of the closed values `model_catalog`, `session_templates`, and
-`repo_watch`. Failure returns
-`configuration_reload_failed { command_id, phase, reason }`, sanitized as
-startup logs are. Which sections reload and the validate-then-swap rule belong
-to [configuration-and-credentials.md](../spec/configuration-and-credentials.md).
+its claim.
 
 Program-run cancellation is the request
 `cancel_program_run { run_id, command_id }` and the receipt

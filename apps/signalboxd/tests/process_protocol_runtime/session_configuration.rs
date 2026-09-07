@@ -806,3 +806,88 @@ async fn absent_defaults_replacement_precedes_settings_validation() -> Result<()
     drop(connection);
     runtime.stop().await
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn reload_configuration_swaps_request_catalogs_and_replays_without_reading_files()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::configuration_reload::ConfigurationReload;
+    let (_container, pool) = postgres().await?;
+    let socket = SocketDirectory::create()?;
+    let files = tempfile::tempdir()?;
+    let model_path = files.path().join("models.toml");
+    let template_path = files.path().join("templates.toml");
+    let mut model_source = MODEL_CONFIGURATION.parse::<toml_edit::DocumentMut>()?;
+    let example = include_str!("../../../../config/signalboxd.example.toml")
+        .parse::<toml_edit::DocumentMut>()?;
+    model_source.insert("numeric_bounds", example["numeric_bounds"].clone());
+    let models = HubModelConfiguration::parse(&model_source.to_string())?;
+    fs::write(&model_path, model_source.to_string())?;
+    fs::write(&template_path, "version = 1\n")?;
+    let templates = signalboxd::SessionTemplateConfiguration::default();
+    let reload = ConfigurationReload::new(
+        pool.clone(),
+        models.clone(),
+        templates.clone(),
+        model_path.clone(),
+        template_path,
+        None,
+    )
+    .map_err(|error| io::Error::other(format!("reload fixture: {error:?}")))?;
+    let listener = LocalProcessListener::bind(socket.socket())?;
+    let (nudge, _work) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    let runtime = ProcessRuntime::new_with_templates(
+        listener,
+        pool.clone(),
+        nudge,
+        InProcessToolDispatchGate::default(),
+        models,
+        templates,
+    )
+    .with_configuration_reload(reload);
+    let (shutdown, receiver) = watch::channel(false);
+    let task = tokio::spawn(runtime.run(receiver));
+    let mut connection = Connection::connect(socket.socket()).await?;
+    model_source.remove("aliases");
+    fs::write(&model_path, model_source.to_string())?;
+    let command_id = command()?;
+    connection
+        .request(1, ClientRequest::ReloadConfiguration { command_id })
+        .await?;
+    let receipt = response_within(&mut connection).await?;
+    assert_eq!(
+        receipt.message(),
+        &ServerMessage::ConfigurationReloaded {
+            command_id,
+            reloaded_sections: signalbox_process_protocol::ReloadedSection::ALL.to_vec(),
+        }
+    );
+    fs::remove_file(&model_path)?;
+    connection
+        .request(2, ClientRequest::ReloadConfiguration { command_id })
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        receipt.message()
+    );
+    connection
+        .request(3, ClientRequest::ListModelAliases {})
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::ModelAliasesStart {}
+    );
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::ModelAliasesEnd {
+            alias_count: CanonicalU64::new(0)
+        }
+    );
+    drop(connection);
+    shutdown.send(true)?;
+    task.await??;
+    pool.close().await;
+    socket.cleanup()?;
+    Ok(())
+}

@@ -371,13 +371,32 @@ provider delta or a metadata title or tag. A single explicit raw-output option
 is the only opt-in to unescaped text. A recorded review finding carries an
 opaque caller-supplied file-path key.
 
+Configuration reload is `reload_configuration { command_id }`, with a
+user-global command identity. Equal retries report busy while pending or replay
+the stored result without reading configuration again. Reloads serialize from
+file read through the terminal result. Before installation, core commits the
+complete checked replacement and prior reloadable snapshots and the checked
+rule-set digest as durable intent. Template snapshots contain accepted
+prompt-file contents.
+
+Success returns `configuration_reloaded { command_id, reloaded_sections }`, with
+sections from `model_catalog`, `session_templates`, and `repo_watch`. Failure
+returns `configuration_reload_failed { command_id, phase, reason }`; `phase` is
+`read`, `validate`, `activate`, `reconcile`, or `install`, and `reason` is
+sanitized as startup logs are, with 1 through 1,024 UTF-8 bytes and no control
+characters. A pending reload returns `unavailable` with the message
+`configuration reload is busy`. The terminal client exposes
+`reload-configuration` with no command-specific flags and prints the installed
+sections or failure phase and reason.
+
 ## Planned
 
 - OAuth credential provisioning, re-provisioning after rejected refresh, and
   deletion: [design](../design/process-protocol.md).
 - Credential-exclusion administration, a listing read and a clear mutation over
   active exclusions: [design](../design/process-protocol.md).
-- Configuration reload request: [design](../design/process-protocol.md).
+- Repository-watch reload boundary and startup replay:
+  [design](../design/process-protocol.md).
 - Program-run cancellation request and receipt:
   [design](../design/process-protocol.md).
 - Runner creation, status, and recovery requests, and the status read's failure

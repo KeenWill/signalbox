@@ -11,6 +11,9 @@ use crate::mapping::{
     durable_command_kind_from_str, durable_command_kind_to_str,
 };
 
+pub(crate) const RELOAD_CONFIGURATION_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReloadConfiguration);
+
 pub(crate) const CREATE_SESSION_KIND: &str =
     durable_command_kind_to_str(CommandKind::CreateSession);
 pub(crate) const CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND: &str =
@@ -69,7 +72,14 @@ struct CommandKindDefinition {
     maximum_version: i16,
 }
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 16] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 17] = [
+    CommandKindDefinition {
+        kind: CommandKind::ReloadConfiguration,
+        spelling: RELOAD_CONFIGURATION_KIND,
+        typed_table: "reload_configuration_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
     CommandKindDefinition {
         kind: CommandKind::CreateSession,
         spelling: CREATE_SESSION_KIND,
@@ -359,6 +369,19 @@ mod tests {
             .iter()
             .map(|definition| definition.spelling.to_owned())
             .collect()
+    }
+
+    #[test]
+    fn reload_configuration_is_admitted_by_the_closed_registry_and_database() {
+        assert!(database_admitted_command_kinds().contains(super::RELOAD_CONFIGURATION_KIND));
+        assert!(
+            COMMAND_KIND_DEFINITIONS
+                .iter()
+                .any(
+                    |definition| definition.kind == CommandKind::ReloadConfiguration
+                        && definition.supports_version(1)
+                )
+        );
     }
 
     #[test]

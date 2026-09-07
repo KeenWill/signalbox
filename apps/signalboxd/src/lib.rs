@@ -5273,3 +5273,6 @@ mod tests {
         ));
     }
 }
+
+/// Durable configuration reload composition.
+pub mod configuration_reload;

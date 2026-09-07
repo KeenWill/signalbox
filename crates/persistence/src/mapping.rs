@@ -1804,6 +1804,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
 /// Closed durable-command kinds stored by the user-global registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DurableCommandKind {
+    ReloadConfiguration,
     /// Session creation.
     CreateSession,
     /// Session creation from an imported frontier.
@@ -1858,6 +1859,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::RegisterWorkspace => "register_workspace",
         DurableCommandKind::MintGitRemote => "mint_git_remote",
         DurableCommandKind::WithdrawGitRemote => "withdraw_git_remote",
+        DurableCommandKind::ReloadConfiguration => "reload_configuration",
         DurableCommandKind::SessionLifecycle => "session_lifecycle",
     }
 }
@@ -1883,6 +1885,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "mint_git_remote" => Some(DurableCommandKind::MintGitRemote),
         "withdraw_git_remote" => Some(DurableCommandKind::WithdrawGitRemote),
         "session_lifecycle" => Some(DurableCommandKind::SessionLifecycle),
+        "reload_configuration" => Some(DurableCommandKind::ReloadConfiguration),
         _ => None,
     }
 }
