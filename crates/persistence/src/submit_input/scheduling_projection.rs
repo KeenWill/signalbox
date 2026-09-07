@@ -7,11 +7,12 @@ use super::decode::{
     require_applied_runner_recovery_interrupt, require_current_attempt_row,
     require_stored_inherited_configuration, require_stored_origin_configuration,
 };
+use super::prepare::require_recorded_batch;
 use super::write::{decode_starting_lineage, load_active_acceptance_tail};
 use super::{
     StoredSchedulingInventoryCounts, SubmitInputCorruption, SubmitInputRepositoryError,
     decode_frozen_model, decode_model_call_disposition, decode_optional_token_count,
-    decode_position, require_recorded_batch, required,
+    decode_position, required,
 };
 use crate::mapping::{
     accepted_input_id_from_uuid, defaults_version_from_numeric, durable_command_id_from_uuid,
