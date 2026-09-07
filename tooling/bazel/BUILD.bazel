@@ -7,4 +7,9 @@ native_runtime(
     visibility = ["//visibility:public"],
 )
 
-exports_files(["patches/v8-build-output.patch"])
+exports_files([
+    "check_generated.py",
+    "check_markdown.py",
+    "patches/deno-embedded-javascript.patch",
+    "patches/v8-build-output.patch",
+])

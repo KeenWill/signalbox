@@ -62,3 +62,48 @@ rust_test(
     ],
     deps = ["//crates/blob-store:signalbox_blob_store"] + all_crate_deps(normal_dev = True),
 )
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conformance",
+    size = "small",
+    srcs = ["tests/conformance.rs"],
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["--test-threads=16"],
+    crate_features = [
+        "default",
+        "test-support",
+    ],
+    crate_root = "tests/conformance.rs",
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [] + all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env_files = [":cargo_environment"],
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = [
+        ":signalbox_blob_store_filesystem",
+        "//crates/blob-store:signalbox_blob_store",
+        "//crates/domain:signalbox_domain",
+    ] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)

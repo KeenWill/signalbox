@@ -50,3 +50,67 @@ rust_test(
     ],
     deps = [] + all_crate_deps(normal_dev = True),
 )
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "accessors",
+    size = "small",
+    srcs = ["tests/accessors.rs"],
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["--test-threads=16"],
+    crate_features = [],
+    crate_root = "tests/accessors.rs",
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [":signalbox_derive"] + all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env_files = [":cargo_environment"],
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    tags = [],
+    deps = [] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "operator_error",
+    size = "small",
+    srcs = ["tests/operator_error.rs"],
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["--test-threads=16"],
+    crate_features = [],
+    crate_root = "tests/operator_error.rs",
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [":signalbox_derive"] + all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env_files = [":cargo_environment"],
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    tags = [],
+    deps = [] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)

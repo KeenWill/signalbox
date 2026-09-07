@@ -97,3 +97,9 @@ rust_test(
     tags = ["external"],
     deps = ["//crates/test-bin:signalbox_test_bin"] + all_crate_deps(normal_dev = True),
 )
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
+)

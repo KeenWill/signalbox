@@ -91,3 +91,15 @@ rust_test(
     ],
     deps = [] + all_crate_deps(normal_dev = True),
 )
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
+)
+
+filegroup(
+    name = "projections",
+    srcs = glob(["projections/*.md"]),
+    visibility = ["//:__pkg__"],
+)

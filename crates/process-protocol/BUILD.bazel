@@ -4,7 +4,7 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 exports_files([
     "Cargo.toml",
-    "src/lib.rs",
+    "src/request.rs",
 ])
 
 cargo_toml_env_vars(
@@ -55,4 +55,10 @@ rust_test(
         "--forbid=unsafe_code",
     ],
     deps = [] + all_crate_deps(normal_dev = True),
+)
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
 )

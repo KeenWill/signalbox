@@ -248,7 +248,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     args = ["--test-threads=16"],
-    compile_data = ["//crates/process-protocol:src/lib.rs"],
+    compile_data = ["//crates/process-protocol:src/request.rs"],
     crate = ":signalboxd_lib",
     crate_features = ["test-support"],
     data = [
@@ -353,4 +353,10 @@ rust_test(
         "//crates/persistence:signalbox_persistence",
         "//crates/test-bin:signalbox_test_bin",
     ] + all_crate_deps(normal_dev = True),
+)
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
 )
