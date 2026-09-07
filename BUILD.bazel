@@ -84,6 +84,7 @@ filegroup(
 test_suite(
     name = "bazel_tests",
     tests = [
+        ":media_integration_tests",
         ":rust_integration_tests",
         ":rust_unit_tests",
     ],
@@ -334,5 +335,19 @@ test_suite(
         "//crates/model-runtime-openai:loopback",
         "//crates/ownership-seam:lifecycle_vocabulary",
         "//crates/tool-schema-derive:derive",
+    ],
+)
+
+test_suite(
+    name = "media_integration_tests",
+    tests = [
+        "//crates/file-media-adapter-archives:archive_adapter",
+        "//crates/file-media-adapter-office:office_adapter",
+        "//crates/file-media-adapter-pdf:pdf_adapter",
+        "//crates/file-media-adapter-svg:svg_adapter",
+        "//crates/file-media-adapter-video:video_adapter",
+        "//crates/file-media-adapters-image:adapters",
+        "//crates/file-media-adapters-text:adapters",
+        "//crates/file-media-runtime:registry_conformance",
     ],
 )

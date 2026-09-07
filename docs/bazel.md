@@ -89,3 +89,8 @@ tracked sources with Git.
 provider-loopback, and filesystem conformance tests. It is included in
 `//:bazel_tests`. Filesystem conformance checks the host storage classification
 outside the sandbox and always executes; the other results are cacheable.
+
+`bazel test //:media_integration_tests` checks text, image, archive, office,
+PDF, SVG, video, and registry behavior. These fixture-based targets are included
+in `//:bazel_tests` and cache their results. Audio worker and process-isolation
+tests continue in the Cargo job that provisions the real sandbox.
