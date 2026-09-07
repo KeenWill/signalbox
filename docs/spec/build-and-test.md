@@ -18,6 +18,9 @@ results to `validate` under its change-scope gate. File-media format and
 registry conformance tests use native Bazel targets; process-isolation tests
 retain their provisioned Cargo job.
 
+Coverage runs through Bazel for the workspace and the persistence, daemon, and
+terminal-client PostgreSQL selections. It is report-only, with no threshold.
+
 ## Design decisions
 
 The checker job runs its Python suites through Bazel with declared Python and
@@ -45,6 +48,3 @@ mapping outside the Bazel sandbox.
 ## Planned
 
 None.
-
-Coverage runs through Bazel for the workspace and the persistence, daemon, and
-terminal-client PostgreSQL selections. It is report-only, with no threshold.
