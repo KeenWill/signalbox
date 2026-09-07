@@ -1145,88 +1145,7 @@ async fn run_hub(
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
-    let bootstrap_min_connections = bootstrap_bounds
-        .integer("fenced_pool_min_connections")
-        .flatten()
-        .map(u32::try_from)
-        .transpose()
-        .ok()
-        .and_then(validate_fenced_pool_min_connections)
-        .ok_or_else(|| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("invalid_fenced_pool_min_connections"),
-            )
-        })?;
-    let mut database = FencedHubDatabase::connect_production(
-        configuration.database_url(),
-        bootstrap_min_connections,
-    )
-    .await
-    .map_err(|error| {
-        let phase = match &error {
-            FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
-            FencedHubDatabaseError::ParseOptions(_)
-            | FencedHubDatabaseError::ConnectBootstrap(_)
-            | FencedHubDatabaseError::AcquireGuard(_)
-            | FencedHubDatabaseError::AdvanceFence(_)
-            | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
-        };
-        erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
-    })?;
-    let pool = database.pool().clone();
-    let fenced_pool_floor_pool = pool.clone();
-    migrate(&pool).await.map_err(|error| {
-        tracing::error!(
-            migration_detail = %error,
-            "database migration rejected"
-        );
-        erase_startup_cause(
-            RuntimePhase::Migration,
-            SanitizedStartupCause::Static("database_migration_failed"),
-        )
-    })?;
-    tracing::info!(
-        phase = ?RuntimePhase::Migration,
-        "daemon startup phase completed"
-    );
-    let pending_reload =
-        signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
-            pool.clone(),
-        )
-        .pending()
-        .await
-        .map_err(|_| {
-            erase_startup_cause(
-                RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static("configuration_reload_intent_read_failed"),
-            )
-        })?;
-    let retained_startup = pending_reload
-        .first()
-        .map(|(_, intent)| {
-            signalboxd::configuration_reload::ConfigurationReload::startup_snapshot(
-                &on_disk,
-                &intent.replacement_snapshot,
-            )
-        })
-        .transpose()
-        .map_err(|_| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("configuration_reload_snapshot_incompatible"),
-            )
-        })?;
-    let model_configuration = match &retained_startup {
-        Some(catalogs) => (*catalogs.models).clone(),
-        None => HubModelConfiguration::parse(&on_disk).map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::ModelConfiguration(&error),
-            )
-        })?,
-    };
-    let numeric_bounds = model_configuration.numeric_bounds();
+    let numeric_bounds = &bootstrap_bounds;
     let configured_duration = |field| numeric_bounds.duration(field).flatten();
     let configured_usize = |field| {
         numeric_bounds
@@ -1263,16 +1182,6 @@ async fn run_hub(
                 SanitizedStartupCause::Static("invalid_codex_cli_version_probe_bound"),
             )
         })?;
-    if let Some(codex_cli) = model_configuration.codex_cli() {
-        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
-            .await
-            .map_err(|_| {
-                erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
-                )
-            })?;
-    }
     let fenced_pool_min_connections =
         validate_fenced_pool_min_connections(configured_u32("fenced_pool_min_connections")?)
             .ok_or_else(|| {
@@ -1456,6 +1365,84 @@ async fn run_hub(
         configured_usize("max_code_host_result_items")?,
         configured_usize("max_repository_file_content_bytes")?,
     );
+    let mut database = FencedHubDatabase::connect_production(
+        configuration.database_url(),
+        fenced_pool_min_connections,
+    )
+    .await
+    .map_err(|error| {
+        let phase = match &error {
+            FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
+            FencedHubDatabaseError::ParseOptions(_)
+            | FencedHubDatabaseError::ConnectBootstrap(_)
+            | FencedHubDatabaseError::AcquireGuard(_)
+            | FencedHubDatabaseError::AdvanceFence(_)
+            | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
+        };
+        erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
+    })?;
+    let pool = database.pool().clone();
+    let fenced_pool_floor_pool = pool.clone();
+    migrate(&pool).await.map_err(|error| {
+        tracing::error!(
+            migration_detail = %error,
+            "database migration rejected"
+        );
+        erase_startup_cause(
+            RuntimePhase::Migration,
+            SanitizedStartupCause::Static("database_migration_failed"),
+        )
+    })?;
+    tracing::info!(
+        phase = ?RuntimePhase::Migration,
+        "daemon startup phase completed"
+    );
+    let pending_reload =
+        signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
+            pool.clone(),
+        )
+        .pending()
+        .await
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("configuration_reload_intent_read_failed"),
+            )
+        })?;
+    let retained_startup = pending_reload
+        .first()
+        .map(|(_, intent)| {
+            signalboxd::configuration_reload::ConfigurationReload::startup_snapshot(
+                &on_disk,
+                &intent.replacement_snapshot,
+            )
+        })
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("configuration_reload_snapshot_incompatible"),
+            )
+        })?;
+    let model_configuration = match &retained_startup {
+        Some(catalogs) => (*catalogs.models).clone(),
+        None => HubModelConfiguration::parse(&on_disk).map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::ModelConfiguration(&error),
+            )
+        })?,
+    };
+    if let Some(codex_cli) = model_configuration.codex_cli() {
+        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
+            .await
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
+                )
+            })?;
+    }
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,
