@@ -1234,20 +1234,23 @@ export async function readExtendedSessionTranscript(
   held: HeldSessionTranscript | null,
   signal?: AbortSignal,
 ): Promise<HeldSessionTranscript> {
-  const append =
+  const reusableFirstPage =
     held !== null &&
     held.page.items.length <=
       Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items) &&
     held.page.projected_body_bytes <=
       Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes) &&
     held.sessionId === window.sessionId &&
+    held.continuation === null &&
+    continuation === null
+  if (reusableFirstPage && held.first === window.first && held.through === window.through)
+    return held
+  const append =
+    reusableFirstPage &&
     BigInt(window.first) >= BigInt(held.first) &&
     BigInt(window.first) <= BigInt(held.through) &&
     BigInt(held.through) <= BigInt(window.through) &&
-    held.continuation === null &&
-    held.page.continuation === null &&
-    continuation === null
-  if (append && held.first === window.first && held.through === window.through) return held
+    held.page.continuation === null
   const page =
     append && held.through === window.through
       ? { ...held.page, items: [], projected_body_bytes: 0 }

@@ -546,3 +546,21 @@ it('relays provider text and replaces the follow stream when its consumer reques
   await follow.return(undefined)
   expect(fetch).toHaveBeenCalledTimes(3)
 })
+
+it('reuses a held first page with a server continuation when its window is unchanged', async () => {
+  const page = {
+    ...inputPage(8),
+    continuation: { type: 'more_at', address: { event_sequence: '9' } },
+  }
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json(page))
+    .mockRejectedValue(new Error('history should not be reread'))
+  vi.stubGlobal('fetch', fetch)
+  const window = { sessionId, first: '1', through: '9' }
+  const held = await readExtendedSessionTranscript(window, null, limits, null)
+  const reused = await readExtendedSessionTranscript(window, null, limits, held)
+  expect(reused).toBe(held)
+  expect(reused.page.continuation).toEqual(page.continuation)
+  expect(fetch).toHaveBeenCalledTimes(1)
+})
