@@ -32,6 +32,28 @@ host_tools.host_tools(
 use_repo(host_tools, "signalbox_rust_host_tools")
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "rusty_v8_archive",
+    downloaded_file_path = "librusty_v8.a.gz",
+    sha256 = "f48762ca10d1f1fc605a441c5ae430ec8ce1e9e80f14d78fbc42cb878c30b476",
+    urls = ["https://github.com/denoland/rusty_v8/releases/download/v150.4.0/librusty_v8_simdutf_release_x86_64-unknown-linux-gnu.a.gz"],
+)
+
+crate.annotation(
+    build_script_data = ["@rusty_v8_archive//file"],
+    build_script_env = {
+        "RUSTY_V8_ARCHIVE": "$(execpath @rusty_v8_archive//file)",
+        "RUSTY_V8_SRC_BINDING_PATH": "../gen/src_binding_simdutf_release_x86_64-unknown-linux-gnu.rs",
+    },
+    crate = "v8",
+    label_injections = {"@rusty_v8_archive": "@rusty_v8_archive"},
+    patch_args = ["-p1"],
+    patches = ["//tooling/bazel:patches/v8-build-output.patch"],
+    version = "150.4.0",
+)
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",

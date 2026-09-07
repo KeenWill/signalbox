@@ -17,21 +17,17 @@ extract_cargo_lints(
 )
 
 rust_library(
-    name = "signalbox_conversation_import_codex",
+    name = "signalbox_file_media_linux_sandbox",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
+    compile_data = [],
+    crate_features = [],
+    crate_root = "src/lib.rs",
     edition = crate_edition(),
     lint_config = ":cargo_lints",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
+    proc_macro_deps = [] + all_crate_deps(proc_macro = True),
     rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
+    rustc_flags = ["--deny=warnings"],
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//crates/application:signalbox_application",
-        "//crates/conversation-import-json:signalbox_conversation_import_json",
-        "//crates/domain:signalbox_domain",
-    ] + all_crate_deps(normal = True),
+    deps = [] + all_crate_deps(normal = True),
 )
