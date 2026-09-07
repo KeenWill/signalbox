@@ -16,7 +16,13 @@ use signalbox_domain::{
     SessionTemplateName, SettingOverlay, ToolApprovalPosture,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
-use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
+use signalbox_persistence::{
+    model_execution::{
+        CredentialPoolRuntimeAction, CredentialPoolRuntimeExhaustion, CredentialPoolRuntimeMember,
+        CredentialPoolRuntimePolicy, CredentialPoolRuntimeTieBreak,
+    },
+    process_read::ProcessModelCallInputTokenSemantics,
+};
 use signalbox_tools_basic::{CURRENT_TIME_NAME, ECHO_NAME};
 use signalbox_tools_web::{WEB_FETCH_NAME, WebFetchEgressPolicy};
 use uuid::Uuid;
@@ -3192,7 +3198,7 @@ on_headroom_low = "switch_now""#,
 }
 
 #[test]
-fn configuration_rejects_a_headroom_reserve_no_adapter_reports() {
+fn configuration_rejects_a_headroom_reserve_without_adapter_capacity() {
     let reserved = configuration_with_anthropic_pool(
         r#"[[credential_pools]]
 name = "anthropic-main"
@@ -3230,7 +3236,7 @@ value = 10"#,
 }
 
 #[test]
-fn configuration_rejects_a_member_headroom_reserve_no_adapter_reports() {
+fn configuration_rejects_a_member_headroom_reserve_without_adapter_capacity() {
     let reserved = configuration_with_anthropic_pool(
         r#"[[credential_pools]]
 name = "anthropic-main"
@@ -3285,7 +3291,7 @@ fn configuration_rejects_switch_now_for_a_cause_the_adapter_cannot_prove() {
 }
 
 #[test]
-fn configuration_rejects_least_used_ties_no_adapter_can_resolve() {
+fn configuration_rejects_least_used_ties_without_adapter_capacity() {
     let least_used = configuration_with_anthropic_pool(
         r#"[[credential_pools]]
 name = "anthropic-main"
@@ -5399,4 +5405,119 @@ async fn file_credentials_resolve_a_terminated_file_to_the_bare_value() {
 
     assert_eq!(resolved.expose_bytes(), b"synthetic-token-value");
     std::fs::remove_file(path).expect("fixture file is removable");
+}
+
+#[test]
+fn configuration_admits_codex_least_used_ties() {
+    let pool = r#"[[credential_pools]]
+name = "codex-main"
+tie_break = "least_used"
+on_pool_exhausted = "fail"
+members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
+    HubModelConfiguration::parse(&CONFIGURATION.replace(CODEX_POOL, pool))
+        .expect("Codex capacity evidence admits least_used");
+}
+
+#[test]
+fn configuration_admits_codex_pool_headroom_reserve() {
+    let pool = r#"[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+headroom_reserve_percent = 10
+members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
+    HubModelConfiguration::parse(&CONFIGURATION.replace(CODEX_POOL, pool))
+        .expect("Codex capacity evidence admits the pool reserve");
+}
+
+#[test]
+fn configuration_admits_codex_member_headroom_reserve() {
+    let pool = r#"[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{ profile = "codex-subscription-primary", priority = 1, headroom_reserve_percent = 23 }]"#;
+    HubModelConfiguration::parse(&CONFIGURATION.replace(CODEX_POOL, pool))
+        .expect("Codex capacity evidence admits the member reserve");
+}
+
+#[test]
+fn configuration_admits_codex_headroom_actions_between_calls() {
+    for action in [
+        "stay",
+        "switch_next_turn",
+        "avoid_new_sessions",
+        "quarantine",
+    ] {
+        let pool = format!("{CODEX_POOL}\non_headroom_low = \"{action}\"");
+        assert!(
+            HubModelConfiguration::parse(&CONFIGURATION.replace(CODEX_POOL, &pool)).is_ok(),
+            "Codex capacity evidence admits {action}"
+        );
+    }
+}
+
+#[test]
+fn configuration_rejects_codex_switch_now_on_low_headroom() {
+    let pool = format!("{CODEX_POOL}\non_headroom_low = \"switch_now\"");
+    assert_eq!(
+        HubModelConfiguration::parse(&CONFIGURATION.replace(CODEX_POOL, &pool)).err(),
+        Some(
+            HubModelConfigurationError::InadmissibleCredentialPoolAction {
+                trigger: Arc::from("on_headroom_low"),
+            }
+        ),
+    );
+}
+
+#[test]
+fn configuration_projects_codex_capacity_policy_into_runtime_catalog() {
+    let pool = r#"[[credential_pools]]
+name = "codex-main"
+tie_break = "least_used"
+on_pool_exhausted = "fail"
+headroom_reserve_percent = 10
+on_headroom_low = "switch_next_turn"
+members = [{ profile = "codex-subscription-primary", priority = 2, headroom_reserve_percent = 23 }]"#;
+    let directory = tempfile::tempdir().expect("fixture directory is available");
+    let executable = std::env::current_exe().expect("test executable has a path");
+    let source = configuration_with_codex_paths(&executable, directory.path());
+    let source = format!(
+        r#"{source}
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000002"
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "codex"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#
+    );
+    let configuration = HubModelConfiguration::parse(&source.replace(CODEX_POOL, pool))
+        .expect("Codex admits capacity policy");
+    let catalog = configuration.credential_pool_runtime_catalog();
+    let projected = catalog
+        .values()
+        .find(|policy| policy.name() == "codex-main");
+    let expected = CredentialPoolRuntimePolicy::new(
+        "codex-main",
+        vec![
+            CredentialPoolRuntimeMember::new(
+                "codex-subscription-primary",
+                std::num::NonZeroU32::new(2).expect("configured priority is nonzero"),
+            )
+            .with_headroom_reserve(Some(23)),
+        ],
+        CredentialPoolRuntimeExhaustion::Fail,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .with_capacity_policy(
+        CredentialPoolRuntimeTieBreak::LeastUsed,
+        Some(10),
+        CredentialPoolRuntimeAction::SwitchNextTurn,
+    );
+    assert_eq!(projected, Some(&expected));
 }
