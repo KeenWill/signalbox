@@ -1,11 +1,9 @@
+load("@postgres_suites//:defs.bzl", "SUITES")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_postgres_test", "rust_selection_test", "rust_unit_test")
 
-CRATE_FEATURES = [
-    "postgres-integration",
-    "test-support",
-]
+CRATE_FEATURES = SUITES["persistence"]["crate_features"]
 
 CRATE_PROC_MACRO_DEPS = ["//crates/derive:signalbox_derive"]
 
@@ -182,23 +180,10 @@ rust_postgres_test(
 
 test_suite(
     name = "postgres_tests",
+    tags = ["manual"],
     tests = [
-        ":approval_judge_eval_postgres",
-        ":blob_postgres",
-        ":conversation_import_postgres",
-        ":conversation_listing_postgres",
-        ":git_remote_authority_postgres",
-        ":goal_postgres",
-        ":imported_conversation_e2e_postgres",
-        ":imported_session_postgres",
-        ":outbox_decode_postgres",
-        ":postgres_integration",
-        ":program_journal_postgres",
-        ":review_workflow_postgres",
-        ":runner_protocol_postgres",
-        ":search_path_postgres",
-        ":session_metadata_postgres",
-        ":session_placement_postgres",
+        "//:postgres_persistence",
+        "//:postgres_runner",
     ],
 )
 

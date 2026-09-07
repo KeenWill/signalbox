@@ -4,6 +4,7 @@ load("@rules_python//python:defs.bzl", "py_test")
 load("//tooling/bazel:api_documentation.bzl", "api_documentation")
 load("//tooling/bazel:native_generation.bzl", "native_generation")
 load("//tooling/bazel:source_manifest.bzl", "source_manifest")
+load("//tooling/bazel:testing.bzl", "rust_postgres_suite")
 
 exports_files([
     ".github/workflows/claude-smoke.yml",
@@ -16,6 +17,7 @@ exports_files([
     "config/signalbox-runner.example.toml",
     "tooling/codex-cli/release.json",
     "tooling/postgres_test_image.rs",
+    ".github/postgres-integration-suites.toml",
     "tooling/requirements-mdformat.txt",
     "config/signalboxd.example.toml",
 ])
@@ -24,6 +26,7 @@ filegroup(
     name = "postgres_workflow_fixtures",
     srcs = [
         ".github/postgres-integration-suites.toml",
+        ".github/workflows/bazel.yml",
         ".github/workflows/rust.yml",
     ],
     visibility = ["//scripts:__pkg__"],
@@ -629,4 +632,72 @@ js_library(
     name = "web_contract_javascript",
     srcs = ["clients/web/src/generated/web-contract.mjs"],
     visibility = ["//crates/web-contract:__pkg__"],
+)
+
+PERSISTENCE_TEST_BINARIES = {
+    "//crates/persistence:unit_tests": "signalbox_persistence",
+    "//crates/persistence:approval_judge_eval_postgres": "approval_judge_eval_postgres",
+    "//crates/persistence:blob_postgres": "blob_postgres",
+    "//crates/persistence:conversation_import_postgres": "conversation_import_postgres",
+    "//crates/persistence:conversation_listing_postgres": "conversation_listing_postgres",
+    "//crates/persistence:git_remote_authority_postgres": "git_remote_authority_postgres",
+    "//crates/persistence:goal_postgres": "goal_postgres",
+    "//crates/persistence:imported_conversation_e2e_postgres": "imported_conversation_e2e_postgres",
+    "//crates/persistence:imported_session_postgres": "imported_session_postgres",
+    "//crates/persistence:importer_conformance_corpus": "importer_conformance_corpus",
+    "//crates/persistence:outbox_decode_postgres": "outbox_decode_postgres",
+    "//crates/persistence:postgres_integration": "postgres_integration",
+    "//crates/persistence:program_journal_postgres": "program_journal_postgres",
+    "//crates/persistence:review_workflow_postgres": "review_workflow_postgres",
+    "//crates/persistence:runner_protocol_postgres": "runner_protocol_postgres",
+    "//crates/persistence:search_path_postgres": "search_path_postgres",
+    "//crates/persistence:session_metadata_postgres": "session_metadata_postgres",
+    "//crates/persistence:session_placement_postgres": "session_placement_postgres",
+}
+
+rust_postgres_suite(
+    name = "persistence",
+    binaries = PERSISTENCE_TEST_BINARIES,
+)
+
+rust_postgres_suite(
+    name = "runner",
+    binaries = PERSISTENCE_TEST_BINARIES,
+)
+
+rust_postgres_suite(
+    name = "program-runtime",
+    binaries = {
+        "//crates/program-runtime:unit_tests": "signalbox_program_runtime",
+        "//crates/program-runtime:program_host_postgres": "program_host_postgres",
+    },
+)
+
+rust_postgres_suite(
+    name = "signalboxd",
+    binaries = {
+        "//apps/signalboxd:unit_tests": "signalboxd",
+        "//apps/signalboxd:signalboxd_unit_tests": "signalboxd",
+        "//apps/signalboxd:approval_judge_eval_unit_tests": "approval-judge-eval",
+        "//apps/signalboxd:signalbox_debug_unit_tests": "signalbox-debug",
+        "//apps/signalboxd:live_tool_evals": "live_tool_evals",
+        "//apps/signalboxd:live_tool_exercise": "live_tool_exercise",
+        "//apps/signalboxd:offline_reply": "offline_reply",
+        "//apps/signalboxd:offline_tool_loop": "offline_tool_loop",
+        "//apps/signalboxd:process_protocol_runtime": "process_protocol_runtime",
+        "//apps/signalboxd:process_substrate": "process_substrate",
+        "//apps/signalboxd:repo_watch_v2_postgres": "repo_watch_v2_postgres",
+        "//apps/signalboxd:web_http": "web_http",
+        "//apps/signalboxd:web_session_input": "web_session_input",
+    },
+)
+
+rust_postgres_suite(
+    name = "terminal-client",
+    binaries = {
+        "//apps/client:unit_tests": "signalbox_client",
+        "//apps/client:signalbox_unit_tests": "signalbox",
+        "//apps/client:chat_end_to_end": "chat_end_to_end",
+        "//apps/client:end_to_end": "end_to_end",
+    },
 )

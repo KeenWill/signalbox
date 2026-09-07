@@ -5,6 +5,10 @@ bazel_dep(name = "gcc_toolchain", version = "0.12.0")
 bazel_dep(name = "rules_python", version = "2.3.3")
 bazel_dep(name = "aspect_rules_js", version = "3.4.1")
 bazel_dep(name = "rules_nodejs", version = "6.7.5")
+bazel_dep(name = "toml.bzl", version = "0.4.1")
+
+postgres = use_extension("//tooling/bazel:postgres_suites.bzl", "postgres_suites")
+use_repo(postgres, "postgres_suites")
 
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(node_version = "26.8.1")

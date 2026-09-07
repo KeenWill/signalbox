@@ -1,11 +1,9 @@
+load("@postgres_suites//:defs.bzl", "SUITES")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_postgres_test", "rust_selection_test", "rust_unit_test")
 
-CRATE_FEATURES = [
-    "default",
-    "postgres-integration",
-]
+CRATE_FEATURES = SUITES["program-runtime"]["crate_features"]
 
 rust_package()
 
@@ -29,7 +27,7 @@ rust_unit_test(
 
 rust_postgres_test(
     name = "program_host_postgres",
-    crate_features = ["postgres-integration"],
+    crate_features = SUITES["program-runtime"]["crate_features"],
     crate_root = "tests/program_host_postgres.rs",
     deps = [
         ":signalbox_program_runtime",
@@ -42,7 +40,7 @@ rust_postgres_test(
 test_suite(
     name = "postgres_tests",
     tags = ["manual"],
-    tests = [":program_host_postgres"],
+    tests = ["//:postgres_program_runtime"],
 )
 
 rust_api_json(

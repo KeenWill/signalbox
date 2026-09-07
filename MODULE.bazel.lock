@@ -230,6 +230,21 @@
   },
   "selectedYankedVersions": {},
   "moduleExtensions": {
+    "//tooling/bazel:postgres_suites.bzl%postgres_suites": {
+      "general": {
+        "bzlTransitiveDigest": "iZTVm0cC0nSZAv2GhxAiQXyAeVLmuQl2iD91a64YHzs=",
+        "usagesDigest": "EBtCdqRTBM39PRJ9dbbg6cV87VcBDM0MV2osHrnKkhg=",
+        "recordedInputs": [
+          "REPO_MAPPING:,toml.bzl toml.bzl+"
+        ],
+        "generatedRepoSpecs": {
+          "postgres_suites": {
+            "repoRuleId": "@@//tooling/bazel:postgres_suites.bzl%_manifest",
+            "attributes": {}
+          }
+        }
+      }
+    },
     "//tooling/bazel:v8.bzl%v8": {
       "general": {
         "bzlTransitiveDigest": "nAPyP7rsimd3PuF+/zSYHe7cMTF11II1aXbXewmIG4U=",

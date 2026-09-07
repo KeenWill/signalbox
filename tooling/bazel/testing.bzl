@@ -1,6 +1,7 @@
 """Rust unit, integration, PostgreSQL, and API-documentation defaults."""
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@postgres_suites//:defs.bzl", "SUITES")
 load("@rules_rust//rust:defs.bzl", _rust_doc = "rust_doc", _rust_doc_test = "rust_doc_test", _rust_test = "rust_test")
 load(":rust.bzl", "RUSTC_FLAGS")
 
@@ -9,6 +10,7 @@ _UNIT_RUSTC_FLAGS = ["--deny=warnings", "--forbid=unsafe_code"]
 
 def _test_defaults(kwargs):
     kwargs.setdefault("size", "large")
+    kwargs.setdefault("visibility", ["//:__pkg__"])
     kwargs.setdefault("args", _TEST_ARGS)
     kwargs.setdefault("aliases", aliases(normal_dev = True, proc_macro_dev = True))
     kwargs.setdefault("lint_config", ":cargo_lints")
@@ -69,7 +71,7 @@ def rust_postgres_test(name, compile_data = [], tags = [], **kwargs):
     rust_integration_test(
         name = name,
         compile_data = ["//:tooling/postgres_test_image.rs"] + compile_data,
-        tags = ["manual", "requires-network"] + tags,
+        tags = ["manual", "requires-network", "external"] + tags,
         **kwargs
     )
 
@@ -85,7 +87,10 @@ def _test_selection_impl(ctx):
             executable = executable,
             runfiles = ctx.attr.test[DefaultInfo].default_runfiles,
         ),
-        ctx.attr.test[RunEnvironmentInfo],
+        RunEnvironmentInfo(
+            environment = dict(ctx.attr.test[RunEnvironmentInfo].environment, **ctx.attr.env),
+            inherited_environment = ctx.attr.test[RunEnvironmentInfo].inherited_environment,
+        ),
     ]
 
 rust_selection_test = rule(
@@ -93,6 +98,7 @@ rust_selection_test = rule(
     test = True,
     attrs = {
         "test": attr.label(executable = True, cfg = "target", mandatory = True),
+        "env": attr.string_dict(),
     },
     doc = "Run another selection of a compiled libtest binary using the target's args.",
 )
@@ -123,3 +129,34 @@ def rust_api_json(name = "api_json", **kwargs):
     kwargs.setdefault("rustdoc_flags", ["-Z", "unstable-options", "--output-format", "json"])
     kwargs.setdefault("visibility", ["//:__pkg__"])
     _rust_doc(name = name, **kwargs)
+
+def rust_postgres_suite(name, binaries):
+    """Select ignored tests and shards from the shared suite manifest.
+
+    Args:
+        name: Manifest suite name.
+        binaries: Compiled Bazel test labels mapped to Cargo test binary names.
+    """
+    suite = SUITES[name]
+    selected = []
+    for test, binary in binaries.items():
+        if suite.get("include_binaries") and binary not in suite["include_binaries"]:
+            continue
+        if binary in suite.get("exclude_binaries", []):
+            continue
+        target = "postgres_" + name.replace("-", "_") + "_" + test.rsplit(":", 1)[-1]
+        rust_selection_test(
+            name = target,
+            test = test,
+            args = ["--ignored"] + _TEST_ARGS + [arg for skip in suite["skip"] for arg in ["--skip", skip]],
+            env = {"RUST_MIN_STACK": "8388608"},
+            shard_count = suite["shards"],
+            tags = ["manual", "external", "no-sandbox", "requires-network"],
+            size = "enormous",
+        )
+        selected.append(":" + target)
+    native.test_suite(
+        name = "postgres_" + name.replace("-", "_"),
+        tests = selected,
+        tags = ["manual"],
+    )
