@@ -54,31 +54,31 @@ shapes and placement transitions are owned by
 on the turn. Replacement is never refused because a model call is in flight; it
 stays staged and resumable while daemon-locus requests execute on the current
 placement. A runner-locus request whose placement is lost resolves as a
-retryable tool failure recorded in the batch. After every request resolves,
-replacement takes over in the [continuation transaction](../spec/tool-loop.md),
-after all tool results are appended and before the next call is prepared against
-the changed placement. When an interrupt or crash-loss reconciliation
-terminalizes the batch, that path completes or retires the staged replacement
-before terminalizing the turn. The command claims its identity and provisioning
-authorization immediately, and its terminal transaction commits only after any
-authorized in-flight daemon-local call for the session reaches its observation
-boundary. A pinned loss installs the successor placement and extends the next
-context frontier in that transaction, so the call's entries append before the
-placement boundary; a pre-pin replacement returns the placement to unpinned at
-the successor revision and appends no boundary. The terminal transaction also
-moves the turn out of the runner-recovery wait when it is still parked there: to
-running with a fresh attempt when the loss interrupted no tool attempt, and
-otherwise to the phase the retained tool attempt justifies. A staged call that
-completed, refused, failed, cancelled, or ended ambiguous leaves the turn in the
-state that outcome produced. A call that ends known-failed, refused, cancelled,
-or ambiguous reaches an observation boundary too, so staging never waits
-indefinitely. Abandonment requires no active turn; with a turn active it records
-that the turn needs existing control, and the user empties the slot through the
-stop, approval, or reconciliation flow first. A queued turn remains queued and
-cannot activate while its placement is lost. Both commands are administrative
-recovery: they neither widen the interrupt delivery nor create a standalone
-cancellation path, and no case turns ambiguous effect evidence into known
-failure.
+retryable tool failure recorded in the batch before any approval wait parks the
+batch. After every request resolves, replacement takes over in the
+[continuation transaction](../spec/tool-loop.md), after all tool results are
+appended and before the next call is prepared against the changed placement.
+When an interrupt or crash-loss reconciliation terminalizes the batch, that path
+completes or retires the staged replacement before terminalizing the turn. The
+command claims its identity and provisioning authorization immediately, and its
+terminal transaction commits only after any authorized in-flight daemon-local
+call for the session reaches its observation boundary. A pinned loss installs
+the successor placement and extends the next context frontier in that
+transaction, so the call's entries append before the placement boundary; a
+pre-pin replacement returns the placement to unpinned at the successor revision
+and appends no boundary. The terminal transaction also moves the turn out of the
+runner-recovery wait when it is still parked there: to running with a fresh
+attempt when the loss interrupted no tool attempt, and otherwise to the phase
+the retained tool attempt justifies. A staged call that completed, refused,
+failed, cancelled, or ended ambiguous leaves the turn in the state that outcome
+produced. A call that ends known-failed, refused, cancelled, or ambiguous
+reaches an observation boundary too, so staging never waits indefinitely.
+Abandonment requires no active turn; with a turn active it records that the turn
+needs existing control, and the user empties the slot through the stop,
+approval, or reconciliation flow first. A queued turn remains queued and cannot
+activate while its placement is lost. Both commands are administrative recovery:
+they neither widen the interrupt delivery nor create a standalone cancellation
+path, and no case turns ambiguous effect evidence into known failure.
 
 Recovery-only startup binds the runner socket in recovery-only mode after
 migrations, reconciles retained runner inventory, evidence, and nonterminal

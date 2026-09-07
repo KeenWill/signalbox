@@ -5,15 +5,14 @@ This design is not built; it extends the
 
 ## Goal
 
-Deliver durable, checked reload intent from core to the owning module.
+Deliver durable, checked rule activation from core to the owning module.
 
 ## Design
 
 The reload-intent input family carries the reload command identity, checked
-per-repository rule sets, convergence targets, and rule-set digest. Core
-delivers the retained payload, and the module handles repeated delivery
-idempotently. [Process protocol](process-protocol.md) owns intent persistence
-and recovery.
+per-repository rule sets, and rule-set digest. Core delivers rule activation
+from the retained intent, and the module handles repeated delivery idempotently.
+[Process protocol](process-protocol.md) owns intent persistence and recovery.
 
 ## Compatibility constraints
 
