@@ -1033,6 +1033,7 @@ impl AmbiguousModelCallTurn {
 
 ```rust
 pub enum ModelCallClosureError {
+    UnexpectedProviderCompaction,
     IdentityShapeMismatch,
     CallStateMismatch,
     ObservationCorrelationMismatch,

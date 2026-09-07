@@ -36,11 +36,6 @@ BEGIN
         SELECT pg_get_functiondef(function_signature::regprocedure) INTO definition;
         revised_definition := replace(
             definition,
-            'payload_kind = ''provider_compaction''',
-            'payload_kind IN (''provider_compaction'', ''provider_reasoning'')'
-        );
-        revised_definition := replace(
-            revised_definition,
             '''assistant_text'', ''provider_compaction''',
             '''assistant_text'', ''provider_compaction'', ''provider_reasoning'''
         );
@@ -51,8 +46,8 @@ BEGIN
         );
         revised_definition := replace(
             revised_definition,
-            'WHEN ''provider_compaction'' THEN',
-            'WHEN ''provider_reasoning'' THEN NULL; WHEN ''provider_compaction'' THEN'
+            'WHEN ''assistant_text'' THEN',
+            'WHEN ''assistant_text'', ''provider_reasoning'' THEN'
         );
         IF revised_definition = definition THEN
             RAISE EXCEPTION 'response-part function % has no provider compaction predicate', function_signature;
