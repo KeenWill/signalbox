@@ -15,8 +15,8 @@ binary partitions, and shard counts. Each manifest shard runs on its own CI
 worker. Their compilation is cacheable; database tests always execute. Daemon
 PostgreSQL targets use sorted JSON maps. The Rust workflow binds the Bazel
 results to `validate` under its change-scope gate. File-media format and
-registry conformance tests use native Bazel targets; process-isolation tests
-retain their provisioned Cargo job.
+registry conformance tests use native Bazel targets; process-isolation tests run
+in a GitHub-hosted Bazel job with Bubblewrap and a delegated cgroup.
 
 ## Design decisions
 
