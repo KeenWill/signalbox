@@ -171,8 +171,8 @@ class RenderDomainSpineTests(unittest.TestCase):
                     (root / 'src/lib.rs').write_text(
                         '#[cfg(target_os = "linux")]\npub use sandbox::Record;\n'
                         '#[cfg(not(target_os = "linux"))]\npub use ' + counterpart + ';\n')
-                    with patch('render_domain_spine.ROOT', root):
-                        block = Renderer(document).block(document['index']['1'])
+                    with patch('render_domain_spine.ROOT', root / 'unavailable'):
+                        block = Renderer(document, source_root=root).block(document['index']['1'])
                     self.assertEqual('#[cfg(target_os = "linux")]' not in block, unconditional)
                     self.assertIn('pub struct Record', block)
                     self.assertIn('pub fn new', block)

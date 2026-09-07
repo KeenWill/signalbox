@@ -472,6 +472,7 @@ api_documentation(
     json = [":api_json"],
     sources = [
         ":api_snapshots",
+        ":rust_sources",
         "docs/api/crates.toml",
     ],
 )

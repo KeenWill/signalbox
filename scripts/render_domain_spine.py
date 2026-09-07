@@ -126,11 +126,11 @@ def item_cfg(item):
                  for condition in cfg_attributes(attribute.get('other', '')))
 
 
-def has_complementary_export(item):
+def has_complementary_export(item, source_root):
     conditions = item_cfg(item)
     if len(conditions) != 1 or not item['span']:
         return False
-    source = ROOT / item['span']['filename']
+    source = source_root / item['span']['filename']
     if not source.is_file():
         return False
     condition = re.sub(r'\s+', '', conditions[0])
@@ -168,7 +168,8 @@ def format_rust(code):
 
 
 class Renderer:
-    def __init__(self, document, public_exports=None):
+    def __init__(self, document, public_exports=None, *, source_root=None):
+        self.source_root = source_root or ROOT
         self.index = document['index']
         self.paths = document['paths']
         self.root = self.item(document['root'])
@@ -206,7 +207,7 @@ class Renderer:
                 target = self.index.get(str(body['use']['id']))
                 if target and target['crate_id'] == self.crate_id:
                     visit(target['id'], conditions, ancestors + (identity,))
-                    if has_complementary_export(item):
+                    if has_complementary_export(item, self.source_root):
                         visit(target['id'], inherited, ancestors + (identity,))
 
         visit(self.root['id'])
@@ -648,10 +649,10 @@ def main():
             paths[crate] = build_json(crate, workspace=args.source_root)
     public_exports = {}
     for path in paths.values():
-        renderer = Renderer(json.loads(path.read_text()))
+        renderer = Renderer(json.loads(path.read_text()), source_root=args.source_root)
         public_exports.update(renderer.exports())
     for crate, path in paths.items():
-        renderer = Renderer(json.loads(path.read_text()), public_exports)
+        renderer = Renderer(json.loads(path.read_text()), public_exports, source_root=args.source_root)
         files = renderer.files(crate, source_root=args.source_root)
         write_files((args.output_dir or args.source_root / 'docs/api') / crate, files)
         print(f'{crate}: {len(files)} Markdown files')
