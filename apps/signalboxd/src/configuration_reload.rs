@@ -361,11 +361,11 @@ impl ConfigurationReload {
                 let prepared = watch.prepare_reload(prior.clone()).await.map_err(|_| {
                     ReloadRepositoryError::Corruption("prior reload worker preparation failed")
                 })?;
-                let restored = self.reconcile(&prior).await?;
                 *self
                     .current
                     .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = prior;
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = prior.clone();
+                let restored = self.reconcile(&prior).await?;
                 watch.install_reload(prepared).await.map_err(|_| {
                     ReloadRepositoryError::Corruption("reload worker installation failed")
                 })?;
@@ -373,16 +373,16 @@ impl ConfigurationReload {
                 self.repository.finish(request, &refusal).await?;
                 return Ok(ReloadLookup::Recorded(refusal));
             }
-            let restored = self.reconcile(&replacement).await?;
-            Some((watch, prepared, restored))
+            Some((watch, prepared))
         } else {
             None
         };
         *self
             .current
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = replacement;
-        if let Some((watch, prepared, restored)) = prepared_watch {
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = replacement.clone();
+        if let Some((watch, prepared)) = prepared_watch {
+            let restored = self.reconcile(&replacement).await?;
             watch.install_reload(prepared).await.map_err(|_| {
                 ReloadRepositoryError::Corruption("reload worker installation failed")
             })?;
