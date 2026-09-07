@@ -1,10 +1,21 @@
+load("@rules_rust//cargo:defs.bzl", "extract_cargo_lints")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+extract_cargo_lints(
+    name = "cargo_lints",
+    manifest = "Cargo.toml",
+    workspace = "//:Cargo.toml",
+)
 
 rust_library(
     name = "signalbox_newtype",
     srcs = ["src/lib.rs"],
     edition = "2024",
-    rustc_flags = ["--forbid=unsafe_code"],
+    lint_config = ":cargo_lints",
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
     visibility = ["//:__subpackages__"],
 )
 
@@ -12,4 +23,9 @@ rust_test(
     name = "unit_tests",
     size = "small",
     crate = ":signalbox_newtype",
+    lint_config = ":cargo_lints",
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
 )

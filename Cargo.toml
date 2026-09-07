@@ -1,5 +1,4 @@
 [workspace]
-exclude = ["crates/file-media-linux-sandbox"]
 members = [
     "apps/client",
     "apps/signalbox-runner",
@@ -21,6 +20,7 @@ members = [
     "crates/file-media-adapters-image",
     "crates/file-media-adapters-text",
     "crates/file-media-runtime",
+    "crates/file-media-linux-sandbox",
     "crates/file-media-adapter-archives",
     "crates/file-media-adapter-office",
     "crates/file-media-adapter-pdf",

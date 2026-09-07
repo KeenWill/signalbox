@@ -4,7 +4,11 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
-| root | 95 | 0 | 4 | [functions](root/functions.md), [types](root/types.md), [types-2](root/types-2.md) |
+| root | 54 | 0 | 4 | [types](root/types.md), [types-2](root/types-2.md), [functions](root/functions.md) |
+| delegation | 11 | 0 | 0 | [delegation](delegation.md) |
+| goal | 16 | 0 | 0 | [goal](goal.md) |
 | operator_status | 5 | 0 | 0 | [operator_status](operator_status.md) |
 | review | 32 | 0 | 0 | [review](review.md) |
+| runner | 11 | 0 | 0 | [runner](runner.md) |
 | scalars | 28 | 0 | 3 | [scalars](scalars.md) |
+| user_input | 3 | 0 | 0 | [user_input](user_input.md) |
