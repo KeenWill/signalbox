@@ -2863,6 +2863,7 @@ mod tests {
         assert_eq!(
             classify_terminal(
                 TerminalEvidence::Refused(RefusalEvidence {
+                    reason: signalbox_model_runtime::RefusalReason::Unspecified,
                     exchange: exchange.clone(),
                     message_id: None,
                     reported_model: None,
@@ -3031,6 +3032,7 @@ mod tests {
     fn refused_provider_compaction_is_retained_without_refusal_text() {
         let classified = classify_terminal(
             TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
                 exchange: ExchangeFacts::default(),
                 message_id: None,
                 reported_model: Some(ProviderReportedModel::new("model-exact")),
@@ -3068,6 +3070,7 @@ mod tests {
     fn refused_provider_compaction_with_tool_use_is_a_finish_mismatch() {
         let classified = classify_terminal(
             TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
                 exchange: ExchangeFacts::default(),
                 message_id: None,
                 reported_model: Some(ProviderReportedModel::new("model-exact")),
@@ -3588,6 +3591,7 @@ mod tests {
             (
                 "refused",
                 TerminalEvidence::Refused(RefusalEvidence {
+                    reason: signalbox_model_runtime::RefusalReason::Unspecified,
                     exchange: ExchangeFacts::default(),
                     message_id: None,
                     reported_model: None,

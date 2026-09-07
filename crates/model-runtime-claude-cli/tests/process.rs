@@ -476,6 +476,10 @@ async fn refusal_requires_the_typed_refusal_stop_reason() {
     let refusal = refused(&result.evidence);
 
     assert_eq!(
+        refused(&result.evidence).reason,
+        signalbox_model_runtime::RefusalReason::Unspecified
+    );
+    assert_eq!(
         refusal.content,
         vec![AssistantPart::Text(fixtures::REFUSAL.to_string())]
     );

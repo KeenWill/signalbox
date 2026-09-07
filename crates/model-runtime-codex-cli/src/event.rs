@@ -651,6 +651,7 @@ impl<C: Clone> EventDecoder<C> {
 
         match envelope.outcome {
             EnvelopeOutcome::Refused => TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
                 exchange: self.exchange,
                 message_id: message_id.map(ProviderMessageId::new),
                 reported_model: None,

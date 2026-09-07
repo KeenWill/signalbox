@@ -4,7 +4,7 @@ use signalbox_model_runtime::ProviderErrorKind;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FailureClass {
     Provider(ProviderErrorKind),
-    PolicyRefusal,
+    PolicyRefusal(signalbox_model_runtime::RefusalReason),
 }
 
 pub(crate) fn classify(info: Option<&CodexErrorInfo>) -> FailureClass {
@@ -19,8 +19,15 @@ pub(crate) fn classify(info: Option<&CodexErrorInfo>) -> FailureClass {
         KnownError::Unauthorized => ProviderErrorKind::CredentialRejected,
         KnownError::BadRequest => ProviderErrorKind::InvalidRequest,
         KnownError::InternalServerError => ProviderErrorKind::ProviderInternal,
-        KnownError::CyberPolicy | KnownError::MisalignmentPolicyViolation => {
-            return FailureClass::PolicyRefusal;
+        KnownError::CyberPolicy => {
+            return FailureClass::PolicyRefusal(
+                signalbox_model_runtime::RefusalReason::CyberPolicy,
+            );
+        }
+        KnownError::MisalignmentPolicyViolation => {
+            return FailureClass::PolicyRefusal(
+                signalbox_model_runtime::RefusalReason::Misalignment,
+            );
         }
         KnownError::SessionBudgetExceeded
         | KnownError::HttpConnectionFailed { .. }

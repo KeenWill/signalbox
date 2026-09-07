@@ -1722,6 +1722,7 @@ fn decoded_response_accepts_completion() {
 #[test]
 fn decoded_response_accepts_refusal_without_completion_material() {
     let evidence = TerminalEvidence::Refused(RefusalEvidence {
+        reason: signalbox_model_runtime::RefusalReason::Unspecified,
         exchange: fixture_exchange(),
         message_id: None,
         reported_model: Some(fixture_reported_model()),

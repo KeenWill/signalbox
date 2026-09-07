@@ -74,8 +74,7 @@ observed before the loss, and whether a tool call had opened in the material the
 adapter decoded. A provider error may also carry an adapter-owned proof that the
 provider never accepted the request; this page owns that evidence, and
 [credential-availability](credential-availability.md) decides what the proof
-leads to. Refusal evidence reaches callers only from the Codex CLI and Claude
-Code CLI adapters.
+leads to.
 
 `SseFraming` is the provider-agnostic incremental parser both HTTP adapters
 build on, from transport byte chunks to event-stream records.
@@ -129,13 +128,13 @@ no adapter in the repository constructs it.
 The HTTP adapters never construct the incomplete-write unsent cause, because an
 HTTP server can act before end-of-request framing.
 
-Both HTTP decoders construct refusal evidence. Execute converts an ordinary
-refusal to an unrecognized provider error before returning, because a buffered
-HTTP request gives no proof that the response followed the complete upload. A
-refusal that carries at least one validated provider-compaction block with
-non-null replacement content remains refusal evidence because that completed
-replacement proves the provider processed and replaced the request context. A
-suffix containing only null-content no-op blocks does not supply that proof.
+Refusal evidence carries a typed reason: content policy, cyber policy,
+misalignment, or unspecified. Policy refusals carry no credential-rejection or
+non-acceptance proof. HTTP refusals with reported usage remain refusal evidence.
+Without reported usage, an HTTP refusal remains refusal evidence only when it
+carries a validated provider-compaction block with non-null replacement content
+and retained input and output counts; otherwise execute returns an unrecognized
+provider error.
 
 The Claude Code CLI never supplies the non-acceptance proof: it classifies
 failures from rendered prose by substring and exposes no structured native code.
@@ -553,5 +552,5 @@ turn-liveness causes.
   ([design](../design/runtime-substrate.md)).
 - Codex CLI OAuth delivery and the exact-value redaction it seeds before spawn
   ([design](../design/runtime-substrate.md)).
-- Refusal evidence from the direct HTTP adapters, which awaits an upload-proving
-  transport or evidence source ([design](../design/runtime-substrate.md)).
+- An upload-proving transport for HTTP refusals without reported usage or
+  completed provider compaction ([design](../design/runtime-substrate.md)).

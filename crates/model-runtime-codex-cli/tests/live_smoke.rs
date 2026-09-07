@@ -1547,6 +1547,7 @@ fn decoded_response_accepts_refusal_without_completion_material() {
         ..TokenUsage::default()
     };
     let evidence = TerminalEvidence::Refused(RefusalEvidence {
+        reason: signalbox_model_runtime::RefusalReason::Unspecified,
         exchange: exchange.clone(),
         message_id: None,
         reported_model: None,
