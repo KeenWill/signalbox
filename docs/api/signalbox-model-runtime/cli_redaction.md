@@ -75,6 +75,7 @@ impl<'a, C: clone::Clone> RedactingSink<'a, C> {
     pub fn finish(&mut self);
 }
 impl<C: clone::Clone> ObservationSink<C> for RedactingSink<'_, C> {
+    fn observe_rate_limits(&mut self, correlation: C, snapshot: RateLimitSnapshot);
     fn observe(&mut self, observation: Observation<C>);
 }
 ```

@@ -74,6 +74,7 @@ impl IssuedModelCallCorrelation {
             provider_failure_cause: None,
             retry_after: None,
             non_acceptance_proven: false,
+            rate_limits: None,
         }
     }
 
@@ -103,6 +104,7 @@ impl IssuedModelCallCorrelation {
             provider_failure_cause: Some(cause),
             retry_after,
             non_acceptance_proven,
+            rate_limits: None,
         }
     }
 }
@@ -214,6 +216,7 @@ pub enum ProviderModelCallFailureCause {
 /// One provider-neutral terminal observation bound to exact issued authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CorrelatedModelCallTerminalObservation {
+    pub(super) rate_limits: Option<Box<crate::ProviderRateLimitSnapshot>>,
     pub(super) correlation: IssuedModelCallCorrelation,
     pub(super) observation: ModelCallTerminalObservation,
     pub(super) usage: ProviderReportedTokenUsage,
@@ -223,6 +226,17 @@ pub struct CorrelatedModelCallTerminalObservation {
 }
 
 impl CorrelatedModelCallTerminalObservation {
+    /// Attaches capacity evidence observed during this exact provider call.
+    pub fn with_rate_limits(mut self, snapshot: Option<crate::ProviderRateLimitSnapshot>) -> Self {
+        self.rate_limits = snapshot.map(Box::new);
+        self
+    }
+
+    /// Borrows the latest reported capacity snapshot, if any.
+    pub fn rate_limits(&self) -> Option<&crate::ProviderRateLimitSnapshot> {
+        self.rate_limits.as_deref()
+    }
+
     /// Returns the exact model call named by the issued correlation.
     pub const fn call(&self) -> ModelCallId {
         self.correlation.call
