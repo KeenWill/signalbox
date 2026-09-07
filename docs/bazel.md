@@ -14,9 +14,9 @@ bazel test //:bazel_tests
 Bazel builds the workspace libraries and binaries on x86-64 Linux with all
 features enabled, including test-support surfaces and fixture binaries, matching
 Cargo's all-features CI build. These targets do not validate default-feature
-release artifacts. The unit suite covers the workspace libraries and binaries.
-Cargo commands and CI cover the full workspace. See
-[Build and test](spec/build-and-test.md).
+release artifacts. The ordinary suite covers workspace unit tests, integration
+binaries, and doctests. Cargo commands and CI cover the provisioned
+host-isolation gate. See [Build and test](spec/build-and-test.md).
 
 `crate_universe` reads the workspace Cargo manifests and `Cargo.lock` to
 generate third-party dependency targets. Change dependencies with Cargo as
@@ -64,7 +64,10 @@ CLI, Claude/Codex adapter, and daemon unit targets use host utilities and carry
 Bazel's `external` tag so their tests always execute while compilation remains
 cacheable. The daemon socket tests also run outside the sandbox to inspect the
 host's real ownership mapping. Other tests declare their fixture files as Bazel
-inputs. Cargo continues to run the integration tests and doctests.
+inputs. `//:rust_doc_tests` runs all workspace library doctests, including
+compile-fail sealing proofs. The standalone integration targets include the
+compile-fail diagnostic fixtures, which use the host Cargo environment and
+always execute.
 
 The PostgreSQL suites cover persistence and the JavaScript program host. They
 share the image digest in `tooling/postgres_test_image.rs`, which Renovate
@@ -103,8 +106,10 @@ outside the sandbox and always executes; the other results are cacheable.
 
 `bazel test //:media_integration_tests` checks text, image, archive, office,
 PDF, SVG, video, and registry behavior. These fixture-based targets are included
-in `//:bazel_tests` and cache their results. Audio worker and process-isolation
-tests continue in the Cargo job that provisions the real sandbox.
+in `//:bazel_tests` and cache their results. The `//:host_integration_tests`
+targets cover the audio worker, process isolation, and real Bubblewrap checks
+with CI confinement requirements enabled. They need a delegated cgroup and the
+real sandbox; the provisioned Cargo workspace job retains that CI gate.
 
 The importer conformance corpus runs in `//:rust_integration_tests`. Its JSONL
 inputs, golden files, and Cargo configuration are declared separately. Golden
@@ -127,3 +132,8 @@ comparison are separate cacheable actions. The API configuration selects the
 pinned nightly toolchain; Renovate groups its Cargo renderer and Bazel pins. The
 required contract check uses this target. The optional baseline API digest runs
 separately and still uses Cargo to document historical revisions.
+
+`//crates/web-contract:generated_roundtrip` runs the generated JavaScript
+contract tests with a pinned Node.js toolchain and declared JSON fixtures.
+Ordinary PostgreSQL selections reuse the ignored suites’ compiled binaries; the
+non-PostgreSQL suite does not execute their ignored tests.

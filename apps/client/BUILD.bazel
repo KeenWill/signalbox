@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_unit_test")
 
 TEST_DEPS = [
     "//apps/signalboxd:signalboxd_lib",
@@ -40,4 +40,89 @@ rust_unit_test(
     name = "signalbox_unit_tests",
     crate = ":signalbox",
     deps = TEST_DEPS,
+)
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_client",
+)
+
+rust_integration_test(
+    name = "chat_end_to_end",
+    args = ["--test-threads=4"],
+    srcs = glob(["tests/**/*.rs"]),
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_root = "tests/chat_end_to_end.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [":signalbox"],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_signalbox": "$(rootpath :signalbox)",
+    },
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/client",
+        "CARGO_BIN_EXE_signalbox": "$(rootpath :signalbox)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = [
+        "//apps/client:signalbox_client",
+        "//apps/signalboxd:signalboxd_lib",
+        "//crates/application:signalbox_application",
+        "//crates/domain:signalbox_domain",
+        "//crates/model-provider-runtime:signalbox_model_provider_runtime",
+        "//crates/model-runtime:signalbox_model_runtime",
+        "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
+        "//crates/persistence:signalbox_persistence",
+        "//crates/process-protocol:signalbox_process_protocol",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
+)
+
+rust_integration_test(
+    name = "end_to_end",
+    args = ["--test-threads=4"],
+    srcs = glob(["tests/**/*.rs"]),
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_root = "tests/end_to_end.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [":signalbox"],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_signalbox": "$(rootpath :signalbox)",
+    },
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/client",
+        "CARGO_BIN_EXE_signalbox": "$(rootpath :signalbox)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = [
+        "//apps/client:signalbox_client",
+        "//apps/signalboxd:signalboxd_lib",
+        "//crates/application:signalbox_application",
+        "//crates/domain:signalbox_domain",
+        "//crates/model-provider-runtime:signalbox_model_provider_runtime",
+        "//crates/model-runtime:signalbox_model_runtime",
+        "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
+        "//crates/persistence:signalbox_persistence",
+        "//crates/process-protocol:signalbox_process_protocol",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
 )

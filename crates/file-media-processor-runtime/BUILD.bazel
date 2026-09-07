@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_unit_test")
 
 CRATE_FEATURES = ["test-worker"]
 
@@ -43,4 +43,46 @@ rust_api_json(
     name = "api_json",
     crate = ":signalbox_file_media_processor_runtime",
     crate_features = CRATE_FEATURES,
+)
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_file_media_processor_runtime",
+    crate_features = ["test-worker"],
+)
+
+rust_integration_test(
+    name = "isolation",
+    srcs = glob(["tests/**/*.rs"]),
+    args = [
+        "--ignored",
+        "--test-threads=4",
+    ],
+    crate_features = ["test-worker"],
+    crate_root = "tests/isolation.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [":signalbox-file-media-synthetic-worker"],
+    env = {
+        "CI": "true",
+        "NEXTEST_BIN_EXE_signalbox_file_media_synthetic_worker": "$(rootpath :signalbox-file-media-synthetic-worker)",
+    },
+    env_inherit = ["SIGNALBOX_FILE_MEDIA_CGROUP_ROOT"],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/file-media-processor-runtime",
+        "CARGO_BIN_EXE_signalbox-file-media-synthetic-worker": "$(rootpath :signalbox-file-media-synthetic-worker)",
+    },
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+    deps = [
+        "//crates/file-media-linux-sandbox:signalbox_file_media_linux_sandbox",
+        "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
+        "//crates/file-media-runtime:signalbox_file_media_runtime",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
 )
