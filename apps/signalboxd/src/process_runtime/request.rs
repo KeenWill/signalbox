@@ -245,7 +245,6 @@ where
             statement,
             content,
         } => {
-            // Box the composed commission future to reduce the dispatcher's poll frame.
             Box::pin(handle_commission_session(
                 writer,
                 version,
