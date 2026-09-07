@@ -16,7 +16,9 @@ features enabled, including test-support surfaces and fixture binaries, matching
 Cargo's all-features CI build. These targets do not validate default-feature
 release artifacts. The ordinary suite covers workspace unit tests, integration
 binaries, and doctests. A GitHub-hosted Bazel job runs the provisioned
-host-isolation gate. See [Build and test](spec/build-and-test.md).
+host-isolation gate. The required Rust `validate` job retains Cargo checks for
+the catalog workspace dependency boundary and Codex schema fixtures, including
+Rust lockfile-only updates. See [Build and test](spec/build-and-test.md).
 
 `crate_universe` reads the workspace Cargo manifests and `Cargo.lock` to
 generate third-party dependency targets. Change dependencies with Cargo as
