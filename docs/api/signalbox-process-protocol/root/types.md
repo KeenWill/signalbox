@@ -2,60 +2,6 @@
 
 # root: types
 
-## UserAttachmentKind
-
-```rust
-pub enum UserAttachmentKind {
-    Image,
-    Document,
-    File,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## UserInputPart
-
-```rust
-pub enum UserInputPart {
-    Text {
-        text: string::String,
-    },
-    Attachment {
-        digest: CanonicalBlobDigest,
-        kind: UserAttachmentKind,
-        media_type: string::String,
-        display_filename: option::Option<string::String>,
-    },
-}
-// derives: clone::Clone, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl fmt::Debug for UserInputPart {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-```
-
-## UserInputContent
-
-```rust
-pub struct UserInputContent(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl UserInputContent {
-    pub fn parts(&self) -> &[UserInputPart];
-}
-impl<'de> de::Deserialize<'de> for UserInputContent {
-    fn deserialize<DeserializerT>(
-        deserializer: DeserializerT,
-    ) -> result::Result<Self, <DeserializerT as de::Deserializer>::Error>
-    where
-        DeserializerT: de::Deserializer<'de>;
-}
-impl UserInputContent {
-    pub fn text(value: string::String) -> Self;
-    pub fn from_parts(parts: vec::Vec<UserInputPart>) -> Self;
-    pub fn single_text(&self) -> option::Option<&str>;
-    pub fn into_parts(self) -> vec::Vec<UserInputPart>;
-}
-```
-
 ## ModelSelection
 
 ```rust
@@ -461,264 +407,6 @@ pub enum ConversationSummary {
 impl ConversationSummary {
     pub const fn cursor(&self) -> ConversationCursor;
 }
-```
-
-## GoalCommandRejection
-
-```rust
-pub enum GoalCommandRejection {
-    SessionNotFound,
-    SessionClosing,
-    GoalAlreadyAttached,
-    GoalNotAttached,
-    UnknownModelAlias,
-    AcceptancePositionExhausted,
-    RequiresBlocked,
-    RequiresPursuingOrBlocked,
-    GenerationExhausted,
-    EventOrdinalExhausted,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## GoalBlockedReason
-
-```rust
-pub enum GoalBlockedReason {
-    UserInputRequired,
-    ExternalChangeRequired,
-    AuthorizationRequired,
-    ExecutionFailure,
-    FinishCheckFailed,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## GoalBlockedProvenance
-
-```rust
-pub enum GoalBlockedProvenance {
-    Model {
-        turn_id: CanonicalUuid,
-        tool_request_id: CanonicalUuid,
-    },
-    ExecutionFailure {
-        turn_id: CanonicalUuid,
-    },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## GoalLifecycleState
-
-```rust
-pub enum GoalLifecycleState {
-    Pursuing {},
-    Blocked {
-        reason: GoalBlockedReason,
-        need: string::String,
-    },
-    Achieved {
-        turn_id: CanonicalUuid,
-        tool_request_id: CanonicalUuid,
-    },
-    UserStopped {},
-    Superseded {
-        by_generation: CanonicalU64,
-    },
-    SessionClosed {
-        outcome: SessionClosureOutcome,
-    },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## SessionClosureOutcome
-
-```rust
-pub enum SessionClosureOutcome {
-    FailedRetryable,
-    FailedStructural,
-    FailedUnknown,
-    Stopped,
-    Superseded,
-    Abandoned,
-    Retired,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## LifecycleActorClass
-
-```rust
-pub enum LifecycleActorClass {
-    Core,
-    Operator,
-    Module,
-    Watchdog,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## GoalHistoryEvent
-
-```rust
-pub enum GoalHistoryEvent {
-    Commissioned {
-        statement: string::String,
-        command_id: CommandId,
-    },
-    Blocked {
-        reason: GoalBlockedReason,
-        need: string::String,
-        provenance: GoalBlockedProvenance,
-    },
-    Resumed {
-        guidance: option::Option<string::String>,
-        command_id: CommandId,
-    },
-    Achieved {
-        report: string::String,
-        turn_id: CanonicalUuid,
-        tool_request_id: CanonicalUuid,
-    },
-    UserStopped {
-        command_id: CommandId,
-    },
-    Superseded {
-        replacement_statement: string::String,
-        command_id: CommandId,
-    },
-    SessionClosed {
-        outcome: SessionClosureOutcome,
-        actor: LifecycleActorClass,
-    },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## DescendantTerminationScope
-
-```rust
-pub enum DescendantTerminationScope {
-    ParentAlone,
-    ParentAndDescendants,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## CommissionedSessionFence
-
-```rust
-pub enum CommissionedSessionFence {
-    PullRequest {
-        repository: string::String,
-        pull_request: CanonicalU64,
-        head_sha: string::String,
-        head_repository: string::String,
-        head_branch: string::String,
-        base_branch: string::String,
-    },
-    Branch {
-        repository: string::String,
-        branch: string::String,
-    },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## StartGate
-
-```rust
-pub enum StartGate {
-    Open,
-    Held,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## SessionOwnership
-
-```rust
-pub enum SessionOwnership {
-    Owned,
-    Unmonitored,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## FinishCondition
-
-```rust
-pub enum FinishCondition {
-    ExternalGate,
-    Declared { statement: string::String },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## SessionLifecycleMembers
-
-```rust
-pub struct SessionLifecycleMembers {
-    pub start_gate: StartGate,
-    pub ownership: SessionOwnership,
-    pub finish_condition: option::Option<FinishCondition>,
-}
-// derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl SessionLifecycleMembers {
-    pub fn is_default(&self) -> bool;
-}
-```
-
-## SessionFailureCause
-
-```rust
-pub enum SessionFailureCause {
-    ProviderTransient,
-    ProviderQuotaExhausted,
-    ProviderOverloaded,
-    InfrastructureFailure,
-    RetryBudgetExhausted,
-    ContextCompactionWall,
-    ContextHeadroomExhausted,
-    BrokenToolchain,
-    ModerationBlock,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## SessionLifecycleCommandRejection
-
-```rust
-pub enum SessionLifecycleCommandRejection {
-    SessionNotFound,
-    TransitionNotAdmitted,
-    RequiresParked,
-    ReleaseWhileParked,
-    OwnershipUnchanged,
-    FinishConditionAlreadyDeclared,
-    StandingCauseMismatch,
-    SuccessorNotFound,
-    SuccessorIsSelf,
-    GoalResumeRequired,
-    GoalOutcomeMismatch,
-    PendingTerminalConflict,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## SessionLifecycleEffect
-
-```rust
-pub enum SessionLifecycleEffect {
-    StartReleased {},
-    Closed {},
-    ClosurePending { live_turn_id: CanonicalUuid },
-    Resumed {},
-    OwnershipChanged {},
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
 
 ## ClientRequest
@@ -1778,107 +1466,522 @@ pub enum ToolBatchState {
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
 
-## RunnerSandboxProfile
+## SessionEvent
 
 ```rust
-pub enum RunnerSandboxProfile {
-    Ambient,
-    WorkspaceRestricted,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## RunnerCapabilityClass
-
-```rust
-pub struct RunnerCapabilityClass(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl RunnerCapabilityClass {
-    pub fn as_str(&self) -> &str;
-}
-impl RunnerCapabilityClass {
-    pub fn try_new(value: string::String) -> result::Result<Self, CanonicalValueError>;
-}
-impl convert::TryFrom<string::String> for RunnerCapabilityClass {
-    type Error = CanonicalValueError;
-    fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
-}
-impl convert::From<RunnerCapabilityClass> for string::String {
-    fn from(value: RunnerCapabilityClass) -> Self;
-}
-```
-
-## RunnerCredentialProfileName
-
-```rust
-pub struct RunnerCredentialProfileName(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl RunnerCredentialProfileName {
-    pub fn as_str(&self) -> &str;
-}
-impl RunnerCredentialProfileName {
-    pub fn try_new(value: string::String) -> result::Result<Self, CanonicalValueError>;
-}
-impl convert::TryFrom<string::String> for RunnerCredentialProfileName {
-    type Error = CanonicalValueError;
-    fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
-}
-impl convert::From<RunnerCredentialProfileName> for string::String {
-    fn from(value: RunnerCredentialProfileName) -> Self;
-}
-```
-
-## RunnerRepositoryKey
-
-```rust
-pub struct RunnerRepositoryKey(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl RunnerRepositoryKey {
-    pub fn as_str(&self) -> &str;
-}
-impl RunnerRepositoryKey {
-    pub fn try_new(value: string::String) -> result::Result<Self, CanonicalValueError>;
-}
-impl convert::TryFrom<string::String> for RunnerRepositoryKey {
-    type Error = CanonicalValueError;
-    fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
-}
-impl convert::From<RunnerRepositoryKey> for string::String {
-    fn from(value: RunnerRepositoryKey) -> Self;
-}
-```
-
-## RunnerProjectionSelector
-
-```rust
-pub enum RunnerProjectionSelector {
-    Runner { runner_id: CanonicalUuid },
-    CapabilityClass { name: RunnerCapabilityClass },
+pub enum SessionEvent {
+    SessionCreated {},
+    SessionModelSettingsChanged {
+        command_id: CommandId,
+        prior_defaults_version: CanonicalU64,
+        installed_defaults_version: CanonicalU64,
+        prior_model: ModelSelection,
+        installed_model: ModelSelection,
+        prior_settings: ModelSettingsSnapshot,
+        installed_settings: ModelSettingsSnapshot,
+        caller_override: ModelSettingsOverlay,
+        adjustments: vec::Vec<ModelChangeAdjustment>,
+    },
+    TurnModelSettingsResolved {
+        accepted_input_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
+        requested_model: ModelSelection,
+        selected_direct_id: CanonicalUuid,
+        per_call_override: ModelSettingsOverlay,
+        settings: ModelSettingsSnapshot,
+        adjusted_from_selection_id: option::Option<CanonicalUuid>,
+        adjustments: vec::Vec<ModelChangeAdjustment>,
+    },
+    InputAccepted {
+        accepted_input_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        acceptance_position: CanonicalU64,
+        content: UserInputContent,
+    },
+    GoalTurnRetired {
+        turn_id: CanonicalUuid,
+    },
+    TurnActivated {
+        turn_id: CanonicalUuid,
+        current_attempt_id: CanonicalUuid,
+    },
+    ModelCallTransition {
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        state: ModelCallState,
+    },
+    ToolBatchTransition {
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        state: ToolBatchState,
+    },
+    RunnerStateTransition {
+        runner_id: CanonicalUuid,
+        placement_revision: RunnerPlacementRevision,
+        sandbox_profile: RunnerSandboxProfile,
+        working_directory: option::Option<RunnerWorkingDirectory>,
+        state: RunnerStateTransitionState,
+    },
+    ToolApprovalDecided {
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+        decision: ToolApprovalEventDecision,
+        decider: ToolApprovalEventDecider,
+        rationale: option::Option<string::String>,
+    },
+    ContextCompacted {
+        context_compaction_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        through_position: CanonicalU64,
+        summary_entry_id: CanonicalUuid,
+        result_frontier_id: CanonicalUuid,
+    },
+    TurnCompleted {
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        completion_entry_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
+    },
+    TurnFailed {
+        turn_id: CanonicalUuid,
+        failure_entry_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
+    },
+    TurnRefused {
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
+    },
+    TurnCancelled {
+        turn_id: CanonicalUuid,
+        cancellation_entry_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
+    },
+    TurnReconciliationRequired {
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
+    },
+    TurnToolReconciliationRequired {
+        turn_id: CanonicalUuid,
+        tool_attempt_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
+    },
+    ChildSpawned {
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        relationship: DelegationPolicy,
+    },
+    ChildWaiting {
+        await_request_id: CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        mode: DelegationWaitMode,
+    },
+    SessionMessage {
+        spawning_request_id: CanonicalUuid,
+        message_id: CanonicalUuid,
+        sender_session_id: CanonicalUuid,
+        recipient_session_id: CanonicalUuid,
+        ordinal: CanonicalU64,
+        delivery_sequence: CanonicalU64,
+        content: string::String,
+    },
+    ChildResult {
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        outcome: DelegationOutcome,
+        content: option::Option<string::String>,
+        reason: DelegationReason,
+        provenance: DelegationProvenance,
+    },
+    ChildLifecycleDisposition {
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        outcome: DelegationOutcome,
+        reason: DelegationReason,
+        provenance: DelegationProvenance,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
 
-## RunnerConnectionHealth
+## ServerMessage
 
 ```rust
-pub enum RunnerConnectionHealth {
-    Connected,
-    Suspect,
-    Shutdown,
-    Lost,
+pub enum ServerMessage {
+    SessionCreated {
+        session_id: CanonicalUuid,
+        model_settings: ModelSettingsSnapshot,
+    },
+    SessionCommissioned {
+        session_id: CanonicalUuid,
+        dispatch_id: CanonicalUuid,
+    },
+    SessionLifecycleCommandApplied {
+        session_id: CanonicalUuid,
+        effect: SessionLifecycleEffect,
+    },
+    SessionSpawned {
+        tool_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        relationship: DelegationPolicy,
+    },
+    SessionAwaitRegistered {
+        tool_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        mode: DelegationWaitMode,
+    },
+    ChildResult {
+        await_request_id: CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        outcome: DelegationOutcome,
+        content: option::Option<string::String>,
+        reason: DelegationReason,
+        provenance: DelegationProvenance,
+    },
+    SessionMessageSent {
+        tool_request_id: CanonicalUuid,
+        message_id: CanonicalUuid,
+        direction: DelegationMessageDirection,
+        ordinal: CanonicalU64,
+        delivery_sequence: CanonicalU64,
+    },
+    SessionPlacementUpdated {
+        session_id: CanonicalUuid,
+        placement_version: CanonicalU64,
+        placement: SessionPlacement,
+    },
+    InputSubmitted {
+        session_id: CanonicalUuid,
+        accepted_input_id: CanonicalUuid,
+        acceptance_position: CanonicalU64,
+        turn_id: CanonicalUuid,
+        model_settings: ModelSettingsSnapshot,
+    },
+    SteeringSubmitted {
+        session_id: CanonicalUuid,
+        accepted_input_id: CanonicalUuid,
+        acceptance_position: CanonicalU64,
+        source_turn_id: CanonicalUuid,
+    },
+    GoalTransitionApplied {
+        session_id: CanonicalUuid,
+        event_ordinal: CanonicalU64,
+        generation: CanonicalU64,
+    },
+    GoalHistoryStart {
+        session_id: CanonicalUuid,
+        current_generation: CanonicalU64,
+        current_statement: string::String,
+    },
+    GoalHistoryState {
+        current_state: GoalLifecycleState,
+    },
+    GoalHistoryItem {
+        event_ordinal: CanonicalU64,
+        generation: CanonicalU64,
+        event: GoalHistoryEvent,
+    },
+    GoalHistoryEnd {
+        event_count: CanonicalU64,
+    },
+    SessionsStart {},
+    SessionSummary {
+        session_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
+        model_selection: ModelSelection,
+        placement_version: CanonicalU64,
+        placement: SessionPlacement,
+        runner: option::Option<RunnerProjection>,
+    },
+    SessionsEnd {
+        session_count: CanonicalU64,
+    },
+    OperatorStatus(boxed::Box<OperatorStatusMessage>),
+    TemplatesStart {},
+    TemplateSummary {
+        name: string::String,
+        version: CanonicalU64,
+    },
+    TemplatesEnd {
+        template_count: CanonicalU64,
+    },
+    DeploymentLimits {
+        max_message_utf8_bytes: option::Option<CanonicalU64>,
+        max_system_prompt_utf8_bytes: option::Option<CanonicalU64>,
+        terminal_input_channel_capacity: option::Option<CanonicalU64>,
+        min_metadata_page_size: option::Option<CanonicalU64>,
+        max_metadata_page_size: option::Option<CanonicalU64>,
+        max_review_findings_per_run: option::Option<CanonicalU64>,
+    },
+    SessionMetadataPageStart {},
+    SessionMetadataSummary {
+        session_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
+        model_selection: ModelSelection,
+        dangerous_tool_auto_approval: bool,
+        title: option::Option<string::String>,
+        tags: vec::Vec<string::String>,
+        archived: bool,
+        last_writer: option::Option<MetadataLastWriter>,
+    },
+    SessionMetadataPageEnd {
+        session_count: CanonicalU64,
+        next_after_session_id: option::Option<CanonicalUuid>,
+    },
+    ConversationPageStart {},
+    ConversationSummary {
+        conversation: ConversationSummary,
+    },
+    ConversationPageEnd {
+        conversation_count: CanonicalU64,
+        next_after: option::Option<ConversationCursor>,
+    },
+    ModelAliasesStart {},
+    ModelAliasSummary {
+        alias_id: CanonicalUuid,
+        selection_id: CanonicalUuid,
+    },
+    ModelAliasesEnd {
+        alias_count: CanonicalU64,
+    },
+    ModelCapabilitiesStart {},
+    ModelCapabilityItem {
+        selection_id: CanonicalUuid,
+        capabilities: ModelCapabilities,
+    },
+    ModelCapabilitiesEnd {
+        capability_count: CanonicalU64,
+    },
+    SessionMetadata {
+        session_id: CanonicalUuid,
+        metadata: SessionMetadata,
+        last_writer: option::Option<MetadataLastWriter>,
+    },
+    SessionMetadataReplaced {
+        session_id: CanonicalUuid,
+        metadata: SessionMetadata,
+        last_writer: MetadataLastWriter,
+    },
+    SessionDefaultsReplaced {
+        session_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
+        model_selection: ModelSelection,
+        model_settings: ModelSettingsSnapshot,
+        dangerous_tool_auto_approval: bool,
+        system_prompt: SystemPromptMember,
+    },
+    SessionDefaults {
+        session_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
+        model_selection: ModelSelection,
+        model_settings: ModelSettingsSnapshot,
+        dangerous_tool_auto_approval: bool,
+        system_prompt: option::Option<SystemPromptText>,
+    },
+    ToolRequestDecided {
+        tool_request_id: CanonicalUuid,
+        decision: ToolDecision,
+    },
+    ToolDenialOverridden {
+        tool_request_id: CanonicalUuid,
+    },
+    SessionCompacted {
+        session_id: CanonicalUuid,
+        context_compaction_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        through_position: CanonicalU64,
+        summary_entry_id: CanonicalUuid,
+        result_frontier_id: CanonicalUuid,
+    },
+    ConversationImportInserted {
+        imported_conversation_id: CanonicalUuid,
+    },
+    ConversationImportAlreadyImported {
+        imported_conversation_id: CanonicalUuid,
+    },
+    ConversationImportBegun {
+        declared_size_bytes: CanonicalU64,
+    },
+    ConversationImportAppended {
+        assembled_size_bytes: CanonicalU64,
+    },
+    ConversationImportAborted {},
+    BlobUploadBegun {
+        expected_digest: CanonicalBlobDigest,
+        expected_length_bytes: CanonicalU64,
+    },
+    BlobUploadAlreadyPresent {
+        digest: CanonicalBlobDigest,
+        byte_length: CanonicalU64,
+    },
+    BlobUploadAppended {
+        assembled_length_bytes: CanonicalU64,
+    },
+    BlobUploadCommitted {
+        digest: CanonicalBlobDigest,
+        byte_length: CanonicalU64,
+    },
+    BlobUploadAborted {},
+    BlobMetadata {
+        digest: CanonicalBlobDigest,
+        byte_length: CanonicalU64,
+        replica_count: CanonicalU64,
+    },
+    BlobChunkRead {
+        digest: CanonicalBlobDigest,
+        offset_bytes: CanonicalU64,
+        bytes: BlobChunk,
+    },
+    ImportedConversationStart {
+        imported_conversation_id: CanonicalUuid,
+    },
+    ImportedConversationEntry {
+        position: CanonicalU64,
+        imported_entry_id: CanonicalUuid,
+        source_speaker: ImportedSourceSpeaker,
+        content_kind: ImportedContentKind,
+        text_preview: option::Option<ImportedTextPreview>,
+    },
+    ImportedConversationEnd {
+        imported_conversation_id: CanonicalUuid,
+        entry_count: CanonicalU64,
+    },
+    TranscriptSnapshotStart {
+        session_id: CanonicalUuid,
+        cursor: CanonicalU64,
+        runner: option::Option<RunnerProjection>,
+    },
+    TranscriptTurn {
+        turn_id: CanonicalUuid,
+        acceptance_position: CanonicalU64,
+        model_settings: option::Option<TurnModelSettingsSnapshot>,
+        state: TurnState,
+    },
+    TranscriptModelCallUsage {
+        model_call_index: CanonicalU64,
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        usage_provenance: UsageProvenance,
+        usage: ModelCallTokenUsage,
+        cost: option::Option<ModelCallDollarCost>,
+    },
+    TranscriptModelCallsEnd {
+        model_call_count: CanonicalU64,
+    },
+    TranscriptEntry {
+        entry_index: CanonicalU64,
+        source_session_id: CanonicalUuid,
+        entry_id: CanonicalUuid,
+        entry: TranscriptEntry,
+    },
+    TranscriptUserEntry {
+        entry_index: CanonicalU64,
+        source_session_id: CanonicalUuid,
+        entry_id: CanonicalUuid,
+        accepted_input_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        content: UserInputContent,
+    },
+    TranscriptTextEntry {
+        entry_index: CanonicalU64,
+        source_session_id: CanonicalUuid,
+        entry_id: CanonicalUuid,
+        entry: TranscriptTextEntry,
+    },
+    TranscriptContent {
+        entry_index: CanonicalU64,
+        fragment_index: CanonicalU64,
+        final_fragment: bool,
+        content_fragment: ContentFragment,
+    },
+    TranscriptSnapshotEnd {
+        session_id: CanonicalUuid,
+        cursor: CanonicalU64,
+        turn_count: CanonicalU64,
+        entry_count: CanonicalU64,
+    },
+    SessionEvent {
+        cursor: CanonicalU64,
+        session_id: CanonicalUuid,
+        event: SessionEvent,
+    },
+    ProviderTextDelta {
+        session_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        part_index: CanonicalU64,
+        content: ContentFragment,
+    },
+    ReviewTargetCreated {
+        target_id: CanonicalUuid,
+    },
+    ReviewRunStarted {
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+    },
+    ReviewPassActivated {
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+    },
+    ReviewPassCompleted {
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        state: ReviewPassLifecycle,
+    },
+    ReviewFindingsRecorded {
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        finding_count: CanonicalU64,
+    },
+    ReviewFindingEventRecorded {
+        finding_id: CanonicalUuid,
+        status: ReviewFindingStatus,
+    },
+    ReviewExternalLinkReserved {
+        external_link_id: CanonicalUuid,
+    },
+    ReviewExternalLinkAttached {
+        external_link_id: CanonicalUuid,
+        external_object: string::String,
+    },
+    ReviewTarget {
+        target: ReviewTargetSnapshot,
+    },
+    ReviewRun {
+        run: ReviewRunSnapshot,
+        pass: option::Option<ReviewPassSnapshot>,
+    },
+    ReviewFinding {
+        finding: ReviewFindingSnapshot,
+    },
+    ReviewFindingsStart {
+        run_id: CanonicalUuid,
+    },
+    ReviewFindingItem {
+        finding: ReviewFindingSnapshot,
+    },
+    ReviewFindingsEnd {
+        finding_count: CanonicalU64,
+    },
+    ReviewOrchestrationStarted {
+        attempt_id: CanonicalUuid,
+    },
+    ReviewOrchestrationAdvanced {
+        attempt_id: CanonicalUuid,
+        state: ReviewOrchestrationState,
+    },
+    ReviewOrchestration {
+        snapshot: ReviewOrchestrationSnapshot,
+    },
+    Error {
+        code: ErrorCode,
+        message: string::String,
+        detail: ErrorDetail,
+    },
 }
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-```
-
-## RunnerProjectionState
-
-```rust
-pub enum RunnerProjectionState {
-    Unpinned,
-    Pinned,
-    RunnerLostBeforePin,
-    RunnerLost,
-    RunnerAbandoned,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
