@@ -164,6 +164,7 @@ impl StreamDecoder {
                 };
                 let failed = event.kind == "response.failed";
                 if response.status.as_deref() != event.kind.strip_prefix("response.") {
+                    self.observe_response_facts(&response, correlation, sink);
                     self.discarded_unexamined_bytes = true;
                     return self.violation("terminal event and response status disagree");
                 }
@@ -472,7 +473,20 @@ impl StreamDecoder {
             {
                 return Err("model identity changed during stream".to_string());
             }
-            if self.reported_model.is_none() {
+        }
+        self.observe_response_facts(response, correlation, sink);
+        Ok(())
+    }
+
+    fn observe_response_facts<C: Clone>(
+        &mut self,
+        response: &Response,
+        correlation: &C,
+        sink: &mut (dyn ObservationSink<C> + Send),
+    ) {
+        if let Some(model) = response.model.as_ref().filter(|model| !model.is_empty()) {
+            let model = ProviderReportedModel::new(model.clone());
+            if self.reported_model.as_ref() != Some(&model) {
                 emit(
                     correlation,
                     sink,
@@ -484,7 +498,6 @@ impl StreamDecoder {
         if let Some(usage) = &response.usage {
             self.usage.absorb(convert_usage(usage));
         }
-        Ok(())
     }
 
     fn observe_item_kind(&mut self, index: u32, kind: &str) -> Result<(), String> {
@@ -1568,17 +1581,54 @@ mod tests {
     }
 
     #[test]
-    fn terminal_event_must_agree_with_response_status() {
-        let mut event = terminal();
-        event["response"]["status"] = json!("in_progress");
-        assert!(matches!(
-            decode(event),
-            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
-                tool_calls: ToolCallsAtLoss::Unobserved,
-                finish_reported: None,
-                ..
-            })
-        ));
+    fn first_terminal_status_disagreement_retains_reported_metadata() {
+        for (wrapper, status, error) in [
+            ("response.completed", "in_progress", Value::Null),
+            ("response.incomplete", "completed", Value::Null),
+            ("response.failed", "completed", Value::Null),
+            (
+                "response.completed",
+                "failed",
+                json!({"code":"server_error","message":"failed"}),
+            ),
+        ] {
+            let mut event = terminal();
+            event["type"] = json!(wrapper);
+            event["response"]["status"] = json!(status);
+            event["response"]["error"] = error;
+            let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+            let mut sink = Vec::new();
+            let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                panic!("contradictory terminal envelope must terminate");
+            };
+            let TerminalEvidence::BoundaryLoss(loss) = *evidence else {
+                panic!("contradictory terminal envelope must remain boundary loss");
+            };
+            assert!(matches!(
+                loss.cause,
+                LossCause::StreamProtocolViolation { .. }
+            ));
+            assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+            assert_eq!(loss.finish_reported, None);
+            assert_eq!(
+                loss.reported_model,
+                Some(ProviderReportedModel::new("model-fixture")),
+                "{wrapper} / {status}"
+            );
+            assert_eq!(
+                loss.usage,
+                TokenUsage {
+                    input_tokens: Some(5),
+                    output_tokens: Some(2),
+                    ..TokenUsage::unreported()
+                }
+            );
+            assert_eq!(sink.len(), 1);
+            assert_eq!(
+                sink[0].fact,
+                ObservationFact::ProviderModelReported(ProviderReportedModel::new("model-fixture"))
+            );
+        }
     }
     #[test]
     fn incomplete_output_ceiling_is_typed_completion() {
