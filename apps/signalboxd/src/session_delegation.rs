@@ -2,7 +2,9 @@
 
 use std::{error::Error, fmt, future::Future, time::Duration};
 
-use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+use signalbox_application::{
+    ClassifyOperatorFailure, EligibilityNudge, InProcessEligibilityNudge, OperatorFailureClass,
+};
 use signalbox_domain::{
     DelegatedSpawnRequest, DelegationAwaitRequest, DelegationMessageId, DelegationMessageRequest,
     DelegationWait, DelegationWaitMode, SessionId, ToolDispatchAuthority, ToolRequestId, TurnId,
@@ -22,6 +24,7 @@ use sqlx::PgPool;
 #[derive(Clone, Debug)]
 pub struct PostgresSessionDelegationPort {
     repository: SessionDelegationRepository,
+    eligibility_nudge: InProcessEligibilityNudge,
 }
 
 #[derive(Clone, Debug)]
@@ -31,8 +34,8 @@ pub(crate) enum DaemonSessionDelegationPort {
 }
 
 impl DaemonSessionDelegationPort {
-    pub(crate) fn postgres(pool: PgPool) -> Self {
-        Self::Postgres(PostgresSessionDelegationPort::new(pool))
+    pub(crate) fn postgres(pool: PgPool, eligibility_nudge: InProcessEligibilityNudge) -> Self {
+        Self::Postgres(PostgresSessionDelegationPort::new(pool, eligibility_nudge))
     }
 
     pub(crate) const fn unavailable() -> Self {
@@ -42,9 +45,10 @@ impl DaemonSessionDelegationPort {
 
 impl PostgresSessionDelegationPort {
     /// Shares the daemon pool with atomic delegation tool transactions.
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool, eligibility_nudge: InProcessEligibilityNudge) -> Self {
         Self {
             repository: SessionDelegationRepository::new(pool),
+            eligibility_nudge,
         }
     }
 
@@ -304,6 +308,7 @@ impl SessionDelegationPort for PostgresSessionDelegationPort {
             RecordDelegationSpawnOutcome::Recorded(relation) => {
                 let receipt = SpawnSessionReceipt::from_relation(&request, &relation)
                     .ok_or(PostgresSessionDelegationPortError::Contract)?;
+                let _ = self.eligibility_nudge.nudge(receipt.child());
                 Ok(SessionDelegationPortOutcome::Applied(receipt))
             }
             RecordDelegationSpawnOutcome::Rejected(_) => Ok(SessionDelegationPortOutcome::Rejected),

@@ -473,6 +473,22 @@ Preparing a model operation collects all frontier-referenced requests, attempts,
 and decisions in one batched query per record family, with no per-entry round
 trips under the scheduler lock.
 
+`spawn_session` declares a task plus a relationship, either background or bound
+with separately labeled actions for the parent stopping and the parent being
+cancelled. The creation transaction atomically creates one delegated no-ancestry
+child and its initial task work, closes the spawning physical attempt with its
+matching receipt, derives the child's placement default from its parent's
+directory, and returns the child session identity as a durable completion. The
+child's initial task is not accepted user input: the spawn transition records a
+`DelegatedTask` origin bound to the spawning request and its parent session and
+turn, and the child's first turn starts from that entry with no accepted-input
+row or user actor invented. Equal physical replay returns that child and reuses
+the same semantic entry and turn origin; a second child cannot attach to the
+request. There is no fixed active-child-count limit; admission checks the
+complete locked relationship inventory for request and child uniqueness.
+
+The daemon nudges the child for eligibility after its spawn commits.
+
 ## Planned
 
 - Lost-placement resolution: [tool-loop design](../design/tool-loop.md).
@@ -484,9 +500,7 @@ trips under the scheduler lock.
   an `InstructionAdmission` and a successor instruction manifest for a
   successful `instructions_read`; see
   [tool-loop design](../design/tool-loop.md).
-- Child creation by `spawn_session`, the child's `DelegatedTask` origin, and
-  delivery of its terminal result to the parent: no present surface creates the
-  child, and the daemon rejects execution until the placement-owned creation
-  transaction exists; see [tool-loop design](../design/tool-loop.md).
+- Delivery of a delegated child's terminal result to the parent: see
+  [tool-loop design](../design/tool-loop.md).
 - Runner-locus execution rules: the lost-lease retry exception and the runner
   approval ladder; see [runner protocol design](../design/runner-protocol.md).
