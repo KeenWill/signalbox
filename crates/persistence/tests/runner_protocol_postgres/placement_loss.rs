@@ -506,6 +506,28 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
     let payload: String = sqlx::query_scalar("SELECT payload_kind FROM semantic_transcript_entry WHERE source_session_id = $1 AND semantic_entry_id = $2")
         .bind(fixture.session.into_uuid()).bind(result.into_uuid()).fetch_one(&pool).await?;
     assert_eq!(payload, "tool_inadmissible");
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let mut projected = Vec::new();
+    loop {
+        let outcome = dispatcher
+            .dispatch_next(|event| {
+                if event.session() == Some(fixture.session)
+                    && let DispatchedOutboxEventKind::ToolBatchTransition {
+                        producing_call,
+                        state: signalbox_persistence::outbox::DispatchedToolBatchState::ResultsProjected { .. },
+                        ..
+                    } = event.kind()
+                {
+                    projected.push(*producing_call);
+                }
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?;
+        if outcome == OutboxDispatchOutcome::Idle {
+            break;
+        }
+    }
+    assert_eq!(projected, [batch.producing_call()]);
     if target_available {
         let state: String =
             sqlx::query_scalar("SELECT state_kind FROM model_call WHERE model_call_id = $1")
