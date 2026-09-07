@@ -7802,6 +7802,9 @@ fn decode_complete(
         "command delivery",
     )?;
     let command = match (actor, delivery) {
+        (Actor::Core, DeliveryRequest::StartWhenNoActiveTurn { configuration }) => {
+            SubmitInput::new_core_continuation(command_id, session, content, configuration)
+        }
         (
             Actor::Core,
             DeliveryRequest::Interrupt {

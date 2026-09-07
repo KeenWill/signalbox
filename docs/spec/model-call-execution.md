@@ -60,7 +60,11 @@ automatic compaction; when that compaction fails, or the request still exceeds
 the window after it, one transaction fails the queued turn with no ordinary call
 prepared. Inside the tool-result continuation transaction an exceeded bound
 commits the tool results, prepares no continuation call, and fails the turn with
-a headroom record.
+a headroom record. For a repository-watch-created session, the daemon queues at
+most one successor per such terminalization with the fixed input
+`Continue the unfinished repository-watch task from the compacted context.` and
+compacts the terminal frontier through the existing automatic compaction path
+before activating that successor.
 
 Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen

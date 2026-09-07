@@ -35,11 +35,17 @@ use crate::{
 };
 use tracing::Instrument;
 
+mod continuation;
+pub use continuation::ContinuationCompactionError;
+use continuation::{RepositoryWatchContinuation, successor_requires_compaction};
+
 const PROVIDER_COUNT_ADMISSION_PERCENT: u64 = 95;
 
 /// Failure while reconciling provider-reported context growth before activation.
 #[derive(Debug)]
 pub enum ReportedUsageCompactionError {
+    /// A repository-watch terminalization could not admit its bounded successor.
+    Continuation(ContinuationCompactionError),
     /// Read-only selection of the queued turn failed.
     Activation(StartEligibleTurnRepositoryError),
     /// Prospective operation or prior terminal usage could not be read.
@@ -75,7 +81,7 @@ impl ReportedUsageCompactionError {
     /// Returns the selected queued turn when selection got that far.
     pub const fn turn(&self) -> Option<TurnId> {
         match self {
-            Self::Activation(_) => None,
+            Self::Activation(_) | Self::Continuation(_) => None,
             Self::Model { turn, .. }
             | Self::Render(turn)
             | Self::ContextWindowUnavailable(turn) => Some(*turn),
@@ -96,6 +102,7 @@ impl Error for ReportedUsageCompactionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Activation(error) => Some(error),
+            Self::Continuation(error) => Some(error),
             Self::Model { source, .. } => Some(source),
             Self::CompactionFailureClosure { source, .. } => Some(source),
             Self::Render(_) | Self::ContextWindowUnavailable(_) | Self::Compaction { .. } => None,
@@ -107,6 +114,7 @@ impl ClassifyOperatorFailure for ReportedUsageCompactionError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
             Self::Activation(error) => error.operator_failure_class(),
+            Self::Continuation(error) => error.operator_failure_class(),
             Self::Model { source, .. } => source.operator_failure_class(),
             Self::Render(_) => OperatorFailureClass::FailClosedCorruption,
             Self::ContextWindowUnavailable(_) => OperatorFailureClass::CallerOrHubBug,
@@ -118,6 +126,7 @@ impl ClassifyOperatorFailure for ReportedUsageCompactionError {
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
             Self::Activation(_) => "reported_usage_activation_preview",
+            Self::Continuation(error) => error.operator_failure_cause_code(),
             Self::Model { source, .. } => source.operator_failure_cause_code(),
             Self::Render(_) => "reported_usage_frontier_rendering",
             Self::ContextWindowUnavailable(_) => "reported_usage_context_window_unavailable",
@@ -136,6 +145,7 @@ pub struct ReportedUsageCompaction {
     runtime_models: RuntimeModelCatalog,
     model_configuration: HubModelConfiguration,
     compaction_model: Arc<dyn ContextCompactionModel>,
+    continuation: Option<RepositoryWatchContinuation>,
 }
 
 struct ReportedUsageCompactionCandidate {
@@ -174,7 +184,31 @@ impl ReportedUsageCompaction {
             runtime_models,
             model_configuration,
             compaction_model,
+            continuation: None,
         }
+    }
+
+    /// Enables bounded successor admission for repository-watch continuation failures.
+    pub fn with_repository_watch_continuation(
+        mut self,
+        nudge: InProcessEligibilityNudge,
+        tool_gate: signalbox_application::InProcessToolDispatchGate,
+    ) -> Self {
+        self.continuation = Some(RepositoryWatchContinuation { nudge, tool_gate });
+        self
+    }
+
+    async fn enqueue_continuation(
+        &self,
+        session: SessionId,
+    ) -> Result<(), ReportedUsageCompactionError> {
+        if let Some(continuation) = &self.continuation {
+            continuation
+                .enqueue(self.model_calls.pool(), &self.model_configuration, session)
+                .await
+                .map_err(ReportedUsageCompactionError::Continuation)?;
+        }
+        Ok(())
     }
 
     /// Compacts once when the newest terminal call proves reserved headroom is gone.
@@ -183,6 +217,7 @@ impl ReportedUsageCompaction {
         session: SessionId,
         observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
     ) -> Result<(), ReportedUsageCompactionError> {
+        self.enqueue_continuation(session).await?;
         self.compact_if_needed_for(session, observe_prepared, false)
             .await
     }
@@ -328,6 +363,13 @@ impl ReportedUsageCompaction {
             return Ok(None);
         };
         let turn = preview.prepared().turn().turn();
+        if self.continuation.is_some()
+            && successor_requires_compaction(self.model_calls.pool(), session, turn)
+                .await
+                .map_err(ReportedUsageCompactionError::Continuation)?
+        {
+            return Ok(Some(ReportedUsageCompactionCandidate { preview, turn }));
+        }
         let prospective = self
             .model_calls
             .preview_activation_operation(
@@ -1102,7 +1144,14 @@ where
             if let Err(error) = &outcome {
                 report_guarded_ambiguity(&execution, error);
             }
-            outcome
+            outcome?;
+            if let Some(compaction) = &reported_usage_compaction {
+                compaction
+                    .enqueue_continuation(session)
+                    .await
+                    .map_err(ContextGuardedTurnPassError::ReportedUsageCompaction)?;
+            }
+            Ok(())
         }
     }
 }

@@ -2188,7 +2188,8 @@ async fn run_hub(
         runtime_models.clone(),
         model_configuration.clone(),
         Arc::clone(&context_compaction_model),
-    );
+    )
+    .with_repository_watch_continuation(eligibility_nudge.clone(), tool_dispatch_gate.clone());
     let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(

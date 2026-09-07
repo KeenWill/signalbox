@@ -2,7 +2,7 @@
 //!
 //! docs/spec/identity-and-commands.md owns hub-minted identity supply and
 //! user-global command replay. The baseline boundary fixes the user actor,
-//! while lifecycle closure has one core-only interrupt constructor.
+//! while lifecycle closure and compacted continuation use core-only constructors.
 //! Authoritative session loading, position
 //! allocation, preparation, and recording remain inside one atomic
 //! transaction port.
@@ -49,7 +49,7 @@ pub enum SubmitInputRequestError {
 /// and max command-identity sentinels reserved by
 /// docs/spec/identity-and-commands.md cannot enter canonical command
 /// construction through this boundary. Purpose-specific constructors fix
-/// either the baseline user or lifecycle-closure core actor.
+/// either the baseline user or the daemon-core actor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmitInputRequest {
     command_id: DurableCommandId,
@@ -61,6 +61,7 @@ pub struct SubmitInputRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SubmitInputRequestKind {
     User(DeliveryRequest),
+    CoreContinuation(PerInputConfigurationChoices),
     CoreInterrupt {
         expected_active_turn: TurnId,
         descendant_scope: DescendantTerminationScope,
@@ -72,6 +73,9 @@ impl SubmitInputRequestKind {
     const fn delivery(&self) -> DeliveryRequest {
         match self {
             Self::User(delivery) => *delivery,
+            Self::CoreContinuation(configuration) => DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: *configuration,
+            },
             Self::CoreInterrupt {
                 expected_active_turn,
                 descendant_scope,
@@ -116,6 +120,22 @@ impl SubmitInputRequest {
             content,
             SubmitInputRequestKind::User(delivery),
             max_content_utf8_bytes,
+        )
+    }
+
+    /// Admits a daemon-core successor after a terminal continuation needs compaction.
+    pub fn try_new_core_continuation(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        configuration: PerInputConfigurationChoices,
+    ) -> Result<Self, SubmitInputRequestError> {
+        Self::admit(
+            command_id,
+            session,
+            content,
+            SubmitInputRequestKind::CoreContinuation(configuration),
+            None,
         )
     }
 
@@ -405,6 +425,14 @@ where
         let command = match kind {
             SubmitInputRequestKind::User(delivery) => {
                 DomainSubmitInput::new(command_id, session, content, delivery)
+            }
+            SubmitInputRequestKind::CoreContinuation(configuration) => {
+                DomainSubmitInput::new_core_continuation(
+                    command_id,
+                    session,
+                    content,
+                    configuration,
+                )
             }
             SubmitInputRequestKind::CoreInterrupt {
                 expected_active_turn,
