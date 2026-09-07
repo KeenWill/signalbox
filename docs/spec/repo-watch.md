@@ -34,7 +34,7 @@ mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
 
-The module schema contains twelve tables:
+The module schema contains thirteen tables:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A
   repository row fences complete frontier commits with a generation and the
@@ -66,6 +66,8 @@ The module schema contains twelve tables:
 - `webhook_delivery`, `webhook_body`, and `webhook_disposition` retain one
   authenticated delivery under its caller-selected expiry.
 - `core_event_cursor` records module application progress.
+- `rule_evaluation_cursor` records each rule revision's last evaluated
+  repository event, including nonmatches and suppressed dispatches.
 
 The repository-event reducer evaluates the existing checked rule matcher and
 returns one batch with a fresh dispatch identity for each matching rule. It
@@ -88,7 +90,8 @@ evaluates one revalidated snapshot and uses that verdict for its decision.
 The v2 module is not composed into the daemon runtime: the daemon starts no
 module worker and exposes no module operator route. Planned dispatch actions and
 lifecycle reactions are retained in strictly increasing, unique action-ordinal
-order; no submitter is composed and no submission behavior is specified.
+order. The module submitter recovers exact retained payloads and invokes core
+session handlers through the daemon's command adapter.
 
 ## Design decisions
 
@@ -134,15 +137,38 @@ own one-based ordinal. A reaction naming a committed dispatch remains admissible
 after its rule is deactivated; deactivation prevents only new matched
 dispatches.
 
-The module retains a command in `dispatch_ledger` before any future submission
-and applies settlement lifecycle events to pending ledger rows. `SessionCreated`
-settles the next pending create action for its repository-watch dispatch and
-records the new session; replaying the event cannot settle another action.
-Identity reuse is idempotent only when all retained command metadata agrees. One
-dispatch reference names exactly one rule revision and event evaluation,
-including its complete ordered action batch. Pending ledger rows remain
-recoverable without the removed or inactive rule, and newly resolved template or
-configuration values cannot replace the committed payload.
+The module retains a command in `dispatch_ledger` before submission and applies
+settlement lifecycle events to pending ledger rows. `SessionCreated` settles the
+next pending create action for its repository-watch dispatch and records the new
+session; replaying the event cannot settle another action. Identity reuse is
+idempotent only when all retained command metadata agrees. One dispatch
+reference names exactly one rule revision and event evaluation, including its
+complete ordered action batch. Pending ledger rows remain recoverable without
+the removed or inactive rule, and newly resolved template or configuration
+values cannot replace the committed payload.
+
+Rule evaluation starts after the active revision's activation tail and resumes
+from its durable cursor. Matching facts acquire the configured singleton before
+commands and evaluation progress commit together. Pull-request scope keys the
+provider number; stack scope keys the root of the open base/head-branch
+component; repository scope keys the repository; rule scope spans repositories.
+Each key belongs to one rule revision. A live dispatch suppresses later matching
+facts. Nonsticky session termination releases its action; cooldown begins when
+the last action releases. A sticky stop keeps redispatch suppressed for that
+key.
+
+Goal commissioning or resumption releases the dispatched session's held start
+gate. Goal achievement or a user-stopped goal issues a parent-only sticky stop.
+Reactions retain their original rule and action even after configuration removes
+the rule. The module commits lifecycle effects before advancing its application
+cursor; the daemon acknowledges the corresponding seam event afterward.
+
+The command adapter copies complete resolved template defaults without initial
+input or repository credentials and stamps the module issuer on creation claims.
+Pending submission follow-ups remain retryable after core command settlement,
+including interruption of a live turn whose session is closing. Synchronous
+command-identity conflicts settle as rejected before submission continues to the
+next action.
 
 ## Boundary contracts
 

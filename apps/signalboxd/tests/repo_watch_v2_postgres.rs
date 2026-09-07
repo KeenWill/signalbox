@@ -2149,3 +2149,386 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     drop(container);
     Ok(())
 }
+
+impl signalbox_module_repo_watch_v2::dispatch::LifecycleCommandFactory for FixtureSessionFactory {
+    fn lifecycle(
+        &mut self,
+        session: SessionId,
+        operation: SessionLifecycleOperation,
+    ) -> SessionLifecycleCommand {
+        let id = DurableCommandId::from_uuid(Uuid::from_u128(self.next_command));
+        self.next_command += 1;
+        SessionLifecycleCommand::new(id, session, operation)
+    }
+}
+
+fn dispatch_observation(
+    repository: &RepositorySlug,
+    run: u64,
+    now: OffsetDateTime,
+) -> signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+    // Distinct run identities produce successive facts on one unchanged branch.
+    let branch = BranchName::try_new(String::from("main")).expect("branch");
+    let head =
+        CommitSha::try_new(String::from("1111111111111111111111111111111111111111")).expect("head");
+    signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        repository: repository.clone(),
+        default_branch: branch.clone(),
+        default_head: head.clone(),
+        observed_at: now,
+        observation: RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests: Vec::new(),
+                branch_heads: vec![RepoWatchBranchHead::new(branch.clone(), head)],
+                workflow_runs: vec![RepoWatchWorkflowRunObservation::new(
+                    GitHubObjectId::new(NonZeroU64::new(run).expect("positive run")),
+                    GitHubObjectId::new(NonZeroU64::new(1).expect("workflow")),
+                    RepoWatchWorkflowRunAttempt::new(NonZeroU64::new(1).expect("attempt")),
+                    branch,
+                    WorkflowName::try_new(String::from("CI")).expect("workflow"),
+                    CheckConclusion::Success,
+                )],
+            })
+            .expect("complete observation"),
+        ),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_cooldown()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_ownership_seam::{
+        GoalChange, GoalEventKind, LifecycleActor, LifecycleEventKind, SessionStateKind,
+        SessionTerminal, SessionTerminalOutcome,
+    };
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    sqlx::query("CREATE FUNCTION reject_redundant_cursor_update() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.event_ordinal = OLD.event_ordinal THEN RAISE EXCEPTION 'redundant evaluation cursor update'; END IF; RETURN NEW; END $$")
+        .execute(&pool).await?;
+    sqlx::query(
+        "CREATE TRIGGER reject_redundant_cursor_update BEFORE UPDATE ON rule_evaluation_cursor
+        FOR EACH ROW EXECUTE FUNCTION reject_redundant_cursor_update()",
+    )
+    .execute(&pool)
+    .await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("dispatch/project"))?;
+    let now = OffsetDateTime::now_utc();
+    let initial = dispatch_observation(&repository, 1, now);
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &initial,
+            EventProducer::Poll,
+        )
+        .await?;
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("ci"))?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+            repository: Some(repository.clone()),
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(String::from("watch"))?,
+        }],
+        RepoWatchSingletonScope::Repository,
+        Duration::from_secs(5),
+    )?;
+    store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                &repository,
+                std::slice::from_ref(&rule),
+            )],
+            now,
+        )
+        .await?;
+    assert!(
+        store.next_rule_event(&repository, &rule).await?.is_none(),
+        "activation excludes already-admitted facts"
+    );
+    let mut ids = FixedDispatchIds {
+        value: 10001,
+        calls: 0,
+    };
+    let mut factory = FixtureSessionFactory {
+        next_command: 20001,
+        model: 30001,
+    };
+    let mut codec = FixtureCommandCodec;
+    for run in [2, 3] {
+        let observation = dispatch_observation(&repository, run, now);
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &observation,
+                EventProducer::Poll,
+            )
+            .await?;
+        assert!(
+            store
+                .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, now)
+                .await
+                .expect("evaluate")
+        );
+    }
+    let commands = store.recover_pending_commands(&mut codec).await?;
+    assert_eq!(
+        commands.len(),
+        1,
+        "the second matching fact is suppressed while the singleton is held"
+    );
+    let first = &commands[0];
+    let session = SessionId::from_uuid(Uuid::from_u128(40001));
+    let creation = LifecycleEvent::session_created_for_test(
+        1,
+        now,
+        session,
+        SessionCreated {
+            cause: SessionCreationCause::ModuleDispatched {
+                dispatch: ModuleDispatch::RepositoryWatch {
+                    dispatch: first.dispatch(),
+                },
+            },
+            ownership: SessionOwnership::Owned,
+        },
+    );
+    store
+        .react_to_lifecycle(&creation, &mut factory, &mut codec)
+        .await?;
+    let goal = LifecycleEvent::for_test(
+        2,
+        now,
+        Some(session),
+        LifecycleEventKind::GoalChanged(GoalChange {
+            event_ordinal: 1,
+            generation: 1,
+            kind: GoalEventKind::Commissioned,
+        }),
+    );
+    store
+        .react_to_lifecycle(&goal, &mut factory, &mut codec)
+        .await?;
+    store
+        .react_to_lifecycle(&goal, &mut factory, &mut codec)
+        .await?;
+    let reactions = store.recover_pending_commands(&mut codec).await?;
+    assert_eq!(reactions.len(), 1, "a replay retains one reaction identity");
+    assert!(
+        matches!(reactions[0].command().clone().into_payload(),SessionCommandPayload::Lifecycle(command) if *command.operation() == SessionLifecycleOperation::ReleaseStart)
+    );
+    let release_id = reactions[0].command().command_id();
+    let mut sink = SettlingThenFailingSink {
+        store: store.clone(),
+        fail: true,
+        calls: Vec::new(),
+        now,
+    };
+    assert!(store.submit_pending(&mut codec, &mut sink).await.is_err());
+    assert_eq!(
+        store.recover_pending_commands(&mut codec).await?.len(),
+        1,
+        "a committed command still retries an unfinished submission follow-up"
+    );
+    sink.fail = false;
+    store
+        .submit_pending(&mut codec, &mut sink)
+        .await
+        .expect("retry follow-up");
+    assert_eq!(
+        sink.calls,
+        vec![release_id, release_id],
+        "retry uses the exact command identity"
+    );
+    assert!(store.recover_pending_commands(&mut codec).await?.is_empty());
+    let terminal = LifecycleEvent::for_test(
+        3,
+        now,
+        Some(session),
+        LifecycleEventKind::SessionTerminal(SessionTerminal {
+            prior: SessionStateKind::Created,
+            outcome: SessionTerminalOutcome::AchievedVerified,
+            standing: None,
+            actor: LifecycleActor::Operator,
+        }),
+    );
+    store
+        .react_to_lifecycle(&terminal, &mut factory, &mut codec)
+        .await?;
+    let restarted = RepoWatchStore::new(pool.clone());
+    assert!(
+        restarted
+            .next_rule_event(&repository, &rule)
+            .await?
+            .is_none(),
+        "suppressed facts stay consumed across restart"
+    );
+    for (run, elapsed, expected_creations) in [(4, 4, 1), (5, 5, 2)] {
+        let time = now + Duration::from_secs(elapsed);
+        let observation = dispatch_observation(&repository, run, time);
+        restarted
+            .ingest_observation(
+                &restarted.ingest_baseline(&repository).await?,
+                &observation,
+                EventProducer::Poll,
+            )
+            .await?;
+        assert!(
+            restarted
+                .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, time)
+                .await
+                .expect("evaluate")
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM dispatch_ledger WHERE trigger_sequence IS NULL",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            count, expected_creations,
+            "cooldown begins when the previous singleton releases"
+        );
+    }
+    store
+        .reconcile_rules(&[], now + Duration::from_secs(6))
+        .await?;
+    let stop = LifecycleEvent::for_test(
+        4,
+        now + Duration::from_secs(6),
+        Some(session),
+        LifecycleEventKind::GoalChanged(GoalChange {
+            event_ordinal: 2,
+            generation: 1,
+            kind: GoalEventKind::UserStopped,
+        }),
+    );
+    restarted
+        .react_to_lifecycle(&stop, &mut factory, &mut codec)
+        .await?;
+    assert!(restarted.recover_pending_commands(&mut codec).await?.iter().any(|p| matches!(p.command().clone().into_payload(),SessionCommandPayload::Lifecycle(command) if matches!(command.operation(),SessionLifecycleOperation::Stop { sticky:StopStickiness::Sticky, .. }))),"removed rules still retain their lifecycle reaction origin");
+    pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+struct SettlingThenFailingSink {
+    store: RepoWatchStore,
+    fail: bool,
+    calls: Vec<DurableCommandId>,
+    now: OffsetDateTime,
+}
+impl signalbox_module_repo_watch_v2::dispatch::SessionCommandSink for SettlingThenFailingSink {
+    type Error = ();
+    async fn submit(
+        &mut self,
+        command: SessionCommand,
+    ) -> Result<signalbox_module_repo_watch_v2::dispatch::CommandSubmission, ()> {
+        use signalbox_ownership_seam::{CommandSettlement, LifecycleEventKind};
+        let SessionCommandPayload::Lifecycle(command) = command.into_payload() else {
+            panic!("fixture submits only its start release");
+        };
+        self.calls.push(command.command_id());
+        let event = LifecycleEvent::for_test(
+            99,
+            self.now,
+            Some(command.session()),
+            LifecycleEventKind::CommandSettled {
+                command: command.command_id(),
+                result: CommandSettlement::Applied,
+            },
+        );
+        self.store
+            .apply_lifecycle_event(&event)
+            .await
+            .expect("core settlement");
+        if self.fail {
+            Err(())
+        } else {
+            Ok(signalbox_module_repo_watch_v2::dispatch::CommandSubmission::Accepted)
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn repository_watch_creation_records_its_module_issuer() -> Result<(), Box<dyn Error>> {
+    use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
+    use signalbox_module_repo_watch_v2::dispatch::{CommandSubmission, SessionCommandSink};
+    use signalbox_persistence::scheduler::PostgresEligibilitySweep;
+    use signalboxd::{HubModelConfiguration, repo_watch_dispatch::RepositoryWatchCommandSink};
+    use std::sync::Arc;
+
+    let (container, pool, _) = postgres().await?;
+    migrate(&pool).await?;
+    let models = HubModelConfiguration::parse(
+        &include_str!("../../../config/signalboxd.example.toml").replace(
+            "/usr/local/bin/signalbox-exec-supervisor",
+            std::env::current_exe()?.to_string_lossy().as_ref(),
+        ),
+    )?;
+    let (eligibility_nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    let mut sink = RepositoryWatchCommandSink {
+        pool: pool.clone(),
+        models: Arc::new(models),
+        eligibility_nudge,
+        tool_dispatch_gate: InProcessToolDispatchGate::default(),
+    };
+    let id = DurableCommandId::from_uuid(Uuid::now_v7());
+    let command = SessionCommand::create_session(
+        CreateSession::new(
+            id,
+            SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
+                dispatch: RepoWatchDispatchId::from_uuid(Uuid::now_v7()),
+            }),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(Uuid::now_v7()),
+            )),
+        )
+        .with_lifecycle(
+            StartGate::Held,
+            SessionOwnership::Owned,
+            Some(FinishCondition::ExternalGate),
+        ),
+    )
+    .expect("held seam command");
+    assert!(matches!(
+        sink.submit(command.clone()).await.expect("create session"),
+        CommandSubmission::Creation(CreateSessionOutcome::Applied(_))
+    ));
+    assert!(matches!(
+        sink.submit(command).await.expect("replay creation"),
+        CommandSubmission::Creation(CreateSessionOutcome::Applied(_))
+    ));
+    let issuer: (String, Option<String>) = sqlx::query_as(
+        "SELECT issuer_kind, issuer_module FROM durable_command WHERE command_id = $1",
+    )
+    .bind(id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        issuer,
+        (String::from("module"), Some(String::from("repo_watch")))
+    );
+    let held: bool = sqlx::query_scalar("SELECT start_gate_held FROM session_lifecycle")
+        .fetch_one(&pool)
+        .await?;
+    assert!(held);
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(inputs, 0);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

@@ -231,6 +231,22 @@ impl LifecycleEvent {
         &self.kind
     }
 
+    /// Builds a typed lifecycle input for persistence-boundary integration tests.
+    #[cfg(feature = "test-support")]
+    pub const fn for_test(
+        sequence: u64,
+        recorded_at: OffsetDateTime,
+        session: Option<SessionId>,
+        kind: LifecycleEventKind,
+    ) -> Self {
+        Self {
+            sequence,
+            recorded_at,
+            session,
+            kind,
+        }
+    }
+
     /// Builds a session-created event for persistence-boundary integration tests.
     #[cfg(feature = "test-support")]
     pub const fn session_created_for_test(
