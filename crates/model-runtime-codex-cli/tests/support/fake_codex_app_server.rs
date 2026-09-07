@@ -119,8 +119,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "error_permission" => "cyberPolicy",
                 "error_invalid_request" | "error_target_not_found" => "badRequest",
                 "error_request_too_large" => "contextWindowExceeded",
-                "error_rate_limited" => "rateLimitExceeded",
+                "error_rate_limited" | "rate_snapshot_past" => "rateLimitExceeded",
                 "error_quota_exhausted"
+                | "quota_snapshot_past"
                 | "error_then_turn_failed"
                 | "error_without_turn_failed"
                 | "error_then_turn_completed" => "usageLimitExceeded",
@@ -143,6 +144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
     match scenario.as_str() {
+        "rate_snapshot_past" | "quota_snapshot_past" => {
+            emit_value(
+                json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":100,"resetsAt":1}}}}),
+            );
+            failed("terminal rejection");
+        }
         name if name.starts_with("typed:") => {
             failed("authentication failed rate limit quota exhausted")
         }

@@ -45,6 +45,7 @@ pub(crate) struct Client {
     thread_id: Option<String>,
     turn_id: Option<String>,
     pub(crate) activity: TurnActivity,
+    pub(crate) rate_limits: super::frame::RateLimits,
 }
 
 impl Client {
@@ -62,6 +63,7 @@ impl Client {
             thread_id: None,
             turn_id: None,
             activity: TurnActivity::default(),
+            rate_limits: super::frame::RateLimits::default(),
         };
         client.queue(json!({"id":1,"method":"initialize","params":{
             "clientInfo":{"name":"signalbox","version":env!("CARGO_PKG_VERSION")}
@@ -184,6 +186,11 @@ impl Client {
 
     fn notification(&mut self, method: &str, params: &Value) -> Result<Event, ProtocolError> {
         match method {
+            "account/rateLimits/updated" => {
+                let event: super::frame::AccountRateLimitsUpdated = decode(params)?;
+                self.rate_limits.merge(event.rate_limits);
+                Ok(Event::Ignored)
+            }
             "item/agentMessage/delta" => {
                 let event: ItemTextDelta = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn_id)?;

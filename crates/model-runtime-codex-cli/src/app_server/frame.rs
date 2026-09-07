@@ -270,3 +270,50 @@ pub(crate) struct TextInput {
 pub(crate) enum TextInputKind {
     Text,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountRateLimitsUpdated {
+    pub(crate) rate_limits: RateLimits,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct RateLimits {
+    pub(crate) primary: Option<RateLimitWindow>,
+    pub(crate) secondary: Option<RateLimitWindow>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RateLimitWindow {
+    pub(crate) used_percent: f64,
+    pub(crate) resets_at: Option<i64>,
+}
+
+impl RateLimits {
+    pub(crate) fn merge(&mut self, update: Self) {
+        if update.primary.is_some() {
+            self.primary = update.primary;
+        }
+        if update.secondary.is_some() {
+            self.secondary = update.secondary;
+        }
+    }
+
+    pub(crate) fn retry_after(&self, now: std::time::SystemTime) -> Option<std::time::Duration> {
+        let latest = [self.primary.as_ref(), self.secondary.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter(|window| window.used_percent >= 100.0)
+            .filter_map(|window| window.resets_at)
+            .max()?;
+        let reset = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(
+            u64::try_from(latest).unwrap_or(0),
+        ))?;
+        Some(
+            reset
+                .duration_since(now)
+                .unwrap_or(std::time::Duration::ZERO),
+        )
+    }
+}
