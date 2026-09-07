@@ -439,8 +439,10 @@ earlier boundary commit is rejected. Candidate recovery waits retain no
 transaction or pooled connection. Interrupt or crash-loss batch terminalization
 retires the staged command before ending the turn. A model observation,
 including failure, refusal, cancellation or ambiguity, permits installation and
-retains the turn state that observation produced. Pre-pin installation appends
-no boundary.
+retains the turn state that observation produced. A tool-round observation
+installs a ready staged replacement at its yielded frontier before classifying
+the new requests for placement loss; that round retains the relocation in its
+boundary. Pre-pin installation appends no boundary.
 
 A queued turn cannot activate while its placement is lost. Replacement and
 abandonment outbox events wake queued work, retaining hints when the eligibility

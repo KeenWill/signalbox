@@ -20,6 +20,7 @@ use super::persist_tool_round::{
     availability_retry_backoff, count_turn_credential_attempts,
     insert_credential_pool_terminal_exhaustion, is_same_credential_retry_cause,
     persist_availability_successor, persist_credential_pool_exhaustion,
+    persist_observed_tool_round, persist_tool_round_observation,
 };
 use super::prepared::{
     insert_prepared_call, load_call_credential_reference, load_call_user_overrides,
@@ -749,16 +750,52 @@ impl PostgresModelCallRepository {
                         "terminal observation does not match fresh issued state",
                     )
                 })?;
-            persist_terminal_outcome_with_usage(
-                &mut transaction,
-                &outcome,
-                Some(TurnTerminalCause::ModelCallFailed),
-                usage,
-                provider_failure_cause,
-                retained_input_tokens,
-                retained_output_tokens,
-            )
-            .await?;
+            if let ModelCallTerminalOutcome::ToolRound(round) = &outcome {
+                persist_tool_round_observation(
+                    &mut transaction,
+                    round,
+                    usage,
+                    retained_input_tokens,
+                    retained_output_tokens,
+                )
+                .await?;
+                let relocation = if let Some(runner) = &self.runner_recovery {
+                    runner
+                        .settle_replacement_at_boundary(
+                            &mut transaction,
+                            session,
+                            Some(round.yielded_snapshot()),
+                        )
+                        .await
+                        .map_err(|error| match error {
+                            crate::runner_protocol::RunnerProtocolStoreError::Database(source) => {
+                                ModelCallRepositoryError::from(source)
+                            }
+                            _ => ModelCallCorruption::Inconsistent(
+                                "runner replacement tool observation boundary",
+                            )
+                            .into(),
+                        })?
+                        .1
+                } else {
+                    None
+                };
+                let boundary = relocation
+                    .as_ref()
+                    .map_or(round.yielded_snapshot(), |boundary| boundary.frontier());
+                persist_observed_tool_round(&mut transaction, round, boundary).await?;
+            } else {
+                persist_terminal_outcome_with_usage(
+                    &mut transaction,
+                    &outcome,
+                    Some(TurnTerminalCause::ModelCallFailed),
+                    usage,
+                    provider_failure_cause,
+                    retained_input_tokens,
+                    retained_output_tokens,
+                )
+                .await?;
+            }
             Ok(Some(ModelCallObservationCommitOutcome::Terminal(Box::new(
                 outcome,
             ))))
