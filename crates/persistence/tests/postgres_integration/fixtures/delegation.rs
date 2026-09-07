@@ -800,6 +800,9 @@ pub(crate) fn delegation_corruption(
     error: SessionDelegationRepositoryError,
 ) -> SessionDelegationCorruption {
     match error {
+        SessionDelegationRepositoryError::Placement(error) => {
+            panic!("unexpected placement failure: {error:?}")
+        }
         SessionDelegationRepositoryError::Corruption(corruption) => corruption,
         SessionDelegationRepositoryError::Database(_) => {
             panic!("expected typed delegation corruption, found database failure")

@@ -2,20 +2,17 @@
 
 This design is not built; it extends
 [process-protocol.md](../spec/process-protocol.md) with the wire surfaces the
-owner has committed and the daemon and terminal client do not implement, apart
-from the terminal client's existing `spawn_session` half.
+owner has committed and the daemon and terminal client do not implement.
 
 ## Goal
 
-Future implementation of these nine surfaces under protocol version 1 must pair
+Future implementation of these eight surfaces under protocol version 1 must pair
 each daemon handler with its terminal-client consumer in the same change:
 provisioning an `oauth` credential profile, re-provisioning it after a rejected
 daemon-owned refresh, deleting it, credential-exclusion administration,
-configuration reload, program-run cancellation, runner placement facts,
-`spawn_session`, and the typed projection of credential-pool exhaustion and of
-the credential-availability wait. The terminal client already sends
-`spawn_session` and validates its receipt, so that surface needs only its daemon
-transaction.
+configuration reload, program-run cancellation, runner placement facts, and the
+typed projection of credential-pool exhaustion and of the
+credential-availability wait.
 
 ## Design
 
@@ -189,13 +186,6 @@ planned wire commands whose durable request, replay, and recovery semantics stay
 in [identity-and-commands.md](../spec/identity-and-commands.md) and
 [runner-protocol.md](../spec/runner-protocol.md).
 
-`spawn_session` carries a bounded `task` and the closed relationship object and
-returns `session_spawned { tool_request_id, child_session_id, relationship }`.
-The placement-owned creation transaction that implements the parent-directory
-default creates the child; it preserves the exact-request and authority rules of
-the delegation contracts on the spec page, and the task string fits both the
-delegation-content ceiling and its complete normalized JSON argument envelope.
-
 The credential projection adds
 `failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
 as a `transcript_turn` state variant,
@@ -231,13 +221,10 @@ call-free terminal attempt. The endings these shapes project belong to
 
 ## Compatibility constraints
 
-`spawn_session` and `session_spawned` are admitted version-1 variants: the
-daemon decodes `spawn_session` and rejects it without mutation, and no daemon
-path produces `session_spawned`. `runner_state_transition` is an admitted
-version-1 event variant that the daemon projects when the outbox carries a
-runner state transition. Every other request and message above is outside the
-closed inventories in `crates/process-protocol` until the daemon and client
-implement its surface together.
+`runner_state_transition` is an admitted version-1 event variant that the daemon
+projects when the outbox carries a runner state transition. Every other request
+and message above is outside the closed inventories in `crates/process-protocol`
+until the daemon and client implement its surface together.
 
 No response code is reserved for an authorization failure, because client
 identity, authentication, authorization, and revocation are undecided.
