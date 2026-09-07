@@ -198,7 +198,7 @@ pub(crate) struct TokenUsageUpdated {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct AgentMessageDelta {
+pub(crate) struct ItemTextDelta {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
     pub(crate) item_id: String,

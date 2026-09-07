@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use super::classify::TurnActivity;
 use super::decode::{ProtocolError, decode};
 use super::frame::{
-    AgentMessage, AgentMessageDelta, ErrorNotification, ItemNotification, RpcError, ThreadOptions,
+    AgentMessage, ErrorNotification, ItemNotification, ItemTextDelta, RpcError, ThreadOptions,
     ThreadStartResponse, TokenUsageUpdated, Turn, TurnCompleted, TurnInput, TurnStartResponse,
     TurnStatus,
 };
@@ -18,7 +18,7 @@ pub(crate) enum Event {
         message: AgentMessage,
         completed: bool,
     },
-    Delta(AgentMessageDelta),
+    Delta(ItemTextDelta),
     Usage(TokenUsageUpdated),
     Error(ErrorNotification),
     Terminal(Turn),
@@ -180,10 +180,16 @@ impl Client {
     fn notification(&mut self, method: &str, params: &Value) -> Result<Event, ProtocolError> {
         match method {
             "item/agentMessage/delta" => {
-                let event: AgentMessageDelta = decode(params)?;
+                let event: ItemTextDelta = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn_id)?;
                 self.activity.assistant_output_observed = true;
                 Ok(Event::Delta(event))
+            }
+            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                let event: ItemTextDelta = decode(params)?;
+                self.correlate(&event.thread_id, &event.turn_id)?;
+                self.activity.assistant_output_observed = true;
+                Ok(Event::Ignored)
             }
             "item/started" | "item/completed" => {
                 let event: ItemNotification = decode(params)?;
@@ -196,6 +202,8 @@ impl Client {
                         completed: method == "item/completed",
                     })
                 } else {
+                    self.activity.assistant_output_observed |=
+                        event.item.get("type").and_then(Value::as_str) == Some("reasoning");
                     Ok(Event::Ignored)
                 }
             }
@@ -203,7 +211,15 @@ impl Client {
                 let event: TokenUsageUpdated = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn_id)?;
                 let total = &event.token_usage.total;
-                if total.output_tokens != 0 || total.reasoning_output_tokens != 0 {
+                if total.input_tokens > 0
+                    || total.cached_input_tokens > 0
+                    || total
+                        .cache_write_input_tokens
+                        .is_some_and(|count| count > 0)
+                    || total.output_tokens != 0
+                    || total.reasoning_output_tokens != 0
+                    || total.total_tokens > 0
+                {
                     self.activity.assistant_output_observed = true;
                 }
                 Ok(Event::Usage(event))
@@ -217,13 +233,15 @@ impl Client {
             "turn/completed" => {
                 let event: TurnCompleted = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn.id)?;
+                self.activity.assistant_output_observed |= event.turn.items.iter().any(|item| {
+                    matches!(
+                        item.get("type").and_then(Value::as_str),
+                        Some("agentMessage" | "reasoning")
+                    )
+                });
                 if event.turn.status == TurnStatus::InProgress {
                     return Ok(Event::Ignored);
                 }
-                self.activity.assistant_output_observed |=
-                    event.turn.items.iter().any(|item| {
-                        item.get("type").and_then(Value::as_str) == Some("agentMessage")
-                    });
                 self.phase = Phase::Closed;
                 Ok(Event::Terminal(event.turn))
             }

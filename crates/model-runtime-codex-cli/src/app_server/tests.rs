@@ -310,6 +310,159 @@ fn assistant_activity_independently_defeats_non_acceptance_proof() {
 }
 
 #[test]
+fn every_positive_usage_axis_independently_defeats_non_acceptance_proof() {
+    for axis in [
+        "inputTokens",
+        "cachedInputTokens",
+        "cacheWriteInputTokens",
+        "outputTokens",
+        "reasoningOutputTokens",
+        "totalTokens",
+    ] {
+        let mut client = running();
+        let mut total = json!({"inputTokens":0,"cachedInputTokens":0,"cacheWriteInputTokens":0,
+            "outputTokens":0,"reasoningOutputTokens":0,"totalTokens":0});
+        total[axis] = json!(1);
+        client
+            .receive(&peer::notification(
+                "thread/tokenUsage/updated",
+                json!({
+                    "tokenUsage":{"total":total}
+                }),
+            ))
+            .expect("positive provider usage");
+        let Event::Terminal(turn) = client
+            .receive(&peer::turn("failed", json!("usageLimitExceeded")))
+            .expect("failed turn")
+        else {
+            panic!("failure closes the turn");
+        };
+        assert!(
+            !client.activity.proves_non_acceptance(
+                turn.status,
+                turn.error
+                    .as_ref()
+                    .and_then(|error| error.codex_error_info.as_ref())
+            ),
+            "positive {axis}"
+        );
+    }
+}
+
+#[test]
+fn zero_usage_does_not_alone_defeat_non_acceptance_proof() {
+    let mut client = running();
+    client.receive(&peer::notification("thread/tokenUsage/updated", json!({
+        "tokenUsage":{"total":{"inputTokens":0,"cachedInputTokens":0,"cacheWriteInputTokens":0,
+            "outputTokens":0,"reasoningOutputTokens":0,"totalTokens":0}}
+    }))).expect("zero usage");
+    let Event::Terminal(turn) = client
+        .receive(&peer::turn("failed", json!("usageLimitExceeded")))
+        .expect("failed turn")
+    else {
+        panic!("failure closes the turn");
+    };
+    assert!(
+        client.activity.proves_non_acceptance(
+            turn.status,
+            turn.error
+                .as_ref()
+                .and_then(|error| error.codex_error_info.as_ref())
+        )
+    );
+}
+
+#[test]
+fn reasoning_activity_independently_defeats_non_acceptance_proof() {
+    let cases = [
+        peer::notification(
+            "item/reasoning/summaryTextDelta",
+            json!({"itemId":"reasoning-1","delta":"summary","summaryIndex":0}),
+        ),
+        peer::notification(
+            "item/reasoning/textDelta",
+            json!({"itemId":"reasoning-1","delta":"reasoning","contentIndex":0}),
+        ),
+        peer::notification(
+            "item/started",
+            json!({"item":{"type":"reasoning","id":"reasoning-1","summary":[],"content":[]}}),
+        ),
+        peer::notification(
+            "item/completed",
+            json!({"item":{"type":"reasoning","id":"reasoning-1","summary":["summary"],"content":["reasoning"]}}),
+        ),
+    ];
+    for activity in cases {
+        let mut client = running();
+        assert!(matches!(
+            client.receive(&activity).expect("reasoning notification"),
+            Event::Ignored
+        ));
+        let Event::Terminal(turn) = client
+            .receive(&peer::turn("failed", json!("usageLimitExceeded")))
+            .expect("failed turn")
+        else {
+            panic!("failure closes the turn");
+        };
+        assert!(
+            !client.activity.proves_non_acceptance(
+                turn.status,
+                turn.error
+                    .as_ref()
+                    .and_then(|error| error.codex_error_info.as_ref())
+            ),
+            "{activity}"
+        );
+    }
+}
+
+#[test]
+fn reasoning_in_a_failed_turn_summary_defeats_non_acceptance_proof() {
+    let mut client = running();
+    let mut terminal = peer::turn("failed", json!("usageLimitExceeded"));
+    terminal["params"]["turn"]["items"] =
+        json!([{"type":"reasoning","id":"reasoning-1","summary":["summary"],"content":[]}]);
+    let Event::Terminal(turn) = client.receive(&terminal).expect("failed turn") else {
+        panic!("failure closes the turn");
+    };
+    assert!(
+        !client.activity.proves_non_acceptance(
+            turn.status,
+            turn.error
+                .as_ref()
+                .and_then(|error| error.codex_error_info.as_ref())
+        )
+    );
+}
+
+#[test]
+fn reasoning_in_a_nonterminal_turn_summary_defeats_later_non_acceptance_proof() {
+    let mut client = running();
+    let mut progress = peer::turn("inProgress", Value::Null);
+    progress["params"]["turn"]["items"] =
+        json!([{"type":"reasoning","id":"reasoning-1","summary":["summary"],"content":[]}]);
+    assert!(matches!(
+        client.receive(&progress).expect("in-progress summary"),
+        Event::Ignored
+    ));
+    assert!(!client.is_terminal());
+    let Event::Terminal(turn) = client
+        .receive(&peer::turn("failed", json!("usageLimitExceeded")))
+        .expect("failed turn")
+    else {
+        panic!("failure closes the turn");
+    };
+    assert!(
+        !client.activity.proves_non_acceptance(
+            turn.status,
+            turn.error
+                .as_ref()
+                .and_then(|error| error.codex_error_info.as_ref())
+        )
+    );
+}
+
+#[test]
 fn completed_or_interrupted_status_never_proves_non_acceptance() {
     for status in ["completed", "interrupted"] {
         let mut client = running();
