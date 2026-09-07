@@ -50,6 +50,18 @@ pub fn validate_oauth_authorization(
 
 ```rust
 pub enum ServerMessage {
+    WorkspaceRegistered {
+        command_id: CommandId,
+        workspace_id: CanonicalUuid,
+    },
+    GitRemoteMinted {
+        command_id: CommandId,
+        mint_id: CanonicalUuid,
+    },
+    GitRemoteWithdrawn {
+        command_id: CommandId,
+        withdrawal_id: CanonicalUuid,
+    },
     ConfigurationReloaded {
         command_id: CommandId,
         reloaded_sections: vec::Vec<ReloadedSection>,
