@@ -315,11 +315,14 @@ credential_pool = "anthropic-main"
 # directory containing a separately provisioned account's login; distinct paths
 # to the same account do not provide independent capacity.
 #
-# Equal priorities let least_used prefer the greatest known headroom. A member
-# with known headroom at or below the 10% reserve is excluded; on_headroom_low
-# displaces it next turn.
+# Headroom selection and low-headroom switching depend on capacity snapshots
+# emitted by the Codex adapter. Equal priorities let least_used prefer the
+# greatest known headroom. Known headroom at or below the 10% reserve excludes
+# a member; on_headroom_low displaces it next turn.
 # Unknown capacity does not exclude a member: known capacity is preferred, and
 # ties use configured order. An admissible sticky member remains preferred.
+# The switch_now failure actions try another member after credential rejection
+# or a typed quota, rate-limit, or overload failure that proves non-acceptance.
 # Add another profile and membership for each additional independent account.
 # [[credential_profiles]]
 # name = "codex-local-a"
@@ -348,6 +351,10 @@ credential_pool = "anthropic-main"
 # on_pool_exhausted = "fail"
 # headroom_reserve_percent = 10
 # on_headroom_low = "switch_next_turn"
+# on_quota_exhausted = "switch_now"
+# on_rate_limited = "switch_now"
+# on_overloaded = "switch_now"
+# on_credential_rejected = "switch_now"
 # members = [
 #   { profile = "codex-local-a", priority = 1 },
 #   { profile = "codex-local-b", priority = 1 },
