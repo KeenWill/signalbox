@@ -445,14 +445,16 @@ post-reservation ceiling enforced by the daemon, and the loader does not derive
 either value from the other.
 
 The daemon refers to a credential by its non-secret name everywhere except at
-the point of use. No credential value, credential file path, or database URL
-appears in a log, an error, or a durable record. For a profile whose credential
-value the daemon resolves, the daemon redacts that exact value from provider
-text before it truncates the text; a delivery that gives the daemon no value
-receives credential-shape redaction instead. A credential for one repository
-never authorizes a request to another. That isolation comes from how a
-credential is provisioned or from the repository entry a runner selects; the
-daemon's code-host tools use one fixed credential reference.
+the point of use. OAuth authorization tables hold the refresh and identity
+tokens the delivery needs; no credential value appears in a log, an error, or
+any other durable record. No credential file path or database URL appears in a
+log, an error, or a durable record. For a profile whose credential value the
+daemon resolves, the daemon redacts that exact value from provider text before
+it truncates the text; a delivery that gives the daemon no value receives
+credential-shape redaction instead. A credential for one repository never
+authorizes a request to another. That isolation comes from how a credential is
+provisioned or from the repository entry a runner selects; the daemon's
+code-host tools use one fixed credential reference.
 
 Errors, logs, and diagnostic evidence contain classes, counts, and canonical
 identifiers. They never contain source bytes, host or credential paths, raw or
@@ -554,9 +556,8 @@ requests, and model arguments cannot widen either admission rule.
 
 Admission is not delivery: the daemon supplies a surface only for `anthropic`
 and `openai` `file`, `claude_cli` `ambient` and `file`, and `codex_cli`
-`ambient` and `codex_home`. The `codex_cli` spellings of `file` and `oauth` are
-validated and then rejected as `UndeliveredCredentialDelivery`, so such a
-document fails startup rather than running inert.
+`ambient`, `codex_home`, and `oauth`. The `codex_cli` spelling of `file` is
+validated and then rejected as `UndeliveredCredentialDelivery`.
 
 Two model entries naming one target must agree on their complete rates or on
 their complete absence of rates. Rates are never written to a model-call row;
@@ -714,6 +715,65 @@ validation of nonempty reviewer identities after bot-suffix normalization.
 Convergence reads and the sweep require this policy; other code-host operations
 do not use it.
 
+Startup installs the OAuth registration catalog after database migrations. OAuth
+provisioning runs the configured device exchange, retains refresh and identity
+tokens with the canonical configuration tuple and generation, and stores no
+authorization when the response lacks an identity token. Authorization commits
+and pool-policy membership insertion serialize account-independence checks
+against every retained co-membership.
+
+`oauth` is spelled `delivery = "oauth"` with exactly five required fields:
+`client_id`, `token_url`, `refresh_token_url`, `device_authorization_url`, and
+the string array `scopes`. These are configuration, never build-provided
+constants. `client_id` is 1 through 1,024 NUL-free UTF-8 bytes preserved
+exactly. `scopes` holds 1 through 64 strings of 1 through 256 bytes, each byte
+an RFC 6749 scope-token character, declared order is request order, exact
+duplicates are rejected, and no normalization occurs. All endpoints are absolute
+`https` URLs with no fragment and no user information; every other scheme is
+rejected with no plaintext or local-host exception. The tuple is compared by
+parsed canonical components, scheme, lowercased host, effective port, path, and
+query, never by configured bytes. The delivery admits only
+`billing_kind = "subscription"`.
+
+Refresh sends JSON `{ client_id, grant_type: "refresh_token", refresh_token }`
+to `refresh_token_url`; device polling uses `token_url`.
+
+Refresh and dispatch compare the stored tuple with the current registration
+under the profile row lock; mismatch quarantines the generation before any token
+is sent. One process-shared refresh per profile and generation marks refresh in
+progress before one POST, with redirects and automatic retries disabled.
+Cancellation while waiting for initial profile locks or before refresh is sent
+cancels preparation; an unsent refresh clears its marker. Definitive
+non-rotation clears the marker. Connection loss after possible request bytes,
+cancellation after send, redirects, indeterminate responses, and refresh tokens
+rejected as expired, reused, or revoked quarantine the generation. Refresh
+replaces returned refresh and identity tokens in one commit, retaining either
+token when omitted; differing account identity quarantines. An ambiguous
+replacement commit is reread: a committed replacement is adopted and an
+uncleared marker quarantines. Access tokens live only in memory and refresh
+lazily after restart. Cache expiry comes from the access-token JWT `exp` claim.
+Cached tokens with at most five minutes remaining refresh before installation to
+stay outside Codex's proactive-refresh window.
+
+Dispatch holds the profile row lock through copying access and identity tokens
+and account metadata into a scratch home, withholding the refresh token. The
+adapter seeds exact-value redaction before writing either token. Homes use
+`0700` directories and `0600` regular files beneath one daemon-owned `0700`
+root, with descriptor-relative creation and removal rejecting symlinks. The root
+appends `.oauth` to the process socket path and cannot overlap runner socket
+artifacts. Completion removes the home; startup validates all retained homes
+before scavenging and fails without removal on ownership, type, or containment
+mismatch. The Codex child uses the home's file backend and token-only
+authentication with ambient credentials, keyrings, helpers, and external stores
+disabled; inability to deliver the home is a typed pre-send failure. An
+access-token rejection during an invocation neither quarantines the profile nor
+permits automatic call retry. Delivery failure evidence and quarantine commit
+atomically and bypass pool trigger policy. OAuth quarantine reads lock only
+currently registered OAuth pool members. Successful re-provisioning clears OAuth
+delivery-origin quarantine and cached access; failure preserves both. Deletion
+holds the dispatch profile lock while removing authorization and cached access,
+advances the retained generation, and preserves registration and history.
+
 ## Planned
 
 - Input-modality declarations on model and serving-target records, and the blob
@@ -732,8 +792,7 @@ do not use it.
   [design](../design/configuration-and-credentials.md).
 - Pre-activation workspace binding and template instruction selectors:
   [design](../design/configuration-and-credentials.md).
-- Codex CLI `file` and `oauth` deliveries, with provisioning, refresh,
-  quarantine, and restore rules for a daemon-owned authorization:
+- Codex CLI `file` delivery and OAuth database-restore rules:
   [design](../design/configuration-and-credentials.md).
 - Bounded credential-home concurrency and round-robin selection:
   `max_concurrent_invocations` and `round_robin`:

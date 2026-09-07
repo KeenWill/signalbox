@@ -2,6 +2,58 @@
 
 # runner
 
+## RunnerRecoveryRejection
+
+```rust
+pub enum RunnerRecoveryRejection {
+    SessionNotFound,
+    PlacementNotLost,
+    ExistingControlRequired,
+    PendingRunnerNotFound,
+    RunnerUnavailable,
+    ReplacementPending,
+    PlacementUnavailable,
+    RevisionWithoutRepository,
+    ProvisioningFailed,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## RunnerReplacementOutcome
+
+```rust
+pub enum RunnerReplacementOutcome {
+    Replaced {
+        runner_id: CanonicalUuid,
+        placement_revision: PositiveCanonicalU64,
+    },
+    Rejected {
+        reason: RunnerRecoveryRejection,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## RunnerAbandonmentOutcome
+
+```rust
+pub enum RunnerAbandonmentOutcome {
+    Abandoned,
+    Rejected { reason: RunnerRecoveryRejection },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## RunnerPromotionOutcome
+
+```rust
+pub enum RunnerPromotionOutcome {
+    Promoted { runner_id: CanonicalUuid },
+    Rejected { reason: RunnerRecoveryRejection },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## RunnerSandboxProfile
 
 ```rust

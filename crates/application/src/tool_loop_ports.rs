@@ -48,6 +48,13 @@ pub enum ResolvedToolConversationEntry {
         /// Exact durable denial and provenance.
         approval: ToolApprovalResolution,
     },
+    /// The request carrying the reason for resolution before dispatch.
+    Inadmissible {
+        /// Source-qualified semantic entry.
+        source: SemanticTranscriptEntryRef,
+        /// Request carrying its durable inadmissibility reason.
+        request: ToolRequest,
+    },
     /// The request referenced by one closed-by-turn-end entry.
     Closed {
         /// Source-qualified semantic entry.
@@ -64,6 +71,7 @@ impl ResolvedToolConversationEntry {
             Self::AssistantToolUse { source, .. }
             | Self::ExecutionResult { source, .. }
             | Self::Denied { source, .. }
+            | Self::Inadmissible { source, .. }
             | Self::Closed { source, .. } => *source,
         }
     }

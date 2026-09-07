@@ -350,11 +350,28 @@ fn visible_process_entry(
             content,
             ..
         }
+        | ProcessTranscriptEntry::ToolInadmissible {
+            entry_index,
+            content,
+            ..
+        }
         | ProcessTranscriptEntry::ToolClosed {
             entry_index,
             content,
             ..
         } => (entry_index, TranscriptEntryKind::ToolResult, content),
+        ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index,
+            placement_revision,
+            ..
+        } => (
+            entry_index,
+            TranscriptEntryKind::System,
+            format!(
+                "runner placement changed to revision {}",
+                placement_revision.get()
+            ),
+        ),
         ProcessTranscriptEntry::TurnFailed { entry_index, .. } => (
             entry_index,
             TranscriptEntryKind::System,

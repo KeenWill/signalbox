@@ -21,6 +21,7 @@ import {
   HttpSessionTimelineSource,
   type SessionWindowAnchor,
 } from './session-timeline/model'
+import { SESSION_WINDOW_BYTES, SESSION_WINDOW_ITEMS } from './session-workspace'
 import {
   actions,
   selectApp,
@@ -32,8 +33,6 @@ import {
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const NATIVE_SESSION_ID_PATTERN = String.raw`\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*`
-const SESSION_WINDOW_ITEMS = 80
-const SESSION_WINDOW_BYTES = 64 * 1024
 const MAX_CACHED_SESSION_WORKSPACES = 4
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
 export interface SessionSelectionEvidence {
