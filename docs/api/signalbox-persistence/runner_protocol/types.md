@@ -2,6 +2,12 @@
 
 # runner_protocol: types
 
+## RunnerEnrollmentRequestId
+
+```rust
+pub use signalbox_domain::RunnerEnrollmentRequestId;
+```
+
 ## RunnerRegistrationRevision
 
 ```rust
@@ -205,18 +211,6 @@ impl runner_protocol::StoredValidatedRunnerRegistration {
 }
 ```
 
-## RunnerEnrollmentRequestId
-
-```rust
-pub struct RunnerEnrollmentRequestId(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl runner_protocol::RunnerEnrollmentRequestId {
-    pub const fn from_uuid(value: uuid::Uuid) -> Self;
-    pub const fn as_uuid(&self) -> &uuid::Uuid;
-    pub const fn into_uuid(self) -> uuid::Uuid;
-}
-```
-
 ## IssuedRunnerEnrollmentIdentities
 
 ```rust
@@ -246,12 +240,12 @@ impl runner_protocol::PristineRunnerEnrollmentRequest {
 }
 impl runner_protocol::PristineRunnerEnrollmentRequest {
     pub fn new(
-        request: runner_protocol::RunnerEnrollmentRequestId,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
         issued: runner_protocol::IssuedRunnerEnrollmentIdentities,
         allowed_classes: impl collect::IntoIterator<Item = signalbox_domain::RunnerCapabilityClass>,
         advertisement: signalbox_domain::RunnerAdvertisement,
     ) -> Self;
-    pub const fn request(&self) -> runner_protocol::RunnerEnrollmentRequestId;
+    pub const fn request(&self) -> signalbox_domain::RunnerEnrollmentRequestId;
     pub const fn issued(&self) -> runner_protocol::IssuedRunnerEnrollmentIdentities;
     pub fn allowed_classes(
         &self,
@@ -279,13 +273,13 @@ impl runner_protocol::RunnerEnrollmentReceipt {
     pub const fn registration(&self) -> &runner_protocol::StoredValidatedRunnerRegistration;
 }
 impl runner_protocol::RunnerEnrollmentReceipt {
-    pub const fn request(&self) -> runner_protocol::RunnerEnrollmentRequestId;
+    pub const fn request(&self) -> signalbox_domain::RunnerEnrollmentRequestId;
     pub const fn identities(&self) -> runner_protocol::IssuedRunnerEnrollmentIdentities;
     pub fn advertisement(&self) -> signalbox_domain::RunnerAdvertisement;
     pub fn into_parts(
         self,
     ) -> (
-        runner_protocol::RunnerEnrollmentRequestId,
+        signalbox_domain::RunnerEnrollmentRequestId,
         signalbox_domain::RunnerEnrollment,
         runner_protocol::StoredValidatedRunnerRegistration,
     );
@@ -434,7 +428,7 @@ impl runner_protocol::RunnerProtocolStore {
     >;
     pub async fn resume_registration(
         &self,
-        request: runner_protocol::RunnerEnrollmentRequestId,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
         observed: runner_protocol::IssuedRunnerEnrollmentIdentities,
         prior_revision: runner_protocol::RunnerRegistrationRevision,
         advertisement: signalbox_domain::RunnerAdvertisement,
@@ -571,6 +565,88 @@ impl runner_protocol::RunnerProtocolStore {
         runner_protocol::RunnerProtocolStoreError,
     >;
 }
+impl runner_protocol::RunnerProtocolStore {
+    pub async fn replacement_workspace_releases(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+    ) -> result::Result<
+        vec::Vec<signalbox_domain::ProvisionedWorkspace>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn record_replacement_workspace_released(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        session: signalbox_domain::SessionId,
+        revision: signalbox_domain::RunnerGeneration,
+        runner: signalbox_domain::RunnerId,
+        manifest: signalbox_domain::WorkspaceManifestId,
+    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
+    pub async fn record_replacement_provisioning_failure(
+        &self,
+        authorization: &signalbox_domain::RunnerReplacementProvisioning,
+        kind: signalbox_domain::RunnerProvisioningFailureKind,
+        detail: &value::Value,
+    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
+    pub async fn replacement_provisioning_authorization(
+        &self,
+        authorization: signalbox_domain::RunnerProvisioningAuthorizationId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::RunnerReplacementProvisioning>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn replacement_provisioning(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+    ) -> result::Result<
+        vec::Vec<signalbox_domain::RunnerReplacementProvisioning>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn record_replacement_workspace_ready(
+        &self,
+        authorization: &signalbox_domain::RunnerReplacementProvisioning,
+        workspace: &signalbox_domain::ProvisionedWorkspace,
+    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
+}
+impl runner_protocol::RunnerProtocolStore {
+    pub async fn promoted_runner_receipt(
+        &self,
+        candidate: signalbox_domain::RunnerEnrollmentId,
+    ) -> result::Result<
+        option::Option<runner_protocol::RunnerEnrollmentReceipt>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn resume_runner_replacement(
+        &self,
+        command: signalbox_domain::DurableCommandId,
+    ) -> result::Result<
+        runner_protocol::RunnerRecoveryOutcome<signalbox_domain::ReplaceLostRunnerResult>,
+        runner_protocol::RunnerRecoveryError,
+    >;
+    pub async fn resume_runner_replacements(
+        &self,
+    ) -> result::Result<(), runner_protocol::RunnerRecoveryError>;
+    pub async fn replace_lost_runner(
+        &self,
+        command: signalbox_domain::ReplaceLostRunner,
+    ) -> result::Result<
+        runner_protocol::RunnerRecoveryOutcome<signalbox_domain::ReplaceLostRunnerResult>,
+        runner_protocol::RunnerRecoveryError,
+    >;
+    pub async fn abandon_lost_runner(
+        &self,
+        command: signalbox_domain::AbandonLostRunner,
+    ) -> result::Result<
+        runner_protocol::RunnerRecoveryOutcome<signalbox_domain::AbandonLostRunnerResult>,
+        runner_protocol::RunnerRecoveryError,
+    >;
+    pub async fn promote_pending_runner(
+        &self,
+        command: signalbox_domain::PromotePendingRunner,
+    ) -> result::Result<
+        runner_protocol::RunnerRecoveryOutcome<signalbox_domain::PromotePendingRunnerResult>,
+        runner_protocol::RunnerRecoveryError,
+    >;
+}
 ```
 
 ## RunnerEnrollmentRequestFailure
@@ -578,34 +654,34 @@ impl runner_protocol::RunnerProtocolStore {
 ```rust
 pub enum RunnerEnrollmentRequestFailure {
     ActiveEnrollmentExists {
-        request: runner_protocol::RunnerEnrollmentRequestId,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
         active_enrollment: signalbox_domain::RunnerEnrollmentId,
     },
     ReplayAdvertisementMismatch {
-        request: runner_protocol::RunnerEnrollmentRequestId,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
     },
     ReplayPolicyMismatch {
-        request: runner_protocol::RunnerEnrollmentRequestId,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
     },
     UnknownRequest {
-        request: runner_protocol::RunnerEnrollmentRequestId,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
     },
     ResumeIdentityMismatch {
-        request: runner_protocol::RunnerEnrollmentRequestId,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
         expected: runner_protocol::IssuedRunnerEnrollmentIdentities,
         observed: runner_protocol::IssuedRunnerEnrollmentIdentities,
     },
     EnrollmentRevoked {
-        request: runner_protocol::RunnerEnrollmentRequestId,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
         enrollment: signalbox_domain::RunnerEnrollmentId,
     },
     ResumeRevisionMismatch {
-        request: runner_protocol::RunnerEnrollmentRequestId,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
         expected: runner_protocol::RunnerRegistrationRevision,
         observed: runner_protocol::RunnerRegistrationRevision,
     },
     StaleResumeAdvertisement {
-        request: runner_protocol::RunnerEnrollmentRequestId,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
         prior: runner_protocol::RunnerRegistrationRevision,
         current: runner_protocol::RunnerRegistrationRevision,
     },

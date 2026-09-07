@@ -139,6 +139,11 @@ pub struct ProviderReasoningItemError;
 /// The complete semantic transcript-entry payload set.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum SemanticTranscriptEntryPayload {
+    /// The checked successor placement record owned by this source session.
+    RunnerPlacementChanged {
+        /// Exact successor placement revision; the record remains content authority.
+        placement_revision: crate::RunnerGeneration,
+    },
     /// One exact normalized entry projected from immutable imported history.
     Imported {
         /// The immutable imported entry that remains content authority.
@@ -246,7 +251,12 @@ pub enum SemanticTranscriptEntryPayload {
         /// The exact denied logical request.
         request: ToolRequestId,
     },
-    /// An undecided request closed because its turn terminalized.
+    /// A request resolved before dispatch by its stored inadmissibility reason.
+    ToolInadmissible {
+        /// The logical request carrying its closed inadmissibility reason.
+        request: ToolRequestId,
+    },
+    /// The turn ended before this request was resolved.
     ToolClosed {
         /// The exact closed logical request.
         request: ToolRequestId,

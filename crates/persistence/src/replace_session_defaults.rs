@@ -256,12 +256,15 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
                 | CommandKind::ClearCredentialExclusion
-                | CommandKind::CancelProgramRun
-                | CommandKind::SessionLifecycle,
+                | CommandKind::CancelProgramRun,
             ) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
@@ -315,12 +318,15 @@ impl ReplaceSessionDefaultsRepository {
                     | CommandKind::RegisterWorkspace
                     | CommandKind::MintGitRemote
                     | CommandKind::WithdrawGitRemote
+                    | CommandKind::SessionLifecycle
+                    | CommandKind::ReplaceLostRunner
+                    | CommandKind::AbandonLostRunner
+                    | CommandKind::PromotePendingRunner
                     | CommandKind::ProvisionOauthCredential
                     | CommandKind::ReprovisionOauthCredential
                     | CommandKind::DeleteOauthCredential
                     | CommandKind::ClearCredentialExclusion
-                    | CommandKind::CancelProgramRun
-                    | CommandKind::SessionLifecycle,
+                    | CommandKind::CancelProgramRun,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -433,12 +439,15 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
                 | CommandKind::ClearCredentialExclusion
-                | CommandKind::CancelProgramRun
-                | CommandKind::SessionLifecycle,
+                | CommandKind::CancelProgramRun,
             ) => Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id }),
         }
     }

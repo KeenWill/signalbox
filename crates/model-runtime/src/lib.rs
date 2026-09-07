@@ -66,7 +66,7 @@ pub use capability::{
 pub use cli_process::{
     CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CliDecodeFailure, CliDecodeFailureClass,
     CliEnvironmentOverride, CliEnvironmentVariable, CliProcessLabels, CliProcessRequest,
-    CliSession, CliTerminalTextCapture, execute_cli_process,
+    CliSession, CliTerminalTextCapture, execute_cli_process, execute_cli_process_with_credentials,
 };
 pub use cli_redaction::{
     DiscardedField, REDACTED, RedactingSink, TerminalTextCapture, ToolArgumentRedaction,
@@ -107,7 +107,7 @@ pub use provider_support::{
     pre_exchange_loss_evidence, proven_unsent_evidence, provider_response_body_too_large,
     provider_response_prefix_len, serialize_provider_request, transport_facts_from_error,
 };
-pub use redaction::{CredentialRedactingSink, redact_evidence};
+pub use redaction::{CredentialRedactingSink, redact_credential_text, redact_evidence};
 pub use runtime::{CancellationSignal, ModelRuntime};
 pub use scripted::{Script, ScriptedModel, ScriptedPrepared};
 pub use settings::{

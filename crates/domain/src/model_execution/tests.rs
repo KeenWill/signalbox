@@ -220,6 +220,7 @@ fn foreground_delegation_result_closes_exact_tool_continuation_round() {
             &entries,
             &BTreeMap::new(),
             &BTreeSet::new(),
+            &BTreeSet::new(),
         ),
         Ok(true)
     );
@@ -249,6 +250,7 @@ fn background_delegation_result_does_not_complete_tool_continuation_round() {
             &execution.starting_snapshot,
             &entries,
             &BTreeMap::new(),
+            &BTreeSet::new(),
             &BTreeSet::new(),
         ),
         Ok(false)

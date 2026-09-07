@@ -335,6 +335,7 @@ impl AcceptedInputTurnSchedulingProjection {
 /// Canonical complete scheduling state for one session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedInputSchedulingProjection {
+    pub(super) runner_placement_frontier: Option<ContextFrontierId>,
     pub(super) session: Session,
     pub(super) initial_seed_frontier: Option<ContextFrontierId>,
     pub(super) latest_compaction_result: Option<ContextFrontierId>,
@@ -364,6 +365,25 @@ pub(super) struct ActiveExecutingToolBatchCorrelation {
 }
 
 impl AcceptedInputSchedulingProjection {
+    pub(super) fn base_with_runner_placement<'a>(
+        &'a self,
+        base: Option<&'a ResolvedContextFrontierSnapshot>,
+    ) -> Result<Option<&'a ResolvedContextFrontierSnapshot>, ()> {
+        let placement = self
+            .runner_placement_frontier
+            .and_then(|frontier| self.snapshots.get(&frontier));
+        match (base, placement) {
+            (None, placement) => Ok(placement),
+            (base, None) => Ok(base),
+            (Some(base), Some(placement)) if base.is_semantic_prefix_of(placement) => {
+                Ok(Some(placement))
+            }
+            (Some(base), Some(placement)) if placement.is_semantic_prefix_of(base) => {
+                Ok(Some(base))
+            }
+            _ => Err(()),
+        }
+    }
     /// Borrows the complete current-session snapshot.
     pub const fn session(&self) -> &Session {
         &self.session
@@ -544,6 +564,7 @@ impl AcceptedInputSchedulingProjection {
                 | SemanticTranscriptEntryPayload::DelegationResult { .. }
                 | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
                 | SemanticTranscriptEntryPayload::ContextSummary { .. }
+                | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
                 | SemanticTranscriptEntryPayload::TurnCancelled { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
                 | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
@@ -551,6 +572,7 @@ impl AcceptedInputSchedulingProjection {
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
                 | SemanticTranscriptEntryPayload::ToolClosed { .. }
                 | SemanticTranscriptEntryPayload::TurnCompleted { .. }
                 | SemanticTranscriptEntryPayload::Imported { .. } => None,

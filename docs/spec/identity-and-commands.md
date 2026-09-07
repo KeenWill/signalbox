@@ -90,12 +90,12 @@ formatted error.
 Every command handler inspects the registry for the command identifier before it
 validates anything against current state. Replaying the same command with the
 same payload returns the recorded result once the command has settled; while it
-is pending the handler reports busy, except that review orchestration resumes
-its own pending command. Replaying it with a different payload or kind is a
-conflict and changes nothing. A single-transaction command commits its registry
-row, payload record, result, and every effect together, and a failed transaction
-leaves no claim behind. A recorded rejection claims the identifier the same way
-an applied command does.
+is pending the handler reports busy, except that review orchestration and runner
+replacement resume their own pending commands. Replaying it with a different
+payload or kind is a conflict and changes nothing. A single-transaction command
+commits its registry row, payload record, result, and every effect together, and
+a failed transaction leaves no claim behind. A recorded rejection claims the
+identifier the same way an applied command does.
 
 Recording who or what caused an action is provenance only. It grants no
 lifecycle, authorization, or approval authority. No automated path can attribute
@@ -195,19 +195,28 @@ content-derived identifier, reader identity, bytes, extracted text, filename,
 declared type, parser message, stderr, path, or credential. The general rule for
 what errors and logs may contain is in [process-protocol](process-protocol.md).
 
+`ReplaceLostRunner`, `AbandonLostRunner`, and `PromotePendingRunner` have
+immutable typed request and result families in the user-global command registry.
+Abandonment, promotion, and an immediately installable non-provisioning
+replacement claim and settle in one transaction. A provisioning replacement
+claims its complete request and one single-use authorization, waits without a
+transaction, and installs its exact retained receipt and terminal result
+together. Equal pending replay joins the retained operation; startup resumes
+unterminated replacement commands before admitting process clients.
+
 OAuth provisioning, re-provisioning, and deletion have distinct registry kinds
 and typed relational request and result families keyed by command identifier.
 The deferred typed-record trigger requires each claim's request, both record
 families are append-only, and structural replay equality compares the operation
 and profile while excluding the command identifier. A no-exchange rejection
-claims and commits its terminal receipt in one transaction.
+claims and commits its terminal receipt in one transaction. Device exchanges
+commit the claim before network work and authorization with the terminal
+receipt.
 
 ## Planned
 
 - Registry kind and typed request/result records for configuration reload:
   [design](../design/identity-and-commands.md).
-- Registry kinds and typed records for the runner recovery commands (replace,
-  abandon, promote): [design](../design/identity-and-commands.md).
 - A production generator for `ProviderTargetEvidenceId`:
   [design](../design/identity-and-commands.md).
 - Writers and generators for `WorkspaceId`, `GitRemoteMintId`, and

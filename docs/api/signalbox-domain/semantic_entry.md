@@ -56,6 +56,9 @@ pub struct ProviderReasoningItemError;
 
 ```rust
 pub enum SemanticTranscriptEntryPayload {
+    RunnerPlacementChanged {
+        placement_revision: RunnerGeneration,
+    },
     Imported {
         imported_entry: ImportedTranscriptEntryId,
         source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
@@ -123,6 +126,9 @@ pub enum SemanticTranscriptEntryPayload {
         attempt: ToolAttemptId,
     },
     ToolDenied {
+        request: ToolRequestId,
+    },
+    ToolInadmissible {
         request: ToolRequestId,
     },
     ToolClosed {
