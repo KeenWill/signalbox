@@ -19,56 +19,38 @@ needs only its daemon transaction.
 
 ## Design
 
-OAuth administration has three requests, `provision_oauth_credential`,
-`reprovision_oauth_credential`, and `delete_oauth_credential`, each carrying
-`profile` and a user-global `command_id`. Provisioning and re-provisioning emit
-`oauth_credential_authorization { command_id, profile, user_code, verification_uri }`
-for the device-authorization exchange owned by
-[configuration and credentials](configuration-and-credentials.md). `user_code`
-is 1 through 256 printable ASCII bytes; `verification_uri` is an absolute
-`https` URI without user information or fragment, 1 through 4,096 UTF-8 bytes.
-Invalid fields fail as `device_endpoint_rejected` before progress is emitted.
-Each request ends with
-`oauth_credential_receipt { command_id, profile, outcome }`, whose outcome is
-`provisioned`, `already_provisioned`, `reprovisioned`, `deleted`,
-`already_deleted`, `not_provisioned`, `abandoned`, `superseded`, or
-`failed { reason }`, where `reason` is one of the fieldless values
-`unknown_profile`, `non_oauth_profile`, `registration_changed`,
-`device_endpoint_rejected`, `device_endpoint_failed` for transport failure of
-the initial device-authorization request, `access_denied` for operator denial,
-`polling_expired`, `token_endpoint_failed`, `token_response_without_identity`,
-or `account_independence_failed`. Provisioning or re-provisioning an undeclared
-profile returns `failed { reason: unknown_profile }`; either request naming a
-profile whose delivery is not `oauth` returns
-`failed { reason: non_oauth_profile }`. Neither starts an exchange or mutates
-credential state. Initial provisioning returns `already_provisioned` without
-starting an exchange when the profile holds authorization. Re-provisioning
-returns `not_provisioned` without starting an exchange when no authorization is
-stored. Only re-provisioning replaces authorization; it clears every OAuth
-delivery-origin quarantine, including refresh and tuple-mismatch quarantines,
-only on success. Deletion addresses retained OAuth state by profile identity
-even when its declaration is absent or its delivery is no longer `oauth`.
-Deletion acquires the profile row lock that dispatch holds through the
-token-copy step, then ends its OAuth delivery-origin quarantine and removes
-stored authorization and cached access tokens, preventing future dispatches
-while retaining any current registration and referenced history; a child already
-holding a copied token finishes its invocation. Each profile retains a
-generation that every deletion advances. Provisioning and re-provisioning commit
-authorization and advance that generation atomically only when their starting
-generation is current and, for re-provisioning, authorization is still stored;
-otherwise the transaction records `superseded` without storing authorization.
-The final transaction also revalidates, serialized with catalog replacement,
-that the profile exists with `oauth` delivery and the exchange's canonical OAuth
-tuple; otherwise it records `failed { reason: registration_changed }` without
-storing authorization. The claim retains authorization details before their
-first emission and while pending. An equal request with the same `command_id`
-reports busy while pending and replays those details when available, or returns
-its stored receipt without repeating the exchange or deletion; conflicting reuse
-is rejected. Startup terminalizes each pending provisioning or re-provisioning
-claim with an `abandoned` receipt; another provisioning attempt requires a new
-`command_id`. The credential mutation and terminal receipt commit atomically
-under the command claim protocol in
-[identity and commands](../spec/identity-and-commands.md).
+OAuth administration uses the requests and receipts on the
+[spec page](../spec/process-protocol.md). Provisioning and re-provisioning emit
+`oauth_credential_authorization` for the device-authorization exchange owned by
+[configuration and credentials](configuration-and-credentials.md); invalid
+progress fields fail as `device_endpoint_rejected` before progress is emitted.
+Initial provisioning returns `already_provisioned` without starting an exchange
+when the profile holds authorization. Re-provisioning returns `not_provisioned`
+without starting an exchange when no authorization is stored. Only
+re-provisioning replaces authorization; it clears every OAuth delivery-origin
+quarantine, including refresh and tuple-mismatch quarantines, only on success.
+Deletion addresses retained OAuth state by profile identity even when its
+declaration is absent or its delivery is no longer `oauth`. Deletion acquires
+the profile row lock that dispatch holds through the token-copy step, then ends
+its OAuth delivery-origin quarantine and removes stored authorization and cached
+access tokens, preventing future dispatches while retaining any current
+registration and referenced history; a child already holding a copied token
+finishes its invocation. Each profile retains a generation that every deletion
+advances. Provisioning and re-provisioning commit authorization and advance that
+generation atomically only when their starting generation is current and, for
+re-provisioning, authorization is still stored; otherwise the transaction
+records `superseded` without storing authorization. The final transaction also
+revalidates, serialized with catalog replacement, that the profile exists with
+`oauth` delivery and the exchange's canonical OAuth tuple; otherwise it records
+`failed { reason: registration_changed }` without storing authorization. The
+claim retains authorization details before their first emission and while
+pending. An equal request with the same `command_id` reports busy while pending
+and replays those details when available, or returns its stored receipt without
+repeating the exchange or deletion; conflicting reuse is rejected. Startup
+terminalizes each pending provisioning or re-provisioning claim with an
+`abandoned` receipt; another provisioning attempt requires a new `command_id`.
+The credential mutation and terminal receipt commit atomically under the command
+claim protocol in [identity and commands](../spec/identity-and-commands.md).
 
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
@@ -241,9 +223,10 @@ call-free terminal attempt. The endings these shapes project belong to
 daemon decodes `spawn_session` and rejects it without mutation, and no daemon
 path produces `session_spawned`. `runner_state_transition` is an admitted
 version-1 event variant that the daemon projects when the outbox carries a
-runner state transition. Every other request and message above is outside the
-closed inventories in `crates/process-protocol` until the daemon and client
-implement its surface together.
+runner state transition. The OAuth administration envelopes and progress message
+are admitted version-1 variants. Every other request and message above is
+outside the closed inventories in `crates/process-protocol` until the daemon and
+client implement its surface together.
 
 No response code is reserved for an authorization failure, because client
 identity, authentication, authorization, and revocation are undecided.

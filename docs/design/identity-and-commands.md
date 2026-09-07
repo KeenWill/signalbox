@@ -6,20 +6,19 @@ This design is not built; it extends
 ## Goal
 
 Build the items the identity and command subsystem has committed to but lacks:
-registry kinds and typed records for runner recovery, OAuth administration, and
-configuration reload, production generators for the four identity types that
-lack one, and the optional runner placement the two creation payloads lack.
-`Actor` gains a program arm that submit-input records, and create-session
-adoption stays an explicit maintainer choice, so a program-driven turn is never
-recorded as user-issued.
+registry kinds and typed records for runner recovery and configuration reload,
+production generators for the four identity types that lack one, and the
+optional runner placement the two creation payloads lack. `Actor` gains a
+program arm that submit-input records, and create-session adoption stays an
+explicit maintainer choice, so a program-driven turn is never recorded as
+user-issued.
 
 ## Design
 
-`provision_oauth_credential`, `reprovision_oauth_credential`,
-`delete_oauth_credential`, and `reload_configuration` each gain a registry kind
-and typed relational request and result record families keyed by command
-identifier. The reload request records retain the checked snapshot;
-[process protocol](process-protocol.md) owns the payloads and outcomes.
+`reload_configuration` gains a registry kind and typed relational request and
+result record families keyed by command identifier. The request records retain
+the checked snapshot; [process protocol](process-protocol.md) owns the payloads
+and outcomes.
 
 Three runner recovery command kinds join the registry and its closed kind
 constraint: replace a lost runner, abandon a lost runner, and promote a pending
