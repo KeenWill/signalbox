@@ -1721,7 +1721,7 @@ async fn headless_escalation_identities(
 /// replay must check the persisted continuation identity rather than accept a
 /// newly supplied one.
 ///
-/// A later request in the same batch that is still undecided, or decided by
+/// A later admissible request in the batch that is still undecided, or decided by
 /// anything other than a proposal-time source, is evidence that this completion
 /// was not the last: those decisions land after the batch is proposed. The
 /// proposal-time sources are the ones the proposing transaction itself records —
@@ -1741,6 +1741,7 @@ async fn exact_completion_continuation(
               ON decision.request_id = later.request_id
            WHERE later.producing_model_call_id = $1
              AND later.request_ordinal > $2
+             AND later.inadmissible_reason IS NULL
              AND (
                  decision.request_id IS NULL
                  OR decision.decision_source

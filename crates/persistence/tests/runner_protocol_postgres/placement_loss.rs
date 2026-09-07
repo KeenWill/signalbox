@@ -262,8 +262,14 @@ fn model_repository(
     )
 }
 
+enum JudgeBatchShape {
+    SingleRequest,
+    RunnerSuffix,
+}
+
 async fn judge_observation_closes_lost_request(
     recommendation: signalbox_domain::DelegateApprovalRecommendation,
+    shape: JudgeBatchShape,
 ) -> Result<(), Box<dyn Error>> {
     use signalbox_application::ApprovalJudgeCompletionIdentities;
     use signalbox_persistence::approval_judge::{
@@ -271,6 +277,9 @@ async fn judge_observation_closes_lost_request(
     };
     let (_container, pool) = migrated_postgres().await?;
     let fixture = parked_batch(&pool).await?;
+    if matches!(shape, JudgeBatchShape::RunnerSuffix) {
+        append_pending_runner_suffix(&pool, &fixture).await?;
+    }
     sqlx::raw_sql("ALTER TABLE tool_request DISABLE TRIGGER ALL;")
         .execute(&pool)
         .await?;
@@ -299,6 +308,12 @@ async fn judge_observation_closes_lost_request(
         .load_active_batch(fixture.session, fixture.turn)
         .await?
         .expect("in-flight judge retains the wait");
+    if matches!(shape, JudgeBatchShape::RunnerSuffix) {
+        assert_eq!(
+            parked.requests()[1].inadmissible_reason(),
+            Some(signalbox_domain::ToolInadmissibleReason::PlacementLost)
+        );
+    }
     assert_eq!(
         parked.awaiting_approval().map(|waiting| waiting.request()),
         Some(fixture.request)
@@ -381,16 +396,22 @@ async fn judge_observation_closes_lost_request(
 #[ignore = "requires Docker"]
 async fn placement_loss_waits_for_judge_approval_and_retires_its_decision()
 -> Result<(), Box<dyn Error>> {
-    judge_observation_closes_lost_request(signalbox_domain::DelegateApprovalRecommendation::Approve)
-        .await
+    judge_observation_closes_lost_request(
+        signalbox_domain::DelegateApprovalRecommendation::Approve,
+        JudgeBatchShape::SingleRequest,
+    )
+    .await
 }
 
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn placement_loss_waits_for_judge_denial_and_retires_its_decision()
 -> Result<(), Box<dyn Error>> {
-    judge_observation_closes_lost_request(signalbox_domain::DelegateApprovalRecommendation::Deny)
-        .await
+    judge_observation_closes_lost_request(
+        signalbox_domain::DelegateApprovalRecommendation::Deny,
+        JudgeBatchShape::SingleRequest,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -399,6 +420,7 @@ async fn placement_loss_waits_for_judge_escalation_and_retires_its_decision()
 -> Result<(), Box<dyn Error>> {
     judge_observation_closes_lost_request(
         signalbox_domain::DelegateApprovalRecommendation::EscalateToHuman,
+        JudgeBatchShape::SingleRequest,
     )
     .await
 }
@@ -661,5 +683,45 @@ async fn placement_loss_preserves_an_executor_dispatched_attempt() -> Result<(),
     );
     assert_eq!(attempt.attempt(), dispatched.correlation().attempt());
     assert_eq!(attempt.generation(), dispatched.correlation().generation());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn placement_loss_judge_replay_checks_continuation_identity_with_inadmissible_suffix()
+-> Result<(), Box<dyn Error>> {
+    judge_observation_closes_lost_request(
+        signalbox_domain::DelegateApprovalRecommendation::Approve,
+        JudgeBatchShape::RunnerSuffix,
+    )
+    .await
+}
+
+async fn append_pending_runner_suffix(
+    pool: &PgPool,
+    fixture: &UndispatchedBatch,
+) -> Result<(), Box<dyn Error>> {
+    let request = ToolRequestId::from_uuid(Uuid::now_v7());
+    let entry = Uuid::now_v7();
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql("ALTER TABLE tool_request DISABLE TRIGGER ALL; ALTER TABLE tool_round DISABLE TRIGGER ALL; ALTER TABLE context_frontier DISABLE TRIGGER ALL; ALTER TABLE context_frontier_delta DISABLE TRIGGER ALL; ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;")
+        .execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO tool_request (request_id, session_id, turn_id, producing_model_call_id, request_ordinal, tool_name, arguments_kind, arguments_text, approval_posture) SELECT $1, session_id, turn_id, producing_model_call_id, 1, tool_name, 'json', '{}', 'human' FROM tool_request WHERE request_id = $2")
+        .bind(request.into_uuid()).bind(fixture.request.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO semantic_transcript_entry (source_session_id, semantic_entry_id, payload_kind, producing_model_call_id, assistant_tool_request_id, assistant_response_part_ordinal) SELECT session_id, $1, 'assistant_tool_use', producing_model_call_id, request_id, 1 FROM tool_request WHERE request_id = $2")
+        .bind(entry).bind(request.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO context_frontier_delta (owning_session_id, context_frontier_id, member_position, source_session_id, semantic_entry_id) SELECT round.session_id, boundary_frontier_id, frontier.member_count + 1, round.session_id, $1 FROM tool_round AS round JOIN context_frontier AS frontier ON frontier.owning_session_id = round.session_id AND frontier.context_frontier_id = round.boundary_frontier_id WHERE round.turn_id = $2")
+        .bind(entry).bind(fixture.turn.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query("UPDATE context_frontier AS frontier SET member_count = member_count + 1 FROM tool_round AS round WHERE round.turn_id = $1 AND frontier.owning_session_id = round.session_id AND frontier.context_frontier_id = round.boundary_frontier_id")
+        .bind(fixture.turn.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query(
+        "UPDATE tool_round SET response_part_count = 2, request_count = 2 WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE tool_request ENABLE TRIGGER ALL; ALTER TABLE tool_round ENABLE TRIGGER ALL; ALTER TABLE context_frontier ENABLE TRIGGER ALL; ALTER TABLE context_frontier_delta ENABLE TRIGGER ALL; ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL;")
+        .execute(&mut *transaction).await?;
+    transaction.commit().await?;
     Ok(())
 }
