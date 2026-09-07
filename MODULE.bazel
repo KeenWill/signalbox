@@ -13,3 +13,20 @@ rust.toolchain(
 use_repo(rust, "rust_toolchains")
 
 register_toolchains("@rust_toolchains//:all")
+
+host_tools = use_extension("@rules_rust//rust:extensions.bzl", "rust_host_tools")
+host_tools.host_tools(
+    name = "signalbox_rust_host_tools",
+    version = RUST_VERSION,
+)
+use_repo(host_tools, "signalbox_rust_host_tools")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    host_tools = "@signalbox_rust_host_tools",
+    manifests = ["//:Cargo.toml"],
+    supported_platform_triples = ["x86_64-unknown-linux-gnu"],
+)
+use_repo(crate, "crates")
