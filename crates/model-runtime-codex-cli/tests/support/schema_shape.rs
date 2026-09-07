@@ -58,12 +58,21 @@ fn object_fields(
 }
 
 fn dereference<'a>(mut value: &'a Value, root: &'a Value) -> &'a Value {
-    while let Some(reference) = value["$ref"].as_str() {
-        value = root
-            .pointer(reference.strip_prefix('#').expect("local schema reference"))
-            .expect("schema reference resolves");
+    loop {
+        if let Some(reference) = value["$ref"].as_str() {
+            value = root
+                .pointer(reference.strip_prefix('#').expect("local schema reference"))
+                .expect("schema reference resolves");
+        } else if let Some(branches) = value["allOf"]
+            .as_array()
+            .filter(|branches| branches.len() == 1)
+            .filter(|_| value.as_object().is_some_and(|fields| fields.len() == 1))
+        {
+            value = &branches[0];
+        } else {
+            return value;
+        }
     }
-    value
 }
 
 fn alternatives(value: &Value) -> Option<Vec<Value>> {

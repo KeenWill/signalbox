@@ -548,3 +548,18 @@ fn singleton_string_discriminators_need_no_redundant_type_keyword() {
         }
     }
 }
+
+#[test]
+fn transparent_all_of_wrappers_preserve_consumed_status_checks() {
+    let expected = derived::<frame::TurnCompleted>();
+    let mut actual = schema("TurnCompletedNotification");
+    let status = actual["definitions"]["Turn"]["properties"]["status"].clone();
+    actual["definitions"]["Turn"]["properties"]["status"] =
+        serde_json::json!({"allOf":[{"allOf":[status]}]});
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_ok());
+    actual["definitions"]["TurnStatus"]["enum"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("futureStatus"));
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
+}
