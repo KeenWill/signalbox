@@ -9,8 +9,10 @@ use signalbox_model_provider_runtime::{
     ContextCompactionModelResult, RuntimeContextCompactionModel,
 };
 use signalbox_model_runtime::CredentialReference;
-use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
-use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
+use signalbox_model_runtime_anthropic::{
+    AnthropicConfig, AnthropicConstructionError, AnthropicRuntime,
+};
+use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 
 use crate::{
     FileCredentialAccess, HubModelConfiguration, configuration::ModelAdapter,
@@ -31,7 +33,39 @@ pub struct ModelRuntimeFactory {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ModelRuntimeBuildError;
+pub struct ModelRuntimeBuildError(&'static str);
+
+impl ModelRuntimeBuildError {
+    /// Returns the closed cause code without adapter-owned detail strings.
+    pub const fn cause_code(self) -> &'static str {
+        self.0
+    }
+}
+
+impl From<AnthropicConstructionError> for ModelRuntimeBuildError {
+    fn from(error: AnthropicConstructionError) -> Self {
+        Self(match error {
+            AnthropicConstructionError::InvalidBaseUrl { .. } => "anthropic_invalid_base_url",
+            AnthropicConstructionError::InvalidVersion => "anthropic_invalid_version",
+            AnthropicConstructionError::InvalidExchangeTimeout => "anthropic_invalid_timeout",
+            AnthropicConstructionError::InvalidSseRecordLimit => "anthropic_invalid_record_limit",
+            AnthropicConstructionError::ClientConstruction { .. } => {
+                "anthropic_client_construction"
+            }
+        })
+    }
+}
+
+impl From<OpenAiConstructionError> for ModelRuntimeBuildError {
+    fn from(error: OpenAiConstructionError) -> Self {
+        Self(match error {
+            OpenAiConstructionError::InvalidBaseUrl { .. } => "openai_invalid_base_url",
+            OpenAiConstructionError::InvalidExchangeTimeout => "openai_invalid_timeout",
+            OpenAiConstructionError::InvalidSseRecordLimit => "openai_invalid_record_limit",
+            OpenAiConstructionError::ClientConstruction { .. } => "openai_client_construction",
+        })
+    }
+}
 
 impl ModelRuntimeFactory {
     pub fn new(
@@ -60,7 +94,7 @@ impl ModelRuntimeFactory {
             config.model_capabilities = models.runtime_model_capability_catalog();
             Some(
                 AnthropicRuntime::new(config, credentials(ModelAdapter::Anthropic))
-                    .map_err(|_| ModelRuntimeBuildError)?,
+                    .map_err(ModelRuntimeBuildError::from)?,
             )
         } else {
             None
@@ -71,7 +105,7 @@ impl ModelRuntimeFactory {
             config.model_capabilities = models.runtime_model_capability_catalog();
             Some(
                 OpenAiRuntime::new(config, credentials(ModelAdapter::OpenAi))
-                    .map_err(|_| ModelRuntimeBuildError)?,
+                    .map_err(ModelRuntimeBuildError::from)?,
             )
         } else {
             None
@@ -84,7 +118,7 @@ impl ModelRuntimeFactory {
             self.post_kill_reap_bound,
             self.native_message_limit,
         )
-        .map_err(|_| ModelRuntimeBuildError)
+        .map_err(|error| ModelRuntimeBuildError(error.cause_code()))
     }
 }
 
@@ -186,7 +220,7 @@ impl ContextCompactionModel for CatalogContextCompactionModel {
 
 impl std::fmt::Display for ModelRuntimeBuildError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("model runtime composition failed")
+        formatter.write_str(self.cause_code())
     }
 }
 impl std::error::Error for ModelRuntimeBuildError {}
@@ -218,8 +252,24 @@ impl<E: signalbox_application::ClassifyOperatorFailure>
     }
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
-            Self::Configuration(_) => "model_runtime_composition_failed",
+            Self::Configuration(error) => error.cause_code(),
             Self::Pass(error) => error.operator_failure_cause_code(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_composition_preserves_the_adapter_timeout_cause() {
+        let models = crate::configuration::checked_in_example_configuration().expect("models");
+        let error = match ModelRuntimeFactory::new(Some(Duration::ZERO), None, None).build(&models)
+        {
+            Ok(_) => panic!("zero exchange timeout is invalid"),
+            Err(error) => error,
+        };
+        assert_eq!(error.cause_code(), "anthropic_invalid_timeout");
     }
 }

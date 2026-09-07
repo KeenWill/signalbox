@@ -1014,20 +1014,39 @@ async fn reload_receipt_failure_requires_recovery_after_catalog_installation()
         None,
     )
     .map_err(|error| io::Error::other(format!("reload fixture: {error:?}")))?;
-    sqlx::raw_sql("CREATE FUNCTION reject_reload_receipt_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'receipt fixture failure'; END $$;
-        CREATE TRIGGER reject_reload_receipt_fixture BEFORE INSERT ON reload_configuration_result FOR EACH ROW EXECUTE FUNCTION reject_reload_receipt_fixture();")
+    let aliases_before = reload.catalogs().models.model_aliases().count();
+    let request = signalbox_persistence::reload_configuration::ReloadConfiguration {
+        command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+    };
+    sqlx::raw_sql("CREATE FUNCTION reject_reload_commit_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'commit fixture failure' USING ERRCODE = '23514'; END $$;
+        CREATE CONSTRAINT TRIGGER reject_reload_claim_fixture AFTER INSERT ON reload_configuration_command DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_reload_commit_fixture();")
         .execute(&pool).await?;
     let error = reload
-        .reload(
-            signalbox_persistence::reload_configuration::ReloadConfiguration {
-                command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
-            },
+        .reload(request)
+        .await
+        .expect_err("claim commit is rejected");
+    assert!(matches!(
+        error,
+        ConfigurationReloadError::BeforeEffect(
+            signalbox_persistence::reload_configuration::ReloadRepositoryError::Database(_)
         )
+    ));
+    assert_eq!(
+        reload.catalogs().models.model_aliases().count(),
+        aliases_before
+    );
+    sqlx::raw_sql("DROP TRIGGER reject_reload_claim_fixture ON reload_configuration_command;
+        CREATE CONSTRAINT TRIGGER reject_reload_receipt_fixture AFTER INSERT ON reload_configuration_result DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_reload_commit_fixture();")
+        .execute(&pool).await?;
+    let error = reload
+        .reload(request)
         .await
         .expect_err("receipt commit fails after installation");
     assert!(matches!(
         error,
-        ConfigurationReloadError::RecoveryRequired(_)
+        ConfigurationReloadError::RecoveryRequired(
+            signalbox_persistence::reload_configuration::ReloadRepositoryError::Database(_)
+        )
     ));
     assert_eq!(reload.catalogs().models.model_aliases().count(), 0);
     assert_eq!(

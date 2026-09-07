@@ -237,3 +237,68 @@ async fn reload_migration_preserves_oauth_commands_when_applied_after_oauth()
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn reload_configuration_commit_constraint_rejections_are_proven_rollbacks()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::reload_configuration::ReloadRepositoryError;
+
+    let (_container, pool, _) = migrated_postgres().await?;
+    let repository = ReloadConfigurationRepository::new(pool.clone());
+    let request = ReloadConfiguration {
+        command_id: DurableCommandId::from_uuid(next_test_submit_uuid()),
+    };
+    let intent = ReloadIntent {
+        replacement_snapshot: "{}".to_owned(),
+        prior_snapshot: "{}".to_owned(),
+        rule_set_digest: [0; 32],
+    };
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_reload_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'test deferred rejection' USING ERRCODE = '23514'; END $$;
+         CREATE CONSTRAINT TRIGGER reject_reload_claim
+         AFTER INSERT ON reload_configuration_command DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW EXECUTE FUNCTION reject_reload_commit();",
+    )
+    .execute(&pool)
+    .await?;
+    let error = repository
+        .claim(request, Ok(&intent))
+        .await
+        .expect_err("claim rollback");
+    assert!(matches!(&error, ReloadRepositoryError::Database(error)
+        if error.as_database_error().and_then(|error| error.code()).as_deref() == Some("23514")));
+    assert_eq!(repository.lookup(request).await?, ReloadLookup::Unclaimed);
+    assert!(repository.pending().await?.is_empty());
+
+    sqlx::raw_sql(
+        "DROP TRIGGER reject_reload_claim ON reload_configuration_command;
+         CREATE CONSTRAINT TRIGGER reject_reload_receipt
+         AFTER INSERT ON reload_configuration_result DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW EXECUTE FUNCTION reject_reload_commit();",
+    )
+    .execute(&pool)
+    .await?;
+    assert_eq!(
+        repository.claim(request, Ok(&intent)).await?,
+        ReloadClaim::Retained
+    );
+    let error = repository
+        .finish(request, &ReloadResult::Reloaded)
+        .await
+        .expect_err("receipt rollback");
+    assert!(matches!(&error, ReloadRepositoryError::Database(error)
+        if error.as_database_error().and_then(|error| error.code()).as_deref() == Some("23514")));
+    assert_eq!(repository.lookup(request).await?, ReloadLookup::Pending);
+    sqlx::query("DROP TRIGGER reject_reload_receipt ON reload_configuration_result")
+        .execute(&pool)
+        .await?;
+    repository.finish(request, &ReloadResult::Reloaded).await?;
+    assert_eq!(
+        repository.lookup(request).await?,
+        ReloadLookup::Recorded(ReloadResult::Reloaded)
+    );
+    pool.close().await;
+    Ok(())
+}
