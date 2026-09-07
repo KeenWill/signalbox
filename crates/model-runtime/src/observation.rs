@@ -1,6 +1,6 @@
 //! The observation stream an adapter emits while executing one operation.
 //!
-//! Observations are transient progress facts. In
+//! Observations carry progress and provider evidence. In
 //! docs/spec/sessions-and-transcript.md, stream deltas are never canonical
 //! transcript history; the terminal evidence returned by
 //! [`crate::ModelRuntime::execute`] is the authoritative summary. Every
@@ -79,6 +79,10 @@ pub enum ObservationFact {
 pub trait ObservationSink<C> {
     /// Receives one observation.
     fn observe(&mut self, observation: Observation<C>);
+
+    /// Receives capacity evidence for retention with the correlated call.
+    /// Progress-only sinks may discard this separate evidence channel.
+    fn observe_rate_limits(&mut self, _correlation: C, _snapshot: crate::RateLimitSnapshot) {}
 }
 
 impl<C> ObservationSink<C> for Vec<Observation<C>> {

@@ -15,6 +15,7 @@ mod support;
 mod approval_decisions;
 mod attention;
 mod convergence_sweep;
+mod credential_capacity;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;

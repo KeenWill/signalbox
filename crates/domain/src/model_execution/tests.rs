@@ -582,6 +582,7 @@ fn correlated_observation(
         provider_failure_cause: None,
         retry_after: None,
         non_acceptance_proven: false,
+        rate_limits: None,
     }
 }
 
