@@ -1,8 +1,8 @@
 # Compatibility smoke for the Codex CLI wrapped by
 # crates/model-runtime-codex-cli. It installs the exact version pinned in
-# tooling/codex-cli/package.json and spends one real, cheapest-model exchange
-# through the adapter, so a Renovate pin bump is proven against the live CLI
-# rather than assumed. The discipline it implements is specified in the Codex
+# tooling/codex-cli/package.json. It spends one real, cheapest-model exchange
+# through the adapter and another through the app-server protocol probe, so a
+# Renovate pin bump is proven against the live CLI. The discipline it implements is specified in the Codex
 # CLI provider adapter section of docs/spec/runtime-substrate.md.
 #
 # Accepted trust boundary. The live exchange must execute the proposed
@@ -234,7 +234,8 @@ jobs:
                 sh -c 'trap "while :; do sleep 1; done" TERM; "$@"' sh \
                 tooling/codex-cli/node_modules/.bin/codex login --with-api-key
       # The test repeats the pre-spend assertions immediately before the model
-      # operation, then spends exactly one exchange through the adapter.
+      # operation, then spends one exchange through the adapter. The following
+      # protocol probe performs another live exchange plus rejected-login probes.
       - name: Run one live exchange through the adapter
         env:
           # Optional, and a plain variable rather than a secret because a model
