@@ -72,8 +72,8 @@ struct ConvertedItem {
     refused: bool,
 }
 
-/// Converts one complete output item; reasoning has no durable producer here.
-fn convert_item(item: &WireOutputItem) -> Result<ConvertedItem, String> {
+/// Converts one terminal output item; reasoning has no durable producer here.
+fn convert_item(item: &WireOutputItem, response_status: &str) -> Result<ConvertedItem, String> {
     match item.kind.as_str() {
         "reasoning" => Ok(ConvertedItem {
             parts: Vec::new(),
@@ -84,8 +84,13 @@ fn convert_item(item: &WireOutputItem) -> Result<ConvertedItem, String> {
             refused: false,
         }),
         "message" => {
-            if item.status.as_deref() != Some("completed") {
-                return Err("output message item is not completed".to_string());
+            if item.status.as_deref() != Some("completed")
+                && !(response_status == "incomplete"
+                    && item.status.as_deref() == Some("incomplete"))
+            {
+                return Err(
+                    "output message item status disagrees with its terminal response".to_string(),
+                );
             }
             if item.role.as_deref() != Some("assistant") {
                 return Err("output message must have assistant role".to_string());
@@ -224,6 +229,12 @@ pub(crate) fn decode_response<C: Clone>(
     {
         return loss("non-failed response carries an error".to_string(), None);
     }
+    if response.status.as_deref() == Some("completed") && response.incomplete_details.is_some() {
+        return loss(
+            "completed response carries incomplete details".to_string(),
+            None,
+        );
+    }
     if response.object.as_deref() != Some("response")
         || response.id.as_deref().is_none_or(str::is_empty)
         || response.model.as_deref().is_none_or(str::is_empty)
@@ -249,6 +260,9 @@ pub(crate) fn decode_response<C: Clone>(
     let mut content = Vec::new();
     let mut refused = false;
     let mut ids = BTreeSet::new();
+    let Some(status) = response.status.as_deref() else {
+        return loss("response lacks status".to_string(), None);
+    };
     for item in &items {
         if item.id.as_deref().is_none_or(str::is_empty) {
             return loss(
@@ -259,7 +273,7 @@ pub(crate) fn decode_response<C: Clone>(
         let ConvertedItem {
             parts,
             refused: item_refused,
-        } = match convert_item(item) {
+        } = match convert_item(item, status) {
             Ok(result) => result,
             Err(detail) => return loss(detail, None),
         };
@@ -273,9 +287,6 @@ pub(crate) fn decode_response<C: Clone>(
         content.extend(parts);
         refused |= item_refused;
     }
-    let Some(status) = response.status.as_deref() else {
-        return loss("response lacks status".to_string(), None);
-    };
     let mut finish = map_terminal(
         status,
         response
@@ -505,7 +516,9 @@ mod tests {
             ] {
                 let mut value = response();
                 value["status"] = json!(status);
-                value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                if status == "incomplete" {
+                    value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                }
                 let mut call = json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"});
                 if let Some(item_status) = item_status {
                     call["status"] = json!(item_status);
@@ -537,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn buffered_message_content_requires_completed_item_status() {
+    fn buffered_message_content_respects_terminal_response_status() {
         for status in ["completed", "incomplete"] {
             for item_status in [
                 None,
@@ -548,17 +561,29 @@ mod tests {
             ] {
                 let mut value = response();
                 value["status"] = json!(status);
-                value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                if status == "incomplete" {
+                    value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                }
                 if let Some(item_status) = item_status {
                     value["output"][0]["status"] = json!(item_status);
                 } else {
                     value["output"][0].as_object_mut().unwrap().remove("status");
                 }
                 let (evidence, observations) = decode(value);
-                if item_status == Some("completed") {
+                if item_status == Some("completed")
+                    || (status == "incomplete" && item_status == Some("incomplete"))
+                {
                     let TerminalEvidence::Completed(result) = evidence else {
-                        panic!("completed message content must decode");
+                        panic!("matching terminal message content must decode");
                     };
+                    assert_eq!(
+                        result.finish,
+                        if status == "incomplete" {
+                            CompletionFinish::MaxOutputTokens
+                        } else {
+                            CompletionFinish::EndTurn
+                        }
+                    );
                     assert_eq!(
                         result.content,
                         vec![AssistantPart::Text("ready".to_string())]
@@ -611,7 +636,9 @@ mod tests {
             for error in [Value::Null, json!({}), json!({"code":"server_error"})] {
                 let mut value = response();
                 value["status"] = json!(status);
-                value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                if status == "incomplete" {
+                    value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                }
                 value["error"] = error.clone();
                 let (evidence, observations) = decode(value.clone());
                 if error.is_null() {
@@ -625,6 +652,58 @@ mod tests {
                 }
                 value["output"] = json!({});
                 assert!(matches!(decode(value).0, TerminalEvidence::BoundaryLoss(_)));
+            }
+        }
+    }
+
+    #[test]
+    fn completed_responses_reject_incomplete_details_before_announcing_a_finish() {
+        for tool in [false, true] {
+            for details in [
+                Value::Null,
+                json!({"reason":"max_output_tokens"}),
+                json!({"reason":"content_filter"}),
+            ] {
+                let mut value = response();
+                if tool {
+                    value["output"] = json!([{"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"}]);
+                }
+                value["incomplete_details"] = details.clone();
+                let (evidence, observations) = decode(value);
+                if details.is_null() {
+                    let TerminalEvidence::Completed(result) = evidence else {
+                        panic!("null incomplete details are valid");
+                    };
+                    assert_eq!(
+                        result.finish,
+                        if tool {
+                            CompletionFinish::ToolUse
+                        } else {
+                            CompletionFinish::EndTurn
+                        }
+                    );
+                } else {
+                    let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+                        panic!("completed response with incomplete details must fail closed");
+                    };
+                    assert!(matches!(
+                        loss.cause,
+                        LossCause::ResponseUnintelligible { .. }
+                    ));
+                    assert_eq!(loss.finish_reported, None);
+                    assert_eq!(
+                        loss.tool_calls,
+                        if tool {
+                            ToolCallsAtLoss::Opened
+                        } else {
+                            ToolCallsAtLoss::NoneOpened
+                        }
+                    );
+                    assert!(!observations.iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                }
             }
         }
     }
@@ -660,7 +739,9 @@ mod tests {
             ] {
                 let mut value = response();
                 value["status"] = json!(status);
-                value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                if status == "incomplete" {
+                    value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                }
                 value["output"].as_array_mut().unwrap().push(item.clone());
                 assert!(matches!(
                     decode(value.clone()).0,

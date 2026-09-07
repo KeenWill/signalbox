@@ -1031,7 +1031,9 @@ mod tests {
                 let mut event = terminal();
                 event["type"] = json!(format!("response.{status}"));
                 event["response"]["status"] = json!(status);
-                event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                if status == "incomplete" {
+                    event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                }
                 event["response"]["error"] = error.clone();
                 let mut decoder = StreamDecoder::new(ExchangeFacts::default());
                 let mut sink = Vec::new();
@@ -1061,6 +1063,62 @@ mod tests {
     }
 
     #[test]
+    fn completed_events_reject_incomplete_details_before_announcing_a_finish() {
+        for tool in [false, true] {
+            for details in [
+                Value::Null,
+                json!({"reason":"max_output_tokens"}),
+                json!({"reason":"content_filter"}),
+            ] {
+                let mut event = terminal();
+                if tool {
+                    event["response"]["output"] = json!([{"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"}]);
+                }
+                event["response"]["incomplete_details"] = details.clone();
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                    panic!("terminal event must terminate");
+                };
+                if details.is_null() {
+                    let TerminalEvidence::Completed(result) = *evidence else {
+                        panic!("null incomplete details are valid");
+                    };
+                    assert_eq!(
+                        result.finish,
+                        if tool {
+                            CompletionFinish::ToolUse
+                        } else {
+                            CompletionFinish::EndTurn
+                        }
+                    );
+                } else {
+                    let TerminalEvidence::BoundaryLoss(loss) = *evidence else {
+                        panic!("completed event with incomplete details must fail closed");
+                    };
+                    assert!(matches!(
+                        loss.cause,
+                        LossCause::StreamProtocolViolation { .. }
+                    ));
+                    assert_eq!(loss.finish_reported, None);
+                    assert_eq!(
+                        loss.tool_calls,
+                        if tool {
+                            ToolCallsAtLoss::Opened
+                        } else {
+                            ToolCallsAtLoss::NoneOpened
+                        }
+                    );
+                    assert!(!sink.iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn terminal_output_must_include_every_observed_output_index_before_flushing() {
         for status in ["completed", "incomplete"] {
             for index in [0, 1, 7] {
@@ -1082,7 +1140,10 @@ mod tests {
                     let mut event = terminal();
                     event["type"] = json!(format!("response.{status}"));
                     event["response"]["status"] = json!(status);
-                    event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                    if status == "incomplete" {
+                        event["response"]["incomplete_details"] =
+                            json!({"reason":"max_output_tokens"});
+                    }
                     if index == 0 {
                         event["response"]["output"] = json!([]);
                     }
@@ -1251,7 +1312,9 @@ mod tests {
                 let mut event = terminal();
                 event["type"] = json!(format!("response.{status}"));
                 event["response"]["status"] = json!(status);
-                event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                if status == "incomplete" {
+                    event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                }
                 let mut call = json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"});
                 if let Some(item_status) = item_status {
                     call["status"] = json!(item_status);
@@ -1287,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn streamed_message_content_requires_completed_item_status() {
+    fn streamed_message_content_respects_terminal_response_status() {
         for status in ["completed", "incomplete"] {
             for item_status in [
                 None,
@@ -1299,7 +1362,9 @@ mod tests {
                 let mut event = terminal();
                 event["type"] = json!(format!("response.{status}"));
                 event["response"]["status"] = json!(status);
-                event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                if status == "incomplete" {
+                    event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                }
                 if let Some(item_status) = item_status {
                     event["response"]["output"][0]["status"] = json!(item_status);
                 } else {
@@ -1313,10 +1378,20 @@ mod tests {
                 let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
                     panic!("terminal event must terminate");
                 };
-                if item_status == Some("completed") {
+                if item_status == Some("completed")
+                    || (status == "incomplete" && item_status == Some("incomplete"))
+                {
                     let TerminalEvidence::Completed(result) = *evidence else {
-                        panic!("completed message content must decode");
+                        panic!("matching terminal message content must decode");
                     };
+                    assert_eq!(
+                        result.finish,
+                        if status == "incomplete" {
+                            CompletionFinish::MaxOutputTokens
+                        } else {
+                            CompletionFinish::EndTurn
+                        }
+                    );
                     assert_eq!(
                         result.content,
                         vec![signalbox_model_runtime::AssistantPart::Text(
@@ -1382,7 +1457,9 @@ mod tests {
                 event["type"] = json!(format!("response.{status}"));
                 event["response"]["status"] = json!(status);
                 event["response"]["usage"] = terminal_usage;
-                event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                if status == "incomplete" {
+                    event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                }
                 if status == "failed" {
                     event["response"]["error"] = json!({"code":"server_error"});
                 }
@@ -1564,7 +1641,9 @@ mod tests {
                 let mut event = terminal();
                 event["type"] = json!(format!("response.{status}"));
                 event["response"]["status"] = json!(status);
-                event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                if status == "incomplete" {
+                    event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                }
                 event["response"]["output"]
                     .as_array_mut()
                     .unwrap()
