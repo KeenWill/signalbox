@@ -259,13 +259,13 @@ configured attempt budget is spent, the recovery row becomes exhausted, the wait
 remains unchanged, and the process transcript sets operator action required.
 
 Startup acquires the single-daemon guard, fences the prior pool incarnation once
-the fence migration has run, runs the remaining migrations, completes the
-generic scan, initializes every configured blob store, marks prior-process
-runner connections lost, binds the runner socket, binds the process socket, and
-then starts enrollment, admission, dispatch, and scheduling concurrently. No
-request, dispatch cursor advance, scheduler pass, or runner admission occurs
-before recovery completes. Any phase failure is a failed startup with a
-classified, key-bearing log line and a failure exit code.
+the fence migration has run, runs the remaining migrations, marks prior-process
+runner connections lost and propagates their loss before the generic scan,
+initializes every configured blob store, binds the runner socket, binds the
+process socket, and then starts enrollment, admission, dispatch, and scheduling
+concurrently. No request, dispatch cursor advance, scheduler pass, or runner
+admission occurs before recovery completes. Any phase failure is a failed
+startup with a classified, key-bearing log line and a failure exit code.
 
 Each scan transaction classifies the lost tenure by its durable evidence and
 never fabricates a live end. A running turn with no model call ends its attempt

@@ -70,7 +70,7 @@ async fn prepared_batch(pool: &PgPool) -> Result<UndispatchedBatch, Box<dyn Erro
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn placement_loss_retires_prepared_attempt_without_result_projection()
+async fn placement_loss_retires_prepared_attempt_before_startup_classification()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = prepared_batch(&pool).await?;
@@ -91,6 +91,19 @@ async fn placement_loss_retires_prepared_attempt_without_result_projection()
         .store
         .propagate_connection_loss_session(loss, fixture.session)
         .await?;
+    let startup = signalbox_persistence::startup::PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.session,
+            signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            &mut signalbox_application::UuidV7StartupScanIdGenerator,
+        )
+        .await?;
+    assert!(
+        matches!(startup, signalbox_application::StartupScanSessionOutcome::ResumableToolBatch { turn } if turn == fixture.turn)
+    );
     let repository = PostgresToolLoopRepository::new(pool.clone());
     let batch = repository
         .load_active_batch(fixture.session, fixture.turn)
