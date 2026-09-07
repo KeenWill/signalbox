@@ -632,6 +632,14 @@ impl StreamDecoder {
                 if let Some(raw) = self.completed_reasoning.get(&index) {
                     let completed: WireOutputItem =
                         serde_json::from_str(raw.get()).map_err(|error| error.to_string())?;
+                    if item.encrypted_content.as_ref().is_some_and(|content| {
+                        completed.encrypted_content.as_ref() != Some(content)
+                    }) {
+                        return Err(
+                            "terminal reasoning differs from the completed encrypted content"
+                                .to_string(),
+                        );
+                    }
                     self.observe_item_parts(index, &completed, true)?;
                     continue;
                 }
@@ -2366,6 +2374,87 @@ mod tests {
             ObservationFact::ProviderModelReported(ProviderReportedModel::new("model-fixture"))
         );
     }
+    #[test]
+    fn terminal_reasoning_must_repeat_completed_ciphertext_when_present() {
+        for status in ["completed", "incomplete"] {
+            for ciphertext in [
+                None,
+                Some(Value::Null),
+                Some(json!("complete")),
+                Some(json!("changed")),
+                Some(json!("")),
+            ] {
+                let completed = json!({"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"complete"});
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                assert!(matches!(
+                    apply(
+                        &mut decoder,
+                        json!({
+                            "type":"response.output_item.done","output_index":0,"item":completed
+                        }),
+                        &mut sink
+                    ),
+                    StreamStep::Continue
+                ));
+                let mut reasoning = json!({"type":"reasoning","id":"rs_fixture"});
+                if let Some(value) = &ciphertext {
+                    reasoning["encrypted_content"] = value.clone();
+                }
+                let mut event = terminal();
+                event["type"] = json!(format!("response.{status}"));
+                event["response"]["status"] = json!(status);
+                if status == "incomplete" {
+                    event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                }
+                event["response"]["output"]
+                    .as_array_mut()
+                    .unwrap()
+                    .insert(0, reasoning);
+                let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                    panic!("terminal must terminate");
+                };
+                if ciphertext
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value != "complete")
+                {
+                    let TerminalEvidence::BoundaryLoss(loss) = *evidence else {
+                        panic!("terminal cannot rewrite completed encrypted reasoning");
+                    };
+                    assert!(matches!(
+                        loss.cause,
+                        LossCause::StreamProtocolViolation { .. }
+                    ));
+                    assert_eq!(
+                        loss.finish_reported,
+                        Some(if status == "incomplete" {
+                            FinishReason::MaxOutputTokens
+                        } else {
+                            FinishReason::EndTurn
+                        })
+                    );
+                    assert!(!sink.iter().any(|observation| matches!(
+                        observation.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                } else {
+                    let TerminalEvidence::Completed(completion) = *evidence else {
+                        panic!(
+                            "omitted or matching terminal ciphertext preserves the completed item"
+                        );
+                    };
+                    assert_eq!(
+                        completion.content[0],
+                        signalbox_model_runtime::AssistantPart::ProviderReasoning {
+                            item_json: completed.to_string(),
+                        }
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn reasoning_replay_uses_the_completed_item_instead_of_the_added_snapshot() {
         let mut decoder = StreamDecoder::new(ExchangeFacts::default());

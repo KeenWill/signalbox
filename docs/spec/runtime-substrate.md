@@ -47,8 +47,9 @@ content; its JSON bytes remain unchanged through the runtime and bridge. Replay
 carries the producing call's durable effective target and pinned credential
 reference. A missing producing-target mapping fails input estimation and request
 preparation before provider interaction. Streaming takes those bytes from the
-completed output item. A credential in the item rejects the whole evidence with
-`credential_in_provider_reasoning`.
+completed output item. Terminal reasoning may omit encrypted content; when
+present, it must match the completed item's encrypted content. A credential in
+the item rejects the whole evidence with `credential_in_provider_reasoning`.
 
 `ModelRuntime` has two stages. `prepare` does all work that needs no provider
 traffic and returns an opaque one-shot capability or a typed failure.
