@@ -146,6 +146,14 @@ readable, nonempty directory, and startup fails otherwise. Delivery links the
 selected profile's `auth.json` into a private per-operation `CODEX_HOME` with an
 empty `config.toml`.
 
+A Codex home pool declares one `codex_cli` subscription profile with
+`delivery = "codex_home"` and a distinct `codex_home` directory per
+independently metered account, then lists those profile names as pool members.
+Equal member priorities let `least_used` compare their headroom under the pool's
+reserve and headroom action;
+[the configuration example](../../config/signalboxd.example.toml) provides a
+three-home pool that replaces its ambient profile and pool.
+
 A credential pool is the set of profiles that may substitute for one another for
 one model family. An `[[adapter_mappings]]` entry maps each family to exactly
 one pool, and every member of that pool carries the mapping's adapter. A pool's
