@@ -1,20 +1,8 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("//tooling/bazel:package.bzl", "rust_package")
 
-exports_files(["Cargo.toml"])
-
-cargo_toml_env_vars(
-    name = "cargo_environment",
-    src = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
-
-extract_cargo_lints(
-    name = "cargo_lints",
-    manifest = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
+rust_package()
 
 rust_library(
     name = "signalbox_client",
@@ -111,10 +99,4 @@ rust_test(
         "//crates/persistence:signalbox_persistence",
         "//crates/test-bin:signalbox_test_bin",
     ] + all_crate_deps(normal_dev = True),
-)
-
-filegroup(
-    name = "rust_sources",
-    srcs = glob(["**/*.rs"]),
-    visibility = ["//:__pkg__"],
 )

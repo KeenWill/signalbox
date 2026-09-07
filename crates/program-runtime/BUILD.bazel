@@ -1,25 +1,13 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
 load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_library", "rust_test")
+load("//tooling/bazel:package.bzl", "rust_package")
 
 CRATE_FEATURES = [
     "default",
     "postgres-integration",
 ]
 
-exports_files(["Cargo.toml"])
-
-cargo_toml_env_vars(
-    name = "cargo_environment",
-    src = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
-
-extract_cargo_lints(
-    name = "cargo_lints",
-    manifest = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
+rust_package()
 
 rust_library(
     name = "signalbox_program_runtime",
@@ -110,12 +98,6 @@ test_suite(
     name = "postgres_tests",
     tags = ["manual"],
     tests = [":program_host_postgres"],
-)
-
-filegroup(
-    name = "rust_sources",
-    srcs = glob(["**/*.rs"]),
-    visibility = ["//:__pkg__"],
 )
 
 rust_doc(

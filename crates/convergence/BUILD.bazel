@@ -1,11 +1,6 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_doc", "rust_library", "rust_test")
-
-exports_files([
-    "Cargo.toml",
-    "examples/repository.toml",
-])
+load("//tooling/bazel:package.bzl", "rust_package")
 
 filegroup(
     name = "fixtures",
@@ -13,17 +8,10 @@ filegroup(
     visibility = ["//:__subpackages__"],
 )
 
-cargo_toml_env_vars(
-    name = "cargo_environment",
-    src = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
-
-extract_cargo_lints(
-    name = "cargo_lints",
-    manifest = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
+rust_package(exports = [
+    "Cargo.toml",
+    "examples/repository.toml",
+])
 
 rust_library(
     name = "signalbox_convergence",
@@ -103,12 +91,6 @@ rust_test(
     # These tests execute host shell or process utilities.
     tags = ["external"],
     deps = [] + all_crate_deps(normal_dev = True),
-)
-
-filegroup(
-    name = "rust_sources",
-    srcs = glob(["**/*.rs"]),
-    visibility = ["//:__pkg__"],
 )
 
 rust_doc(
