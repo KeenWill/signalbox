@@ -746,3 +746,43 @@ async fn replace_through_successor_chain(
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_candidate_authority_changes_publish_committed_wakeups()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let receipt = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    let enrollment = receipt.identities().enrollment();
+    let connection = store.open_connection(enrollment).await?;
+    let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
+    listener.listen("runner_recovery").await?;
+    for transition in [
+        RunnerConnectionTransition::HeartbeatMissed,
+        RunnerConnectionTransition::HeartbeatRecovered,
+        RunnerConnectionTransition::TransportClosed,
+    ] {
+        store
+            .transition_connection(enrollment, connection.epoch(), transition)
+            .await?;
+        let notification = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, listener.recv()).await??;
+        assert_eq!(notification.channel(), "runner_recovery");
+    }
+    store.open_connection(enrollment).await?;
+    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, listener.recv()).await??;
+    store
+        .register(receipt.enrollment(), advertisement())
+        .await?;
+    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, listener.recv()).await??;
+    let mut current = store
+        .load_enrollment(enrollment)
+        .await?
+        .expect("the registration retains its enrollment");
+    assert!(store.revoke_enrollment(&mut current).await?);
+    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, listener.recv()).await??;
+    Ok(())
+}
