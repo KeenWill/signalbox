@@ -547,6 +547,7 @@ impl AcceptedInputSchedulingProjection {
                 | SemanticTranscriptEntryPayload::TurnCancelled { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
                 | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
+                | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | SemanticTranscriptEntryPayload::ToolDenied { .. }

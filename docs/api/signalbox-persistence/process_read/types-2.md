@@ -81,6 +81,13 @@ pub enum ProcessTranscriptEntry {
         turn: signalbox_domain::TurnId,
         model_call: signalbox_domain::ModelCallId,
     },
+    ProviderReasoning {
+        entry_index: u64,
+        source_session: signalbox_domain::SessionId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
+        turn: signalbox_domain::TurnId,
+        model_call: signalbox_domain::ModelCallId,
+    },
     AssistantToolUse {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,

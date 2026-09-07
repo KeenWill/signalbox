@@ -232,3 +232,24 @@ fn inv033_provider_compaction_projects_only_a_non_text_marker()
     )?;
     Ok(())
 }
+
+#[test]
+fn inv033_provider_reasoning_projects_only_a_non_text_marker()
+-> Result<(), Box<dyn std::error::Error>> {
+    let message = ServerMessage::TranscriptEntry {
+        entry_index: CanonicalU64::new(0),
+        source_session_id: uuid(1),
+        entry_id: uuid(2),
+        entry: TranscriptEntry::ProviderReasoning {
+            turn_id: uuid(3),
+            model_call_id: uuid(4),
+        },
+    };
+
+    assert_server_message_round_trip(
+        request(8)?,
+        message,
+        r#"{"type":"transcript_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000002","entry":{"type":"provider_reasoning","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000004"}}"#,
+    )?;
+    Ok(())
+}

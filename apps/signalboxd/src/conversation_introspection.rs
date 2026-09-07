@@ -325,6 +325,11 @@ fn visible_process_entry(
             TranscriptEntryKind::System,
             String::from("provider compaction"),
         ),
+        ProcessTranscriptEntry::ProviderReasoning { entry_index, .. } => (
+            entry_index,
+            TranscriptEntryKind::System,
+            String::from("provider reasoning"),
+        ),
         ProcessTranscriptEntry::AssistantToolUse {
             entry_index,
             name,

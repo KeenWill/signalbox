@@ -3820,6 +3820,28 @@ fn decode_transcript_entry(
                 model_call: ModelCallId::from_uuid(call),
             }
         }
+        (
+            "provider_reasoning",
+            None,
+            None,
+            None,
+            Some(item_json),
+            Some(call),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(turn),
+        ) if signalbox_domain::ProviderReasoningItem::try_new(item_json.clone()).is_ok() => {
+            ProcessTranscriptEntry::ProviderReasoning {
+                entry_index,
+                source_session,
+                entry,
+                turn: TurnId::from_uuid(turn),
+                model_call: ModelCallId::from_uuid(call),
+            }
+        }
         ("turn_failed", None, None, Some(turn), None, None, None, None, None, None, None, None) => {
             ProcessTranscriptEntry::TurnFailed {
                 entry_index,
@@ -3871,6 +3893,7 @@ fn decode_transcript_entry(
             | "steering_accepted_input"
             | "assistant_text"
             | "provider_compaction"
+            | "provider_reasoning"
             | "assistant_tool_use"
             | "tool_execution_result"
             | "tool_denied"

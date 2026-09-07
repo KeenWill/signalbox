@@ -72,7 +72,7 @@ pub(crate) fn reported_usage_preflight_configuration_text() -> String {
         // without prospective token counting.
         .replace("adapter = \"anthropic\"", "adapter = \"openai\"")
         .replace("model_family = \"anthropic\"", "model_family = \"openai\"")
-        .replace("max_output_tokens = 256", "max_output_tokens = 1")
+        .replace("max_output_tokens = 256", "max_output_tokens = 16")
         .replace(
             "context_window_tokens = 200000",
             "context_window_tokens = 4096",
