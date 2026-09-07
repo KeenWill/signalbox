@@ -100,7 +100,9 @@ repository-watch configuration, including rules, convergence targets, template,
 interval, credential path, webhook listener settings, and hook map. Core
 reconciles convergence targets from the retained intent. Reload stops and joins
 affected ingestion tasks before rule activation and event-tail capture;
-ingestion resumes only under the replacement snapshot. The
+ingestion resumes only under the replacement snapshot. A failure after ingestion
+stops leaves the intent pending until recovery installs that snapshot and
+resumes ingestion before terminalizing the claim. The
 [reload-intent input](ownership-seam.md) delivers rule activation only, and the
 module activates the rules atomically and idempotently by command identity and
 digest. The activation transaction captures each repository's current event tail

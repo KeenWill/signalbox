@@ -25,7 +25,12 @@ creates a delegated child and its initial task work.
 ## Design
 
 A runner-locus request whose placement is lost resolves as a retryable failure
-recorded in the batch before any approval wait parks the batch.
+recorded in the batch before any approval wait parks the batch. The request
+stores `closed_inadmissible` with the retryable `placement_lost` reason, without
+an approval state, judge call, attempt row, or executor work. It projects one
+`ToolInadmissible { request }` entry in proposal order, rendered as
+`execution_failed` with detail `placement_lost`, and satisfies the
+batch-complete condition.
 
 A family declares an admissibility check for a condition it can evaluate before
 approval. Where a family declares one, that check takes precedence over the
@@ -122,7 +127,8 @@ until the creation transaction exists, and no other surface creates the child.
 ## Acceptance criteria
 
 A runner-locus request on a lost placement records a retryable failure without
-approval parking and counts toward batch completion.
+approval parking or an attempt row; its retained `closed_inadmissible`
+resolution projects `ToolInadmissible` and counts toward batch completion.
 
 A request a declaring family marks inadmissible resolves before approval with no
 approval state, no judge call, no attempt row, and no executor work; it projects
