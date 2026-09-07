@@ -1,6 +1,11 @@
 //! GitHub observation composition for the repository task.
 
-use std::{collections::BTreeSet, error::Error, fmt, future::Future};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    future::Future,
+};
 
 use serde_json::{Value, json};
 use signalbox_ownership_seam::{
@@ -245,6 +250,7 @@ pub trait RepositoryClientLoader: Send {
 pub struct GitHubRepositoryTask<Loader> {
     pub repository: RepositorySlug,
     pub signal_reviewers: Vec<RepoWatchAuthorLogin>,
+    pub subject_retention: std::time::Duration,
     pub clients: Loader,
     pub store: RepoWatchStore,
 }
@@ -276,6 +282,7 @@ where
             &self.repository,
             &self.signal_reviewers,
             producer,
+            self.subject_retention,
         )
         .await
         .map_err(|error| match error {
@@ -351,12 +358,8 @@ pub async fn fetch_observation(
                 .map(|p| p.context().number()),
         );
     }
-    numbers.extend(
-        merged_baselines
-            .iter()
-            .map(RepoWatchMergedPullRequestBaselineV1::number),
-    );
     let mut pulls = Vec::new();
+    let mut merged_at = BTreeMap::new();
     for number in numbers {
         let prior = previous.and_then(|p| {
             p.state()
@@ -367,16 +370,21 @@ pub async fn fetch_observation(
         let merged = merged_baselines
             .iter()
             .find(|baseline| baseline.number() == number);
-        pulls.push(fetch_pull(io, &root, repository, number, reviewers, prior, merged).await?);
+        let (pull, merge_time) =
+            fetch_pull(io, &root, repository, number, reviewers, prior, merged).await?;
+        if let Some(merge_time) = merge_time {
+            merged_at.insert(number, merge_time);
+        }
+        pulls.push(pull);
     }
     let retained_branches = branch_heads
         .iter()
         .filter(|branch| {
             branch.branch() == &default_branch
                 || pulls.iter().any(|pull| {
-                    branch.branch() == pull.context().base_branch()
-                        || (pull.context().head_repository() == repository
-                            && branch.branch() == pull.context().head_branch())
+                    pull.lifecycle() == RepoWatchPullRequestLifecycle::Open
+                        && pull.context().head_repository() == repository
+                        && branch.branch() == pull.context().head_branch()
                 })
         })
         .cloned()
@@ -398,6 +406,7 @@ pub async fn fetch_observation(
         default_branch,
         default_head,
         observation: RepoWatchObservation::new(reviewers.to_vec(), state),
+        merged_at,
         observed_at: OffsetDateTime::now_utc(),
     })
 }
@@ -450,7 +459,7 @@ async fn fetch_pull(
     reviewers: &[RepoWatchAuthorLogin],
     previous: Option<&RepoWatchPullRequestState>,
     merged: Option<&RepoWatchMergedPullRequestBaselineV1>,
-) -> Result<RepoWatchPullRequestState, ObservationError> {
+) -> Result<(RepoWatchPullRequestState, Option<OffsetDateTime>), ObservationError> {
     let path = format!("{root}/pulls/{}", number.get());
     let (detail, _) = read_page(io, &path).await?;
     let context = detail.admit(pull_context(
@@ -462,7 +471,14 @@ async fn fetch_pull(
     if context.number() != number {
         return Err(detail.invalid());
     }
-    let lifecycle = match (detail["state"].as_str(), detail["merged_at"].is_string()) {
+    let merged_at = if detail["merged_at"].is_null() {
+        None
+    } else {
+        Some(detail.admit(github_timestamp(
+            detail.admit(detail["merged_at"].as_str())?,
+        ))?)
+    };
+    let lifecycle = match (detail["state"].as_str(), merged_at.is_some()) {
         (Some("open"), false) => RepoWatchPullRequestLifecycle::Open,
         (Some("closed"), false) => RepoWatchPullRequestLifecycle::Closed,
         (Some("closed"), true) => RepoWatchPullRequestLifecycle::Merged,
@@ -473,13 +489,28 @@ async fn fetch_pull(
         Some(false) => MergeableState::Conflicting,
         None => MergeableState::Unknown,
     };
-    let ((completed_check_suites, completed_check_runs), reviews, threads, reactions) = tokio::try_join!(
-        fetch_checks(io, root, context.head_sha()),
-        fetch_reviews(io, &path, previous),
-        fetch_threads(io, repository, number),
-        fetch_reactions(io, root, number, reviewers),
-    )?;
-    RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+    let ((completed_check_suites, completed_check_runs), reviews, threads, reactions) =
+        if lifecycle == RepoWatchPullRequestLifecycle::Open {
+            tokio::try_join!(
+                fetch_checks(io, root, context.head_sha()),
+                fetch_reviews(io, &path, previous),
+                fetch_threads(io, repository, number),
+                fetch_reactions(io, root, number, reviewers),
+            )?
+        } else if let Some(previous) = previous {
+            (
+                (
+                    previous.completed_check_suites().to_vec(),
+                    previous.completed_check_runs().to_vec(),
+                ),
+                previous.reviews().to_vec(),
+                previous.threads().to_vec(),
+                previous.reactions().to_vec(),
+            )
+        } else {
+            ((Vec::new(), Vec::new()), Vec::new(), Vec::new(), Vec::new())
+        };
+    let state = RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
         context,
         lifecycle,
         mergeable_state,
@@ -493,7 +524,34 @@ async fn fetch_pull(
         repository: repository.clone(),
         pull_request: Some(number),
         source,
-    })
+    })?;
+    Ok((state, merged_at))
+}
+
+// GitHub REST timestamps use UTC calendar dates with second precision.
+pub(crate) fn github_timestamp(value: &str) -> Option<OffsetDateTime> {
+    use sqlx::types::time::Date;
+    if value.len() != 20 || value.get(10..11)? != "T" || !value.ends_with('Z') {
+        return None;
+    }
+    let (year, rest) = value.get(..10)?.split_once('-')?;
+    let (month, day) = rest.split_once('-')?;
+    let mut clock = value.get(11..19)?.split(':');
+    let date = Date::from_calendar_date(
+        year.parse().ok()?,
+        month.parse::<u8>().ok()?.try_into().ok()?,
+        day.parse().ok()?,
+    )
+    .ok()?;
+    Some(
+        date.with_hms(
+            clock.next()?.parse().ok()?,
+            clock.next()?.parse().ok()?,
+            clock.next()?.parse().ok()?,
+        )
+        .ok()?
+        .assume_utc(),
+    )
 }
 
 async fn fetch_checks(
@@ -1191,7 +1249,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compacted_merged_numbers_are_refetched_without_an_open_pull_request() {
+    async fn terminal_pulls_preserve_comparison_without_reading_discussions_or_dead_heads() {
+        let mut io = fixture();
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let reviewer = RepoWatchAuthorLogin::try_new(String::from("reviewer")).expect("reviewer");
+        let previous =
+            fetch_observation(&io, &repository, std::slice::from_ref(&reviewer), None, &[])
+                .await
+                .expect("open observation");
+        io.pages
+            .get_mut("/repos/example/project/pulls?state=open&per_page=100&page=1")
+            .expect("open page")
+            .0 = json!([]);
+        io.pages
+            .get_mut("/repos/example/project/pulls/1")
+            .expect("detail")
+            .0["state"] = json!("closed");
+        // Keep the default branch alive at a different SHA; the closed head must not be searched.
+        let default_head = "2222222222222222222222222222222222222222";
+        io.pages
+            .get_mut("/repos/example/project/branches?per_page=100&page=1")
+            .expect("branches")
+            .0 = json!([
+            {"name": "main", "commit": {"sha": default_head}},
+            {"name": "feature", "commit": {"sha": HEAD}}
+        ]);
+        io.pages.retain(|path, _| {
+            !path.contains("/commits/")
+                && !path.contains("/reviews")
+                && !path.contains("/reactions")
+                && !path.contains("/comments")
+                && !path.contains("/actions/runs")
+        });
+        io.threads = Value::Null;
+        io.pages.insert(format!("/repos/example/project/actions/runs?head_sha={default_head}&status=completed&per_page=100&page=1"), (json!({"total_count": 0, "workflow_runs": []}), false));
+        let observed = fetch_observation(
+            &io,
+            &repository,
+            std::slice::from_ref(&reviewer),
+            Some(&previous.observation),
+            &[],
+        )
+        .await
+        .expect("terminal observation skips dead surfaces");
+        let terminal = &observed.observation.state().pull_requests()[0];
+        assert_eq!(terminal.lifecycle(), RepoWatchPullRequestLifecycle::Closed);
+        assert_eq!(
+            terminal.reactions(),
+            previous.observation.state().pull_requests()[0].reactions()
+        );
+        assert_eq!(
+            terminal.reviews(),
+            previous.observation.state().pull_requests()[0].reviews()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_merge_time_rejects_the_observation() {
+        let mut io = fixture();
+        let detail = &mut io
+            .pages
+            .get_mut("/repos/example/project/pulls/1")
+            .expect("detail")
+            .0;
+        detail["state"] = json!("closed");
+        detail["merged_at"] = json!("2026-02-30T00:00:00Z");
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let error = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect_err("invalid calendar date");
+        assert!(error.to_string().contains("/repos/example/project/pulls/1"));
+    }
+
+    #[tokio::test]
+    async fn compacted_merged_numbers_do_not_cause_provider_reads() {
         use signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineInputV1;
         let mut io = fixture();
         *io.pages
@@ -1225,14 +1358,11 @@ mod tests {
         .expect("compacted baseline");
         let repository =
             RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        io.pages.remove("/repos/example/project/pulls/1");
         let observed = fetch_observation(&io, &repository, &[], None, &[compacted])
             .await
-            .expect("refetch merged subject");
-        assert_eq!(observed.observation.state().pull_requests().len(), 1);
-        assert_eq!(
-            observed.observation.state().pull_requests()[0].lifecycle(),
-            RepoWatchPullRequestLifecycle::Merged
-        );
+            .expect("compact subjects need no provider reads");
+        assert!(observed.observation.state().pull_requests().is_empty());
     }
 
     #[tokio::test]
@@ -1362,10 +1492,18 @@ mod tests {
         .expect("compact state")
         .expect("merged baseline");
         let empty = RepoWatchObservation::new(Vec::new(), RepoWatchRepositoryState::default());
-        let stored = crate::baseline::observation_payload(&empty, &[compact]);
+        let stored = crate::baseline::observation_payload(
+            &empty,
+            &[crate::ingest::MergedPullRequestBaseline {
+                state: compact,
+                merged_at: prior.merged_at[&prior.observation.state().pull_requests()[0]
+                    .context()
+                    .number()],
+            }],
+        );
         let restored = crate::observation_decode::merged_baselines(&stored)
             .expect("restored compact baseline");
-        assert_eq!(restored[0].head_repository(), &fork);
+        assert_eq!(restored[0].state.head_repository(), &fork);
         *io.pages
             .get_mut("/repos/example/project/pulls?state=open&per_page=100&page=1")
             .expect("pull page") = (json!([]), false);
@@ -1373,18 +1511,10 @@ mod tests {
             .get_mut("/repos/example/project/pulls/1")
             .expect("pull detail")
             .0["head"]["repo"] = Value::Null;
-        let observed = fetch_observation(&io, &repository, &[], None, &restored)
+        io.pages.remove("/repos/example/project/pulls/1");
+        let observed = fetch_observation(&io, &repository, &[], None, &[restored[0].state.clone()])
             .await
-            .expect("deleted fork observation");
-        assert_eq!(
-            observed.observation.state().pull_requests()[0]
-                .context()
-                .head_repository(),
-            &fork
-        );
-        assert_eq!(
-            observed.observation.state().pull_requests()[0].lifecycle(),
-            RepoWatchPullRequestLifecycle::Merged
-        );
+            .expect("deleted fork requires no provider read");
+        assert!(observed.observation.state().pull_requests().is_empty());
     }
 }

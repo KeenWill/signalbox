@@ -94,7 +94,8 @@ names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
 loader supplies no default for any member, while other tables carry their own
 configured limits. Numeric-bound duration policies use Jiff's friendly
 unsigned-duration syntax. `repository_watch_webhook_retention` must be positive
-and finite and governs authenticated webhook `expires_at` as described in
+and finite and governs authenticated webhook `expires_at` and
+merged-pull-request baseline retention as described in
 [repository watch](repo-watch.md). `codex_cli_version_probe_bound` bounds a
 credential-free startup probe of the configured Codex executable, and a missing,
 malformed, zero, unsuccessful, or mismatched probe fails configuration before

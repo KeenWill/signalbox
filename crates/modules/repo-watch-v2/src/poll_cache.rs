@@ -201,7 +201,7 @@ struct PullSnapshot {
     author: Option<String>,
     labels: Vec<String>,
     open: bool,
-    merged: bool,
+    merged_at: Option<String>,
     mergeable: Option<bool>,
     head: HeadSnapshot,
 }
@@ -215,7 +215,7 @@ impl PullSnapshot {
             "author": self.author,
             "labels": self.labels,
             "open": self.open,
-            "merged": self.merged,
+            "merged_at": self.merged_at,
             "mergeable": self.mergeable,
             "head": self.head.encode(),
         })
@@ -229,7 +229,7 @@ impl PullSnapshot {
             author: serde_json::from_value(value.get("author")?.clone()).ok()?,
             labels: serde_json::from_value(value.get("labels")?.clone()).ok()?,
             open: serde_json::from_value(value.get("open")?.clone()).ok()?,
-            merged: serde_json::from_value(value.get("merged")?.clone()).ok()?,
+            merged_at: serde_json::from_value(value.get("merged_at")?.clone()).ok()?,
             mergeable: serde_json::from_value(value.get("mergeable")?.clone()).ok()?,
             head: HeadSnapshot::decode(value.get("head")?)?,
         })
@@ -477,7 +477,13 @@ impl Snapshot {
                     "closed" => false,
                     _ => return None,
                 },
-                merged: value["merged_at"].is_string(),
+                merged_at: if value["merged_at"].is_null() {
+                    None
+                } else {
+                    let timestamp = string(&value["merged_at"])?;
+                    crate::provider::github_timestamp(&timestamp)?;
+                    Some(timestamp)
+                },
                 mergeable: value["mergeable"].as_bool(),
                 head: HeadSnapshot {
                     sha: string(&value["head"]["sha"])?,
@@ -680,9 +686,9 @@ impl Snapshot {
             Self::Metadata(branch) => json!({"default_branch":branch}),
             Self::Branches(items) => json!(items.iter().map(|BranchSnapshot { branch: name, head: sha }| json!({"name":name,"commit":{"sha":sha}})).collect::<Vec<_>>()),
             Self::Pulls(items) => json!(items.iter().map(|number| json!({"number":number})).collect::<Vec<_>>()),
-            Self::Pull(PullSnapshot { number,title,body,draft,author,labels,open,merged,mergeable,head:HeadSnapshot { sha,branch:head,repository:head_repository,base } }) => json!({
+            Self::Pull(PullSnapshot { number,title,body,draft,author,labels,open,merged_at,mergeable,head:HeadSnapshot { sha,branch:head,repository:head_repository,base } }) => json!({
                 "number":number,"title":title,"body":body,"draft":draft,"user":author.as_ref().map(|login| json!({"login":login})),"labels":labels.iter().map(|name| json!({"name":name})).collect::<Vec<_>>(),
-                "state":if *open {"open"} else {"closed"},"merged_at":merged.then_some("merged"),"mergeable":mergeable,
+                "state":if *open {"open"} else {"closed"},"merged_at":merged_at,"mergeable":mergeable,
                 "head":{"sha":sha,"ref":head,"repo":head_repository.as_ref().map(|name| json!({"full_name":name}))},"base":{"ref":base},
             }),
             Self::Suites(items) => json!({"check_suites":items.iter().map(|SuiteSnapshot { id,completion }| match completion { Some(CompletionSnapshot { generation,conclusion }) => json!({"id":id,"status":"completed","updated_at":generation,"conclusion":conclusion}),None => json!({"id":id,"status":"pending"}) }).collect::<Vec<_>>() }),
@@ -791,6 +797,7 @@ impl RepoWatchStore {
         repository: &RepositorySlug,
         reviewers: &[RepoWatchAuthorLogin],
         pages: Vec<(Resource, Option<AcceptedPage>)>,
+        retained: BTreeSet<String>,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
         let same: Option<bool> = sqlx::query_scalar(
@@ -804,6 +811,9 @@ impl RepoWatchStore {
             return Err(StoreError::InvalidPollCache);
         }
         for (resource, page) in pages {
+            if !retained.contains(&resource.path(repository)) {
+                continue;
+            }
             if let Some(page) = page {
                 sqlx::query("INSERT INTO poll_cache_page (repository,resource_key,etag,last_modified,has_next,snapshot) VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT(repository,resource_key) DO UPDATE SET etag=EXCLUDED.etag,last_modified=EXCLUDED.last_modified,has_next=EXCLUDED.has_next,snapshot=EXCLUDED.snapshot")
                     .bind(repository.as_str()).bind(resource.path(repository)).bind(page.validators.etag).bind(page.validators.last_modified).bind(page.has_next).bind(page.snapshot.encode().to_string()).execute(&mut *tx).await?;
@@ -815,6 +825,13 @@ impl RepoWatchStore {
                     .await?;
             }
         }
+        sqlx::query(
+            "DELETE FROM poll_cache_page WHERE repository=$1 AND NOT (resource_key = ANY($2))",
+        )
+        .bind(repository.as_str())
+        .bind(retained.into_iter().collect::<Vec<_>>())
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -826,6 +843,7 @@ pub(crate) struct CachedObservationRead<'a, T> {
     pub repository: &'a RepositorySlug,
     pub reviewers: &'a [RepoWatchAuthorLogin],
     pending: Mutex<Vec<(Resource, Option<AcceptedPage>)>>,
+    retained: Mutex<BTreeSet<String>>,
 }
 
 impl<'a, T> CachedObservationRead<'a, T> {
@@ -841,6 +859,7 @@ impl<'a, T> CachedObservationRead<'a, T> {
             repository,
             reviewers,
             pending: Mutex::new(Vec::new()),
+            retained: Mutex::new(BTreeSet::new()),
         }
     }
     pub(crate) async fn retain(&self) -> Result<(), StoreError> {
@@ -849,6 +868,7 @@ impl<'a, T> CachedObservationRead<'a, T> {
                 self.repository,
                 self.reviewers,
                 std::mem::take(&mut *self.pending.lock().await),
+                std::mem::take(&mut *self.retained.lock().await),
             )
             .await
     }
@@ -858,19 +878,20 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for CachedObservationR
     async fn page(&self, path: &str) -> Result<(Value, bool), ObservationError> {
         let resource =
             Resource::parse(self.repository, path).ok_or(ObservationError::InvalidResponse)?;
+        let pull = matches!(resource, Resource::Pull(_));
         let cached = self
             .store
             .cached_page(self.repository, self.reviewers, &resource)
             .await
             .map_err(ObservationError::Cache)?;
-        match self
+        let (value, has_next) = match self
             .io
             .conditional_page(path, cached.as_ref().map(|p| &p.validators))
             .await?
         {
             ConditionalPage::Unchanged => {
                 let page = cached.ok_or(ObservationError::InvalidResponse)?;
-                Ok((page.snapshot.provider_value(self.repository), page.has_next))
+                (page.snapshot.provider_value(self.repository), page.has_next)
             }
             ConditionalPage::Modified {
                 body,
@@ -891,9 +912,13 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for CachedObservationR
                     None
                 };
                 self.pending.lock().await.push((resource, page));
-                Ok((value, has_next))
+                (value, has_next)
             }
+        };
+        if !pull || value["state"].as_str() == Some("open") {
+            self.retained.lock().await.insert(path.to_owned());
         }
+        Ok((value, has_next))
     }
     async fn threads(&self, request: Value) -> Result<Value, ObservationError> {
         self.io.threads(request).await
@@ -908,6 +933,7 @@ pub async fn poll_with_cache(
     repository: &RepositorySlug,
     reviewers: &[RepoWatchAuthorLogin],
     producer: EventProducer,
+    retention: std::time::Duration,
 ) -> Result<FrontierEventAdmission, ObservationError> {
     let started = std::time::Instant::now();
     let baseline = store
@@ -925,11 +951,15 @@ pub async fn poll_with_cache(
         repository,
         reviewers,
         baseline.observation.as_ref(),
-        &baseline.merged_baselines,
+        &baseline
+            .merged_baselines
+            .iter()
+            .map(|entry| entry.state.clone())
+            .collect::<Vec<_>>(),
     )
     .await?;
     let admission = store
-        .ingest_observation(&baseline, &observed, producer)
+        .ingest_observation(&baseline, &observed, producer, retention)
         .await
         .map_err(ObservationError::Cache)?;
     if matches!(
@@ -946,6 +976,12 @@ pub async fn poll_with_cache(
                 .iter()
                 .filter(|p| p.lifecycle() == RepoWatchPullRequestLifecycle::Open)
                 .count(),
+            terminal_pull_requests = state
+                .pull_requests()
+                .iter()
+                .filter(|p| p.lifecycle() != RepoWatchPullRequestLifecycle::Open)
+                .count(),
+            previous_merged_baselines = baseline.merged_baselines.len(),
             branches = state.branch_heads().len(),
             workflow_runs = state.workflow_runs().len(),
             requests = counted.requests.load(std::sync::atomic::Ordering::Relaxed),
@@ -1004,6 +1040,26 @@ mod tests {
         ] {
             assert!(Resource::parse(&repository, path).is_none(), "{path}");
         }
+    }
+
+    #[test]
+    fn cached_pull_details_preserve_the_provider_merge_time() {
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let resource = Resource::Pull(NonZeroU64::new(1).expect("fixture PR"));
+        let response = json!({
+            "number": 1, "title": "Merged change", "body": "", "draft": false, "user": null, "labels": [],
+            "state": "closed", "merged_at": "2026-09-06T12:34:56Z", "mergeable": null,
+            "head": {"sha": "1111111111111111111111111111111111111111", "ref": "feature", "repo": {"full_name": "example/project"}},
+            "base": {"ref": "main"}
+        });
+        let captured = Snapshot::capture(&resource, &response, &repository, &[]).expect("snapshot");
+        let restarted = Snapshot::decode(&resource, captured.encode()).expect("restart");
+        assert_eq!(
+            restarted.provider_value(&repository)["merged_at"],
+            response["merged_at"],
+            "a conditional response must retain the merge-time expiration anchor"
+        );
     }
 
     #[test]

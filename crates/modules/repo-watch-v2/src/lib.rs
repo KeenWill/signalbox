@@ -115,7 +115,7 @@ pub struct RepositoryProjection<'a> {
     /// Complete normalized state used by the repository-event differ.
     pub comparison_baseline: &'a signalbox_ownership_seam::RepoWatchObservation,
     /// Compact baselines retained for merged pull requests.
-    pub merged_baselines: &'a [signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineV1],
+    pub merged_baselines: &'a [ingest::MergedPullRequestBaseline],
 }
 
 /// Authenticated webhook intake retained until its caller-selected expiry.

@@ -578,6 +578,7 @@ impl RuntimeState {
                 let task = GitHubRepositoryTask {
                     repository: repository.repository().clone(),
                     signal_reviewers: configuration.signal_reviewers().to_vec(),
+                    subject_retention: configuration.webhook_retention(),
                     clients: RepositoryWatchClientLoader::new(repository),
                     store: self.store.clone(),
                 };
