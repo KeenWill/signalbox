@@ -1043,6 +1043,7 @@ export async function readSessionLive(sessionId: string, signal?: AbortSignal) {
 export async function* followSession(
   sessionId: string,
   signal: AbortSignal,
+  needsResync: () => boolean = () => false,
 ): AsyncGenerator<WebSessionLiveStreamEvent> {
   let resynchronized = false
   while (!signal.aborted) {
@@ -1102,6 +1103,13 @@ export async function* followSession(
               throw new TypeError('Session event exceeds its cursor')
             cursor = BigInt(event.cursor)
             yield event
+          } else if (event.kind === 'provider_text_delta') {
+            yield event
+            if (needsResync()) {
+              yield { kind: 'resync_required', cursor: String(cursor) }
+              resync = true
+              break stream
+            }
           } else if (event.kind === 'resync_required') {
             yield event
             resync = true

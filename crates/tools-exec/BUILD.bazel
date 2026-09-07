@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_unit_test")
 
 CRATE_PROC_MACRO_DEPS = ["//crates/derive:signalbox_derive"]
 
@@ -46,4 +46,71 @@ rust_unit_test(
 rust_api_json(
     name = "api_json",
     crate = ":signalbox_tools_exec",
+)
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_tools_exec",
+)
+
+rust_integration_test(
+    name = "bwrap",
+    args = ["--test-threads=4"],
+    srcs = glob(["tests/**/*.rs"]),
+    crate_root = "tests/bwrap.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [":signalbox-exec-supervisor"],
+    env = {
+        "CI": "true",
+        "NEXTEST_BIN_EXE_signalbox_exec_supervisor": "$(rootpath :signalbox-exec-supervisor)",
+    },
+    proc_macro_deps = ["//crates/derive:signalbox_derive"],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/tools-exec",
+        "CARGO_BIN_EXE_signalbox-exec-supervisor": "$(rootpath :signalbox-exec-supervisor)",
+    },
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/domain:signalbox_domain",
+        "//crates/test-bin:signalbox_test_bin",
+        "//crates/tool-contract:signalbox_tool_contract",
+        "//crates/tools-exec:signalbox_tools_exec",
+    ],
+)
+
+rust_integration_test(
+    name = "process",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    crate_root = "tests/process.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [":signalbox-exec-supervisor"],
+    env = {"NEXTEST_BIN_EXE_signalbox_exec_supervisor": "$(rootpath :signalbox-exec-supervisor)"},
+    proc_macro_deps = ["//crates/derive:signalbox_derive"],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/tools-exec",
+        "CARGO_BIN_EXE_signalbox-exec-supervisor": "$(rootpath :signalbox-exec-supervisor)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/domain:signalbox_domain",
+        "//crates/test-bin:signalbox_test_bin",
+        "//crates/tool-contract:signalbox_tool_contract",
+        "//crates/tools-exec:signalbox_tools_exec",
+    ],
 )

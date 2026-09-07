@@ -412,3 +412,27 @@ it.each([
     }),
   ).rejects.toThrow('body continuation')
 })
+
+it('relays provider text and replaces the follow stream when its consumer requests resync', async () => {
+  const delta = {
+    kind: 'provider_text_delta',
+    turn_id: sessionId,
+    model_call_id: sessionId,
+    part_index: 0,
+    content: 'A provider fragment',
+  }
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json(snapshot('41')))
+    .mockResolvedValueOnce(stream({ kind: 'snapshot', snapshot: snapshot('41') }, delta))
+    .mockResolvedValueOnce(Response.json(snapshot('42')))
+  vi.stubGlobal('fetch', fetch)
+  const follow = followSession(sessionId, new AbortController().signal, () => true)
+  await follow.next()
+  await follow.next()
+  expect((await follow.next()).value).toEqual(delta)
+  expect((await follow.next()).value).toEqual({ kind: 'resync_required', cursor: '41' })
+  expect((await follow.next()).value).toEqual({ kind: 'snapshot', snapshot: snapshot('42') })
+  await follow.return(undefined)
+  expect(fetch).toHaveBeenCalledTimes(3)
+})
