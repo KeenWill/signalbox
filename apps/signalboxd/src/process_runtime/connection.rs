@@ -690,6 +690,7 @@ impl SnapshotReaderAdmission {
             ClientRequest::ListSessions {}
             | ClientRequest::ReadOperatorStatus {}
             | ClientRequest::ReadGoal { .. }
+            | ClientRequest::ReadCredentialPoolPolicy { .. }
             | ClientRequest::ReadTranscript { .. }
             | ClientRequest::FollowSession { .. }
             | ClientRequest::ListSessionMetadata { .. }
@@ -712,7 +713,6 @@ impl SnapshotReaderAdmission {
             | ClientRequest::CommissionSession { .. }
             | ClientRequest::ListTemplates {}
             | ClientRequest::ListCredentialExclusions { .. }
-        | ClientRequest::ReadCredentialPoolPolicy { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}

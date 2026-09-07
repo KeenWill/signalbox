@@ -114,11 +114,7 @@ pub(super) async fn record(
                 crate::credential_capacity::load_credential_rate_limits(connection, profile)
                     .await?
                     .ok_or(ModelCallCorruption::Missing("headroom exhaustion snapshot"))?;
-            let reset = snapshot
-                .windows()
-                .iter()
-                .filter_map(|window| *window.resets_at())
-                .min()
+            let reset = headroom_reset(&snapshot, reserve, observed_at.into())
                 .ok_or(ModelCallCorruption::Missing("headroom exhaustion reset"))?;
             candidates.push(Candidate {
                 exclusion: Exclusion::HeadroomReserve {
@@ -156,6 +152,20 @@ pub(super) async fn record(
     Ok(())
 }
 
+fn headroom_reset(
+    snapshot: &signalbox_domain::ProviderRateLimitSnapshot,
+    reserve: u8,
+    observed_at: std::time::SystemTime,
+) -> Option<std::time::SystemTime> {
+    snapshot
+        .windows()
+        .iter()
+        .filter(|window| *window.remaining_percent() <= i64::from(reserve))
+        .filter_map(|window| *window.resets_at())
+        .filter(|reset| *reset > observed_at)
+        .max()
+}
+
 fn generation(value: i64) -> Result<u64, ModelCallRepositoryError> {
     u64::try_from(value)
         .ok()
@@ -165,4 +175,49 @@ fn generation(value: i64) -> Result<u64, ModelCallRepositoryError> {
 fn unix_ms(value: OffsetDateTime) -> Result<i64, ModelCallRepositoryError> {
     i64::try_from(value.unix_timestamp_nanos() / 1_000_000)
         .map_err(|_| ModelCallCorruption::Inconsistent("pool evidence reset").into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::headroom_reset;
+    use signalbox_domain::{ProviderRateLimitSnapshot, ProviderRateLimitWindow};
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn headroom_reset_waits_for_every_active_binding_window() {
+        // Arbitrary clock origin; reset offsets distinguish active binding windows.
+        let observed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let last_binding_reset = observed_at + Duration::from_secs(20);
+        let snapshot = ProviderRateLimitSnapshot::new(
+            observed_at,
+            vec![
+                ProviderRateLimitWindow::new(0, None, Some(observed_at - Duration::from_secs(1))),
+                ProviderRateLimitWindow::new(0, None, Some(observed_at)),
+                ProviderRateLimitWindow::new(0, None, None),
+                ProviderRateLimitWindow::new(5, None, Some(observed_at + Duration::from_secs(10))),
+                ProviderRateLimitWindow::new(10, None, Some(last_binding_reset)),
+                ProviderRateLimitWindow::new(11, None, Some(observed_at + Duration::from_secs(30))),
+            ],
+        );
+        assert_eq!(
+            headroom_reset(&snapshot, 10, observed_at),
+            Some(last_binding_reset)
+        );
+    }
+
+    #[test]
+    fn headroom_reset_is_absent_without_an_active_binding_window() {
+        // Arbitrary clock origin; expired and nonbinding windows cannot supply a reset.
+        let observed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let snapshot = ProviderRateLimitSnapshot::new(
+            observed_at,
+            vec![
+                ProviderRateLimitWindow::new(0, None, Some(observed_at - Duration::from_secs(1))),
+                ProviderRateLimitWindow::new(0, None, Some(observed_at)),
+                ProviderRateLimitWindow::new(0, None, None),
+                ProviderRateLimitWindow::new(11, None, Some(observed_at + Duration::from_secs(30))),
+            ],
+        );
+        assert_eq!(headroom_reset(&snapshot, 10, observed_at), None);
+    }
 }

@@ -173,6 +173,10 @@ async fn pool_projection_freezes_generation_and_unprojected_action_evidence()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn pool_projection_prefers_quarantine_over_transient_exclusion() -> Result<(), Box<dyn Error>>
 {
+    use signalbox_persistence::credential_exclusions::{
+        self as exclusions, ClearCredentialExclusion, ClearCredentialExclusionOutcome,
+        ClearCredentialExclusionResult,
+    };
     const SOURCE_SEED: u128 = 0x4605_1000;
     const TRANSIENT_SEED: u128 = 0x4605_2000;
     const QUARANTINE_SEED: u128 = 0x4605_3000;
@@ -257,6 +261,71 @@ async fn pool_projection_prefers_quarantine_over_transient_exclusion() -> Result
         Some(captured)
     );
     drop(connection);
+    let quarantine = exclusions::list(&pool, 100, None)
+        .await?
+        .exclusions
+        .remove(0);
+    assert_eq!(
+        exclusions::clear(
+            &pool,
+            ClearCredentialExclusion {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                target: quarantine,
+            }
+        )
+        .await?,
+        ClearCredentialExclusionResult::Recorded(ClearCredentialExclusionOutcome::Cleared)
+    );
+    let mut connection = pool.acquire().await?;
+    assert_eq!(
+        evidence::load(&mut connection, session.into_uuid(), turn.into_uuid()).await?,
+        Some(widest.clone()),
+        "a later clear preserves the selected quarantine"
+    );
+    drop(connection);
+    sqlx::query("ALTER TABLE credential_pool_exhaustion_member DISABLE TRIGGER credential_pool_exhaustion_member_immutable").execute(&pool).await?;
+    sqlx::query("UPDATE credential_pool_exhaustion_member SET evidence = jsonb_build_object('profile',profile,'reset_at_unix_ms',$2::bigint,'exclusion',jsonb_build_object('kind','transient_exclusion','observation_model_call_id',$3::uuid)) WHERE terminal_attempt_id = $1")
+        .bind(widest.terminal_attempt_id).bind(reset_ms).bind(observation).execute(&pool).await?;
+    let mut connection = pool.acquire().await?;
+    assert!(
+        matches!(
+            evidence::load(&mut connection, session.into_uuid(), turn.into_uuid()).await,
+            Err(evidence::CredentialPoolEvidenceError::Corruption)
+        ),
+        "a transient source cannot replace a quarantine active at the captured ceiling"
+    );
+    drop(connection);
+    let (after_clear_session, after_clear_turn, after_clear_repository) =
+        active_credential_pool_fixture(
+            &pool,
+            QUARANTINE_SEED + 1000,
+            POOL,
+            &[PROFILE],
+            CredentialPoolRuntimeAction::Stay,
+            CredentialPoolRuntimeAction::Stay,
+        )
+        .await?;
+    fail_before_call(
+        &after_clear_repository,
+        after_clear_session,
+        QUARANTINE_SEED + 1100,
+    )
+    .await?;
+    let mut connection = pool.acquire().await?;
+    let after_clear = evidence::load(
+        &mut connection,
+        after_clear_session.into_uuid(),
+        after_clear_turn.into_uuid(),
+    )
+    .await?
+    .expect("transient evidence after quarantine clear");
+    assert_eq!(
+        after_clear.members[0].exclusion,
+        evidence::CredentialPoolExclusion::TransientExclusion {
+            observation_model_call_id: observation,
+        }
+    );
+    drop(connection);
     pool.close().await;
     drop(container);
     Ok(())
@@ -296,11 +365,19 @@ async fn pool_projection_records_the_observed_headroom_reserve() -> Result<(), B
                 .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed)
                 .with_rate_limits(Some(ProviderRateLimitSnapshot::new(
                     now,
-                    vec![ProviderRateLimitWindow::new(
-                        10,
-                        Some(Duration::from_secs(3600)),
-                        Some(reset),
-                    )],
+                    vec![
+                        ProviderRateLimitWindow::new(10, None, Some(reset)),
+                        ProviderRateLimitWindow::new(
+                            10,
+                            None,
+                            Some(now + Duration::from_secs(1800)),
+                        ),
+                        ProviderRateLimitWindow::new(
+                            11,
+                            None,
+                            Some(now + Duration::from_secs(7200)),
+                        ),
+                    ],
                 ))),
             ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),

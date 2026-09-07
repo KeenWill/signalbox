@@ -72,6 +72,21 @@ SELECT EXISTS (
           WHEN e.evidence->'exclusion'->>'kind' = 'transient_exclusion' THEN EXISTS (
             SELECT 1 FROM credential_pool_transient_exclusion x WHERE x.observation_model_call_id = e.observation_model_call_id AND x.credential_reference = e.profile AND x.reset_at > e.observed_at
               AND floor(extract(epoch FROM x.reset_at) * 1000)::bigint <= (e.evidence->>'reset_at_unix_ms')::bigint)
+            AND NOT EXISTS (
+                SELECT 1 FROM credential_exclusion quarantine
+                WHERE quarantine.kind = 'profile_quarantine' AND quarantine.profile = e.profile
+                  AND quarantine.record_generation <= e.generation_ceiling
+                  AND NOT EXISTS (
+                      SELECT 1 FROM credential_exclusion newer
+                      WHERE newer.kind = quarantine.kind AND newer.profile = quarantine.profile
+                        AND newer.origin = quarantine.origin
+                        AND newer.record_generation > quarantine.record_generation
+                        AND newer.record_generation <= e.generation_ceiling)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM clear_credential_exclusion_command cleared
+                      JOIN durable_command command USING (command_id)
+                      WHERE cleared.cleared_generation = quarantine.record_generation
+                        AND cleared.outcome = 'cleared' AND command.claimed_at <= e.observed_at))
           WHEN e.evidence->'exclusion'->>'kind' = 'headroom_reserve' THEN
             (e.evidence->'exclusion'->>'reserve_percent')::integer = COALESCE(m.headroom_reserve_percent, (policy.definition->>'headroom_reserve_percent')::integer)
             AND (e.evidence->'exclusion'->>'observed_headroom_percent')::bigint <= (e.evidence->'exclusion'->>'reserve_percent')::integer
