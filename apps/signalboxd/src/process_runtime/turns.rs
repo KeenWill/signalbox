@@ -165,6 +165,7 @@ where
         session_id,
         request,
         repository,
+        pool,
         eligibility_nudge,
         tool_dispatch_gate,
         model_configuration,
@@ -336,6 +337,7 @@ where
         session_id,
         request,
         repository,
+        pool,
         eligibility_nudge,
         tool_dispatch_gate,
         model_configuration,
@@ -352,6 +354,39 @@ pub(super) const fn decode_descendant_scope(
             DescendantTerminationScope::ParentAndDescendants
         }
     }
+}
+
+pub(super) async fn recorded_termination(
+    pool: &PgPool,
+    command: DurableCommandId,
+    session: SessionId,
+) -> Result<signalbox_process_protocol::TerminationReceipt, ProtocolError> {
+    let recorded = signalbox_persistence::termination_receipt::load_termination_receipt(
+        pool, command, session,
+    )
+    .await
+    .map_err(|error| {
+        let (cause, reply) = match error {
+            signalbox_persistence::termination_receipt::TerminationReceiptError::Database(_) => {
+                ("database", ProtocolError::mutation_unavailable(true))
+            }
+            signalbox_persistence::termination_receipt::TerminationReceiptError::Corruption => (
+                "corruption",
+                ProtocolError::without_detail(ErrorCode::Internal),
+            ),
+        };
+        tracing::error!(session_id = %session.as_uuid(), cause, "termination receipt read failed");
+        reply
+    })?;
+    Ok(signalbox_process_protocol::TerminationReceipt {
+        descendant_scope: match recorded.descendant_scope {
+            DescendantTerminationScope::ParentAlone => WireDescendantTerminationScope::ParentAlone,
+            DescendantTerminationScope::ParentAndDescendants => {
+                WireDescendantTerminationScope::ParentAndDescendants
+            }
+        },
+        descendant_count: CanonicalU64::new(recorded.descendant_count),
+    })
 }
 
 /// Stops the exact active turn through the accepted interrupt treatment.
@@ -450,6 +485,7 @@ where
         session_id,
         request,
         repository,
+        pool,
         eligibility_nudge,
         tool_dispatch_gate,
         model_configuration,
@@ -468,6 +504,7 @@ pub(super) async fn run_submit_input<Writer>(
     session_id: CanonicalUuid,
     request: SubmitInputRequest,
     repository: SubmitInputRepository,
+    receipt_pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
@@ -475,6 +512,8 @@ pub(super) async fn run_submit_input<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let termination_command = matches!(request.delivery(), DeliveryRequest::Interrupt { .. })
+        .then_some(request.command_id());
     let mut service = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
         ConfiguredSubmitInputTransaction {
@@ -490,11 +529,26 @@ where
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::TurnOrigin(result),
         ))) => {
+            let termination = if let Some(command) = termination_command {
+                match recorded_termination(
+                    receipt_pool,
+                    command,
+                    SessionId::from_uuid(session_id.into_uuid()),
+                )
+                .await
+                {
+                    Ok(receipt) => Some(receipt),
+                    Err(error) => return write_error(writer, version, request_id, error).await,
+                }
+            } else {
+                None
+            };
             write_message(
                 writer,
                 version,
                 request_id,
                 ServerMessage::InputSubmitted {
+                    termination,
                     session_id,
                     accepted_input_id: wire_uuid(result.accepted_input().into_uuid()),
                     acceptance_position: CanonicalU64::new(result.acceptance_position().as_u64()),

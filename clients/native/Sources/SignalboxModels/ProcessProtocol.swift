@@ -2253,11 +2253,29 @@ public struct SignalboxProviderTextDelta: Decodable, Equatable, Sendable {
   }
 }
 
+/// Recorded stop scope and count carried by an `input_submitted` receipt.
+public struct SignalboxTerminationReceipt: Decodable, Equatable, Sendable {
+  public let descendantScope: SignalboxDescendantTerminationScope
+  public let descendantCount: SignalboxCanonicalUInt64
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(["descendant_scope", "descendant_count"], decoder: decoder)
+    descendantScope = try decoder.decode("descendant_scope")
+    descendantCount = try decoder.decode("descendant_count")
+    guard descendantScope != .parentAlone || descendantCount.rawValue == 0 else {
+      throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+        debugDescription: "Parent-alone termination has descendant dispositions."))
+    }
+  }
+}
+
 public struct SignalboxInputSubmitted: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let acceptedInputID: SignalboxCanonicalUUID
   public let acceptancePosition: SignalboxCanonicalUInt64
   public let turnID: SignalboxCanonicalUUID
+  public let termination: SignalboxTerminationReceipt?
   public let modelSettings: SignalboxModelSettingsSnapshot
 
   public init(from decoder: Decoder) throws {
@@ -2265,11 +2283,12 @@ public struct SignalboxInputSubmitted: Decodable, Equatable, Sendable {
     try tagged.rejectUnadmittedFields(
       [
         "type", "session_id", "accepted_input_id", "acceptance_position", "turn_id",
-        "model_settings",
+        "model_settings", "termination",
       ],
       decoder: decoder
     )
     let container = try decoder.container(keyedBy: CodingKeys.self)
+    termination = try container.decodeIfPresent(SignalboxTerminationReceipt.self, forKey: .termination)
     sessionID = try container.decode(SignalboxCanonicalUUID.self, forKey: .sessionID)
     acceptedInputID = try container.decode(
       SignalboxCanonicalUUID.self,
@@ -2292,6 +2311,7 @@ public struct SignalboxInputSubmitted: Decodable, Equatable, Sendable {
     case acceptancePosition = "acceptance_position"
     case turnID = "turn_id"
     case modelSettings = "model_settings"
+    case termination
   }
 }
 

@@ -2,6 +2,16 @@
 
 # response
 
+## TerminationReceipt
+
+```rust
+pub struct TerminationReceipt {
+    pub descendant_scope: DescendantTerminationScope,
+    pub descendant_count: CanonicalU64,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## ServerMessage
 
 ```rust
@@ -50,6 +60,7 @@ pub enum ServerMessage {
         placement: SessionPlacement,
     },
     InputSubmitted {
+        termination: option::Option<TerminationReceipt>,
         session_id: CanonicalUuid,
         accepted_input_id: CanonicalUuid,
         acceptance_position: CanonicalU64,
@@ -63,6 +74,7 @@ pub enum ServerMessage {
         source_turn_id: CanonicalUuid,
     },
     GoalTransitionApplied {
+        termination: option::Option<TerminationReceipt>,
         session_id: CanonicalUuid,
         event_ordinal: CanonicalU64,
         generation: CanonicalU64,

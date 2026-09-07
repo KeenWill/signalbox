@@ -135,11 +135,26 @@ where
             &command_id.into_uuid().hyphenated().to_string(),
         )?;
     }
-    let mut connection = client.mutation_request(build_request(command_id)).await?;
+    let request = build_request(command_id);
+    let expected_termination = match &request {
+        ClientRequest::StopGoal {
+            descendant_scope, ..
+        } => Some(*descendant_scope),
+        _ => None,
+    };
+    let mut connection = client.mutation_request(request).await?;
     let receipt = decode_goal_mutation_receipt(
         expected_session,
         connection.message().await.map_err(ClientError::mutation)?,
     )?;
+    if receipt.termination.map(|value| value.descendant_scope) != expected_termination {
+        return Err(
+            ClientError::Protocol("goal receipt has mismatched termination scope").mutation(),
+        );
+    }
+    if let Some(termination) = receipt.termination {
+        output.termination_receipt(termination)?;
+    }
     output
         .goal_transition_applied(
             receipt.session_id,
@@ -154,6 +169,7 @@ pub(crate) struct GoalMutationReceipt {
     session_id: CanonicalUuid,
     event_ordinal: u64,
     generation: u64,
+    termination: Option<signalbox_process_protocol::TerminationReceipt>,
 }
 
 pub(crate) fn decode_goal_mutation_receipt(
@@ -162,6 +178,7 @@ pub(crate) fn decode_goal_mutation_receipt(
 ) -> Result<GoalMutationReceipt, ClientError> {
     match message {
         ServerMessage::GoalTransitionApplied {
+            termination,
             session_id,
             event_ordinal,
             generation,
@@ -169,6 +186,7 @@ pub(crate) fn decode_goal_mutation_receipt(
             session_id,
             event_ordinal: event_ordinal.value(),
             generation: generation.value(),
+            termination,
         }),
         ServerMessage::Error {
             code,

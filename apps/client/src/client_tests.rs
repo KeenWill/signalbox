@@ -611,6 +611,7 @@ fn goal_mutation_receipt_rejects_a_cross_wired_session() {
     let selected_session = CanonicalUuid::from_uuid(Uuid::from_u128(1));
     let foreign_session = CanonicalUuid::from_uuid(Uuid::from_u128(2));
     let message = ServerMessage::GoalTransitionApplied {
+        termination: None,
         session_id: foreign_session,
         event_ordinal: CanonicalU64::new(1),
         generation: CanonicalU64::new(1),
@@ -4218,6 +4219,7 @@ async fn submit_input_releases_its_connection_after_acceptance() -> Result<(), B
             request.version(),
             request.request_id(),
             ServerMessage::InputSubmitted {
+                termination: None,
                 session_id,
                 accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                 acceptance_position: CanonicalU64::new(1),
@@ -4361,6 +4363,7 @@ async fn reconcile_turn_names_the_parked_turn_and_returns_its_successor()
             request.version(),
             request.request_id(),
             ServerMessage::InputSubmitted {
+                termination: None,
                 session_id,
                 accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                 acceptance_position: CanonicalU64::new(2),
@@ -4424,6 +4427,10 @@ async fn stop_turn_names_the_active_turn_and_returns_its_successor() -> Result<(
             request.version(),
             request.request_id(),
             ServerMessage::InputSubmitted {
+                termination: Some(signalbox_process_protocol::TerminationReceipt {
+                    descendant_scope: selected_scope,
+                    descendant_count: CanonicalU64::new(2),
+                }),
                 session_id,
                 accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                 acceptance_position: CanonicalU64::new(2),
@@ -4449,7 +4456,7 @@ async fn stop_turn_names_the_active_turn_and_returns_its_successor() -> Result<(
         selected_scope,
     )
     .await?;
-    assert_eq!(accepted_successor, successor_turn_id);
+    assert_eq!(accepted_successor.turn_id, successor_turn_id);
     server.await??;
     Ok(())
 }

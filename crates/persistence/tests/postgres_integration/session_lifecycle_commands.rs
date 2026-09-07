@@ -976,6 +976,19 @@ async fn an_interrupt_settled_stop_does_not_rematerialize_its_descendant_cascade
         interrupted,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
     ));
+    let receipt = signalbox_persistence::termination_receipt::load_termination_receipt(
+        &pool,
+        interrupt_command,
+        parent,
+    )
+    .await?;
+    assert_eq!(
+        receipt,
+        signalbox_persistence::termination_receipt::TerminationReceipt {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            descendant_count: 1,
+        }
+    );
     let cascades: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT root_command_id, root_source_kind
            FROM session_delegation_termination_cascade

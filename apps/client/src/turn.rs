@@ -171,7 +171,7 @@ pub(crate) async fn stop(
     let defaults_version =
         resolve_defaults_version(client, output, session_id, defaults_version).await?;
 
-    let successor_turn_id = stop_turn(
+    let receipt = stop_turn(
         client,
         command_id,
         session_id,
@@ -182,7 +182,8 @@ pub(crate) async fn stop(
     )
     .await?;
 
-    await_and_report_turn(client, output, session_id, successor_turn_id).await
+    output.termination_receipt(receipt.termination)?;
+    await_and_report_turn(client, output, session_id, receipt.turn_id).await
 }
 
 /// Reads the authoritative transcript and returns the single turn holding the
@@ -397,6 +398,11 @@ pub(crate) const fn descendant_scope(descendants: bool) -> DescendantTermination
     }
 }
 
+pub(crate) struct StopTurnReceipt {
+    pub(crate) turn_id: CanonicalUuid,
+    pub(crate) termination: signalbox_process_protocol::TerminationReceipt,
+}
+
 pub(crate) async fn stop_turn(
     client: &mut ProcessClient,
     command_id: CommandId,
@@ -405,7 +411,7 @@ pub(crate) async fn stop_turn(
     content: InputContent,
     defaults_version: CanonicalU64,
     descendant_scope: DescendantTerminationScope,
-) -> Result<CanonicalUuid, ClientError> {
+) -> Result<StopTurnReceipt, ClientError> {
     let mut connection = client
         .mutation_request(ClientRequest::StopTurn {
             command_id,
@@ -421,8 +427,16 @@ pub(crate) async fn stop_turn(
         ServerMessage::InputSubmitted {
             session_id: submitted_session,
             turn_id,
+            termination: Some(termination),
             ..
-        } if submitted_session == session_id => Ok(turn_id),
+        } if submitted_session == session_id
+            && termination.descendant_scope == descendant_scope =>
+        {
+            Ok(StopTurnReceipt {
+                turn_id,
+                termination,
+            })
+        }
         ServerMessage::Error {
             code,
             message,

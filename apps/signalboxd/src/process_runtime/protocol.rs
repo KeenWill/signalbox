@@ -598,6 +598,20 @@ where
         .await;
     match outcome {
         Ok(GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(event))) => {
+            let termination = if !schedules_turn {
+                match recorded_termination(
+                    &services.pool,
+                    DurableCommandId::from_uuid(command_uuid),
+                    session,
+                )
+                .await
+                {
+                    Ok(receipt) => Some(receipt),
+                    Err(error) => return write_error(writer, version, request_id, error).await,
+                }
+            } else {
+                None
+            };
             if schedules_turn {
                 let _ = services.eligibility_nudge.nudge(session);
             }
@@ -606,6 +620,7 @@ where
                 version,
                 request_id,
                 ServerMessage::GoalTransitionApplied {
+                    termination,
                     session_id,
                     event_ordinal: CanonicalU64::new(event.ordinal().get()),
                     generation: CanonicalU64::new(event.generation().get()),

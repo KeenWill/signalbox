@@ -44,6 +44,14 @@ use crate::transcript::{
 use crate::user_input::UserInputContent;
 use serde::{Deserialize, Serialize};
 
+/// The selected stop scope and its immutable descendant disposition count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminationReceipt {
+    pub descendant_scope: crate::goal::DescendantTerminationScope,
+    pub descendant_count: CanonicalU64,
+}
+
 /// Closed versioned server message family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -126,6 +134,9 @@ pub enum ServerMessage {
     },
     /// Input acceptance receipt.
     InputSubmitted {
+        /// Present exactly for a stop-turn acceptance.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        termination: Option<TerminationReceipt>,
         /// Owning session.
         session_id: CanonicalUuid,
         /// Accepted input.
@@ -150,6 +161,9 @@ pub enum ServerMessage {
     },
     /// A durable user goal command appended one event.
     GoalTransitionApplied {
+        /// Present exactly for a stop-goal transition.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        termination: Option<TerminationReceipt>,
         /// Owning session.
         session_id: CanonicalUuid,
         /// Appended event position.
@@ -716,6 +730,19 @@ pub enum ServerMessage {
 
 impl ServerMessage {
     pub(crate) fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::InputSubmitted {
+            termination: Some(receipt),
+            ..
+        }
+        | Self::GoalTransitionApplied {
+            termination: Some(receipt),
+            ..
+        } = self
+            && receipt.descendant_scope == crate::goal::DescendantTerminationScope::ParentAlone
+            && receipt.descendant_count.value() != 0
+        {
+            return Err(FrameValidationError::DelegationShape);
+        }
         validate_operator_status_message(self)?;
         match self {
             Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,

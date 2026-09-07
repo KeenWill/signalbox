@@ -295,6 +295,11 @@ is scheduled or attempting and true only after the recovery budget in
 [turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md) is
 exhausted.
 
+A successful `stop_goal` or `stop_turn` receipt carries `termination` with the
+selected `descendant_scope` and the recorded `descendant_count`; parent-alone
+has count zero. An equal command retry reads those immutable facts without
+re-evaluating the cascade. Other goal and input receipts omit `termination`.
+
 Each delegation request carries the invoking session, turn, and tool request
 identity, which must reconstitute one matching logical request before any
 mutation; reconstitution is not execution authority, and the daemon must also

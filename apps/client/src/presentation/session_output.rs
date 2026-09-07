@@ -1,6 +1,23 @@
 use super::*;
 
 impl<'a> Output<'a> {
+    pub(crate) fn termination_receipt(
+        &mut self,
+        receipt: signalbox_process_protocol::TerminationReceipt,
+    ) -> io::Result<()> {
+        let scope = match receipt.descendant_scope {
+            signalbox_process_protocol::DescendantTerminationScope::ParentAlone => "parent_alone",
+            signalbox_process_protocol::DescendantTerminationScope::ParentAndDescendants => {
+                "parent_and_descendants"
+            }
+        };
+        writeln!(
+            self.stdout,
+            "descendant_scope={scope} descendant_count={}",
+            receipt.descendant_count.value()
+        )
+    }
+
     pub(crate) fn blob_metadata(
         &mut self,
         digest: CanonicalBlobDigest,
