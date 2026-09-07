@@ -3,6 +3,7 @@ use serde_json::Value;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) enum KnownError {
     ContextWindowExceeded,
     SessionBudgetExceeded,
@@ -43,6 +44,21 @@ pub(crate) enum KnownError {
 pub(crate) enum CodexErrorInfo {
     Known(KnownError),
     Unknown { tag: String },
+}
+
+// The schema guard checks the known shapes at the consumed field and admits
+// the decoder's unknown-tag fallback.
+#[cfg(test)]
+impl schemars::JsonSchema for CodexErrorInfo {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CodexErrorInfo".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = <KnownError as schemars::JsonSchema>::json_schema(generator);
+        schema.insert("x-codex-unknown-tags".into(), true.into());
+        schema
+    }
 }
 
 impl<'de> Deserialize<'de> for CodexErrorInfo {
@@ -133,6 +149,7 @@ impl CodexErrorInfo {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct TurnError {
     pub(crate) message: String,
     pub(crate) codex_error_info: Option<CodexErrorInfo>,
@@ -140,6 +157,7 @@ pub(crate) struct TurnError {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) enum TurnStatus {
     InProgress,
     Completed,
@@ -148,15 +166,18 @@ pub(crate) enum TurnStatus {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct Turn {
     pub(crate) id: String,
     pub(crate) status: TurnStatus,
     pub(crate) error: Option<TurnError>,
+    #[cfg_attr(test, schemars(schema_with = "consumed_turn_items_schema"))]
     pub(crate) items: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct TurnCompleted {
     pub(crate) thread_id: String,
     pub(crate) turn: Turn,
@@ -164,6 +185,7 @@ pub(crate) struct TurnCompleted {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct ErrorNotification {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
@@ -173,23 +195,26 @@ pub(crate) struct ErrorNotification {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct UsageBreakdown {
-    pub(crate) input_tokens: i64,
-    pub(crate) cached_input_tokens: i64,
+    pub(crate) input_tokens: Option<i64>,
+    pub(crate) cached_input_tokens: Option<i64>,
     #[serde(default)]
     pub(crate) cache_write_input_tokens: Option<i64>,
-    pub(crate) output_tokens: i64,
-    pub(crate) reasoning_output_tokens: i64,
-    pub(crate) total_tokens: i64,
+    pub(crate) output_tokens: Option<i64>,
+    pub(crate) reasoning_output_tokens: Option<i64>,
+    pub(crate) total_tokens: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct ThreadTokenUsage {
     pub(crate) total: UsageBreakdown,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct TokenUsageUpdated {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
@@ -198,6 +223,7 @@ pub(crate) struct TokenUsageUpdated {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct ItemTextDelta {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
@@ -207,34 +233,42 @@ pub(crate) struct ItemTextDelta {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct ItemNotification {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
+    #[cfg_attr(test, schemars(schema_with = "consumed_item_schema"))]
     pub(crate) item: Value,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct AgentMessage {
     pub(crate) id: String,
     pub(crate) text: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct ThreadStartResponse {
     pub(crate) thread: Thread,
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct Thread {
     pub(crate) id: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct TurnStartResponse {
+    #[cfg_attr(test, schemars(schema_with = "started_turn_schema"))]
     pub(crate) turn: Turn,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct RpcError {
     pub(crate) code: i64,
     pub(crate) data: Option<Value>,
@@ -269,4 +303,114 @@ pub(crate) struct TextInput {
 #[serde(rename_all = "camelCase")]
 pub(crate) enum TextInputKind {
     Text,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub(crate) struct AccountRateLimitsUpdated {
+    pub(crate) rate_limits: RateLimits,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub(crate) struct RateLimits {
+    pub(crate) primary: Option<RateLimitWindow>,
+    pub(crate) secondary: Option<RateLimitWindow>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub(crate) struct RateLimitWindow {
+    pub(crate) used_percent: f64,
+    pub(crate) window_duration_mins: Option<i64>,
+    pub(crate) resets_at: Option<i64>,
+}
+
+impl RateLimits {
+    pub(crate) fn merge(&mut self, update: Self) {
+        if update.primary.is_some() {
+            self.primary = update.primary;
+        }
+        if update.secondary.is_some() {
+            self.secondary = update.secondary;
+        }
+    }
+
+    pub(crate) fn capacity_snapshot(
+        &self,
+        observed_at: std::time::SystemTime,
+    ) -> Option<signalbox_model_runtime::RateLimitSnapshot> {
+        let mut windows = Vec::new();
+        for window in [self.primary.as_ref(), self.secondary.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let resets_at = window.resets_at.and_then(|seconds| {
+                let duration = std::time::Duration::from_secs(seconds.unsigned_abs());
+                if seconds < 0 {
+                    std::time::UNIX_EPOCH.checked_sub(duration)
+                } else {
+                    std::time::UNIX_EPOCH.checked_add(duration)
+                }
+            });
+            let window_duration = window
+                .window_duration_mins
+                .and_then(|minutes| u64::try_from(minutes).ok())
+                .and_then(|minutes| minutes.checked_mul(60))
+                .map(std::time::Duration::from_secs);
+            windows.push(signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: (100.0 - window.used_percent).floor() as i64,
+                window_duration,
+                resets_at,
+            });
+        }
+        if windows.is_empty() {
+            return None;
+        }
+        Some(signalbox_model_runtime::RateLimitSnapshot {
+            observed_at,
+            windows,
+        })
+    }
+
+    pub(crate) fn retry_after(&self, now: std::time::SystemTime) -> Option<std::time::Duration> {
+        let latest = [self.primary.as_ref(), self.secondary.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter(|window| window.used_percent >= 100.0)
+            .filter_map(|window| window.resets_at)
+            .max()?;
+        let reset = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(
+            u64::try_from(latest).unwrap_or(0),
+        ))?;
+        Some(
+            reset
+                .duration_since(now)
+                .unwrap_or(std::time::Duration::ZERO),
+        )
+    }
+}
+
+// Turn items supply proof-gate discriminators; agent messages are also decoded separately.
+#[cfg(test)]
+fn consumed_turn_items_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = <Vec<AgentMessage> as schemars::JsonSchema>::json_schema(generator);
+    schema.insert("x-codex-consumed-items".into(), true.into());
+    schema
+}
+
+#[cfg(test)]
+fn consumed_item_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = <AgentMessage as schemars::JsonSchema>::json_schema(generator);
+    schema.insert("x-codex-consumed-item".into(), true.into());
+    schema
+}
+
+#[cfg(test)]
+fn started_turn_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = <Turn as schemars::JsonSchema>::json_schema(generator);
+    schema.insert("x-codex-started-turn".into(), true.into());
+    schema
 }

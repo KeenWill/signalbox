@@ -6,6 +6,34 @@
 
 ```rust
 pub enum ClientRequest {
+    ReloadConfiguration {
+        command_id: CommandId,
+    },
+    ReplaceLostRunner {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        revision: option::Option<string::String>,
+    },
+    AbandonLostRunner {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+    },
+    PromotePendingRunner {
+        command_id: CommandId,
+        enrollment_request_id: CanonicalUuid,
+    },
+    ProvisionOauthCredential {
+        command_id: CommandId,
+        profile: string::String,
+    },
+    ReprovisionOauthCredential {
+        command_id: CommandId,
+        profile: string::String,
+    },
+    DeleteOauthCredential {
+        command_id: CommandId,
+        profile: string::String,
+    },
     CreateSession {
         command_id: CommandId,
         initial_model_selection: ModelSelection,

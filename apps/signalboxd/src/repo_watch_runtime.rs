@@ -3,27 +3,31 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use ring::rand::{SecureRandom, SystemRandom};
-use signalbox_application::{InProcessEligibilityNudge, InProcessToolDispatchGate};
+use signalbox_application::{
+    EligibilityNudge, InProcessEligibilityNudge, InProcessToolDispatchGate,
+};
 use signalbox_domain::RepositorySlug;
 use signalbox_module_repo_watch_v2::{
-    RepoWatchStore, RepositoryRuleSet, RuleReconciliationAdmission, ingest::run_repository_task,
-    provider::GitHubRepositoryTask,
+    ReloadIntentInput, RepoWatchStore, RepositoryRuleSet, RuleReconciliationAdmission,
+    ingest::run_repository_task, provider::GitHubRepositoryTask,
 };
 use signalbox_ownership_seam::{LifecycleEventSource, OffsetDateTime};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{
     sync::{Mutex, Notify, watch},
-    task::JoinSet,
+    task::{JoinHandle, JoinSet},
 };
 
 use crate::{
     HubModelConfiguration, RepositoryWatchConfiguration, SessionTemplateConfiguration,
+    configuration_reload::ConfigurationCatalogs,
+    convergence_sweep_runtime::{ConvergenceSweepNumericBounds, ConvergenceSweepRuntime},
     repo_watch_credentials::RepositoryWatchClientLoader,
     repo_watch_dispatch::{
         RepositoryWatchCommandCodec, RepositoryWatchCommandFactory, RepositoryWatchCommandSink,
         RepositoryWatchDispatchIds,
     },
-    repo_watch_webhook::WebhookListener,
+    repo_watch_webhook::{PreparedListener, WebhookListener},
 };
 
 /// Core capabilities remain in daemon-owned adapters; the module receives its own pool.
@@ -45,6 +49,7 @@ pub enum RepositoryWatchRuntimeError {
     RepositoryWorker,
     Lifecycle,
     Dispatch,
+    Sweep,
 }
 
 /// Opens an independently authenticated module login without sharing the core password.
@@ -116,6 +121,22 @@ struct RuntimeState {
     repositories: JoinSet<()>,
     repository_shutdown: watch::Sender<bool>,
     listener: WebhookListener,
+    paused: bool,
+    changed: Arc<Notify>,
+    core_pool: PgPool,
+    eligibility_nudge: InProcessEligibilityNudge,
+    sweep_bounds: Option<ConvergenceSweepNumericBounds>,
+    sweep: Option<(watch::Sender<bool>, JoinHandle<()>)>,
+    prepared_sweep: Option<ConvergenceSweepRuntime>,
+    commands: Option<(watch::Sender<bool>, JoinHandle<()>)>,
+}
+
+pub(crate) struct PreparedRepositoryWatchReload {
+    configuration: Option<RepositoryWatchConfiguration>,
+    catalogs: ConfigurationCatalogs,
+    wakes: BTreeMap<RepositorySlug, Arc<Notify>>,
+    listener: PreparedListener,
+    sweep: Option<ConvergenceSweepRuntime>,
 }
 
 impl RepositoryWatchRuntime {
@@ -125,10 +146,25 @@ impl RepositoryWatchRuntime {
         configuration: Option<RepositoryWatchConfiguration>,
         services: RepositoryWatchServices,
     ) -> Result<Self, RepositoryWatchRuntimeError> {
+        let runtime = Self::unstarted(module_pool, services);
+        runtime.reload_configuration(configuration).await?;
+        Ok(runtime)
+    }
+
+    /// Composes the idle supervisor without activating on-disk rules before recovery.
+    pub fn unstarted(module_pool: PgPool, services: RepositoryWatchServices) -> Self {
         let (repository_shutdown, _) = watch::channel(false);
-        let runtime = Self {
+        Self {
             state: Arc::new(Mutex::new(RuntimeState {
                 workers: WorkerState::Prepared,
+                paused: true,
+                changed: Arc::new(Notify::new()),
+                core_pool: services.core_pool.clone(),
+                eligibility_nudge: services.eligibility_nudge.clone(),
+                sweep_bounds: None,
+                sweep: None,
+                prepared_sweep: None,
+                commands: None,
                 store: RepoWatchStore::new(module_pool.clone()),
                 module_pool,
                 lifecycle: LifecycleEventSource::new(services.core_pool.clone()),
@@ -146,9 +182,139 @@ impl RepositoryWatchRuntime {
                 repository_shutdown,
                 listener: WebhookListener::default(),
             })),
+        }
+    }
+
+    /// Supplies the startup-only convergence transport bounds.
+    pub async fn set_sweep_bounds(&self, bounds: ConvergenceSweepNumericBounds) {
+        self.state.lock().await.sweep_bounds = Some(bounds);
+    }
+
+    pub(crate) async fn prepare_reload(
+        &self,
+        catalogs: ConfigurationCatalogs,
+    ) -> Result<PreparedRepositoryWatchReload, RepositoryWatchRuntimeError> {
+        let state = self.state.lock().await;
+        let configuration = catalogs.models.repository_watch().cloned();
+        let enabled = configuration
+            .as_ref()
+            .filter(|configuration| configuration.enabled());
+        if enabled
+            .into_iter()
+            .flat_map(|watch| watch.rules())
+            .flat_map(|rule| rule.actions())
+            .any(|action| catalogs.templates.resolve(action.template()).is_none())
+        {
+            return Err(RepositoryWatchRuntimeError::Rules);
+        }
+        let wakes = enabled
+            .into_iter()
+            .flat_map(|watch| watch.repositories())
+            .map(|repository| {
+                (
+                    repository.repository().clone(),
+                    state
+                        .wakes
+                        .get(repository.repository())
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let listener = state
+            .listener
+            .prepare(configuration.as_ref(), &wakes, &state.store)
+            .await
+            .map_err(|_| RepositoryWatchRuntimeError::Listener)?;
+        let sweep = match (enabled, state.sweep_bounds) {
+            (Some(watch), Some(bounds)) => ConvergenceSweepRuntime::try_new(
+                state.core_pool.clone(),
+                watch,
+                (*catalogs.templates).clone(),
+                (*catalogs.models).clone(),
+                state.eligibility_nudge.clone(),
+                bounds,
+            )
+            .map_err(|_| RepositoryWatchRuntimeError::Sweep)?,
+            _ => None,
         };
-        runtime.reload_configuration(configuration).await?;
-        Ok(runtime)
+        Ok(PreparedRepositoryWatchReload {
+            configuration,
+            catalogs,
+            wakes,
+            listener,
+            sweep,
+        })
+    }
+
+    pub(crate) async fn nudge_restored(&self, sessions: Vec<signalbox_domain::SessionId>) {
+        let state = self.state.lock().await;
+        for session in sessions {
+            let _ = state.eligibility_nudge.nudge(session);
+        }
+    }
+
+    pub(crate) async fn activate_startup(
+        &self,
+        configuration: Option<&RepositoryWatchConfiguration>,
+    ) -> Result<(), RepositoryWatchRuntimeError> {
+        let mut state = self.state.lock().await;
+        state.pause().await;
+        let sets = configuration
+            .filter(|configuration| configuration.enabled())
+            .into_iter()
+            .flat_map(|watch| {
+                watch.repositories().iter().map(move |repository| {
+                    RepositoryRuleSet::new(repository.repository(), watch.rules())
+                })
+            })
+            .collect::<Vec<_>>();
+        match state
+            .store
+            .reconcile_rules(&sets, OffsetDateTime::now_utc())
+            .await
+        {
+            Ok(RuleReconciliationAdmission::Applied { .. }) => Ok(()),
+            _ => Err(RepositoryWatchRuntimeError::Rules),
+        }
+    }
+
+    pub(crate) async fn activate_reload(
+        &self,
+        input: ReloadIntentInput<'_>,
+    ) -> Result<RuleReconciliationAdmission, RepositoryWatchRuntimeError> {
+        let mut state = self.state.lock().await;
+        state.pause().await;
+        state
+            .store
+            .activate_reload(input, OffsetDateTime::now_utc())
+            .await
+            .map_err(|_| RepositoryWatchRuntimeError::Rules)
+    }
+
+    pub(crate) async fn install_reload(
+        &self,
+        prepared: PreparedRepositoryWatchReload,
+    ) -> Result<(), RepositoryWatchRuntimeError> {
+        let mut state = self.state.lock().await;
+        state.factory.0 = prepared.catalogs.templates;
+        state.sink.models = prepared.catalogs.models;
+        state.configuration = prepared.configuration;
+        state.wakes = prepared.wakes;
+        state.listener.apply_joined(prepared.listener).await;
+        state.paused = false;
+        if matches!(state.workers, WorkerState::Running) {
+            state.listener.resume().await;
+            state.listener.start();
+            state.start_repositories().await?;
+            state.start_commands(self.clone());
+            state.start_sweep(prepared.sweep);
+        } else {
+            // Startup workers are composed only after recovery settles.
+            state.prepared_sweep = prepared.sweep;
+        }
+        state.changed.notify_one();
+        Ok(())
     }
 
     /// Reconciles rules and changes the listener inside the serialized reload.
@@ -199,6 +365,7 @@ impl RepositoryWatchRuntime {
                 })
             })
             .collect::<Vec<_>>();
+        state.stop_commands().await;
         state.stop_repositories().await;
         match state
             .store
@@ -211,44 +378,104 @@ impl RepositoryWatchRuntime {
             )
             | Err(_) => {
                 if matches!(state.workers, WorkerState::Running) {
-                    state.start_repositories();
+                    state.start_repositories().await?;
+                    state.start_commands(self.clone());
                 }
                 return Err(RepositoryWatchRuntimeError::Rules);
             }
         }
         state.wakes = wakes;
         state.configuration = configuration;
+        state.paused = false;
+        state.changed.notify_one();
         state.listener.apply(listener).await;
         if matches!(state.workers, WorkerState::Running) {
             state.listener.start();
-            state.start_repositories();
+            state.start_repositories().await?;
+            state.start_commands(self.clone());
         }
         Ok(())
     }
 
-    /// Runs one lifecycle/evaluation/submission worker until daemon shutdown.
+    async fn begin(&self) -> Result<(), RepositoryWatchRuntimeError> {
+        {
+            let mut state = self.state.lock().await;
+            if matches!(state.workers, WorkerState::Running) {
+                return Ok(());
+            }
+            state.workers = WorkerState::Running;
+            if !state.paused {
+                state.listener.resume().await;
+                state.listener.start();
+                state.start_repositories().await?;
+                state.start_commands(self.clone());
+                let sweep = state.prepared_sweep.take();
+                state.start_sweep(sweep);
+            }
+        }
+        Ok(())
+    }
+
+    /// Starts idle supervision before recovery so resumed workers precede terminal receipts.
+    pub async fn spawn(
+        self,
+        shutdown: watch::Receiver<bool>,
+    ) -> JoinHandle<Result<(), RepositoryWatchRuntimeError>> {
+        let begun = self.begin().await;
+        tokio::spawn(async move {
+            begun?;
+            self.run(shutdown).await
+        })
+    }
+
+    async fn run_commands(self, mut shutdown: watch::Receiver<bool>) {
+        loop {
+            if *shutdown.borrow() {
+                return;
+            }
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => return,
+                result = async { self.state.lock().await.tick().await } => {
+                    if let Err(error) = result { tracing::warn!(?error, "repository-watch command attempt failed"); }
+                }
+            }
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => return,
+                _ = tokio::time::sleep(crate::process_runtime::OUTBOX_IDLE_POLL_INTERVAL) => {}
+            }
+        }
+    }
+
+    /// Supervises configured workers and retains only idle control while disabled.
     pub async fn run(
         self,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), RepositoryWatchRuntimeError> {
-        {
-            let mut state = self.state.lock().await;
-            state.workers = WorkerState::Running;
-            state.listener.start();
-            state.start_repositories();
-        }
+        self.begin().await?;
         let outcome = loop {
             if *shutdown.borrow() {
                 break Ok(());
             }
+            let (active, changed) = {
+                let state = self.state.lock().await;
+                (
+                    !state.paused && state.configuration.as_ref().is_some_and(|c| c.enabled()),
+                    state.changed.clone(),
+                )
+            };
+            if !active {
+                tokio::select! {
+                    _ = shutdown.changed() => break Ok(()),
+                    _ = changed.notified() => continue,
+                }
+            }
             tokio::select! {
                 biased;
                 _ = shutdown.changed() => break Ok(()),
-                result = async { self.state.lock().await.tick().await } => {
-                    if let Err(error) = result {
-                        if matches!(error, RepositoryWatchRuntimeError::Listener | RepositoryWatchRuntimeError::RepositoryWorker) { break Err(error); }
-                        tracing::warn!(?error, "repository-watch command attempt failed");
-                    }
+                result = async { self.state.lock().await.health() } => {
+                    if let Err(error) = result { break Err(error); }
                 }
             }
             tokio::select! {
@@ -258,7 +485,7 @@ impl RepositoryWatchRuntime {
             }
         };
         let mut state = self.state.lock().await;
-        state.stop_repositories().await;
+        state.pause().await;
         state.listener.shutdown().await;
         state.workers = WorkerState::Prepared;
         state.module_pool.close().await;
@@ -267,12 +494,72 @@ impl RepositoryWatchRuntime {
 }
 
 impl RuntimeState {
+    async fn pause(&mut self) {
+        self.paused = true;
+        self.stop_commands().await;
+        if let Some((shutdown, task)) = self.sweep.take() {
+            let _ = shutdown.send(true);
+            let _ = task.await;
+        }
+        self.listener.pause().await;
+        self.stop_repositories().await;
+    }
+
+    async fn stop_commands(&mut self) {
+        if let Some((shutdown, task)) = self.commands.take() {
+            let _ = shutdown.send(true);
+            let _ = task.await;
+        }
+    }
+
+    fn start_commands(&mut self, runtime: RepositoryWatchRuntime) {
+        if self
+            .configuration
+            .as_ref()
+            .is_some_and(|configuration| configuration.enabled())
+        {
+            let (shutdown, receiver) = watch::channel(false);
+            self.commands = Some((shutdown, tokio::spawn(runtime.run_commands(receiver))));
+        }
+    }
+
+    fn health(&mut self) -> Result<(), RepositoryWatchRuntimeError> {
+        if self.listener.failed() {
+            return Err(RepositoryWatchRuntimeError::Listener);
+        }
+        if self.repositories.try_join_next().is_some() {
+            return Err(RepositoryWatchRuntimeError::RepositoryWorker);
+        }
+        if self
+            .commands
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            return Err(RepositoryWatchRuntimeError::Dispatch);
+        }
+        if self
+            .sweep
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            return Err(RepositoryWatchRuntimeError::Sweep);
+        }
+        Ok(())
+    }
+
+    fn start_sweep(&mut self, sweep: Option<ConvergenceSweepRuntime>) {
+        if let Some(sweep) = sweep {
+            let (shutdown, receiver) = watch::channel(false);
+            self.sweep = Some((shutdown, tokio::spawn(sweep.run(receiver))));
+        }
+    }
+
     async fn stop_repositories(&mut self) {
         let _ = self.repository_shutdown.send(true);
         while self.repositories.join_next().await.is_some() {}
     }
 
-    fn start_repositories(&mut self) {
+    async fn start_repositories(&mut self) -> Result<(), RepositoryWatchRuntimeError> {
         let (shutdown, _) = watch::channel(false);
         self.repository_shutdown = shutdown;
         if let Some(configuration) = self
@@ -281,12 +568,19 @@ impl RuntimeState {
             .filter(|configuration| configuration.enabled())
         {
             for repository in configuration.repositories() {
+                self.store
+                    .prepare_poll_cache(repository.repository(), configuration.signal_reviewers())
+                    .await
+                    .map_err(|_| RepositoryWatchRuntimeError::RepositoryWorker)?;
+            }
+            for repository in configuration.repositories() {
                 let Some(wake) = self.wakes.get(repository.repository()).cloned() else {
                     continue;
                 };
                 let task = GitHubRepositoryTask {
                     repository: repository.repository().clone(),
                     signal_reviewers: configuration.signal_reviewers().to_vec(),
+                    subject_retention: configuration.webhook_retention(),
                     clients: RepositoryWatchClientLoader::new(repository),
                     store: self.store.clone(),
                 };
@@ -298,14 +592,12 @@ impl RuntimeState {
                 ));
             }
         }
+        Ok(())
     }
 
     async fn tick(&mut self) -> Result<(), RepositoryWatchRuntimeError> {
-        if self.listener.failed() {
-            return Err(RepositoryWatchRuntimeError::Listener);
-        }
-        if self.repositories.try_join_next().is_some() {
-            return Err(RepositoryWatchRuntimeError::RepositoryWorker);
+        if self.paused {
+            return Ok(());
         }
         crate::repo_watch_dispatch::scavenge_checkouts(&self.store, &self.sink.pool)
             .await
@@ -352,5 +644,39 @@ impl RuntimeState {
             .await
             .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn health_rejects_a_finished_convergence_sweep() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .expect("lazy pool");
+        let (eligibility_nudge, _work) = signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let runtime = RepositoryWatchRuntime::unstarted(
+            pool.clone(),
+            RepositoryWatchServices {
+                checkout_runner: None,
+                core_pool: pool,
+                models: Arc::new(
+                    crate::configuration::checked_in_example_configuration().expect("models"),
+                ),
+                templates: Arc::new(SessionTemplateConfiguration::default()),
+                eligibility_nudge,
+                tool_dispatch_gate: InProcessToolDispatchGate::default(),
+            },
+        );
+        let (shutdown, _receiver) = watch::channel(false);
+        let mut task = tokio::spawn(async {});
+        (&mut task).await.expect("sweep exits unexpectedly");
+        let mut state = runtime.state.lock().await;
+        state.sweep = Some((shutdown, task));
+        assert_eq!(state.health(), Err(RepositoryWatchRuntimeError::Sweep));
     }
 }

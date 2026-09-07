@@ -209,6 +209,16 @@ Each CLI adapter's supported-version constant is only a claim until three
 statements agree: the version pinned for installation, the version the adapter
 covers, and the version actually invoked.
 
+The Codex smoke compares the pin's checked-in schemas for every decoded
+app-server notification, response, and JSON-RPC envelope with the adapter's
+consumed fields, enum members, and required fields. Consumed fields must remain
+decoder-compatible, adapter-required fields must remain required, and turn
+statuses must match. Consumed turn-item discriminators remain required strings;
+agent-message items preserve their consumed fields. Tagged error objects contain
+only their tag. Compatible additions are reported; consumed fields and error
+members must remain present. Committed schema fixtures must match the pinned
+files byte for byte.
+
 The compatibility smokes assert nothing about answer quality.
 
 A smoke's required aggregate gates merge for a pull request that changes the
@@ -229,25 +239,34 @@ save.
 ## Boundary contracts
 
 The daemon refers to a credential by its non-secret name everywhere except at
-the point of use. No credential value, credential file path, or database URL
-appears in a log, an error, or a durable record. For a profile whose credential
-value the daemon resolves, the daemon redacts that exact value from provider
-text before it truncates the text; a delivery that gives the daemon no value
-receives credential-shape redaction instead. A credential for one repository
-never authorizes a request to another.
+the point of use. OAuth authorization tables hold the refresh and identity
+tokens the delivery needs; no credential value appears in a log, an error, or
+any other durable record. No credential file path or database URL appears in a
+log, an error, or a durable record. For a profile whose credential value the
+daemon resolves, the daemon redacts that exact value from provider text before
+it truncates the text; a delivery that gives the daemon no value receives
+credential-shape redaction instead. A credential for one repository never
+authorizes a request to another.
+
+OAuth access and identity tokens seed exact-value redaction before scratch-home
+writes. Raw and JSON-escaped token forms are scrubbed across child-output chunks
+before adapter decoding, truncation, observations, or terminal evidence;
+credential-shape redaction also applies. Failure to install this delivery fails
+preparation before spawn.
 
 `crates/domain`, `crates/application` and `crates/persistence` declare no
 dependency on any runtime crate, and no runtime type appears in a domain or
 application signature.
 
 `prepare` performs all validation, translation, serialization, credential access
-and request construction with no provider traffic, rejecting duplicate ordinary
-tool names, an ordinary tool whose name equals the structured-output contract
-name, and a named choice of an undeclared tool before any send. `execute`
-consumes the capability, performs at most one provider interaction, emits
-observations synchronously and in order, and always returns a terminal report.
-Nothing in this layer retries, falls back, or repeats its unit of dispatch after
-the provider could have accepted it; the attempt-level retry rule is
+and request construction with no provider traffic except OAuth delivery
+exchanges with the authorization server, rejecting duplicate ordinary tool
+names, an ordinary tool whose name equals the structured-output contract name,
+and a named choice of an undeclared tool before any send. `execute` consumes the
+capability, performs at most one provider interaction, emits observations
+synchronously and in order, and always returns a terminal report. Nothing in
+this layer retries, falls back, or repeats its unit of dispatch after the
+provider could have accepted it; the attempt-level retry rule is
 [model-call-execution](model-call-execution.md)'s. In a subprocess adapter the
 send-commenced fact immediately precedes spawn, a spawn failure is proven
 unsent, and after a successful spawn no path respawns the CLI.
@@ -304,12 +323,14 @@ otherwise a recognized native code outranks a recognized type, which outranks
 the status. An error record that follows the provider's finish marker and names
 no classifiable failure is stream-protocol loss, while a classified one stays
 definitive and outranks the finish. A provider-directed retry delay, decoded
-from the HTTP `Retry-After` header or the Codex CLI's rendered retry phrase,
-rides the provider-error evidence, and the bridge carries it into the durable
-failure observation that feeds the availability-successor backoff. The header
-admits the delay-seconds and HTTP-date forms, a past date is no delay, and a
-malformed value is no evidence; the Codex phrase admits only its bounded second
-and minute units.
+from the HTTP `Retry-After` header or the Codex app-server's typed rate-limit
+snapshot, rides the provider-error evidence into durable availability backoff
+except for quota failures, which carry the evidence without affecting backoff.
+The header admits delay-seconds and HTTP-date forms; malformed values carry no
+evidence. For rate-limit and quota failures, Codex uses the latest reported
+reset among fully consumed primary and secondary windows; null windows in sparse
+updates preserve prior observations. Past HTTP dates and Codex reset instants
+saturate to zero delay.
 
 The non-acceptance proof on a provider error is an adapter-owned typed fact,
 never inferred from the error kind, status retryability or provider prose. A
@@ -322,38 +343,46 @@ response decoded before any stream began. A status-derived fallback, an absent
 or undecodable body, or an unmapped token carries no proof and keeps its
 status-classified kind; a newly mapped availability token carries none until
 that set names it, and an SSE error record never carries it, so an availability
-failure that arrives mid-stream carries none. The Codex CLI adapter, which has
-no error envelope, admits the proof only when its event stream closes with a
-`turn.failed` event; a stream-level error that no matching `turn.failed` event
-closes carries none.
+failure that arrives mid-stream carries none. The Codex CLI adapter admits the
+proof only on a failed `turn/completed` whose `codexErrorInfo` is
+`contextWindowExceeded`, `usageLimitExceeded`, `rateLimitExceeded`,
+`serverOverloaded`, `httpConnectionFailed`, `responseStreamConnectionFailed`,
+`internalServerError`, or `badRequest`. Any positive usage axis, agent-message
+or reasoning delta, item other than `userMessage` or `hookPrompt` in lifecycle
+events or turn summaries, or earlier `willRetry: true` error excludes that
+proof. Other closures carry none. A nonretrying Codex error whose process exits
+without a closing turn notification retains its classification without
+non-acceptance proof.
 
 Provider-internal non-acceptance proof is admitted for Anthropic `api_error` at
 HTTP 500, OpenAI `server_error`/`internal_server_error` at HTTP 500, and a Codex
-CLI event stream that closes with `turn.failed` whose message classifies as
-`ProviderInternal`. Anthropic also admits `rate_limit_error` and
-`overloaded_error`; OpenAI also admits `rate_limit_exceeded`,
-`rate_limit_error`, and `insufficient_quota`.
+CLI turn that closes failed under that rule with `internalServerError`.
+Anthropic also admits `rate_limit_error` and `overloaded_error`; OpenAI also
+admits `rate_limit_exceeded`, `rate_limit_error`, and `insufficient_quota`.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion, and an unrecognized finish token is boundary
 loss in both HTTP adapters. An Anthropic stop-sequence finish naming a sequence
 the request did not declare is stream-protocol loss. A stream that ends in any
 way other than its protocol's terminal marker is incomplete-stream evidence,
-never silent success: a Codex CLI exit of zero without the turn-completed event
-is boundary loss, and under the Claude Code CLI only a terminal result event
-establishes success or refusal, never prose; in a subprocess adapter that loss
-follows a zero exit, while a nonzero exit is definitive provider-error evidence
-classified from bounded stderr. A Codex turn that completes without a streamed
-agent message takes its response from the CLI's separately written final-message
-file under the same size and redaction checks, and a streamed message outranks
-it. A finish reason observed before a stream loss is retained as a reported
-finish but is not completion or refusal evidence; an unrecognized finish
-reported before the envelope is validated is an envelope violation instead, and
-no finish is retained. Within one adapter the buffered and streamed decoders
-never disagree about an output-ceiling finish inside accumulated tool content,
-which is an observed fact in both and not an envelope defect; an unrequested
-Anthropic fallback block is the exception, unintelligible-response loss in the
-buffered decoder and a stream protocol violation in the streamed one.
+never silent success: a Codex CLI stream without `turn/completed` is boundary
+loss, and under the Claude Code CLI only a terminal result event establishes
+success or refusal, never prose; in the Claude Code adapter that loss follows a
+zero exit while a nonzero exit is provider-error evidence classified from
+bounded stderr. The Codex process exit carries no failure classification. A
+Codex `interrupted` turn is boundary loss whose transport detail names that
+status, without cancellation or non-acceptance proof. A Codex turn that
+completes without a streamed agent message takes its response from the
+agent-message item in its `turn/completed` summary under the same size and
+redaction checks, and a streamed message outranks it. A finish reason observed
+before a stream loss is retained as a reported finish but is not completion or
+refusal evidence; an unrecognized finish reported before the envelope is
+validated is an envelope violation instead, and no finish is retained. Within
+one adapter the buffered and streamed decoders never disagree about an
+output-ceiling finish inside accumulated tool content, which is an observed fact
+in both and not an envelope defect; an unrequested Anthropic fallback block is
+the exception, unintelligible-response loss in the buffered decoder and a stream
+protocol violation in the streamed one.
 
 The tool-calls-at-loss fact reports the decoded prefix and nothing beyond it:
 none-opened says no tool call opened in what the adapter decoded, never that the
@@ -440,27 +469,30 @@ buffered success body or a JSON stream record, a shared allocation-free scanner
 rejects JSON nested beyond a fixed depth, unknown fields and raw material
 included; unknown fields stay tolerated for additive provider evolution under
 the same byte and nesting limits as known ones. The Anthropic and Codex CLI
-decoders also tolerate an unknown event name and discard its bounded payload
-without typed parsing, while the OpenAI decoder parses every record's payload
-whatever its event name and dispatches on the payload's `type`, rejecting an
-unrecognized type; the Claude Code CLI decoder rejects an unrecognized top-level
-event type as a stream protocol violation. Malformed or over-depth JSON in a
-success body is unintelligible-response boundary loss. In the HTTP and Claude
-Code CLI decoders, over-depth streamed material and malformed known-event JSON
-are stream protocol violations; the Codex CLI decoder fails both closed as an
-unrecognized provider error. Both CLI decoders reject a syntactically valid
-record that repeats an object member, at any nesting depth, as a stream protocol
-violation. A malformed or over-depth body attached to a definitive error status
-cannot erase that exchange: the adapter falls back to status classification with
-bounded sanitized native material. An Anthropic thinking block must close with
-exactly one nonempty integrity signature, and an empty signature on the opening
-block is a placeholder rather than a delivered one.
+decoders also tolerate an unknown event name or notification method,
+respectively, and discard its bounded payload without typed parsing, while the
+OpenAI decoder parses every record's payload whatever its event name and
+dispatches on the payload's `type`, rejecting an unrecognized type; the Claude
+Code CLI decoder rejects an unrecognized top-level event type as a stream
+protocol violation. Malformed or over-depth JSON in a success body is
+unintelligible-response boundary loss. In all adapters, over-depth streamed
+material and malformed known-event JSON are stream protocol violations. Both CLI
+decoders reject a syntactically valid record that repeats an object member, at
+any nesting depth, as a stream protocol violation. A malformed or over-depth
+body attached to a definitive error status cannot erase that exchange: the
+adapter falls back to status classification with bounded sanitized native
+material. An Anthropic thinking block must close with exactly one nonempty
+integrity signature, and an empty signature on the opening block is a
+placeholder rather than a delivered one.
 
 Each CLI adapter mechanically disables every native facility of the pinned CLI
 that could add a model-visible tool, an instruction source, an external
 interaction or delegated execution, or that could replace the pinned executable;
-prompt text is never a capability boundary. Before spawn the adapter clears the
-parent environment and copies only its allowlist of home, executable and
+prompt text is never a capability boundary. Codex uses root-level validating
+`--disable` flags and
+`app-server --stdio --strict-config --ignore-user-config --ignore-rules`, with
+one ephemeral thread and one turn per process. Before spawn the adapter clears
+the parent environment and copies only its allowlist of home, executable and
 temporary paths, XDG, locale, terminal, certificate and proxy variables. An
 allowlisted proxy value that embeds URL userinfo or is not UTF-8 refuses the
 exchange as proven unsent before spawn, because the child would receive that
@@ -497,19 +529,19 @@ lookup; Claude Code file delivery retains it in the one-shot capability instead.
 
 The Codex CLI adapter accepts the configured non-secret credential reference,
 keeps every direct credential value outside the cleared child environment, and
-never locates, reads, copies, logs or transports the CLI credential store. An
-operation that selects an admitted `codex_home` profile receives that profile's
-path as a request-scoped `CODEX_HOME` override beside the ambient reference, and
-the adapter reads neither store. An ambient Claude Code adapter likewise accepts
-only its one configured reference. Under file delivery the Claude Code adapter
-replaces only the already allowlisted configuration-directory variable with a
-private request-scoped directory, never adds the API-key variable to the child
-environment, and removes the directory when the capability drops. It creates the
-credential, settings and helper files owner-only, and the helper that delivers
-the key runs under a fixed shell interpreter using only builtins, never an
-executable resolved through the search path. A file credential value that is
-empty, not UTF-8, or carries a NUL is unusable and fails preparation before
-spawn.
+does not read, copy, log or transport the CLI credential store. Each operation
+receives a private `CODEX_HOME` with an empty `config.toml` and an `auth.json`
+symlink to the selected profile's home or the ambient Codex home; only the CLI
+opens the login store, and auxiliary state stays in the private home. An ambient
+Claude Code adapter likewise accepts only its one configured reference. Under
+file delivery the Claude Code adapter replaces only the already allowlisted
+configuration-directory variable with a private request-scoped directory, never
+adds the API-key variable to the child environment, and removes the directory
+when the capability drops. It creates the credential, settings and helper files
+owner-only, and the helper that delivers the key runs under a fixed shell
+interpreter using only builtins, never an executable resolved through the search
+path. A file credential value that is empty, not UTF-8, or carries a NUL is
+unusable and fails preparation before spawn.
 
 Provider-controlled text is credential-sanitized before it leaves the adapter.
 An adapter that reads the credential value redacts that exact value from the
@@ -571,6 +603,4 @@ turn-liveness causes.
   ([design](../design/runtime-substrate.md)).
 - Codex CLI file credential delivery: the configuration grammar admits it and
   composition rejects it as undelivered
-  ([design](../design/runtime-substrate.md)).
-- Codex CLI OAuth delivery and the exact-value redaction it seeds before spawn
   ([design](../design/runtime-substrate.md)).

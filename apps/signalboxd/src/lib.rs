@@ -65,9 +65,12 @@ mod lifecycle_deadline_runtime;
 mod lifecycle_metrics_runtime;
 mod local_socket;
 pub mod model_adapter;
+mod oauth;
+pub use oauth::OauthCredentialService;
 mod process_runtime;
 mod repo_watch_checkout;
 mod repo_watch_credentials;
+pub use repo_watch_credentials::credential_files_conflict;
 pub mod repo_watch_dispatch;
 pub mod repo_watch_runtime;
 mod repo_watch_webhook;
@@ -114,7 +117,7 @@ pub use conversation_introspection::{
 pub use credential_pools::{
     CredentialDelivery, CredentialHomeAdmissionFailure, CredentialPool, CredentialPoolAction,
     CredentialPoolExhaustion, CredentialPoolMember, CredentialPoolTieBreak, CredentialPoolTrigger,
-    CredentialProfile,
+    CredentialProfile, OauthDelivery,
 };
 pub use daemon_tools::{
     BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonToolCatalog,
@@ -529,6 +532,15 @@ impl<Execution> FatalExecutionSupervisor<Execution> {
     pub fn recovery_reporter(&self) -> FatalRecoveryReporter {
         FatalRecoveryReporter {
             fatal_signal: self.fatal_signal.clone(),
+        }
+    }
+
+    /// Shares recovery and occupancy authority with a freshly composed execution snapshot.
+    pub fn with_execution<E>(&self, execution: E) -> FatalExecutionSupervisor<E> {
+        FatalExecutionSupervisor {
+            execution,
+            fatal_signal: self.fatal_signal.clone(),
+            bounded_expirations: self.bounded_expirations.clone(),
         }
     }
 
@@ -2169,7 +2181,7 @@ pub type PostgresProviderToolExecutionError<ExecutorError> =
 pub enum PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError> {
     /// Turn-start instruction discovery or durable recording failed.
     WorkspaceInstructions(WorkspaceInstructionRuntimeError),
-    /// Read-only active-turn lookup failed before durable execution began.
+    /// Read-only active-turn or batch lookup failed.
     ResumeLookup(ToolLoopRepositoryError),
     /// A found active turn failed while resumed execution was in progress.
     ResumeExecution {
@@ -2611,7 +2623,8 @@ async fn execute_approval_judge(
         }
     };
     Ok(match outcome {
-        CompleteApprovalJudgeOutcome::Decided => ApprovalJudgeLoopOutcome::Continue,
+        CompleteApprovalJudgeOutcome::Decided
+        | CompleteApprovalJudgeOutcome::ClosedInadmissible => ApprovalJudgeLoopOutcome::Continue,
         CompleteApprovalJudgeOutcome::EscalatedToHuman
         | CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized => {
             ApprovalJudgeLoopOutcome::Parked
@@ -2986,7 +2999,7 @@ where
             .with_tool_catalog(catalog.clone());
             let mut tools = ToolExecutionService::new(
                 UuidV7ToolLoopIdGenerator,
-                tool_repository,
+                tool_repository.clone(),
                 catalog,
                 executor,
                 tool_gate,
@@ -3041,7 +3054,7 @@ where
                             }
                             run_tools = false;
                         }
-                        ToolExecutionServiceOutcome::AwaitingApproval(_) => {
+                        ToolExecutionServiceOutcome::AwaitingApproval(waiting) => {
                             if shutdown_checkpoint_requested(&shutdown_checkpoint) {
                                 return Ok(());
                             }
@@ -3062,7 +3075,23 @@ where
                             .map_err(PostgresProviderToolLoopExecutionError::ApprovalJudge)?
                             {
                                 ApprovalJudgeLoopOutcome::Continue => continue,
-                                ApprovalJudgeLoopOutcome::Parked => return Ok(()),
+                                ApprovalJudgeLoopOutcome::Parked => {
+                                    let current = tool_repository
+                                        .load_active_batch(session, turn)
+                                        .await
+                                        .map_err(
+                                            PostgresProviderToolLoopExecutionError::ResumeLookup,
+                                        )?;
+                                    if current.as_ref().is_some_and(|batch| {
+                                        batch.requests().iter().any(|request| {
+                                            request.id() == waiting
+                                                && request.inadmissible_reason().is_some()
+                                        })
+                                    }) {
+                                        continue;
+                                    }
+                                    return Ok(());
+                                }
                             }
                         }
                         ToolExecutionServiceOutcome::ChildWaitParked(_)
@@ -5274,3 +5303,7 @@ mod tests {
         ));
     }
 }
+
+/// Durable configuration reload composition.
+pub mod configuration_reload;
+pub mod model_catalog_runtime;

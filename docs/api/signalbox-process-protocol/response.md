@@ -2,10 +2,89 @@
 
 # response
 
+## OauthCredentialOutcome
+
+```rust
+pub enum OauthCredentialOutcome {
+    Provisioned {},
+    AlreadyProvisioned {},
+    Reprovisioned {},
+    Deleted {},
+    AlreadyDeleted {},
+    NotProvisioned {},
+    Abandoned {},
+    Superseded {},
+    Failed { reason: OauthCredentialFailure },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## OauthCredentialFailure
+
+```rust
+pub enum OauthCredentialFailure {
+    UnknownProfile,
+    NonOauthProfile,
+    RegistrationChanged,
+    DeviceEndpointRejected,
+    DeviceEndpointFailed,
+    AccessDenied,
+    PollingExpired,
+    TokenEndpointFailed,
+    TokenResponseWithoutIdentity,
+    AccountIndependenceFailed,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## validate_oauth_authorization
+
+```rust
+pub fn validate_oauth_authorization(
+    user_code: &str,
+    verification_uri: &str,
+) -> result::Result<(), FrameValidationError>;
+```
+
 ## ServerMessage
 
 ```rust
 pub enum ServerMessage {
+    ConfigurationReloaded {
+        command_id: CommandId,
+        reloaded_sections: vec::Vec<ReloadedSection>,
+    },
+    ConfigurationReloadFailed {
+        command_id: CommandId,
+        phase: ConfigurationReloadPhase,
+        reason: string::String,
+    },
+    RunnerReplacementReceipt {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        outcome: RunnerReplacementOutcome,
+    },
+    RunnerAbandonmentReceipt {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        outcome: RunnerAbandonmentOutcome,
+    },
+    RunnerPromotionReceipt {
+        command_id: CommandId,
+        enrollment_request_id: CanonicalUuid,
+        outcome: RunnerPromotionOutcome,
+    },
+    OauthCredentialAuthorization {
+        command_id: CommandId,
+        profile: string::String,
+        user_code: string::String,
+        verification_uri: string::String,
+    },
+    OauthCredentialReceipt {
+        command_id: CommandId,
+        profile: string::String,
+        outcome: OauthCredentialOutcome,
+    },
     SessionCreated {
         session_id: CanonicalUuid,
         model_settings: ModelSettingsSnapshot,
@@ -379,4 +458,37 @@ pub enum ServerMessage {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## MAX_CONFIGURATION_RELOAD_REASON_BYTES
+
+```rust
+pub const MAX_CONFIGURATION_RELOAD_REASON_BYTES: usize;
+```
+
+## ReloadedSection
+
+```rust
+pub enum ReloadedSection {
+    ModelCatalog,
+    SessionTemplates,
+    RepoWatch,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+impl ReloadedSection {
+    pub const ALL: [Self; 3];
+}
+```
+
+## ConfigurationReloadPhase
+
+```rust
+pub enum ConfigurationReloadPhase {
+    Read,
+    Validate,
+    Activate,
+    Reconcile,
+    Install,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```

@@ -13,7 +13,7 @@ use signalbox_model_runtime::{
     ProvenUnsentEvidence, ReasoningLevel, ServiceTier, TerminalEvidence, TerminalReport,
     UnsentCause, execute_cli_process,
 };
-use tempfile::NamedTempFile;
+use tempfile::TempDir;
 
 use crate::config::CodexCliConfig;
 use crate::event::EventDecoder;
@@ -102,12 +102,7 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
     "in_app_chat",
     "in_app_dictation",
     "in_app_local_automation",
-    // The CLI's own update check and update flow: it reaches package-registry
-    // hosts unrelated to the model exchange and can replace the executable
-    // whose version this adapter pins. Its machinery lives in the interactive
-    // front end and the app-server daemon, so a `codex exec` dispatch does not
-    // reach it today; disabling it keeps that boundary explicit rather than
-    // inherited from where the CLI happens to wire the feature.
+    // The CLI update flow can replace the pinned executable.
     "in_app_updates",
     "mcp_2026_07_28",
     "mcp_oauth_refresh_coordination",
@@ -142,9 +137,12 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
 /// The build derives this marker from the exact pin in
 /// `tooling/codex-cli/release.json`, so a Renovate change is mechanically
 /// complete and the binding smoke tests that same version. That live exchange
-/// does not prove the offline fixture corpus still represents the CLI's current
-/// event shapes; fixture regeneration or validation against the installed CLI
-/// remains the missing check. The runtime does not add a version-probe process
+/// is accompanied by a comparison of the pin's checked-in app-server schemas
+/// with the adapter's consumed fields, enum members, and required fields.
+/// Consumed fields must remain decoder-compatible, adapter-required fields must
+/// remain required, and turn statuses must match. Tagged error objects contain
+/// only their tag. Compatible additions are reported; consumed fields and error
+/// members must remain present. The runtime does not add a version-probe process
 /// to a model dispatch.
 pub const SUPPORTED_CODEX_CLI_VERSION: &str = env!("SIGNALBOX_CODEX_CLI_VERSION");
 
@@ -332,11 +330,17 @@ fn kill_probe_process_group(group: Option<u32>) {
 fn kill_probe_process_group(_group: Option<u32>) {}
 
 /// Stateless subscription-backed Codex CLI adapter.
+#[derive(Clone)]
 pub struct CodexCliRuntime {
     executable: PathBuf,
     working_directory: PathBuf,
     credential_reference: signalbox_model_runtime::CredentialReference,
     credential_homes: HashMap<signalbox_model_runtime::CredentialReference, PathBuf>,
+    oauth_profiles: std::collections::HashSet<signalbox_model_runtime::CredentialReference>,
+    oauth_delivery: Option<(
+        std::sync::Arc<dyn crate::OauthCredentialProvider>,
+        std::sync::Arc<crate::OauthCredentialRoot>,
+    )>,
     exchange_timeout: Option<Duration>,
     interrupt_grace: Duration,
     post_kill_reap_bound: Option<Duration>,
@@ -348,7 +352,7 @@ pub struct CodexCliRuntime {
 
 /// Opaque one-shot capability for one Codex CLI spawn.
 ///
-/// It owns the rendered full context and the temporary output files.
+/// It owns the rendered full context and the private operation home.
 /// It deliberately implements neither `Clone`, serialization, nor diagnostic
 /// formatting.
 #[must_use]
@@ -356,8 +360,7 @@ pub struct CodexCliPreparedRequest<C> {
     executable: PathBuf,
     working_directory: PathBuf,
     prompt: Vec<u8>,
-    output_schema: NamedTempFile,
-    output_last_message: NamedTempFile,
+    operation_home: OperationHome,
     correlation: C,
     resolved_target: String,
     delivery: DeliveryMode,
@@ -369,7 +372,7 @@ pub struct CodexCliPreparedRequest<C> {
     stderr_limit: usize,
     controls: CodexControls,
     model_context_window_override: Option<u32>,
-    credential_home: Option<PathBuf>,
+    oauth_home: Option<crate::oauth::OauthCredentialHome>,
 }
 
 struct CodexControls {
@@ -390,7 +393,7 @@ pub enum CodexCliConstructionError {
     /// The working directory does not exist or is not a directory.
     InvalidWorkingDirectory,
     /// The working directory is relative and would be resolved twice by the
-    /// child process and its `--cd` argument.
+    /// child process and its thread working-directory field.
     RelativeWorkingDirectory,
     /// Whole-process timeout is zero or cannot be represented by the runtime
     /// clock.
@@ -472,6 +475,15 @@ impl std::fmt::Debug for CodexCliRuntime {
 }
 
 impl CodexCliRuntime {
+    /// Installs the process-shared OAuth authority and its private scratch root.
+    pub fn with_oauth_delivery(
+        mut self,
+        provider: std::sync::Arc<dyn crate::OauthCredentialProvider>,
+        root: std::sync::Arc<crate::OauthCredentialRoot>,
+    ) -> Self {
+        self.oauth_delivery = Some((provider, root));
+        self
+    }
     /// Validates adapter configuration without invoking Codex or inspecting
     /// its login store.
     pub fn new(config: CodexCliConfig) -> Result<Self, CodexCliConstructionError> {
@@ -532,6 +544,8 @@ impl CodexCliRuntime {
             working_directory: config.working_directory,
             credential_reference: config.credential_reference,
             credential_homes: config.credential_homes,
+            oauth_profiles: config.oauth_profiles,
+            oauth_delivery: None,
             exchange_timeout: config.exchange_timeout,
             interrupt_grace: config.interrupt_grace,
             post_kill_reap_bound: config.post_kill_reap_bound,
@@ -607,7 +621,11 @@ impl CodexCliRuntime {
             .credential_homes
             .get(&operation.credential_reference)
             .cloned();
-        if operation.credential_reference != self.credential_reference && credential_home.is_none()
+        if operation.credential_reference != self.credential_reference
+            && credential_home.is_none()
+            && !self
+                .oauth_profiles
+                .contains(&operation.credential_reference)
         {
             return PreparationOutcome::Failed {
                 correlation,
@@ -634,62 +652,22 @@ impl CodexCliRuntime {
                 };
             }
         };
-        // The child interprets `--output-schema` after `current_dir` moves it
-        // to the configured working root, so a schema path that is relative
-        // there — as under a relative `TMPDIR` — would name a file that
-        // preparation never created. Create the file under the absolutized
-        // temporary directory so its retained path cannot be relative.
-        let temporary_directory = match std::path::absolute(std::env::temp_dir()) {
-            Ok(directory) => directory,
-            Err(error) => {
-                return PreparationOutcome::Defect {
-                    correlation,
-                    defect: PreparationDefect::RequestConstructionFailed {
-                        detail: format!(
-                            "could not absolutize the temporary directory for the \
-                             output-schema file: {error}"
-                        ),
-                    },
-                };
-            }
-        };
-        let mut output_schema = match tempfile::Builder::new()
-            .prefix("signalbox-codex-output-")
-            .suffix(".json")
-            .tempfile_in(&temporary_directory)
+        let operation_home = if self
+            .oauth_profiles
+            .contains(&operation.credential_reference)
         {
-            Ok(file) => file,
-            Err(error) => {
-                return PreparationOutcome::Defect {
-                    correlation,
-                    defect: PreparationDefect::RequestConstructionFailed {
-                        detail: format!("could not create output-schema file: {error}"),
-                    },
-                };
-            }
-        };
-        if let Err(error) = std::io::Write::write_all(&mut output_schema, OUTPUT_SCHEMA.as_bytes())
-        {
-            return PreparationOutcome::Defect {
-                correlation,
-                defect: PreparationDefect::RequestConstructionFailed {
-                    detail: format!("could not write output-schema file: {error}"),
-                },
-            };
-        }
-        let output_last_message = match tempfile::Builder::new()
-            .prefix("signalbox-codex-last-message-")
-            .suffix(".json")
-            .tempfile_in(&temporary_directory)
-        {
-            Ok(file) => file,
-            Err(error) => {
-                return PreparationOutcome::Defect {
-                    correlation,
-                    defect: PreparationDefect::RequestConstructionFailed {
-                        detail: format!("could not create output-last-message file: {error}"),
-                    },
-                };
+            OperationHome::UnresolvableCredentialHome
+        } else {
+            match operation_home(credential_home) {
+                Ok(home) => home,
+                Err(_) => {
+                    return PreparationOutcome::Defect {
+                        correlation,
+                        defect: PreparationDefect::RequestConstructionFailed {
+                            detail: "could not prepare Codex operation home".into(),
+                        },
+                    };
+                }
             }
         };
         let prompt = std::mem::take(&mut translated.prompt);
@@ -701,8 +679,7 @@ impl CodexCliRuntime {
             executable: self.executable.clone(),
             working_directory: self.working_directory.clone(),
             prompt,
-            output_schema,
-            output_last_message,
+            operation_home,
             correlation,
             resolved_target: operation.resolved_target.as_str().to_string(),
             delivery: operation.delivery,
@@ -714,7 +691,7 @@ impl CodexCliRuntime {
             stderr_limit: self.stderr_limit,
             controls,
             model_context_window_override,
-            credential_home,
+            oauth_home: None,
         })
     }
 }
@@ -798,9 +775,56 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for CodexCliRuntime {
     async fn prepare(
         &self,
         operation: ModelOperation<C>,
-        _cancellation: CancellationSignal,
+        mut cancellation: CancellationSignal,
     ) -> PreparationOutcome<C, Self::Prepared> {
-        self.prepare_request(operation)
+        let reference = operation.credential_reference.clone();
+        let outcome = self.prepare_request(operation);
+        if !self.oauth_profiles.contains(&reference) {
+            return outcome;
+        }
+        let mut prepared = match outcome {
+            PreparationOutcome::Prepared(prepared) => prepared,
+            outcome => return outcome,
+        };
+        if cancellation.is_cancelled() {
+            return PreparationOutcome::Cancelled {
+                correlation: prepared.correlation,
+            };
+        }
+        let result = if let Some((provider, root)) = &self.oauth_delivery {
+            let mut installer = crate::oauth::Installer {
+                root: root.clone(),
+                home: None,
+            };
+            match provider
+                .deliver(&reference, &mut installer, cancellation)
+                .await
+            {
+                Ok(crate::OauthDeliveryOutcome::Cancelled) => {
+                    return PreparationOutcome::Cancelled {
+                        correlation: prepared.correlation,
+                    };
+                }
+                Ok(crate::OauthDeliveryOutcome::Delivered) => installer
+                    .home
+                    .ok_or(signalbox_model_runtime::CredentialAccessFailure::OauthCredentialHome),
+                Err(error) => Err(error),
+            }
+        } else {
+            Err(signalbox_model_runtime::CredentialAccessFailure::OauthCredentialHome)
+        };
+        match result {
+            Ok(home) => {
+                prepared.oauth_home = Some(home);
+                PreparationOutcome::Prepared(prepared)
+            }
+            Err(failure) => PreparationOutcome::Failed {
+                correlation: prepared.correlation,
+                failure: PreparationFailure::CredentialUnavailable {
+                    error: signalbox_model_runtime::CredentialAccessError::new(reference, failure),
+                },
+            },
+        }
     }
 
     async fn execute(
@@ -826,34 +850,47 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for CodexCliRuntime {
     }
 }
 
+enum OperationHome {
+    Ready(TempDir),
+    UnresolvableCredentialHome,
+}
+
 async fn execute_process<C: Clone + Send + Sync>(
     prepared: CodexCliPreparedRequest<C>,
     sink: &mut (dyn ObservationSink<C> + Send),
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
-    let mut command = std::process::Command::new(&prepared.executable);
-    command
-        .arg("exec")
-        .arg("--json")
-        .arg("--ephemeral")
-        .arg("--ignore-user-config")
-        .arg("--ignore-rules")
-        .arg("--strict-config");
+    let oauth = prepared.oauth_home.as_ref();
+    let operation_home = match (oauth, &prepared.operation_home) {
+        (Some(home), _) => home.path.as_path(),
+        (None, OperationHome::Ready(home)) => home.path(),
+        (None, OperationHome::UnresolvableCredentialHome) => {
+            return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(signalbox_model_runtime::TransportFacts::new(
+                    "Codex credential home cannot be resolved to an absolute directory; exchange refused before spawn",
+                )),
+            });
+        }
+    };
+    let mut command = if oauth.is_some() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("umask 077; exec \"$@\"")
+            .arg("signalbox-oauth")
+            .arg(&prepared.executable);
+        command
+            .arg("--config")
+            .arg("cli_auth_credentials_store=\"file\"");
+        command
+    } else {
+        std::process::Command::new(&prepared.executable)
+    };
     for feature in DISABLED_CODEX_CLI_CAPABILITY_FEATURES {
         command.arg("--disable").arg(feature);
     }
     if prepared.controls.service_tier.is_some() {
         command.arg("--enable").arg("fast_mode");
-    }
-    if let Some(effort) = prepared.controls.reasoning_effort {
-        command
-            .arg("--config")
-            .arg(format!("model_reasoning_effort=\"{effort}\""));
-    }
-    if let Some(tier) = prepared.controls.service_tier {
-        command
-            .arg("--config")
-            .arg(format!("service_tier=\"{tier}\""));
     }
     if let Some(context_window) = prepared.model_context_window_override {
         command
@@ -871,41 +908,51 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg("web_search=\"disabled\"")
         .arg("--config")
         .arg("project_doc_max_bytes=0")
-        .arg("--sandbox")
-        .arg("read-only")
-        .arg("--skip-git-repo-check")
-        .arg("--cd")
-        .arg(&prepared.working_directory)
-        .arg("--model")
-        .arg(&prepared.resolved_target)
-        .arg("--output-schema")
-        .arg(prepared.output_schema.path())
-        .arg("--output-last-message")
-        .arg(prepared.output_last_message.path())
-        .arg("-")
+        .arg("app-server")
+        .arg("--stdio")
+        .arg("--strict-config")
+        .arg("--ignore-user-config")
+        .arg("--ignore-rules")
         .current_dir(&prepared.working_directory);
+    use crate::app_server::{
+        client::Client,
+        frame::{TextInput, TextInputKind, ThreadOptions, TurnInput},
+    };
+    let client = Client::new(
+        ThreadOptions {
+            model: prepared.resolved_target,
+            cwd: prepared.working_directory.to_string_lossy().into_owned(),
+            service_tier: prepared.controls.service_tier.map(str::to_owned),
+        },
+        TurnInput {
+            input: vec![TextInput {
+                kind: TextInputKind::Text,
+                text: String::from_utf8(prepared.prompt).unwrap_or_default(),
+            }],
+            output_schema: serde_json::from_str(OUTPUT_SCHEMA).unwrap_or_default(),
+            effort: prepared.controls.reasoning_effort.map(str::to_owned),
+        },
+    );
     let decoder = EventDecoder::new(
         prepared.correlation.clone(),
         prepared.delivery,
         &prepared.translated,
-        prepared.output_last_message.path().to_path_buf(),
+        client,
         prepared.event_limit,
     );
-    // The selected profile controls this child only; the adapter passes the
-    // path reference and never opens the login material, as required by
-    // `docs/spec/configuration-and-credentials.md`.
-    let environment_overrides = prepared
-        .credential_home
-        .map(|home| {
-            vec![CliEnvironmentOverride::replacing_inherited(
-                CODEX_CREDENTIAL_HOME,
-                home.into_os_string(),
-            )]
-        })
-        .unwrap_or_default();
+    let mut environment_overrides = vec![CliEnvironmentOverride::replacing_inherited(
+        CODEX_CREDENTIAL_HOME,
+        operation_home.as_os_str().to_owned(),
+    )];
+    if let Some(home) = oauth {
+        environment_overrides.push(CliEnvironmentOverride::replacing_inherited(
+            "HOME",
+            home.path.clone().into_os_string(),
+        ));
+    }
     let request = CliProcessRequest {
         command,
-        prompt: prepared.prompt,
+        prompt: Vec::new(),
         decoder,
         exchange_timeout: prepared.exchange_timeout,
         interrupt_grace: prepared.interrupt_grace,
@@ -915,9 +962,62 @@ async fn execute_process<C: Clone + Send + Sync>(
         environment: CODEX_ENVIRONMENT,
         environment_overrides,
     };
-    let _output_schema = prepared.output_schema;
-    let _output_last_message = prepared.output_last_message;
-    execute_cli_process(request, sink, cancellation).await
+    if let Some(home) = oauth {
+        let mut access_sink = signalbox_model_runtime::CredentialRedactingSink::new(
+            sink,
+            &home.material.access_token,
+        );
+        let mut identity_sink = signalbox_model_runtime::CredentialRedactingSink::new(
+            &mut access_sink,
+            &home.material.identity_token,
+        );
+        let evidence = signalbox_model_runtime::execute_cli_process_with_credentials(
+            request,
+            &mut identity_sink,
+            cancellation,
+            &[
+                home.material.access_token.clone(),
+                home.material.identity_token.clone(),
+            ],
+        )
+        .await;
+        identity_sink.flush();
+        access_sink.flush();
+        let evidence =
+            signalbox_model_runtime::redact_evidence(evidence, &home.material.identity_token, None);
+        let mut evidence =
+            signalbox_model_runtime::redact_evidence(evidence, &home.material.access_token, None);
+        if let TerminalEvidence::ProviderError(error) = &mut evidence
+            && error.kind == signalbox_model_runtime::ProviderErrorKind::CredentialRejected
+        {
+            error.kind = signalbox_model_runtime::ProviderErrorKind::Unrecognized;
+            error.non_acceptance_proven = false;
+        }
+        evidence
+    } else {
+        execute_cli_process(request, sink, cancellation).await
+    }
+}
+
+fn operation_home(selected: Option<PathBuf>) -> std::io::Result<OperationHome> {
+    let directory = std::path::absolute(std::env::temp_dir())?;
+    let home = tempfile::Builder::new()
+        .prefix("signalbox-codex-")
+        .tempdir_in(directory)?;
+    std::fs::write(home.path().join("config.toml"), "")?;
+    let source = selected
+        .or_else(|| std::env::var_os(CODEX_CREDENTIAL_HOME).map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")));
+    #[cfg(unix)]
+    if let Some(source) = source {
+        let source = match std::path::absolute(source) {
+            Ok(source) if source.is_absolute() => source,
+            _ => return Ok(OperationHome::UnresolvableCredentialHome),
+        };
+        // Only the CLI opens the login store; auxiliary state stays private.
+        std::os::unix::fs::symlink(source.join("auth.json"), home.path().join("auth.json"))?;
+    }
+    Ok(OperationHome::Ready(home))
 }
 
 #[cfg(test)]

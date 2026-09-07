@@ -8,7 +8,7 @@ use super::frame::{
     CodexErrorInfo, TextInput, TextInputKind, ThreadOptions, TurnInput, TurnStatus,
 };
 
-#[path = "../../tests/support/fake_codex_app_server.rs"]
+#[path = "../../tests/support/protocol_peer.rs"]
 mod peer;
 
 fn new_client() -> Client {
@@ -40,6 +40,10 @@ fn running() -> Client {
         .receive(&peer::response(&initialize))
         .expect("initialize");
     next(&mut client);
+    let limits = next(&mut client);
+    client
+        .receive(&peer::response(&limits))
+        .expect("rate limits read");
     let thread = next(&mut client);
     client
         .receive(&peer::response(&thread))
@@ -59,6 +63,11 @@ fn handshake_creates_one_ephemeral_read_only_thread_and_one_turn() {
         .receive(&peer::response(&initialize))
         .expect("initialize response");
     assert_eq!(next(&mut client), json!({"method":"initialized"}));
+    let limits = next(&mut client);
+    assert_eq!(limits["method"], "account/rateLimits/read");
+    client
+        .receive(&peer::response(&limits))
+        .expect("rate limits read");
     let thread = next(&mut client);
     assert_eq!(thread["method"], "thread/start");
     assert_eq!(
@@ -740,7 +749,7 @@ fn agent_items_deltas_and_total_usage_are_decoded_without_projection_loss() {
             total.reasoning_output_tokens,
             total.total_tokens
         ),
-        (100, 20, Some(10), 5, 3, 105)
+        (Some(100), Some(20), Some(10), Some(5), Some(3), Some(105))
     );
 }
 
@@ -811,6 +820,18 @@ fn dropped_nested_metadata_governs_the_following_emitted_text() {
 }
 
 #[test]
+fn a_credential_marker_completed_across_dropped_fields_suppresses_its_value() {
+    assert_eq!(
+        folded(
+            json!({"item":{"id":"trace-api_","text":"key="}}),
+            &[],
+            "fixture-secret"
+        ),
+        REDACTED
+    );
+}
+
+#[test]
 fn dropped_units_preserve_array_adjacency_and_independent_object_markers() {
     for dropped in [
         json!(["api", ["_key="]]),
@@ -843,4 +864,170 @@ fn member_paths_do_not_confuse_literal_slashes_with_nested_fields() {
         ),
         REDACTED
     );
+}
+
+#[test]
+fn assistant_items_in_the_turn_start_response_exclude_non_acceptance_proof() {
+    let mut client = new_client();
+    let initialize = next(&mut client);
+    client
+        .receive(&peer::response(&initialize))
+        .expect("initialize");
+    next(&mut client);
+    let limits = next(&mut client);
+    client
+        .receive(&peer::response(&limits))
+        .expect("rate limits read");
+    let thread = next(&mut client);
+    client
+        .receive(&peer::response(&thread))
+        .expect("thread start");
+    let request = next(&mut client);
+    let mut response = peer::response(&request);
+    response["result"]["turn"]["items"] = json!([{"type":"reasoning","id":"reasoning-summary"}]);
+    client.receive(&response).expect("turn start response");
+    let Event::Terminal(turn) = client
+        .receive(&peer::turn("failed", json!("rateLimitExceeded")))
+        .expect("failed turn")
+    else {
+        panic!("failed terminal")
+    };
+    assert!(
+        !client.activity.proves_non_acceptance(
+            turn.status,
+            turn.error
+                .as_ref()
+                .and_then(|error| error.codex_error_info.as_ref())
+        )
+    );
+}
+
+#[test]
+fn consumed_rate_limit_windows_choose_the_latest_reset_with_zero_saturation() {
+    use std::time::{Duration, UNIX_EPOCH};
+    for (snapshot, expected) in [
+        (
+            json!({"primary":{"usedPercent":100,"resetsAt":1100}}),
+            Some(Duration::from_secs(100)),
+        ),
+        (json!({"primary":{"usedPercent":90,"resetsAt":1100}}), None),
+        (
+            json!({"primary":{"usedPercent":99.5,"resetsAt":1100}}),
+            None,
+        ),
+        (
+            json!({"primary":{"usedPercent":100.0,"resetsAt":1100}}),
+            Some(Duration::from_secs(100)),
+        ),
+        (
+            json!({"primary":{"usedPercent":100,"resetsAt":1100},"secondary":{"usedPercent":100,"resetsAt":1400}}),
+            Some(Duration::from_secs(400)),
+        ),
+        (
+            json!({"primary":{"usedPercent":100,"resetsAt":900}}),
+            Some(Duration::ZERO),
+        ),
+        (
+            json!({"primary":{"usedPercent":100,"resetsAt":-1}}),
+            Some(Duration::ZERO),
+        ),
+        (json!({"primary":{"usedPercent":100}}), None),
+        (
+            json!({"individualLimit":{"remainingPercent":0,"resetsAt":1400}}),
+            None,
+        ),
+    ] {
+        let limits: super::frame::RateLimits =
+            serde_json::from_value(snapshot.clone()).expect("snapshot fixture");
+        assert_eq!(
+            limits.retry_after(UNIX_EPOCH + Duration::from_secs(1000)),
+            expected,
+            "{snapshot}"
+        );
+    }
+}
+
+#[test]
+fn sparse_rate_limit_notifications_preserve_a_previous_window() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let mut client = running();
+    client.receive(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":100,"resetsAt":1100}}}})).expect("initial snapshot");
+    client.receive(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":null,"secondary":{"usedPercent":90,"resetsAt":1400}}}})).expect("sparse snapshot");
+    assert_eq!(
+        client
+            .rate_limits
+            .retry_after(UNIX_EPOCH + Duration::from_secs(1000)),
+        Some(Duration::from_secs(100))
+    );
+}
+
+#[test]
+fn capacity_windows_preserve_unknown_duration_and_signed_reset_time() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let limits: super::frame::RateLimits = serde_json::from_value(json!({
+        "primary":{"usedPercent":105,"resetsAt":-1},
+        "secondary":{"usedPercent":20,"windowDurationMins":-1}
+    }))
+    .expect("native rate-limit windows");
+    let observed_at = UNIX_EPOCH + Duration::from_secs(1000);
+    let snapshot = limits.capacity_snapshot(observed_at).expect("capacity");
+    assert_eq!(snapshot.observed_at, observed_at);
+    assert_eq!(
+        snapshot.windows,
+        vec![
+            signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: -5,
+                window_duration: None,
+                resets_at: Some(UNIX_EPOCH - Duration::from_secs(1)),
+            },
+            signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: 80,
+                window_duration: None,
+                resets_at: None,
+            },
+        ]
+    );
+}
+
+#[test]
+fn absent_capacity_does_not_emit_a_snapshot() {
+    for value in [json!({}), json!({"primary":null,"secondary":null})] {
+        let limits: super::frame::RateLimits =
+            serde_json::from_value(value.clone()).expect("rate-limit fixture");
+        assert_eq!(
+            limits.capacity_snapshot(std::time::UNIX_EPOCH),
+            None,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn fractional_capacity_rounds_remaining_percentage_down() {
+    for (used_percent, remaining_percent) in [(0.25, 99), (99.5, 0), (100.25, -1)] {
+        let limits: super::frame::RateLimits = serde_json::from_value(json!({
+            "primary":{"usedPercent":used_percent},
+            "secondary":{"usedPercent":61}
+        }))
+        .expect("fractional rate-limit fixture");
+        let snapshot = limits
+            .capacity_snapshot(std::time::UNIX_EPOCH)
+            .expect("fractional usage retains the snapshot");
+        assert_eq!(
+            snapshot.windows,
+            vec![
+                signalbox_model_runtime::RateLimitWindow {
+                    remaining_percent,
+                    window_duration: None,
+                    resets_at: None,
+                },
+                signalbox_model_runtime::RateLimitWindow {
+                    remaining_percent: 39,
+                    window_duration: None,
+                    resets_at: None,
+                },
+            ],
+            "usedPercent={used_percent}"
+        );
+    }
 }

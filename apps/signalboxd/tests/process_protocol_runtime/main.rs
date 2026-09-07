@@ -9,6 +9,8 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod deadline_runtime;
+
 use std::{
     collections::{HashSet, VecDeque},
     error::Error,
@@ -145,8 +147,10 @@ mod fixtures;
 mod fleet_soak;
 mod imported_conversations;
 mod input_admission;
+mod oauth;
 mod reconciliation;
 mod review_orchestration;
+mod runner_recovery;
 mod session_configuration;
 mod session_metadata;
 mod stop_turn;

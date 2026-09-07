@@ -7,6 +7,7 @@
 //! deployment configuration, and migration policy at this executable
 //! boundary.
 
+use signalboxd::credential_files_conflict;
 use signalboxd::repo_watch_runtime::{
     RepositoryWatchRuntime, RepositoryWatchRuntimeError, RepositoryWatchServices,
     connect_repository_watch_pool,
@@ -19,17 +20,17 @@ use std::{
     fmt, fs,
     future::Future,
     num::NonZeroUsize,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
     time::Duration,
 };
 
 use signalbox_application::{
-    ClassifyOperatorFailure, EligibilityNudge, GoalAwareEligibilityPass,
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop,
-    SchedulerLoopExit, SchedulerPassOccupancyBound, StaleActiveTurnBound, StartupScanService,
+    ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+    SchedulerPassOccupancyBound, StaleActiveTurnBound, StartupScanService,
     TurnLivenessScanInterval, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
@@ -40,17 +41,17 @@ use signalbox_model_provider_runtime::{
     RuntimeContextCompactionModel, RuntimeModelCallProvider,
 };
 use signalbox_model_runtime::CredentialReference;
-use signalbox_model_runtime_anthropic::{
-    AnthropicConfig, AnthropicConstructionError, AnthropicRuntime,
-};
+#[cfg(test)]
+use signalbox_model_runtime_anthropic::AnthropicConstructionError;
 use signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version;
-use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
+#[cfg(test)]
+use signalbox_model_runtime_openai::OpenAiConstructionError;
 use signalbox_persistence::{
     automatic_reconciliation::RETRY_LADDER_ARITY, blob::BlobCatalogRepository,
-    convergence_sweep::PostgresConvergenceSweepStore, hub_fence::FENCED_POOL_MAX_CONNECTIONS,
-    migrate, model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
-    session_deadline::SessionDeadlineBounds, start_eligible_turn::StartEligibleTurnRepository,
-    startup::PostgresStartupScanRepository, turn_liveness::TurnLivenessPersistenceBounds,
+    hub_fence::FENCED_POOL_MAX_CONNECTIONS, migrate, model_execution::PostgresModelCallRepository,
+    scheduler::PostgresEligibilitySweep, session_deadline::SessionDeadlineBounds,
+    start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
+    turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
 use signalboxd::runner_protocol_runtime::{
@@ -60,19 +61,17 @@ use signalboxd::runner_protocol_runtime::{
 use signalboxd::{
     AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs, BlobStoreRegistry, BlobTools,
     CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds, ConfiguredApprovalPostureError,
-    ContextGuardedTurnPass, ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
-    DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
-    ExpiredPassRecoveryPolicy, FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
-    FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
-    GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError,
-    LifecycleDeadlineRuntime, LifecycleMetricsRuntime, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    ReportedUsageCompaction, SessionTemplateConfiguration, SessionTemplateConfigurationError,
-    SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
-    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    ContextGuardedTurnPass, ConvergenceSweepNumericBounds, DaemonTools,
+    DaemonToolsConstructionError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FencedPoolFloorReconciliation, FileCredentialAccess,
+    GitHubCodeHostTransport, GoalModeNumericBounds, HubModelConfiguration,
+    HubModelConfigurationError, LifecycleDeadlineRuntime, LifecycleMetricsRuntime,
+    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, OtlpRuntime,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
     TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
-    model_adapter::ConfiguredModelRuntime,
     reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
@@ -370,91 +369,19 @@ fn socket_artifacts_conflict(process_path: &Path, runner_path: &Path) -> bool {
     let Some(runner_artifacts) = socket_artifact_paths(runner_path) else {
         return process_path == runner_path;
     };
+    let oauth_root = oauth_credential_root(&process_artifacts[0]);
     process_artifacts
         .iter()
         .any(|process| runner_artifacts.iter().any(|runner| runner == process))
+        || runner_artifacts
+            .iter()
+            .any(|runner| runner.starts_with(&oauth_root) || oauth_root.starts_with(runner))
 }
 
-fn credential_files_conflict(left: &Path, right: &Path) -> bool {
-    let left = resolved_file_reference(left);
-    let right = resolved_file_reference(right);
-    left == right || same_file_identity(&left, &right)
-}
-
-#[cfg(unix)]
-fn same_file_identity(left: &Path, right: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
-        return false;
-    };
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file_identity(_left: &Path, _right: &Path) -> bool {
-    false
-}
-
-fn resolved_file_reference(path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        env::current_dir()
-            .map(|current| current.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-    let mut resolved = normalize_file_reference(&absolute);
-    for _ in 0..40 {
-        let mut prefix = PathBuf::new();
-        let mut components = resolved.components();
-        let mut replacement = None;
-        while let Some(component) = components.next() {
-            prefix.push(component.as_os_str());
-            let Ok(metadata) = fs::symlink_metadata(&prefix) else {
-                return resolved;
-            };
-            if !metadata.file_type().is_symlink() {
-                continue;
-            }
-            let Ok(target) = fs::read_link(&prefix) else {
-                return resolved;
-            };
-            let mut target = if target.is_absolute() {
-                target
-            } else {
-                prefix
-                    .parent()
-                    .map_or(target.clone(), |parent| parent.join(target))
-            };
-            target.extend(components.map(|remaining| remaining.as_os_str()));
-            replacement = Some(normalize_file_reference(&target));
-            break;
-        }
-        let Some(replacement) = replacement else {
-            return fs::canonicalize(&resolved).unwrap_or(resolved);
-        };
-        resolved = replacement;
-    }
-    resolved
-}
-
-fn normalize_file_reference(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() && !path.is_absolute() {
-                    normalized.push(component.as_os_str());
-                }
-            }
-        }
-    }
-    normalized
+fn oauth_credential_root(process_socket: &Path) -> PathBuf {
+    let mut root = process_socket.as_os_str().to_owned();
+    root.push(".oauth");
+    PathBuf::from(root)
 }
 
 fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
@@ -514,33 +441,6 @@ fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) ->
         "daemon startup construction failed"
     );
     error
-}
-
-/// Converts Anthropic construction evidence to a closed classification.
-///
-/// The adapter's dynamic parser/client detail is deliberately excluded because
-/// an adapter-owned string is not admitted to operator telemetry.
-const fn anthropic_construction_cause(error: &AnthropicConstructionError) -> &'static str {
-    match error {
-        AnthropicConstructionError::InvalidBaseUrl { .. } => "anthropic_invalid_base_url",
-        AnthropicConstructionError::InvalidVersion => "anthropic_invalid_version",
-        AnthropicConstructionError::InvalidExchangeTimeout => "anthropic_invalid_timeout",
-        AnthropicConstructionError::InvalidSseRecordLimit => "anthropic_invalid_record_limit",
-        AnthropicConstructionError::ClientConstruction { .. } => "anthropic_client_construction",
-    }
-}
-
-/// Converts OpenAI construction evidence to a closed classification.
-///
-/// The adapter's dynamic parser/client detail is deliberately excluded because
-/// an adapter-owned string is not admitted to operator telemetry.
-const fn openai_construction_cause(error: &OpenAiConstructionError) -> &'static str {
-    match error {
-        OpenAiConstructionError::InvalidBaseUrl { .. } => "openai_invalid_base_url",
-        OpenAiConstructionError::InvalidExchangeTimeout => "openai_invalid_timeout",
-        OpenAiConstructionError::InvalidSseRecordLimit => "openai_invalid_record_limit",
-        OpenAiConstructionError::ClientConstruction { .. } => "openai_client_construction",
-    }
 }
 
 const fn configured_approval_posture_cause(error: &ConfiguredApprovalPostureError) -> &'static str {
@@ -616,7 +516,6 @@ enum RuntimeTaskExit {
     FencedPoolFloor,
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
-    ConvergenceSweep,
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
     WebHttp(Result<(), WebHttpRuntimeError>),
     TurnLiveness,
@@ -662,7 +561,6 @@ enum RuntimeTaskDefect {
     FencedPoolFloorCompletedBeforeShutdown,
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
-    ConvergenceSweepCompletedBeforeShutdown,
     RepositoryWatchCompletedBeforeShutdown,
     WebHttpCompletedBeforeShutdown,
     TurnLivenessCompletedBeforeShutdown,
@@ -683,9 +581,6 @@ impl RuntimeTaskDefect {
             }
             Self::ProcessCompletedBeforeShutdown => "process_runtime_completed_before_shutdown",
             Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
-            Self::ConvergenceSweepCompletedBeforeShutdown => {
-                "convergence_sweep_completed_before_shutdown"
-            }
             Self::RepositoryWatchCompletedBeforeShutdown => {
                 "repository_watch_completed_before_shutdown"
             }
@@ -750,6 +645,38 @@ fn report_database_close_failure(error: &SingleHubGuardError) {
         cause = %error,
         "daemon database close failed"
     );
+}
+
+async fn migrate_hub_database(pool: &sqlx::PgPool) -> Result<(), HubRuntimeError> {
+    migrate(pool).await.map_err(|error| {
+        tracing::error!(migration_detail = %error, "database migration rejected");
+        erase_startup_cause(
+            RuntimePhase::Migration,
+            SanitizedStartupCause::Static("database_migration_failed"),
+        )
+    })?;
+    tracing::info!(phase = ?RuntimePhase::Migration, "daemon startup phase completed");
+    Ok(())
+}
+
+async fn install_oauth_registrations(
+    pool: &sqlx::PgPool,
+    oauth_registrations: &[(
+        String,
+        signalbox_persistence::oauth_credential::OauthRegistration,
+    )],
+) -> Result<(), HubRuntimeError> {
+    signalbox_persistence::oauth_credential::OauthCredentialRepository::new(pool.clone())
+        .replace_registrations(oauth_registrations)
+        .await
+        .map_err(|error| {
+            erase_startup_scan_cause(
+                process_runtime_failure_class(&ProcessRuntimeError::OauthRecovery(error)),
+                "oauth_registration_recovery_failed",
+                None,
+                None,
+            )
+        })
 }
 
 async fn migrate_scan_then_schedule<Migration, Scan, Schedule, Runtime, Output>(
@@ -919,6 +846,9 @@ fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailure
     use signalbox_persistence::outbox::OutboxDispatchError;
 
     match error {
+        ProcessRuntimeError::OauthRecovery(error) => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: matches!(error, signalbox_persistence::oauth_credential::OauthCredentialRepositoryError::CommitAmbiguous),
+        },
         ProcessRuntimeError::Accept(_)
         | ProcessRuntimeError::SpoolIo(_)
         | ProcessRuntimeError::InsufficientPoolCapacity
@@ -1048,7 +978,6 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::FencedPoolFloor)
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
-        | Ok(RuntimeTaskExit::ConvergenceSweep)
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness)
@@ -1218,14 +1147,20 @@ async fn run_hub(
         )
     })?;
     let prometheus_runtime = initialize_prometheus(telemetry_configuration).await;
-    let model_configuration = HubModelConfiguration::read(configuration.model_configuration_file())
-        .map_err(|error| {
+    let on_disk = fs::read_to_string(configuration.model_configuration_file()).map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::ModelConfiguration(&HubModelConfigurationError::Read),
+        )
+    })?;
+    let bootstrap_bounds =
+        HubModelConfiguration::startup_numeric_bounds(&on_disk).map_err(|error| {
             erase_startup_cause(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
-    let numeric_bounds = model_configuration.numeric_bounds();
+    let numeric_bounds = &bootstrap_bounds;
     let configured_duration = |field| numeric_bounds.duration(field).flatten();
     let configured_usize = |field| {
         numeric_bounds
@@ -1262,16 +1197,6 @@ async fn run_hub(
                 SanitizedStartupCause::Static("invalid_codex_cli_version_probe_bound"),
             )
         })?;
-    if let Some(codex_cli) = model_configuration.codex_cli() {
-        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
-            .await
-            .map_err(|_| {
-                erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
-                )
-            })?;
-    }
     let fenced_pool_min_connections =
         validate_fenced_pool_min_connections(configured_u32("fenced_pool_min_connections")?)
             .ok_or_else(|| {
@@ -1455,187 +1380,6 @@ async fn run_hub(
         configured_usize("max_code_host_result_items")?,
         configured_usize("max_repository_file_content_bytes")?,
     );
-    if configuration.repository_watch_credential_conflicts(&model_configuration) {
-        let error = HubConfigurationError::new(
-            GITHUB_TOKEN_FILE_ENVIRONMENT,
-            RequiredSettingFailure::Conflicts,
-        );
-        return Err(erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Configuration(&error),
-        ));
-    }
-    let daemon_tool_configuration = model_configuration.daemon_tools();
-    let tool_composition = match daemon_tool_configuration {
-        Some(_) => DaemonToolComposition::WithMappedFamilies,
-        None => DaemonToolComposition::Base,
-    };
-    DaemonToolCatalog::validate_approval_postures_for_composition(
-        model_configuration.tool_approval_postures(),
-        tool_composition,
-    )
-    .map_err(|error| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
-        )
-    })?;
-    let template_configuration = SessionTemplateConfiguration::read(
-        configuration.template_configuration_file(),
-        || env::var_os("HOME").map(PathBuf::from),
-        &model_configuration,
-    )
-    .map_err(|error| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::TemplateConfiguration(&error),
-        )
-    })?;
-    if let Some(repository_watch) = model_configuration.repository_watch() {
-        repository_watch
-            .validate_convergence_template(template_configuration.summaries().map(|(name, _)| name))
-            .map_err(|error| {
-                erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::ModelConfiguration(&error),
-                )
-            })?;
-    }
-    let anthropic_model_credentials = FileCredentialAccess::from_files(
-        model_configuration
-            .file_credential_profiles(ModelAdapter::Anthropic)
-            .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
-    );
-    let openai_model_credentials = FileCredentialAccess::from_files(
-        model_configuration
-            .file_credential_profiles(ModelAdapter::OpenAi)
-            .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
-    );
-    let anthropic_credential_access = model_configuration
-        .uses_anthropic_adapter()
-        .then(|| anthropic_model_credentials.clone());
-    let openai_credential_access = model_configuration
-        .uses_openai_adapter()
-        .then(|| openai_model_credentials.clone());
-    let credential_reference =
-        ModelCallCredentialReference::new(model_configuration.fallback_credential_profile());
-    let code_host_credentials = FileCredentialAccess::new(
-        configuration.github_token_file(),
-        CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
-    );
-    let web_search_credentials = FileCredentialAccess::new(
-        configuration.brave_api_key_file(),
-        CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
-    );
-    let compaction_anthropic = anthropic_credential_access
-        .clone()
-        .map(|credential_access| {
-            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
-            adapter_configuration.exchange_timeout = model_exchange_timeout;
-            AnthropicRuntime::new(adapter_configuration, credential_access)
-        })
-        .transpose()
-        .map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
-            )
-        })?;
-    let compaction_openai = openai_credential_access
-        .clone()
-        .map(|credential_access| {
-            let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
-            adapter_configuration.exchange_timeout = model_exchange_timeout;
-            OpenAiRuntime::new(adapter_configuration, credential_access)
-        })
-        .transpose()
-        .map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(openai_construction_cause(&error)),
-            )
-        })?;
-    let anthropic_model_capabilities = model_configuration.runtime_model_capability_catalog();
-    let openai_model_capabilities = model_configuration.runtime_model_capability_catalog();
-    let anthropic = model_configuration
-        .uses_anthropic_adapter()
-        .then(|| anthropic_model_credentials.clone())
-        .map(|credential_access| {
-            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
-            adapter_configuration.exchange_timeout = model_exchange_timeout;
-            adapter_configuration.model_capabilities = anthropic_model_capabilities;
-            AnthropicRuntime::new(adapter_configuration, credential_access)
-        })
-        .transpose()
-        .map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
-            )
-        })?;
-    let openai = openai_credential_access
-        .map(|credential_access| {
-            let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
-            adapter_configuration.exchange_timeout = model_exchange_timeout;
-            adapter_configuration.model_capabilities = openai_model_capabilities;
-            OpenAiRuntime::new(adapter_configuration, credential_access)
-        })
-        .transpose()
-        .map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(openai_construction_cause(&error)),
-            )
-        })?;
-    let code_host_transport = GitHubCodeHostTransport::try_new(code_host_numeric_bounds)
-        .map_err(|_| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("github_transport_construction_failed"),
-            )
-        })?
-        .with_convergence_policy(model_configuration.convergence().cloned());
-    let runtime_models = model_configuration.runtime_model_catalog();
-    let compaction_runtime = ConfiguredModelRuntime::new(
-        compaction_anthropic,
-        compaction_openai,
-        &model_configuration,
-        model_exchange_timeout,
-        post_kill_reap_bound,
-        native_message_limit,
-    )
-    .map_err(|error| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static(error.cause_code()),
-        )
-    })?;
-    let runtime = ConfiguredModelRuntime::new(
-        anthropic,
-        openai,
-        &model_configuration,
-        model_exchange_timeout,
-        post_kill_reap_bound,
-        native_message_limit,
-    )
-    .map_err(|error| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static(error.cause_code()),
-        )
-    })?;
-    let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
-        RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
-    );
-    let approval_judge_model: Arc<dyn ApprovalJudgeModel> = Arc::new(
-        RuntimeApprovalJudgeModel::new(runtime.clone(), runtime_models.clone()),
-    );
-    let provider = RuntimeModelCallProvider::new(
-        runtime,
-        runtime_models.clone(),
-        diagnostic_model_identity_limit,
-    );
-    let model_targets = model_configuration.target_catalog();
     let mut database = FencedHubDatabase::connect_production(
         configuration.database_url(),
         fenced_pool_min_connections,
@@ -1654,6 +1398,154 @@ async fn run_hub(
     })?;
     let pool = database.pool().clone();
     let fenced_pool_floor_pool = pool.clone();
+    migrate_hub_database(&pool).await?;
+    let pending_reload =
+        signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
+            pool.clone(),
+        )
+        .pending()
+        .await
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("configuration_reload_intent_read_failed"),
+            )
+        })?;
+    let retained_startup = pending_reload
+        .first()
+        .map(|(_, intent)| {
+            signalboxd::configuration_reload::ConfigurationReload::startup_snapshot(
+                &on_disk,
+                &intent.replacement_snapshot,
+            )
+        })
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("configuration_reload_snapshot_incompatible"),
+            )
+        })?;
+    let model_configuration = match &retained_startup {
+        Some(catalogs) => (*catalogs.models).clone(),
+        None => HubModelConfiguration::parse(&on_disk).map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::ModelConfiguration(&error),
+            )
+        })?,
+    };
+    if let Some(codex_cli) = model_configuration.codex_cli() {
+        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
+            .await
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
+                )
+            })?;
+    }
+    if configuration.repository_watch_credential_conflicts(&model_configuration) {
+        let error = HubConfigurationError::new(
+            GITHUB_TOKEN_FILE_ENVIRONMENT,
+            RequiredSettingFailure::Conflicts,
+        );
+        return Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Configuration(&error),
+        ));
+    }
+    let daemon_tool_configuration = model_configuration.daemon_tools();
+    let template_configuration = match retained_startup {
+        Some(catalogs) => (*catalogs.templates).clone(),
+        None => SessionTemplateConfiguration::read(
+            configuration.template_configuration_file(),
+            || env::var_os("HOME").map(PathBuf::from),
+            &model_configuration,
+        )
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::TemplateConfiguration(&error),
+            )
+        })?,
+    };
+    if let Some(repository_watch) = model_configuration.repository_watch() {
+        repository_watch
+            .validate_convergence_template(template_configuration.summaries().map(|(name, _)| name))
+            .map_err(|error| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::ModelConfiguration(&error),
+                )
+            })?;
+    }
+    let mut runtime_factory = signalboxd::model_catalog_runtime::ModelRuntimeFactory::new(
+        model_exchange_timeout,
+        post_kill_reap_bound,
+        native_message_limit,
+    );
+    runtime_factory
+        .build(&model_configuration)
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static(error.cause_code()),
+            )
+        })?;
+    let credential_reference =
+        ModelCallCredentialReference::new(model_configuration.fallback_credential_profile());
+    let code_host_credentials = FileCredentialAccess::new(
+        configuration.github_token_file(),
+        CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
+    );
+    let web_search_credentials = FileCredentialAccess::new(
+        configuration.brave_api_key_file(),
+        CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
+    );
+    let code_host_transport = GitHubCodeHostTransport::try_new(code_host_numeric_bounds)
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("github_transport_construction_failed"),
+            )
+        })?
+        .with_convergence_policy(model_configuration.convergence().cloned());
+    let oauth_registrations = model_configuration.oauth_registrations();
+    let root_path = oauth_credential_root(configuration.process_socket_path());
+    let retained_root = match root_path.symlink_metadata() {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => {
+            return Err(erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("oauth_credential_home_recovery_failed"),
+            ));
+        }
+    };
+    let oauth_service = if !oauth_registrations.is_empty() || retained_root {
+        let root = signalbox_model_runtime_codex_cli::OauthCredentialRoot::open(&root_path)
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("oauth_credential_home_recovery_failed"),
+                )
+            })?;
+        let service = Arc::new(
+            signalboxd::OauthCredentialService::new(pool.clone(), oauth_registrations).map_err(
+                |_| {
+                    erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static("oauth_delivery_construction_failed"),
+                    )
+                },
+            )?,
+        );
+        runtime_factory = runtime_factory.with_oauth_delivery(service.clone(), root);
+        Some(service)
+    } else {
+        None
+    };
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
         .map(|configuration| configuration.exec_supervisor_executable().to_path_buf());
@@ -1707,26 +1599,10 @@ async fn run_hub(
     let checkout_runner = tools.process_runner();
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
-    let migration_pool = pool.clone();
+    let migration_oauth_registrations = model_configuration.oauth_registrations();
     let scan_pool = pool.clone();
     let startup = migrate_scan_then_schedule(
-        async move {
-            migrate(&migration_pool).await.map_err(|error| {
-                tracing::error!(
-                    migration_detail = %error,
-                    "database migration rejected"
-                );
-                erase_startup_cause(
-                    RuntimePhase::Migration,
-                    SanitizedStartupCause::Static("database_migration_failed"),
-                )
-            })?;
-            tracing::info!(
-                phase = ?RuntimePhase::Migration,
-                "daemon startup phase completed"
-            );
-            Ok(())
-        },
+        install_oauth_registrations(&pool, &migration_oauth_registrations),
         async move {
             let mut scan = StartupScanService::new(
                 UuidV7StartupScanIdGenerator,
@@ -1771,24 +1647,6 @@ async fn run_hub(
         let _ = database.close().await;
         return Ok(ShutdownOutcome::GuardLost);
     }
-    let configured_convergence_targets =
-        model_configuration
-            .repository_watch()
-            .map_or_else(Vec::new, |configuration| {
-                if configuration.convergence_sweep().is_none() {
-                    return Vec::new();
-                }
-                configuration
-                    .repositories()
-                    .iter()
-                    .flat_map(|repository| {
-                        repository
-                            .convergence_pull_requests()
-                            .iter()
-                            .map(|pull_request| (repository.repository().clone(), *pull_request))
-                    })
-                    .collect()
-            });
     let blob_store_registry = match await_while_guarded(
         &mut database,
         BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone()),
@@ -2030,68 +1888,6 @@ async fn run_hub(
         nudge_buffer_capacity,
     );
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
-    let convergence_sweep_runtime = match model_configuration.repository_watch() {
-        Some(configuration) => match ConvergenceSweepRuntime::try_new(
-            pool.clone(),
-            configuration,
-            template_configuration.clone(),
-            model_configuration.clone(),
-            eligibility_nudge.clone(),
-            convergence_sweep_numeric_bounds,
-        ) {
-            Ok(runtime) => runtime,
-            Err(_) => {
-                let failure = erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static(
-                        "convergence_sweep_transport_construction_failed",
-                    ),
-                );
-                let _ = listener.cleanup();
-                let _ = runner_listener.cleanup();
-                drop(blob_executor);
-                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-                drop(blob_store_registry);
-                let _ = database.close().await;
-                return Err(failure);
-            }
-        },
-        None => None,
-    };
-    let convergence_sweep_store = PostgresConvergenceSweepStore::new(pool.clone());
-    let convergence_target_admission =
-        convergence_sweep_store.reconcile_configured_targets(&configured_convergence_targets);
-    match await_while_guarded(&mut database, convergence_target_admission).await {
-        GuardedAwait::Completed(Ok(restored)) => {
-            for session in restored {
-                let _ = eligibility_nudge.nudge(session);
-            }
-        }
-        GuardedAwait::Completed(Err(_)) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static("convergence_target_admission_failed"),
-            );
-            let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
-            drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
-        }
-        GuardedAwait::GuardLost => {
-            let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
-            if let Some(registry) = blob_store_registry.as_ref() {
-                registry.disarm_staging_sweep();
-            }
-            drop(blob_executor);
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Ok(ShutdownOutcome::GuardLost);
-        }
-    }
     let repository_watch_runtime = {
         let start = async {
             let module_pool = connect_repository_watch_pool(&pool).await?;
@@ -2101,13 +1897,8 @@ async fn run_hub(
             )
             .await
             .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
-            if model_configuration.repository_watch().is_none() {
-                module_pool.close().await;
-                return Ok(None);
-            }
-            RepositoryWatchRuntime::new(
+            Ok::<_, RepositoryWatchRuntimeError>(RepositoryWatchRuntime::unstarted(
                 module_pool,
-                model_configuration.repository_watch().cloned(),
                 RepositoryWatchServices {
                     checkout_runner: checkout_runner.clone(),
                     core_pool: pool.clone(),
@@ -2116,12 +1907,10 @@ async fn run_hub(
                     eligibility_nudge: eligibility_nudge.clone(),
                     tool_dispatch_gate: tool_dispatch_gate.clone(),
                 },
-            )
-            .await
-            .map(Some)
+            ))
         };
         match await_while_guarded(&mut database, start).await {
-            GuardedAwait::Completed(Ok(runtime)) => runtime,
+            GuardedAwait::Completed(Ok(runtime)) => Some(runtime),
             GuardedAwait::Completed(Err(_)) => {
                 let failure = erase_startup_cause(
                     RuntimePhase::Configuration,
@@ -2149,6 +1938,74 @@ async fn run_hub(
         }
     };
     tool_executor = tool_executor.with_blob_executor(blob_executor);
+    let configuration_reload = signalboxd::configuration_reload::ConfigurationReload::new(
+        scheduler_pool.clone(),
+        model_configuration.clone(),
+        template_configuration.clone(),
+        configuration.model_configuration_file().to_path_buf(),
+        configuration.template_configuration_file().to_path_buf(),
+        env::var_os("HOME").map(PathBuf::from),
+    )
+    .map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("configuration_reload_composition_failed"),
+        )
+    })?;
+    let configuration_reload = configuration_reload
+        .with_runtime_factory(runtime_factory.clone())
+        .with_github_tool_credential(configuration.github_token_file());
+    let configuration_reload = match &repository_watch_runtime {
+        Some(watch) => {
+            watch
+                .set_sweep_bounds(convergence_sweep_numeric_bounds)
+                .await;
+            configuration_reload.with_repository_watch(watch.clone())
+        }
+        None => configuration_reload,
+    };
+    let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
+    let repository_watch_worker = match repository_watch_runtime {
+        Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
+        None => None,
+    };
+    let recovery_failure =
+        match await_while_guarded(&mut database, configuration_reload.recover()).await {
+            GuardedAwait::Completed(Ok(())) => None,
+            GuardedAwait::Completed(Err(_)) => Some(Err(erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
+            ))),
+            GuardedAwait::GuardLost => Some(Ok(ShutdownOutcome::GuardLost)),
+        };
+    if let Some(outcome) = recovery_failure {
+        if matches!(outcome, Ok(ShutdownOutcome::GuardLost)) {
+            if let Some(registry) = blob_store_registry.as_ref() {
+                registry.disarm_staging_sweep();
+            }
+        } else {
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+        }
+        let _ = repository_watch_shutdown.send(true);
+        if let Some(worker) = repository_watch_worker {
+            let _ = worker.await;
+        }
+        let _ = listener.cleanup();
+        let _ = runner_listener.cleanup();
+        drop(tool_executor);
+        drop(blob_store_registry);
+        let _ = database.close().await;
+        return outcome;
+    }
+    let recovered_catalogs = configuration_reload.catalogs();
+    let model_configuration = (*recovered_catalogs.models).clone();
+    let template_configuration = (*recovered_catalogs.templates).clone();
+    let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
+        signalboxd::model_catalog_runtime::CatalogContextCompactionModel::new(
+            configuration_reload.catalogs().models,
+            runtime_factory.clone(),
+        ),
+    );
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),
@@ -2157,6 +2014,7 @@ async fn run_hub(
         model_configuration.clone(),
         template_configuration,
     )
+    .with_configuration_reload(configuration_reload.clone())
     .with_context_compaction_model(Arc::clone(&context_compaction_model))
     .with_snapshot_reader_budget(snapshot_reader_budget);
     let process_runtime = match prometheus_runtime.as_ref() {
@@ -2167,77 +2025,111 @@ async fn run_hub(
         Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
         None => process_runtime,
     };
-    let web_http_runtime =
-        web_http_listener.into_runtime(process_runtime.monitor(), eligibility_nudge.clone());
+    let process_runtime = match oauth_service {
+        Some(service) => process_runtime.with_oauth_service(service),
+        None => process_runtime,
+    };
+    let web_http_runtime = web_http_listener
+        .into_runtime(process_runtime.monitor(), eligibility_nudge.clone())
+        .with_configuration_reload(configuration_reload.clone());
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
-    let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
-    let counter = AttachmentPreparingModelCallProvider::for_counting(
-        provider.clone(),
-        scheduler_pool.clone(),
-        blob_store_registry.clone(),
-        model_configuration.provider_input_count_targets(),
-    );
-    let model_repository = PostgresModelCallRepository::new(
-        scheduler_pool.clone(),
-        model_targets,
-        credential_reference,
-    )
-    .with_session_credentials(model_configuration.credential_family_catalog())
-    .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
-    .with_same_credential_attempt_bound(same_credential_attempt_bound)
-    .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
-    .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
-    let provider = AttachmentPreparingModelCallProvider::new(
-        UsageLimitedModelCallProvider::new(provider, &model_configuration),
-        scheduler_pool.clone(),
-        blob_store_registry.clone(),
-    );
-    let reported_usage_compaction = ReportedUsageCompaction::new(
-        StartEligibleTurnRepository::new(scheduler_pool.clone()),
-        model_repository.clone(),
-        tool_catalog.clone(),
-        runtime_models.clone(),
-        model_configuration.clone(),
-        Arc::clone(&context_compaction_model),
-    );
+    let text_deltas = process_runtime.provider_text_delta_sink();
     let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
-    let (execution, fatal_execution) = FatalExecutionSupervisor::new(
-        PostgresProviderModelExecution::new(
+    let (execution_supervisor, fatal_execution) = FatalExecutionSupervisor::new(());
+    let process_runtime =
+        process_runtime.with_recovery_reporter(execution_supervisor.recovery_reporter());
+    let pass_pool = scheduler_pool.clone();
+    let pass_nudge = eligibility_nudge.clone();
+    let pass_blobs = blob_store_registry.clone();
+    let compose_pass = move |model_configuration: &HubModelConfiguration| {
+        let runtime_models = model_configuration.runtime_model_catalog();
+        let runtime = runtime_factory.build(model_configuration)?;
+        let compaction: Arc<dyn ContextCompactionModel> = Arc::new(
+            RuntimeContextCompactionModel::new(runtime.clone(), runtime_models.clone()),
+        );
+        let approval_judge: Arc<dyn ApprovalJudgeModel> = Arc::new(RuntimeApprovalJudgeModel::new(
+            runtime.clone(),
+            runtime_models.clone(),
+        ));
+        let provider = RuntimeModelCallProvider::new(
+            runtime,
+            runtime_models.clone(),
+            diagnostic_model_identity_limit,
+        )
+        .with_text_delta_sink(text_deltas.clone());
+        let counter = AttachmentPreparingModelCallProvider::for_counting(
+            provider.clone(),
+            pass_pool.clone(),
+            pass_blobs.clone(),
+            model_configuration.provider_input_count_targets(),
+        );
+        let model_repository = PostgresModelCallRepository::new(
+            pass_pool.clone(),
+            model_configuration.target_catalog(),
+            credential_reference.clone(),
+        )
+        .with_session_credentials(model_configuration.credential_family_catalog())
+        .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
+        .with_same_credential_attempt_bound(same_credential_attempt_bound)
+        .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
+        .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
+        let provider = AttachmentPreparingModelCallProvider::new(
+            UsageLimitedModelCallProvider::new(provider, model_configuration),
+            pass_pool.clone(),
+            pass_blobs.clone(),
+        );
+        let reported_usage_compaction = ReportedUsageCompaction::new(
+            StartEligibleTurnRepository::new(pass_pool.clone()),
             model_repository.clone(),
-            InProcessAttemptDispatchGate::default(),
-            provider,
-            automatic_tool_round_limit,
-        )
-        .with_tool_loop(tool_dispatch_gate, tool_catalog.clone(), tool_executor)
-        .with_workspace_instructions(workspace_instruction_runtime.clone())
-        .with_approval_judge(
-            approval_judge_model,
-            model_configuration.configured_approval_judge_selection(),
+            tool_catalog.clone(),
+            runtime_models.clone(),
             model_configuration.clone(),
+            compaction.clone(),
+        );
+        let execution = execution_supervisor.with_execution(
+            PostgresProviderModelExecution::new(
+                model_repository.clone(),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                automatic_tool_round_limit,
+            )
+            .with_tool_loop(
+                tool_dispatch_gate.clone(),
+                tool_catalog.clone(),
+                tool_executor.clone(),
+            )
+            .with_workspace_instructions(workspace_instruction_runtime.clone())
+            .with_approval_judge(
+                approval_judge,
+                model_configuration.configured_approval_judge_selection(),
+                model_configuration.clone(),
+            )
+            .with_shutdown_checkpoint(turn_execution_shutdown_receiver.clone()),
+        );
+        Ok::<_, signalboxd::model_catalog_runtime::ModelRuntimeBuildError>(
+            ContextGuardedTurnPass::new(
+                StartEligibleTurnRepository::new(pass_pool.clone()),
+                model_repository,
+                counter,
+                tool_catalog.clone(),
+                runtime_models,
+                model_configuration.clone(),
+                compaction,
+                execution,
+            )
+            .with_reported_usage_compaction(reported_usage_compaction)
+            .with_workspace_instructions(workspace_instruction_runtime.clone())
+            .with_occupancy_recovery(
+                pass_pool.clone(),
+                pass_nudge.clone(),
+                expired_pass_recovery_policy,
+                turn_liveness_persistence_bounds,
+            ),
         )
-        .with_shutdown_checkpoint(turn_execution_shutdown_receiver),
-    );
-    // The connection runtime has no execution role, so it reaches the same
-    // fatal recovery signal through this handle rather than ending an
-    // undecidable durable outcome at the client response.
-    let process_runtime = process_runtime.with_recovery_reporter(execution.recovery_reporter());
-    let activated_pass = ContextGuardedTurnPass::new(
-        StartEligibleTurnRepository::new(scheduler_pool.clone()),
-        model_repository,
-        counter,
-        tool_catalog,
-        runtime_models,
-        model_configuration.clone(),
-        Arc::clone(&context_compaction_model),
-        execution,
-    )
-    .with_reported_usage_compaction(reported_usage_compaction)
-    .with_workspace_instructions(workspace_instruction_runtime)
-    .with_occupancy_recovery(
-        scheduler_pool.clone(),
-        eligibility_nudge.clone(),
-        expired_pass_recovery_policy,
-        turn_liveness_persistence_bounds,
+    };
+    let activated_pass = signalboxd::model_catalog_runtime::CatalogEligibilityPass::new(
+        configuration_reload.clone(),
+        compose_pass,
     );
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),
@@ -2258,7 +2150,8 @@ async fn run_hub(
         model_configuration.clone(),
         eligibility_nudge,
         goal_mode_numeric_bounds,
-    );
+    )
+    .with_configuration_reload(configuration_reload.clone());
     let process_runtime = process_runtime.with_goal_resumption(goal_disposition.clone());
     match goal_disposition
         .reconcile_automatic_resumptions_after_restart()
@@ -2309,8 +2202,6 @@ async fn run_hub(
     let (fenced_pool_floor_shutdown, fenced_pool_floor_shutdown_receiver) = watch::channel(false);
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
-    let (convergence_sweep_shutdown, convergence_sweep_shutdown_receiver) = watch::channel(false);
-    let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
@@ -2345,20 +2236,12 @@ async fn run_hub(
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::WebHttp(web_http_runtime.run(web_http_shutdown_receiver).await)
     });
-    if let Some(convergence_sweep_runtime) = convergence_sweep_runtime {
-        runtime_tasks.spawn(async move {
-            convergence_sweep_runtime
-                .run(convergence_sweep_shutdown_receiver)
-                .await;
-            RuntimeTaskExit::ConvergenceSweep
-        });
-    }
-    if let Some(repository_watch_runtime) = repository_watch_runtime {
+    if let Some(worker) = repository_watch_worker {
         runtime_tasks.spawn(async move {
             RuntimeTaskExit::RepositoryWatch(
-                repository_watch_runtime
-                    .run(repository_watch_shutdown_receiver)
-                    .await,
+                worker
+                    .await
+                    .unwrap_or(Err(RepositoryWatchRuntimeError::RepositoryWorker)),
             )
         });
     }
@@ -2425,12 +2308,6 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
-                    Some(Ok(RuntimeTaskExit::ConvergenceSweep)) => {
-                        report_runtime_task_defect(
-                            RuntimeTaskDefect::ConvergenceSweepCompletedBeforeShutdown,
-                        );
-                        RuntimeStopCause::RuntimeDefect
-                    }
                     Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
                         tracing::error!(?error, "repository-watch runtime failed");
                         RuntimeStopCause::RuntimeFailed
@@ -2485,6 +2362,7 @@ async fn run_hub(
             }
         };
 
+        let _ = repository_watch_shutdown.send(true);
         if cause == RuntimeStopCause::GuardLost {
             runtime_tasks.abort_all();
             while runtime_tasks.join_next().await.is_some() {}
@@ -2495,8 +2373,6 @@ async fn run_hub(
             let _ = fenced_pool_floor_shutdown.send(true);
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
-            let _ = convergence_sweep_shutdown.send(true);
-            let _ = repository_watch_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);
             let _ = lifecycle_deadline_shutdown.send(true);
@@ -2844,11 +2720,10 @@ mod tests {
         ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RequiredSettingFailure,
         RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
         RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
-        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
-        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
-        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
-        fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
-        migrate_scan_then_schedule, openai_construction_cause, operator_filter,
+        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, combine_runtime_stop_cause,
+        completed_runtime_outcome, credential_files_conflict, database_close_failure_outcome,
+        drain_runtime_tasks, erase_startup_cause, fenced_pool_floor_reconciliation_policy,
+        graceful_shutdown_window, migrate_scan_then_schedule, operator_filter,
         process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
         runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
         validate_fenced_pool_min_connections,
@@ -3044,7 +2919,8 @@ mod tests {
         let error = AnthropicConstructionError::InvalidBaseUrl {
             detail: adapter_detail.to_owned(),
         };
-        let cause_code = anthropic_construction_cause(&error);
+        let cause_code =
+            signalboxd::model_catalog_runtime::ModelRuntimeBuildError::from(error).cause_code();
         let encoded = capture_startup_cause(SanitizedStartupCause::Static(cause_code));
         assert!(encoded.contains("anthropic_invalid_base_url"));
         assert!(!encoded.contains(adapter_detail));
@@ -3057,11 +2933,26 @@ mod tests {
             detail: adapter_detail.to_owned(),
         };
 
-        let cause_code = openai_construction_cause(&error);
+        let cause_code =
+            signalboxd::model_catalog_runtime::ModelRuntimeBuildError::from(error).cause_code();
         let encoded = capture_startup_cause(SanitizedStartupCause::Static(cause_code));
 
         assert!(encoded.contains("openai_invalid_base_url"));
         assert!(!encoded.contains(adapter_detail));
+    }
+
+    #[test]
+    fn oauth_startup_recovery_preserves_commit_ambiguity() {
+        use signalbox_persistence::oauth_credential::OauthCredentialRepositoryError;
+        for (error, commit_ambiguous) in [
+            (OauthCredentialRepositoryError::Database, false),
+            (OauthCredentialRepositoryError::CommitAmbiguous, true),
+        ] {
+            assert_eq!(
+                process_runtime_failure_class(&ProcessRuntimeError::OauthRecovery(error)),
+                OperatorFailureClass::Infrastructure { commit_ambiguous }
+            );
+        }
     }
 
     #[test]
@@ -3103,6 +2994,65 @@ mod tests {
         assert_eq!(external_disposition, OperatorFilterDisposition::Rejected);
         assert_eq!(invalid_filter.to_string(), "info");
         assert_eq!(invalid_disposition, OperatorFilterDisposition::Rejected);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn fresh_fenced_database_migrates_before_installing_oauth_catalog()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testcontainers_modules::{
+            postgres::Postgres,
+            testcontainers::{ImageExt, runners::AsyncRunner},
+        };
+        let container = Postgres::default()
+            // Same PostgreSQL image as tests/process_substrate.rs.
+            .with_tag("18.4-alpine3.23")
+            .with_cmd(signalbox_persistence::disposable_postgres_server_args())
+            .with_mount(signalbox_persistence::disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(signalbox_persistence::disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?,
+        );
+        let database = signalboxd::FencedHubDatabase::connect_with(
+            signalbox_persistence::local_test_connection_options(&url)?,
+            None,
+        )
+        .await?;
+        let table: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('oauth_credential_registration')::text")
+                .fetch_one(database.pool())
+                .await?;
+        assert!(
+            table.is_none(),
+            "fencing initializes only its migration baseline"
+        );
+        let registration = signalbox_persistence::oauth_credential::OauthRegistration {
+            client_id: "startup-client".into(),
+            token_url: "https://authorization.example/token".into(),
+            refresh_token_url: "https://authorization.example/oauth/token".into(),
+            device_authorization_url: "https://authorization.example/device".into(),
+            scopes: vec!["openid".into()],
+        };
+        super::migrate_hub_database(database.pool())
+            .await
+            .map_err(|_| "startup migration failed")?;
+        super::install_oauth_registrations(
+            database.pool(),
+            &[("startup-profile".into(), registration)],
+        )
+        .await
+        .map_err(|_| "OAuth startup migration failed")?;
+        let profile: String =
+            sqlx::query_scalar("SELECT profile FROM oauth_credential_registration")
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(profile, "startup-profile");
+        database.close().await?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -3278,6 +3228,68 @@ mod tests {
             configuration.runner_socket_path(),
             std::path::Path::new("/tmp/signalbox-runner.sock")
         );
+    }
+
+    #[test]
+    fn oauth_root_remains_distinct_when_the_socket_ends_in_oauth() {
+        let socket = std::path::Path::new("/tmp/signalbox.oauth");
+        let root = super::oauth_credential_root(socket);
+        assert_ne!(root, socket);
+        assert_eq!(root, std::path::Path::new("/tmp/signalbox.oauth.oauth"));
+        assert_ne!(
+            root,
+            super::oauth_credential_root(std::path::Path::new("/tmp/signalbox.sock"))
+        );
+    }
+
+    #[test]
+    fn runner_socket_cannot_replace_the_oauth_credential_root() {
+        let error = HubConfiguration::from_values(HubConfigurationValues {
+            process_socket_path: Some(OsString::from("/tmp/signalbox.sock")),
+            runner_socket_path: Some(OsString::from("/tmp/signalbox.sock.oauth")),
+            ..hub_configuration_values()
+        })
+        .err()
+        .expect("the OAuth root is a reserved process socket artifact");
+        assert_eq!(
+            error,
+            HubConfigurationError::new(
+                RUNNER_SOCKET_PATH_ENVIRONMENT,
+                RequiredSettingFailure::Conflicts,
+            )
+        );
+    }
+
+    #[test]
+    fn runner_socket_cannot_contain_or_enter_the_oauth_credential_root() {
+        for runner in [
+            "/tmp/oauth-overlap/process.sock.oauth/runner.sock",
+            "/tmp/oauth-overlap",
+        ] {
+            let error = HubConfiguration::from_values(HubConfigurationValues {
+                process_socket_path: Some(OsString::from("/tmp/oauth-overlap/process.sock")),
+                runner_socket_path: Some(OsString::from(runner)),
+                ..hub_configuration_values()
+            })
+            .err()
+            .expect("runner artifacts cannot overlap the OAuth directory");
+            assert_eq!(
+                error,
+                HubConfigurationError::new(
+                    RUNNER_SOCKET_PATH_ENVIRONMENT,
+                    RequiredSettingFailure::Conflicts,
+                ),
+                "{runner}",
+            );
+        }
+        HubConfiguration::from_values(HubConfigurationValues {
+            process_socket_path: Some(OsString::from("/tmp/oauth-overlap/process.sock")),
+            runner_socket_path: Some(OsString::from(
+                "/tmp/oauth-overlap/process.sock.oauth-sibling/runner.sock",
+            )),
+            ..hub_configuration_values()
+        })
+        .expect("a shared name prefix does not overlap directory components");
     }
 
     #[test]
