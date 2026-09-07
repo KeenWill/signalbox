@@ -442,6 +442,5 @@ reaching the owner-private socket is the authority.
   [design](../design/process-protocol.md).
 - Runner creation, status, and recovery requests, and the status read's failure
   evidence: [design](../design/process-protocol.md).
-- Cascade metadata on stop receipts: [design](../design/process-protocol.md).
 - Typed projection of credential-pool exhaustion and of the
   credential-availability wait: [design](../design/process-protocol.md).

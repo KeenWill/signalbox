@@ -164,6 +164,7 @@ where
         request_id,
         session_id,
         request,
+        InputReceiptKind::Submission,
         repository,
         pool,
         eligibility_nudge,
@@ -336,6 +337,7 @@ where
         request_id,
         session_id,
         request,
+        InputReceiptKind::Submission,
         repository,
         pool,
         eligibility_nudge,
@@ -484,6 +486,7 @@ where
         request_id,
         session_id,
         request,
+        InputReceiptKind::Stop,
         repository,
         pool,
         eligibility_nudge,
@@ -491,6 +494,12 @@ where
         model_configuration,
     )
     .await
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum InputReceiptKind {
+    Submission,
+    Stop,
 }
 
 #[expect(
@@ -503,6 +512,7 @@ pub(super) async fn run_submit_input<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     request: SubmitInputRequest,
+    receipt_kind: InputReceiptKind,
     repository: SubmitInputRepository,
     receipt_pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
@@ -512,8 +522,8 @@ pub(super) async fn run_submit_input<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let termination_command = matches!(request.delivery(), DeliveryRequest::Interrupt { .. })
-        .then_some(request.command_id());
+    let termination_command =
+        matches!(receipt_kind, InputReceiptKind::Stop).then_some(request.command_id());
     let mut service = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
         ConfiguredSubmitInputTransaction {
