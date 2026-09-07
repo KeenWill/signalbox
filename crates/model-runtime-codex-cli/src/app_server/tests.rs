@@ -899,6 +899,14 @@ fn consumed_rate_limit_windows_choose_the_latest_reset_with_zero_saturation() {
         ),
         (json!({"primary":{"usedPercent":90,"resetsAt":1100}}), None),
         (
+            json!({"primary":{"usedPercent":99.5,"resetsAt":1100}}),
+            None,
+        ),
+        (
+            json!({"primary":{"usedPercent":100.0,"resetsAt":1100}}),
+            Some(Duration::from_secs(100)),
+        ),
+        (
             json!({"primary":{"usedPercent":100,"resetsAt":1100},"secondary":{"usedPercent":100,"resetsAt":1400}}),
             Some(Duration::from_secs(400)),
         ),
