@@ -2,8 +2,9 @@
 
 Install [Bazelisk](https://github.com/bazelbuild/bazelisk) and a C/C++ compiler
 with the platform development libraries. Bazelisk selects `.bazelversion`;
-`rules_rust` downloads the Rust compiler pinned in `MODULE.bazel`. Update that
-compiler pin together with `rust-toolchain.toml`.
+`rules_rust` downloads the Rust compiler pinned in `MODULE.bazel`. Rust and
+rustfmt share that module's version constant. Renovate groups updates to it with
+`rust-toolchain.toml`; manual toolchain changes update both files.
 
 ```bash
 bazel build //crates/newtype:signalbox_newtype
