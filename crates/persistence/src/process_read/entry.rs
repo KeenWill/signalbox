@@ -27,6 +27,21 @@ pub(super) fn decode_transcript_entry(
     let source_session = session_id_from_uuid(required(row, "source_session_id")?);
     let entry = SemanticTranscriptEntryId::from_uuid(required(row, "semantic_entry_id")?);
     let payload_kind: String = required(row, "payload_kind")?;
+    if payload_kind == "runner_placement_changed" {
+        let revision: Decimal = required(row, "runner_placement_revision")?;
+        let placement_revision = u64::try_from(revision)
+            .ok()
+            .and_then(signalbox_domain::RunnerGeneration::try_from_u64)
+            .ok_or(ProcessReadCorruption::Inconsistent(
+                "placement boundary revision",
+            ))?;
+        return Ok(ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index,
+            source_session,
+            entry,
+            placement_revision,
+        });
+    }
     let origin: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
     let steering_source_turn: Option<Uuid> = row.try_get("steering_source_turn_id")?;
     let failed_turn: Option<Uuid> = row.try_get("failed_turn_id")?;
@@ -491,7 +506,7 @@ pub(super) fn decode_transcript_entry(
 
     if matches!(
         payload_kind.as_str(),
-        "tool_denied" | "tool_closed_by_turn_end"
+        "tool_inadmissible" | "tool_denied" | "tool_closed_by_turn_end"
     ) {
         let Some(request) = tool_result_request else {
             return Err(ProcessReadCorruption::Inconsistent("tool result entry shape").into());
@@ -528,6 +543,22 @@ pub(super) fn decode_transcript_entry(
                     }
                 })
                 .to_string(),
+            }
+        } else if payload_kind == "tool_inadmissible" {
+            let reason: Option<String> = row.try_get("transcript_inadmissible_reason")?;
+            if reason.as_deref() != Some("placement_lost") {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("tool inadmissibility reason").into(),
+                );
+            }
+            ProcessTranscriptEntry::ToolInadmissible {
+                entry_index,
+                source_session,
+                entry,
+                request: ToolRequestId::from_uuid(request),
+                content: String::from(
+                    r#"{"error":{"detail":"placement_lost","kind":"execution_failed"}}"#,
+                ),
             }
         } else {
             ProcessTranscriptEntry::ToolClosed {
@@ -780,6 +811,7 @@ pub(super) fn decode_transcript_entry(
             | "assistant_tool_use"
             | "tool_execution_result"
             | "tool_denied"
+            | "tool_inadmissible"
             | "tool_closed_by_turn_end"
             | "turn_failed"
             | "turn_completed"

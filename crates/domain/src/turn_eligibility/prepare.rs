@@ -289,7 +289,15 @@ pub(super) fn prepare_earliest_queued_activation(
             .latest_compaction_result
             .and_then(|frontier| projection.snapshots.get(&frontier))
             .filter(|latest| seed.is_some_and(|seed| seed.is_semantic_prefix_of(latest)));
-        let base = compacted.or(seed);
+        let base = match projection.base_with_runner_placement(compacted.or(seed)) {
+            Ok(base) => base,
+            Err(()) => {
+                return Err(fail(
+                    projection,
+                    AcceptedInputEligibilityFailure::InternalStartingFrontierDerivationFailed,
+                ));
+            }
+        };
         let snapshot = if let Some(base) = base {
             match base.derive_appending_candidate(
                 identities.starting_frontier,
@@ -346,7 +354,17 @@ pub(super) fn prepare_earliest_queued_activation(
             .latest_compaction_result
             .and_then(|frontier| projection.snapshots.get(&frontier))
             .filter(|latest| terminal_frontier.is_semantic_prefix_of(latest));
-        let base = compacted.unwrap_or(terminal_frontier);
+        let base = match projection
+            .base_with_runner_placement(Some(compacted.unwrap_or(terminal_frontier)))
+        {
+            Ok(Some(base)) => base,
+            _ => {
+                return Err(fail(
+                    projection,
+                    AcceptedInputEligibilityFailure::InternalStartingFrontierDerivationFailed,
+                ));
+            }
+        };
         let snapshot = match base
             .derive_appending_candidate(identities.starting_frontier, starting_references)
         {

@@ -198,10 +198,13 @@ impl CreateSessionRepository {
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
                 | CommandKind::ReloadConfiguration
+                | CommandKind::SessionLifecycle
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
-                | CommandKind::DeleteOauthCredential
-                | CommandKind::SessionLifecycle,
+                | CommandKind::DeleteOauthCredential,
             ) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
@@ -257,10 +260,13 @@ impl CreateSessionRepository {
                     | CommandKind::MintGitRemote
                     | CommandKind::WithdrawGitRemote
                     | CommandKind::ReloadConfiguration
+                    | CommandKind::SessionLifecycle
+                    | CommandKind::ReplaceLostRunner
+                    | CommandKind::AbandonLostRunner
+                    | CommandKind::PromotePendingRunner
                     | CommandKind::ProvisionOauthCredential
                     | CommandKind::ReprovisionOauthCredential
-                    | CommandKind::DeleteOauthCredential
-                    | CommandKind::SessionLifecycle,
+                    | CommandKind::DeleteOauthCredential,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(
@@ -320,10 +326,13 @@ impl CreateSessionRepository {
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
                 | CommandKind::ReloadConfiguration
+                | CommandKind::SessionLifecycle
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
-                | CommandKind::DeleteOauthCredential
-                | CommandKind::SessionLifecycle,
+                | CommandKind::DeleteOauthCredential,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }

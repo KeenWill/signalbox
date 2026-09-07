@@ -7,50 +7,15 @@ from the terminal client's existing `spawn_session` half.
 
 ## Goal
 
-Future implementation of these nine surfaces under protocol version 1 must pair
-each daemon handler with its terminal-client consumer in the same change:
-provisioning an `oauth` credential profile, re-provisioning it after a rejected
-daemon-owned refresh, deleting it, credential-exclusion administration,
-program-run cancellation, runner placement facts, `spawn_session`, cascade
-metadata on stop receipts, and the typed projection of credential-pool
-exhaustion and of the credential-availability wait. The terminal client already
-sends `spawn_session` and validates its receipt, so that surface needs only its
-daemon transaction.
+Future implementation of these surfaces under protocol version 1 must pair each
+daemon handler with its terminal-client consumer in the same change:
+credential-exclusion administration, program-run cancellation, runner placement
+facts, `spawn_session`, cascade metadata on stop receipts, and the typed
+projection of credential-pool exhaustion and of the credential-availability
+wait. The terminal client already sends `spawn_session` and validates its
+receipt, so that surface needs only its daemon transaction.
 
 ## Design
-
-OAuth administration uses the requests and receipts on the
-[spec page](../spec/process-protocol.md). Provisioning and re-provisioning emit
-`oauth_credential_authorization` for the device-authorization exchange owned by
-[configuration and credentials](configuration-and-credentials.md); invalid
-progress fields fail as `device_endpoint_rejected` before progress is emitted.
-Initial provisioning returns `already_provisioned` without starting an exchange
-when the profile holds authorization. Re-provisioning returns `not_provisioned`
-without starting an exchange when no authorization is stored. Only
-re-provisioning replaces authorization; it clears every OAuth delivery-origin
-quarantine, including refresh and tuple-mismatch quarantines, only on success.
-Deletion addresses retained OAuth state by profile identity even when its
-declaration is absent or its delivery is no longer `oauth`. Deletion acquires
-the profile row lock that dispatch holds through the token-copy step, then ends
-its OAuth delivery-origin quarantine and removes stored authorization and cached
-access tokens, preventing future dispatches while retaining any current
-registration and referenced history; a child already holding a copied token
-finishes its invocation. Each profile retains a generation that every deletion
-advances. Provisioning and re-provisioning commit authorization and advance that
-generation atomically only when their starting generation is current and, for
-re-provisioning, authorization is still stored; otherwise the transaction
-records `superseded` without storing authorization. The final transaction also
-revalidates, serialized with catalog replacement, that the profile exists with
-`oauth` delivery and the exchange's canonical OAuth tuple; otherwise it records
-`failed { reason: registration_changed }` without storing authorization. The
-claim retains authorization details before their first emission and while
-pending. An equal request with the same `command_id` reports busy while pending
-and replays those details when available, or returns its stored receipt without
-repeating the exchange or deletion; conflicting reuse is rejected. Startup
-terminalizes each pending provisioning or re-provisioning claim with an
-`abandoned` receipt; another provisioning attempt requires a new `command_id`.
-The credential mutation and terminal receipt commit atomically under the command
-claim protocol in [identity and commands](../spec/identity-and-commands.md).
 
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
@@ -129,10 +94,6 @@ the current state on reconnect. The event family is the extension point for
 later runner facts: a new fact adds a state and its members to this event kind,
 never a second kind. A snapshot's session summary carries the same runner
 object, with connection health present exactly for a pinned placement.
-`replace_lost_runner`, `abandon_lost_runner`, and `promote_pending_runner` are
-planned wire commands whose durable request, replay, and recovery semantics stay
-in [identity-and-commands.md](../spec/identity-and-commands.md) and
-[runner-protocol.md](../spec/runner-protocol.md).
 
 `spawn_session` carries a bounded `task` and the closed relationship object and
 returns `session_spawned { tool_request_id, child_session_id, relationship }`.
@@ -186,10 +147,9 @@ call-free terminal attempt. The endings these shapes project belong to
 daemon decodes `spawn_session` and rejects it without mutation, and no daemon
 path produces `session_spawned`. `runner_state_transition` is an admitted
 version-1 event variant that the daemon projects when the outbox carries a
-runner state transition. The OAuth administration envelopes and progress message
-are admitted version-1 variants. Every other request and message above is
-outside the closed inventories in `crates/process-protocol` until the daemon and
-client implement its surface together.
+runner state transition. Every other request and message above is outside the
+closed inventories in `crates/process-protocol` until the daemon and client
+implement its surface together.
 
 No response code is reserved for an authorization failure, because client
 identity, authentication, authorization, and revocation are undecided.

@@ -170,6 +170,18 @@ impl RunnerEnrollmentId {
 }
 ```
 
+## RunnerEnrollmentRequestId
+
+```rust
+pub struct RunnerEnrollmentRequestId(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl RunnerEnrollmentRequestId {
+    pub const fn from_uuid(value: uuid::Uuid) -> Self;
+    pub const fn as_uuid(&self) -> &uuid::Uuid;
+    pub const fn into_uuid(self) -> uuid::Uuid;
+}
+```
+
 ## RunnerId
 
 ```rust
@@ -212,6 +224,18 @@ impl RunnerLeaseId {
 pub struct WorkspaceManifestId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl WorkspaceManifestId {
+    pub const fn from_uuid(value: uuid::Uuid) -> Self;
+    pub const fn as_uuid(&self) -> &uuid::Uuid;
+    pub const fn into_uuid(self) -> uuid::Uuid;
+}
+```
+
+## RunnerProvisioningAuthorizationId
+
+```rust
+pub struct RunnerProvisioningAuthorizationId(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl RunnerProvisioningAuthorizationId {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
     pub const fn as_uuid(&self) -> &uuid::Uuid;
     pub const fn into_uuid(self) -> uuid::Uuid;
