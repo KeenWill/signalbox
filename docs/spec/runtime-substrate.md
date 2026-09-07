@@ -209,6 +209,16 @@ Each CLI adapter's supported-version constant is only a claim until three
 statements agree: the version pinned for installation, the version the adapter
 covers, and the version actually invoked.
 
+The Codex smoke compares the pin's checked-in schemas for every decoded
+app-server notification, response, and JSON-RPC envelope with the adapter's
+consumed fields, enum members, and required fields. Consumed fields must remain
+decoder-compatible, adapter-required fields must remain required, and turn
+statuses must match. Consumed turn-item discriminators remain required strings;
+agent-message items preserve their consumed fields. Tagged error objects contain
+only their tag. Compatible additions are reported; consumed fields and error
+members must remain present. Committed schema fixtures must match the pinned
+files byte for byte.
+
 The compatibility smokes assert nothing about answer quality.
 
 A smoke's required aggregate gates merge for a pull request that changes the
