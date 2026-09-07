@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_doc_test", "rust_library", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
 
 rust_package(exports = [])
@@ -24,4 +24,9 @@ rust_test(
         "--forbid=unsafe_code",
         "--deny=warnings",
     ],
+)
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_newtype",
 )
