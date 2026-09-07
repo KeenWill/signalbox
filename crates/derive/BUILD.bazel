@@ -1,23 +1,12 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_proc_macro", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_proc_macro")
 
 rust_package()
 
 rust_proc_macro(
     name = "signalbox_derive",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
-    deps = [] + all_crate_deps(normal = True),
 )
 
 rust_test(

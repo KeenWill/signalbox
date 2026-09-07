@@ -1,6 +1,7 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_doc", "rust_library", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
 
 rust_package(exports = [
     "Cargo.toml",
@@ -9,49 +10,25 @@ rust_package(exports = [
 
 rust_library(
     name = "signalbox_web_contract",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
     compile_data = [
         "tests/fixtures/example.json",
         "tests/fixtures/session-closed-rates.json",
     ],
-    crate_features = [],
     crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
-    deps = ["//crates/application:signalbox_application"] + all_crate_deps(normal = True),
+    deps = ["//crates/application:signalbox_application"],
 )
 
 rust_binary(
     name = "generate-web-contract",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
     compile_data = [
         "tests/fixtures/example.json",
         "tests/fixtures/session-closed-rates.json",
     ],
-    crate_features = [],
     crate_root = "src/bin/generate-web-contract.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
     deps = [
         ":signalbox_web_contract",
         "//crates/application:signalbox_application",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_test(

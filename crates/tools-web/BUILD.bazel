@@ -1,32 +1,21 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_library", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_library")
 
 rust_package()
 
 rust_library(
     name = "signalbox_tools_web",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
-    compile_data = [],
-    crate_features = [],
     crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
+    proc_macro_deps = ["//crates/derive:signalbox_derive"],
     deps = [
         "//crates/application:signalbox_application",
         "//crates/domain:signalbox_domain",
         "//crates/egress-transport:signalbox_egress_transport",
         "//crates/model-runtime:signalbox_model_runtime",
         "//crates/tool-contract:signalbox_tool_contract",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_test(
