@@ -258,13 +258,6 @@ pub struct WebSessionRates {
     pub sessions: vec::Vec<WebSessionRate>,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebSessionRates
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebSessionRates where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebSessionRate
@@ -282,13 +275,6 @@ pub struct WebSessionRate {
     pub goal_disposition: option::Option<WebSessionGoalDisposition>,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebSessionRate
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebSessionRate where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebSessionGoalDisposition
@@ -304,13 +290,6 @@ pub enum WebSessionGoalDisposition {
     Superseded,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for WebSessionGoalDisposition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for WebSessionGoalDisposition where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WebSessionCatalogActivity
