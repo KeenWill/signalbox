@@ -16,7 +16,8 @@ Both self-hosted scale sets are managed outside of this repo.
 
 `rust.yml` calls `bazel.yml` for ordinary Rust tests on `signalbox` and all
 manifest PostgreSQL suites on `signalbox-docker`, using the routing expression
-below. `validate` requires the reusable workflow to succeed.
+below. `validate` requires the reusable workflow to succeed. The web job uses
+`signalbox` with the same routing rule and declared browser runtimes and fonts.
 
 ## The routing rule
 
@@ -63,13 +64,12 @@ while the tool-eval and tool-smoke jobs are report-only:
 ## Jobs pinned to GitHub-hosted runners
 
 The runner image has no `sudo` (pods run with `no-new-privileges`), no Nix, no
-`gh` CLI, and no Playwright system dependencies. Jobs needing any of those stay
-hosted for now, although this may change over time.
+`gh` CLI, or host-provided Playwright system dependencies. Jobs needing host
+facilities stay hosted for now, although this may change over time.
 
 | Job                                               | Why                                                   |
 | ------------------------------------------------- | ----------------------------------------------------- |
 | `rust.yml` `workspace-tests`                      | privileged cgroup delegation via `sudo`               |
-| `web.yml` `web`                                   | `sudo` for `playwright install --with-deps`           |
 | `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`             |
 | `devenv-lock.yml` `relock`                        | Nix                                                   |
 | `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix) |

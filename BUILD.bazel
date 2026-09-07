@@ -7,6 +7,7 @@ load("//tooling/bazel:source_manifest.bzl", "source_manifest")
 load("//tooling/bazel:testing.bzl", "rust_coverage_suite", "rust_postgres_suite", "rust_selection_test")
 
 exports_files([
+    ".gitignore",
     ".github/workflows/claude-smoke.yml",
     ".github/workflows/codex-smoke.yml",
     ".cargo/config.toml",
@@ -87,7 +88,7 @@ py_test(
 
 filegroup(
     name = "web_contract_fixtures",
-    srcs = glob(["clients/web/src/generated/web-contract*"]),
+    srcs = ["//clients/web:contract_fixtures"],
     visibility = ["//crates/web-contract:__pkg__"],
 )
 
@@ -630,9 +631,9 @@ test_suite(
     ],
 )
 
-js_library(
+alias(
     name = "web_contract_javascript",
-    srcs = ["clients/web/src/generated/web-contract.mjs"],
+    actual = "//clients/web:contract_javascript",
     visibility = ["//crates/web-contract:__pkg__"],
 )
 
@@ -972,4 +973,10 @@ py_test(
         "tooling/test_summarize_coverage.py",
     ],
     main = "tooling/test_summarize_coverage.py",
+)
+
+js_library(
+    name = "web_gitignore",
+    srcs = [".gitignore"],
+    visibility = ["//clients/web:__pkg__"],
 )

@@ -21,6 +21,12 @@ retain their provisioned Cargo job.
 Coverage runs through Bazel for the workspace and the persistence, daemon, and
 terminal-client PostgreSQL selections. It is report-only, with no threshold.
 
+The web client's lint, typecheck, unit tests, production build, and
+three-browser Playwright checks run as Bazel targets. Packages resolve from the
+npm lockfile; browser runtimes and fonts are checksum-pinned test inputs. These
+results are cacheable without changing the screenshot goldens or their
+tolerances.
+
 ## Design decisions
 
 The checker job runs its Python suites through Bazel with declared Python and
