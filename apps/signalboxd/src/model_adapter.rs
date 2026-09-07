@@ -1149,11 +1149,14 @@ fast_mode = "request_control"
         std::fs::write(
             &executable,
             r#"#!/bin/sh
-cat >/dev/null
-printf '%s\n' '{"type":"thread.started","thread_id":"019c0000-0000-7000-8000-000000000001"}'
-printf '%s\n' '{"type":"turn.started"}'
-printf '%s\n' '{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"{\"outcome\":\"completed\",\"text\":\"<completion-text>\",\"tool_calls\":[]}"}}'
-printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":8,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":4,"reasoning_output_tokens":0}}'
+IFS= read -r initialize
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r initialized
+IFS= read -r thread_start
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-configured"}}}'
+IFS= read -r turn_start
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-configured","status":"inProgress","items":[]}}}'
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-configured","turn":{"id":"turn-configured","status":"completed","items":[{"id":"message-1","type":"agentMessage","text":"{\"outcome\":\"completed\",\"text\":\"<completion-text>\",\"tool_calls\":[]}"}]}}}'
 "#
             .replace("<completion-text>", expected_completion),
         )

@@ -139,9 +139,10 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
 /// complete and the binding smoke tests that same version. That live exchange
 /// is accompanied by a comparison of the pin's checked-in app-server schemas
 /// with the adapter's consumed fields, enum members, and required fields.
-/// Additions are reported; consumed fields and enum members must remain present,
-/// and adapter-required fields must remain required. The runtime does not add a
-/// version-probe process to a model dispatch.
+/// Consumed fields must remain decoder-compatible, adapter-required fields must
+/// remain required, and turn statuses must match. Added fields and error members
+/// are reported; consumed fields and error members must remain present. The
+/// runtime does not add a version-probe process to a model dispatch.
 pub const SUPPORTED_CODEX_CLI_VERSION: &str = env!("SIGNALBOX_CODEX_CLI_VERSION");
 
 const MAX_VERSION_BANNER_BYTES: usize = 4096;

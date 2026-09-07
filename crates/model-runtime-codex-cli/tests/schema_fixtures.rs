@@ -39,34 +39,12 @@ fn strings(value: &Value) -> BTreeSet<&str> {
         .collect()
 }
 
-fn object_shape(expected: &Value, actual: &Value) -> Result<Vec<String>, String> {
-    if !strings(&expected["required"]).is_subset(&strings(&actual["required"])) {
-        return Err(format!(
-            "adapter-required fields no longer required: adapter={} pinned={}",
-            expected["required"], actual["required"]
-        ));
-    }
-    let expected = expected["properties"]
-        .as_object()
-        .expect("adapter object has properties");
-    let actual = actual["properties"]
-        .as_object()
-        .ok_or("pinned object has no properties")?;
-    for field in expected.keys() {
-        if !actual.contains_key(field) {
-            return Err(format!("consumed field removed: {field}"));
-        }
-    }
-    Ok(actual
-        .keys()
-        .filter(|field| !expected.contains_key(*field))
-        .cloned()
-        .collect())
-}
+#[path = "support/schema_shape.rs"]
+mod schema_shape;
 
-fn check_object(label: &str, expected: Value, actual: &Value) {
-    let additions =
-        object_shape(&expected, actual).unwrap_or_else(|error| panic!("{label}: {error}"));
+fn check_object(label: &str, expected: Value, actual: &Value, root: &Value) {
+    let additions = schema_shape::object_shape(&expected, actual, root)
+        .unwrap_or_else(|error| panic!("{label}: {error}"));
     for field in additions {
         println!("{label}: additive field {field}");
     }
@@ -85,41 +63,49 @@ fn pinned_notifications_preserve_consumed_and_adapter_required_fields() {
         "ErrorNotification",
         derived::<frame::ErrorNotification>(),
         &errors,
+        &errors,
     );
     check_object(
         "TurnError",
         derived::<frame::TurnError>(),
         &errors["definitions"]["TurnError"],
+        &errors,
     );
     check_object(
         "TurnCompletedNotification.TurnError",
         derived::<frame::TurnError>(),
         &turns["definitions"]["TurnError"],
+        &turns,
     );
     check_object(
         "TurnCompletedNotification",
         derived::<frame::TurnCompleted>(),
+        &turns,
         &turns,
     );
     check_object(
         "Turn",
         derived::<frame::Turn>(),
         &turns["definitions"]["Turn"],
+        &turns,
     );
     check_object(
         "AccountRateLimitsUpdatedNotification",
         derived::<frame::AccountRateLimitsUpdated>(),
+        &rates,
         &rates,
     );
     check_object(
         "RateLimitSnapshot",
         derived::<frame::RateLimits>(),
         &rates["definitions"]["RateLimitSnapshot"],
+        &rates,
     );
     check_object(
         "RateLimitWindow",
         derived::<frame::RateLimitWindow>(),
         &rates["definitions"]["RateLimitWindow"],
+        &rates,
     );
 }
 
@@ -165,22 +151,19 @@ fn pinned_error_and_turn_enums_preserve_the_adapter_members() {
     let errors = schema("ErrorNotification");
     let turns = schema("TurnCompletedNotification");
     for schema in [&errors, &turns] {
-        check_errors(&schema["definitions"]["CodexErrorInfo"]);
+        check_errors(schema);
     }
     let expected = derived::<frame::TurnStatus>();
-    let additions = enum_members(
-        &strings(&expected["enum"]),
-        &strings(&turns["definitions"]["TurnStatus"]["enum"]),
-    )
-    .expect("turn statuses remain present");
-    for tag in additions {
-        println!("TurnStatus: additive member {tag}");
-    }
+    assert_eq!(
+        strings(&expected["enum"]),
+        strings(&turns["definitions"]["TurnStatus"]["enum"]),
+        "the closed TurnStatus decoder requires the same members"
+    );
 }
 
 fn check_errors(schema: &Value) {
     let expected = variants(&derived::<frame::KnownError>());
-    let actual = variants(schema);
+    let actual = variants(&schema["definitions"]["CodexErrorInfo"]);
     let additions = enum_members(
         &expected.keys().map(String::as_str).collect(),
         &actual.keys().map(String::as_str).collect(),
@@ -191,11 +174,12 @@ fn check_errors(schema: &Value) {
     }
     for (tag, shape) in expected {
         if !shape.is_null() {
-            check_object(&tag, shape.clone(), &actual[&tag]);
+            check_object(&tag, shape.clone(), &actual[&tag], schema);
             check_object(
                 &tag,
                 shape["properties"][&tag].clone(),
                 &actual[&tag]["properties"][&tag],
+                schema,
             );
         }
     }
@@ -207,26 +191,79 @@ fn additions_are_allowed_and_consumed_field_or_requirement_removals_fail() {
     let mut actual = expected.clone();
     actual["properties"]["future"] = serde_json::json!({});
     assert_eq!(
-        object_shape(&expected, &actual),
+        schema_shape::object_shape(&expected, &actual, &actual),
         Ok(vec!["future".to_owned()])
     );
     actual["required"] = serde_json::json!(["id", "future"]);
     assert_eq!(
-        object_shape(&expected, &actual),
+        schema_shape::object_shape(&expected, &actual, &actual),
         Ok(vec!["future".to_owned()])
     );
     actual["required"] = serde_json::json!(["future"]);
-    assert!(object_shape(&expected, &actual).is_err());
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
     actual = expected.clone();
     actual["properties"]
         .as_object_mut()
         .unwrap()
         .remove("optional");
-    assert!(object_shape(&expected, &actual).is_err());
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
     let expected = BTreeSet::from(["known"]);
     assert_eq!(
         enum_members(&expected, &BTreeSet::from(["known", "future"])),
         Ok(vec!["future".to_owned()])
     );
     assert!(enum_members(&expected, &BTreeSet::from(["future"])).is_err());
+}
+
+#[test]
+fn a_new_turn_status_fails_the_consumed_turn_schema_check() {
+    let expected = derived::<frame::TurnCompleted>();
+    let mut actual = schema("TurnCompletedNotification");
+    actual["definitions"]["TurnStatus"]["enum"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("futureStatus"));
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
+}
+
+#[test]
+fn incompatible_consumed_field_types_fail_through_references_and_nullable_variants() {
+    let expected = derived::<frame::ErrorNotification>();
+    let mut actual = schema("ErrorNotification");
+    actual["definitions"]["TurnError"]["properties"]["message"] =
+        serde_json::json!({"type":"integer"});
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
+    let mut actual = schema("ErrorNotification");
+    actual["properties"]["threadId"]["type"] = serde_json::json!(["string", "null"]);
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
+
+    let expected = derived::<frame::KnownError>();
+    let expected_variant = variants(&expected)["httpConnectionFailed"].clone();
+    let document = schema("ErrorNotification");
+    let mut actual =
+        variants(&document["definitions"]["CodexErrorInfo"])["httpConnectionFailed"].clone();
+    actual["properties"]["httpConnectionFailed"]["properties"]["httpStatusCode"]["type"] =
+        serde_json::json!(["string", "null"]);
+    assert!(!schema_shape::compatible(
+        &expected_variant,
+        &expected,
+        &actual,
+        &document
+    ));
+    actual["properties"]["httpConnectionFailed"]["properties"]["httpStatusCode"] =
+        serde_json::json!({"type":["integer","null"],"format":"int64"});
+    assert!(!schema_shape::compatible(
+        &expected_variant,
+        &expected,
+        &actual,
+        &document
+    ));
+    actual["properties"]["httpConnectionFailed"]["properties"]["httpStatusCode"] =
+        serde_json::json!({"type":["integer","null"],"format":"uint8"});
+    assert!(schema_shape::compatible(
+        &expected_variant,
+        &expected,
+        &actual,
+        &document
+    ));
 }

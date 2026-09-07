@@ -41,10 +41,22 @@ pub(crate) enum KnownError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) enum CodexErrorInfo {
     Known(KnownError),
     Unknown { tag: String },
+}
+
+// Unknown error tags use either wire representation; known payloads have their
+// own schema checks.
+#[cfg(test)]
+impl schemars::JsonSchema for CodexErrorInfo {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CodexErrorInfo".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type": ["string", "object"]})
+    }
 }
 
 impl<'de> Deserialize<'de> for CodexErrorInfo {
