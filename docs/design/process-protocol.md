@@ -7,14 +7,15 @@ from the terminal client's existing `spawn_session` half.
 
 ## Goal
 
-Ten surfaces land under protocol version 1, each with its daemon handler and its
-terminal-client consumer in the same change: provisioning an `oauth` credential
-profile, re-provisioning it after a rejected daemon-owned refresh, deleting it,
-credential-exclusion administration, configuration reload, program-run
-cancellation, runner placement facts, `spawn_session`, cascade metadata on stop
-receipts, and the typed projection of credential-pool exhaustion and of the
-credential-availability wait. The terminal client already sends `spawn_session`
-and validates its receipt, so that surface needs only its daemon transaction.
+Future implementation of these ten surfaces under protocol version 1 must pair
+each daemon handler with its terminal-client consumer in the same change:
+provisioning an `oauth` credential profile, re-provisioning it after a rejected
+daemon-owned refresh, deleting it, credential-exclusion administration,
+configuration reload, program-run cancellation, runner placement facts,
+`spawn_session`, cascade metadata on stop receipts, and the typed projection of
+credential-pool exhaustion and of the credential-availability wait. The terminal
+client already sends `spawn_session` and validates its receipt, so that surface
+needs only its daemon transaction.
 
 ## Design
 
@@ -44,7 +45,8 @@ exchange or mutates credential state. Initial provisioning returns
 authorization. Re-provisioning returns `not_provisioned` without starting an
 exchange when no authorization is stored. Only re-provisioning replaces
 authorization; it clears every OAuth delivery-origin quarantine, including
-refresh and tuple-mismatch quarantines, only on success. Deletion ends its
+refresh and tuple-mismatch quarantines, only on success. Deletion acquires the
+profile row lock that dispatch holds through the token-copy step, then ends its
 delivery-origin quarantine and removes stored authorization and cached access
 tokens, preventing future dispatches while retaining the configured registration
 and referenced history; a child already holding a copied token finishes its

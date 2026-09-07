@@ -207,7 +207,10 @@ in the same transaction as the token generation. Every refresh and every
 dispatch compares that stored tuple with the current registration by canonical
 components, under the profile row lock and before any request is formed; a
 mismatch never sends the stored token, the generation quarantines, and recovery
-requires re-provisioning or deletion followed by provisioning.
+requires re-provisioning or deletion followed by provisioning. Dispatch holds
+the profile row lock from its authorization and generation check through copying
+the token into the child's scratch home; deletion acquires that lock before
+removing authorization and cached tokens.
 
 The daemon is the sole refresher. It locks the profile row, reads the stored
 token, and transactionally marks that generation's refresh in progress; the
