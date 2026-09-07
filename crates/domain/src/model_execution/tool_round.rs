@@ -77,6 +77,22 @@ pub(super) fn assemble_tool_round(
                 )
             }
             (
+                AssistantResponsePart::ProviderReasoning(item),
+                ToolResponsePartIdentity::ProviderReasoning { entry },
+            ) => {
+                if !used_entries.insert(entry) {
+                    return Err(ModelCallClosureError::FrontierDerivationFailed);
+                }
+                SemanticTranscriptEntry::from_validated_parts(
+                    entry,
+                    session,
+                    SemanticTranscriptEntryPayload::ProviderReasoning {
+                        producing_call: call.id(),
+                        item: item.clone(),
+                    },
+                )
+            }
+            (
                 AssistantResponsePart::ToolCall(proposal),
                 ToolResponsePartIdentity::ToolCall {
                     entry,
@@ -258,6 +274,22 @@ pub(super) fn assemble_stopped_tool_round(
                     SemanticTranscriptEntryPayload::ProviderCompaction {
                         producing_call: call.id(),
                         block: block.clone(),
+                    },
+                )
+            }
+            (
+                AssistantResponsePart::ProviderReasoning(item),
+                StoppedToolResponsePartIdentity::ProviderReasoning { entry },
+            ) => {
+                if !used_entries.insert(entry) {
+                    return Err(ModelCallClosureError::FrontierDerivationFailed);
+                }
+                SemanticTranscriptEntry::from_validated_parts(
+                    entry,
+                    session,
+                    SemanticTranscriptEntryPayload::ProviderReasoning {
+                        producing_call: call.id(),
+                        item: item.clone(),
                     },
                 )
             }

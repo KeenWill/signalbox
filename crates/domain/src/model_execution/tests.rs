@@ -672,6 +672,72 @@ pub(crate) fn completed_turn_with_provider_compaction_fixture(
     completed
 }
 
+#[test]
+fn reasoning_completion_rejects_compaction_without_retained_iteration_usage() {
+    let execution = in_flight_execution();
+    let compaction = crate::ProviderCompactionBlock::try_new(
+        r#"{"type":"compaction","content":"summary"}"#.to_owned(),
+    )
+    .expect("fixture compaction block is complete");
+    let observation = correlated_observation(
+        &execution,
+        ModelCallTerminalObservation::CompletedWithProviderReasoning {
+            response: vec![AssistantResponsePart::ProviderCompaction(compaction)],
+        },
+    );
+    let result = execution.apply_terminal_observation(
+        observation,
+        ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+            vec![semantic_transcript_entry_id(10)],
+            semantic_transcript_entry_id(12),
+            context_frontier_id(13),
+        )),
+    );
+    assert_eq!(
+        result,
+        Err(ModelCallClosureError::UnexpectedProviderCompaction)
+    );
+}
+
+pub(crate) fn completed_turn_with_provider_reasoning_fixture(
+    value: &str,
+) -> CompletedModelCallTurn {
+    let execution = in_flight_execution();
+    let observation = correlated_observation(
+        &execution,
+        ModelCallTerminalObservation::CompletedWithProviderReasoning {
+            response: vec![
+                AssistantResponsePart::ProviderReasoning(
+                    crate::ProviderReasoningItem::try_new(
+                        r#"{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"opaque"}"#.to_string(),
+                    )
+                    .expect("fixture reasoning item is complete"),
+                ),
+                AssistantResponsePart::Text(
+                    crate::AssistantText::try_new(value.to_owned()).expect("nonempty fixture text"),
+                ),
+            ],
+        },
+    );
+    let outcome = execution
+        .apply_terminal_observation(
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![
+                    semantic_transcript_entry_id(10),
+                    semantic_transcript_entry_id(11),
+                ],
+                semantic_transcript_entry_id(12),
+                context_frontier_id(13),
+            )),
+        )
+        .expect("provider reasoning fixture completion is admissible");
+    let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+        panic!("provider reasoning evidence selects completed outcome");
+    };
+    completed
+}
+
 /// Canonical sealed failure fixture for the existing session-1, turn-3
 /// active execution.
 pub(crate) fn failed_turn_fixture() -> FailedModelCallTurn {

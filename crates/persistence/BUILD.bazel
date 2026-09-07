@@ -1,823 +1,183 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_integration_test", "rust_postgres_test", "rust_unit_test")
 
-exports_files(["Cargo.toml"])
+CRATE_FEATURES = [
+    "postgres-integration",
+    "test-support",
+]
 
-cargo_toml_env_vars(
-    name = "cargo_environment",
-    src = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
+CRATE_PROC_MACRO_DEPS = ["//crates/derive:signalbox_derive"]
 
-extract_cargo_lints(
-    name = "cargo_lints",
-    manifest = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
+TEST_DEPS = [
+    ":signalbox_persistence",
+    "//crates/application:signalbox_application",
+    "//crates/blob-store:signalbox_blob_store",
+    "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
+    "//crates/conversation-import-codex:signalbox_conversation_import_codex",
+    "//crates/domain:signalbox_domain",
+    "//crates/newtype:signalbox_newtype",
+    "//crates/tools-plan:signalbox_tools_plan",
+]
+
+rust_package()
 
 rust_library(
     name = "signalbox_persistence",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
     compile_data = glob(["migrations/*.sql"]) + ["//:config/signalboxd.example.toml"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
+    crate_features = CRATE_FEATURES,
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     deps = [
         "//crates/application:signalbox_application",
         "//crates/blob-store:signalbox_blob_store",
         "//crates/domain:signalbox_domain",
         "//crates/newtype:signalbox_newtype",
         "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
-rust_test(
+rust_postgres_test(
     name = "approval_judge_eval_postgres",
-    size = "large",
-    srcs = ["tests/approval_judge_eval_postgres.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/approval_judge_eval_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "blob_postgres",
-    size = "large",
-    srcs = ["tests/blob_postgres.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/blob_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "conversation_import_postgres",
-    size = "large",
-    srcs = ["tests/conversation_import_postgres.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/conversation_import_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "conversation_listing_postgres",
-    size = "large",
-    srcs = ["tests/conversation_listing_postgres.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/conversation_listing_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "git_remote_authority_postgres",
-    size = "large",
-    srcs = ["tests/git_remote_authority_postgres.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/git_remote_authority_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "goal_postgres",
-    size = "large",
     srcs = ["tests/goal_postgres.rs"] + glob(["tests/support/**/*.rs"]),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/goal_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "imported_session_postgres",
-    size = "large",
     srcs = ["tests/imported_session_postgres.rs"] + glob(["tests/support/**/*.rs"]),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/imported_session_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "imported_conversation_e2e_postgres",
-    size = "large",
     srcs = ["tests/imported_conversation_e2e_postgres.rs"] + glob(["tests/support/**/*.rs"]),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/imported_conversation_e2e_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "search_path_postgres",
-    size = "large",
-    srcs = ["tests/search_path_postgres.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/search_path_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "outbox_decode_postgres",
-    size = "large",
-    srcs = ["tests/outbox_decode_postgres.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/outbox_decode_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "program_journal_postgres",
-    size = "large",
-    srcs = ["tests/program_journal_postgres.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/program_journal_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "postgres_integration",
-    size = "large",
     srcs = glob([
         "tests/postgres_integration/**/*.rs",
         "tests/support/**/*.rs",
     ]),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/postgres_integration/main.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "runner_protocol_postgres",
-    size = "large",
     srcs = glob([
         "tests/runner_protocol_postgres/**/*.rs",
         "tests/support/**/*.rs",
     ]),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/runner_protocol_postgres/main.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "review_workflow_postgres",
-    size = "large",
     srcs = glob([
         "tests/review_workflow_postgres/**/*.rs",
         "tests/support/**/*.rs",
     ]),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/review_workflow_postgres/main.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "session_metadata_postgres",
-    size = "large",
     srcs = ["tests/session_metadata_postgres.rs"] + glob(["tests/support/**/*.rs"]),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/session_metadata_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_postgres_test(
     name = "session_placement_postgres",
-    size = "large",
-    srcs = ["tests/session_placement_postgres.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--test-threads=16",
-    ],
-    compile_data = ["//:tooling/postgres_test_image.rs"],
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/session_placement_postgres.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [
-        "manual",
-        "requires-network",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
 )
 
 test_suite(
@@ -842,80 +202,35 @@ test_suite(
     ],
 )
 
-rust_test(
+rust_unit_test(
     name = "unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":signalbox_persistence",
     crate_features = [
         "default",
         "postgres-integration",
         "test-support",
     ],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
     deps = [
         "//crates/application:signalbox_application",
         "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
         "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-    ] + all_crate_deps(normal_dev = True),
+    ],
 )
 
-filegroup(
-    name = "rust_sources",
-    srcs = glob(["**/*.rs"]),
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
+rust_integration_test(
     name = "importer_conformance_corpus",
     size = "small",
-    srcs = ["tests/importer_conformance_corpus.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--test-threads=16",
-    ],
     compile_data = glob(["tests/fixtures/importer-conformance/*.jsonl"]),
-    crate_features = [
-        "postgres-integration",
-        "test-support",
-    ],
+    crate_features = CRATE_FEATURES,
     crate_root = "tests/importer_conformance_corpus.rs",
     data = glob(["tests/fixtures/importer-conformance/golden/**"]) + ["//:.cargo/config.toml"],
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/persistence"},
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    deps = [
-        ":signalbox_persistence",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
-        "//crates/tools-plan:signalbox_tools_plan",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    deps = TEST_DEPS,
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_persistence",
+    crate_features = CRATE_FEATURES,
 )

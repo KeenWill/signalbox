@@ -870,7 +870,8 @@ impl<C: Clone> EventDecoder<C> {
                         AssistantPart::Text(_)
                         | AssistantPart::Thinking { .. }
                         | AssistantPart::RedactedThinking { .. }
-                        | AssistantPart::ProviderCompaction { .. } => false,
+                        | AssistantPart::ProviderCompaction { .. }
+                        | AssistantPart::ProviderReasoning { .. } => false,
                     }) =>
             {
                 Err(format!("Claude tool choice permits only `{name}`"))
@@ -910,6 +911,9 @@ impl<C: Clone> EventDecoder<C> {
                 AssistantPart::RedactedThinking { data } => Some(AssistantPart::RedactedThinking {
                     data: redact_text(&data),
                 }),
+                AssistantPart::ProviderReasoning { item_json } => {
+                    Some(AssistantPart::ProviderReasoning { item_json })
+                }
                 AssistantPart::ProviderCompaction { block_json } => {
                     Some(AssistantPart::ProviderCompaction { block_json })
                 }

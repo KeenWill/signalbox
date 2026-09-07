@@ -619,6 +619,19 @@ pub enum ProcessTranscriptEntry {
         /// Producing model call.
         model_call: ModelCallId,
     },
+    /// Opaque provider reasoning retained without exposing replay bytes.
+    ProviderReasoning {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Owning turn.
+        turn: TurnId,
+        /// Producing model call.
+        model_call: ModelCallId,
+    },
     /// Assistant tool proposal.
     AssistantToolUse {
         /// Zero-based position in the projected frontier.

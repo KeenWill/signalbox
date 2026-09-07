@@ -13,7 +13,7 @@ use std::time::Duration;
 pub struct OpenAiConfig {
     /// Exact per-model reasoning, fast-mode, and service-tier capabilities.
     pub model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
-    /// Base URL of the API; the adapter appends `/v1/chat/completions`. The
+    /// Base URL of the API; the adapter appends `/v1/responses`. The
     /// scheme must be `https`, except that `http` is admitted for a literal
     /// loopback IP host. User information, query, and fragment are rejected.
     pub base_url: String,
