@@ -732,6 +732,35 @@ async fn refused_response_commits_prior_provider_compaction() -> Result<(), Box<
     assert!(eligible.is_empty());
     assert!(!continuation);
 
+    // Replace the valid compaction suffix to exercise the final-state constraint directly.
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE semantic_transcript_entry
+            SET payload_kind = 'provider_reasoning', assistant_text_value = $2
+          WHERE semantic_entry_id = $1",
+    )
+    .bind(compaction_entry.into_uuid())
+    .bind(r#"{"type":"reasoning","id":"rs_refused","encrypted_content":"opaque"}"#)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let invalid_suffix =
+        sqlx::query("SELECT assert_turn_lifecycle_final_state_without_steering($1)")
+            .bind(fixture.turn.into_uuid())
+            .execute(&pool)
+            .await
+            .expect_err("a refused frontier cannot retain provider reasoning");
+    assert_eq!(
+        invalid_suffix
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into()),
+    );
+
     pool.close().await;
     drop(container);
     Ok(())
@@ -806,6 +835,34 @@ async fn steered_refusal_commits_ordered_provider_compaction_suffix() -> Result<
     };
     assert_eq!(refused.reclassified_pending_steering().len(), 1);
     assert_eq!(refused.reclassified_pending_steering()[0].turn(), successor);
+
+    // Replace the valid compaction suffix to exercise the final-state constraint directly.
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE semantic_transcript_entry
+            SET payload_kind = 'provider_reasoning', assistant_text_value = $2
+          WHERE semantic_entry_id = $1",
+    )
+    .bind(Uuid::from_u128(seed + 20))
+    .bind(r#"{"type":"reasoning","id":"rs_refused","encrypted_content":"opaque"}"#)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let invalid_suffix = sqlx::query("SELECT assert_steering_turn_terminal_final_state($1)")
+        .bind(fixture.turn.into_uuid())
+        .execute(&pool)
+        .await
+        .expect_err("a refused frontier cannot retain provider reasoning");
+    assert_eq!(
+        invalid_suffix
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into()),
+    );
 
     pool.close().await;
     drop(container);

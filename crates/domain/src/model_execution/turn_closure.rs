@@ -42,6 +42,13 @@ pub(super) fn apply_terminal_observation(
         reclassified_pending_steering,
         dangerous_tool_auto_approval,
     } = context;
+    if let ModelCallTerminalObservation::CompletedWithProviderReasoning { response } = &observation
+        && response
+            .iter()
+            .any(|part| matches!(part, AssistantResponsePart::ProviderCompaction(_)))
+    {
+        return Err(ModelCallClosureError::UnexpectedProviderCompaction);
+    }
     let cancellation_proof = match attempt.state() {
         CurrentTurnAttemptState::StopRequested {
             causes: TurnAttemptStopCauses::CancellationOnly { interrupt },
