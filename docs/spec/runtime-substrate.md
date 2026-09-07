@@ -209,6 +209,11 @@ Each CLI adapter's supported-version constant is only a claim until three
 statements agree: the version pinned for installation, the version the adapter
 covers, and the version actually invoked.
 
+The Codex smoke compares the pin's checked-in app-server error, turn-completed,
+and rate-limit notification schemas with the adapter's consumed fields, enum
+members, and required-field sets. Additions are reported; removals and changed
+required sets fail.
+
 The compatibility smokes assert nothing about answer quality.
 
 A smoke's required aggregate gates merge for a pull request that changes the

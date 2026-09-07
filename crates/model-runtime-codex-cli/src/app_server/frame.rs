@@ -3,6 +3,7 @@ use serde_json::Value;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) enum KnownError {
     ContextWindowExceeded,
     SessionBudgetExceeded,
@@ -40,6 +41,7 @@ pub(crate) enum KnownError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) enum CodexErrorInfo {
     Known(KnownError),
     Unknown { tag: String },
@@ -133,6 +135,7 @@ impl CodexErrorInfo {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct TurnError {
     pub(crate) message: String,
     pub(crate) codex_error_info: Option<CodexErrorInfo>,
@@ -140,6 +143,7 @@ pub(crate) struct TurnError {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) enum TurnStatus {
     InProgress,
     Completed,
@@ -148,6 +152,7 @@ pub(crate) enum TurnStatus {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct Turn {
     pub(crate) id: String,
     pub(crate) status: TurnStatus,
@@ -157,6 +162,7 @@ pub(crate) struct Turn {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct TurnCompleted {
     pub(crate) thread_id: String,
     pub(crate) turn: Turn,
@@ -164,6 +170,7 @@ pub(crate) struct TurnCompleted {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct ErrorNotification {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
@@ -273,11 +280,13 @@ pub(crate) enum TextInputKind {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct AccountRateLimitsUpdated {
     pub(crate) rate_limits: RateLimits,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct RateLimits {
     pub(crate) primary: Option<RateLimitWindow>,
     pub(crate) secondary: Option<RateLimitWindow>,
@@ -285,6 +294,7 @@ pub(crate) struct RateLimits {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct RateLimitWindow {
     pub(crate) used_percent: i32,
     pub(crate) resets_at: Option<i64>,
