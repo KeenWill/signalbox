@@ -31,6 +31,9 @@ const MAX_OBSERVATION_REQUESTS: usize = 1_000;
 // GitHub's commit check-run endpoint includes only its 1,000 most recent suites:
 // https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference
 const COMMIT_CHECK_SUITE_LIMIT: usize = 1_000;
+// GitHub caps parameterized workflow-run searches at 1,000 results:
+// https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository
+const WORKFLOW_RUN_SEARCH_LIMIT: u64 = 1_000;
 const THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -58,6 +61,9 @@ pub enum ObservationError {
     },
     CheckSuiteLimitExceeded {
         limit: usize,
+    },
+    WorkflowRunLimitExceeded {
+        limit: u64,
     },
     Request {
         path: String,
@@ -87,6 +93,10 @@ impl fmt::Display for ObservationError {
                 "repository-watch observation {} pull_request={pull_request:?}: {source}",
                 repository.as_str()
             ),
+            Self::WorkflowRunLimitExceeded { limit } => write!(
+                f,
+                "workflow run search exceeds GitHub's {limit}-result limit"
+            ),
             Self::CheckSuiteLimitExceeded { limit } => write!(
                 f,
                 "commit check-run inventory exceeds GitHub's {limit}-suite limit"
@@ -110,7 +120,8 @@ impl Error for ObservationError {
             Self::Request { source, .. } => Some(source),
             Self::InvalidResponse
             | Self::RequestBudgetExceeded { .. }
-            | Self::CheckSuiteLimitExceeded { .. } => None,
+            | Self::CheckSuiteLimitExceeded { .. }
+            | Self::WorkflowRunLimitExceeded { .. } => None,
         }
     }
 }
@@ -458,6 +469,14 @@ async fn pages(
     let mut page = 1_u64;
     loop {
         let (value, next) = read_page(io, &page_path(path, page)).await?;
+        if member == Some("workflow_runs")
+            && value.admit(value["total_count"].as_u64())? > WORKFLOW_RUN_SEARCH_LIMIT
+        {
+            return Err(ObservationError::WorkflowRunLimitExceeded {
+                limit: WORKFLOW_RUN_SEARCH_LIMIT,
+            }
+            .at(&value.path));
+        }
         result.extend(
             value
                 .admit(member.map_or(&*value, |key| &value[key]).as_array())?
@@ -909,7 +928,7 @@ mod tests {
                 {"user": {"login": "unconfigured"}, "content": "-1"}
             ]), false),
             (format!("{root}/actions/runs?head_sha={HEAD}&status=completed&per_page=100&page=1"), json!({
-                "workflow_runs": [{"id": 6, "workflow_id": 5, "name": "CI", "run_attempt": 1, "head_branch": "main",
+                "total_count": 1, "workflow_runs": [{"id": 6, "workflow_id": 5, "name": "CI", "run_attempt": 1, "head_branch": "main",
                     "head_repository": {"full_name": "example/project"},
                     "status": "completed", "conclusion": "success"}]
             }), false),
@@ -921,6 +940,61 @@ mod tests {
                 "pageInfo": {"hasNextPage": false, "endCursor": null}
             }}}}}),
         }
+    }
+
+    #[tokio::test]
+    async fn workflow_search_total_above_githubs_cap_rejects_a_truncated_observation() {
+        let mut io = fixture();
+        let path = format!(
+            "/repos/example/project/actions/runs?head_sha={HEAD}&status=completed&per_page=100&page=1"
+        );
+        io.pages.get_mut(&path).expect("workflow page").0["total_count"] =
+            json!(WORKFLOW_RUN_SEARCH_LIMIT + 1);
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let error = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect_err("capped search is incomplete");
+        assert_eq!(
+            error.to_string(),
+            format!("{path}: workflow run search exceeds GitHub's 1000-result limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_search_exactly_at_githubs_cap_keeps_the_latest_completion() {
+        let mut io = fixture();
+        let root = "/repos/example/project";
+        let path = format!("{root}/actions/runs?head_sha={HEAD}&status=completed");
+        let template =
+            io.pages.get(&page_path(&path, 1)).expect("workflow page").0["workflow_runs"][0]
+                .clone();
+        let runs = (1..=WORKFLOW_RUN_SEARCH_LIMIT)
+            .map(|id| {
+                let mut run = template.clone();
+                run["id"] = json!(id);
+                run
+            })
+            .collect::<Vec<_>>();
+        let chunks = runs.chunks(usize::from(PAGE_SIZE));
+        let page_count = chunks.len();
+        for (index, chunk) in chunks.enumerate() {
+            io.pages.insert(
+                page_path(&path, (index + 1) as u64),
+                (
+                    json!({"total_count": WORKFLOW_RUN_SEARCH_LIMIT, "workflow_runs": chunk}),
+                    index + 1 < page_count,
+                ),
+            );
+        }
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let observed = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect("complete search at the cap");
+        let workflows = observed.observation.state().workflow_runs();
+        assert_eq!(workflows.len(), 1);
+        assert_eq!(workflows[0].id().get(), WORKFLOW_RUN_SEARCH_LIMIT);
     }
 
     #[tokio::test]
@@ -999,9 +1073,10 @@ mod tests {
         first.0["workflow_runs"][0]["run_attempt"] = json!(2);
         older["run_attempt"] = json!(1);
         first.1 = true;
+        first.0["total_count"] = json!(2);
         io.pages.insert(
             path.replace("&page=1", "&page=2"),
-            (json!({"workflow_runs": [older]}), false),
+            (json!({"total_count": 2, "workflow_runs": [older]}), false),
         );
         let repository =
             RepositorySlug::try_new(String::from("example/project")).expect("repository");

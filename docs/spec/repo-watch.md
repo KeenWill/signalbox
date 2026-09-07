@@ -131,10 +131,11 @@ branch and retained pull-request base and same-repository head branches; prior
 completions for those branches remain comparison input. Each observation admits
 at most 1,000 REST and GraphQL requests combined; exhausting that budget rejects
 the incomplete observation. Check inventories exceeding GitHub's 1,000-suite
-commit limit also reject the observation. Failed observations leave the prior
-committed state intact. The daemon starts these tasks, the configured webhook
-listener, and one serialized command worker beside the convergence sweep, and
-drains them before closing its database.
+commit limit and workflow searches exceeding GitHub's 1,000-result cap also
+reject the observation. Failed observations leave the prior committed state
+intact. The daemon starts these tasks, the configured webhook listener, and one
+serialized command worker beside the convergence sweep, and drains them before
+closing its database.
 
 The webhook listener authenticates the configured hook identity, secret, and
 repository before accepting a delivery. An empty resolved webhook secret is
