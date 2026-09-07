@@ -2097,7 +2097,6 @@ async fn run_hub(
             signalboxd::repo_watch_dispatch::scavenge_checkouts(
                 &signalbox_module_repo_watch_v2::RepoWatchStore::new(module_pool.clone()),
                 &pool,
-                &model_configuration,
             )
             .await
             .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;

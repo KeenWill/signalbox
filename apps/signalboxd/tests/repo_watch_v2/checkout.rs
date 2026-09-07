@@ -332,7 +332,7 @@ system_prompt = "Inspect repository activity."
         })
     }
 
-    async fn dispatch(&mut self) {
+    async fn submit_without_lifecycle_settlement(&mut self) {
         let configuration = self
             .sink
             .models
@@ -347,6 +347,10 @@ system_prompt = "Inspect repository activity."
         )
         .await
         .expect("dispatch with checkout");
+    }
+
+    async fn dispatch(&mut self) {
+        self.submit_without_lifecycle_settlement().await;
         let lifecycle = signalbox_ownership_seam::LifecycleEventSource::new(self.core.clone());
         while let Some(event) = lifecycle.next().await.expect("next lifecycle event") {
             self.store
@@ -381,6 +385,22 @@ system_prompt = "Inspect repository activity."
         )
         .expect("derived roots")
         .derived_path(session)
+    }
+
+    fn change_workspace_root(&mut self) -> Result<(), Box<dyn Error>> {
+        let replacement = self._files.path().join("replacement-workspace");
+        git2::Repository::init(&replacement)?;
+        let previous = self
+            .sink
+            .models
+            .daemon_tools()
+            .expect("tools")
+            .workspace_root();
+        self.sink.models = Arc::new(HubModelConfiguration::parse(&self.catalog.replace(
+            previous.to_str().expect("fixture workspace"),
+            replacement.to_str().expect("replacement workspace"),
+        ))?);
+        Ok(())
     }
 
     async fn stop(&mut self, session: SessionId) {
@@ -694,6 +714,7 @@ async fn recovery_fetches_an_existing_checkout_without_cloning_again() -> Result
     // Models a crash after filesystem provisioning but before ledger settlement.
     sqlx::query("UPDATE dispatch_ledger SET checkout_path = NULL, checkout_head_sha = NULL, submission_pending = true WHERE command_id = $1")
         .bind(fixture.command.into_uuid()).execute(&fixture.module).await?;
+    fixture.change_workspace_root()?;
     fixture.dispatch().await;
     assert_eq!(
         *fixture.runner.steps.lock().expect("steps"),
@@ -754,12 +775,12 @@ async fn terminal_session_removes_its_checkout_without_following_tracked_symlink
         .bind(fixture.command.into_uuid())
         .execute(&fixture.module)
         .await?;
-    scavenge_checkouts(&fixture.store, &fixture.core, &fixture.sink.models)
+    scavenge_checkouts(&fixture.store, &fixture.core)
         .await
         .expect("active checkout retained");
     assert!(root.join(".git").is_dir());
     fixture.stop(session).await;
-    scavenge_checkouts(&fixture.store, &fixture.core, &fixture.sink.models)
+    scavenge_checkouts(&fixture.store, &fixture.core)
         .await
         .expect("terminal checkout removed");
     assert!(!root.exists());
@@ -798,11 +819,15 @@ async fn assert_startup_scavenges_interrupted_checkout(
     if retired {
         fixture.runner.bare = fixture.runner.bare.with_file_name("missing.git");
     }
-    fixture.dispatch().await;
-    let session = fixture.session().await;
-    if !retired {
-        fixture.stop(session).await;
-    }
+    fixture.submit_without_lifecycle_settlement().await;
+    let session = fixture
+        .store
+        .dispatch_checkout(fixture.command)
+        .await?
+        .expect("checkout row")
+        .location
+        .expect("retained location")
+        .session;
     // The checkout disposition survived; command follow-up completion did not.
     sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
         .bind(fixture.command.into_uuid())
@@ -811,39 +836,62 @@ async fn assert_startup_scavenges_interrupted_checkout(
     let root = fixture.root(session);
     assert!(root.is_dir());
     let restarted = RepoWatchStore::new(fixture.module.clone());
-    let configuration = HubModelConfiguration::parse(
-        &include_str!("../../../../config/signalboxd.example.toml")
-            .replace(
-                "/usr/local/bin/signalbox-exec-supervisor",
-                std::env::current_exe()?.to_str().expect("test executable"),
-            )
-            .replace(
-                "/srv/signalbox/workspace",
-                fixture
-                    .sink
-                    .models
-                    .daemon_tools()
-                    .expect("tools")
-                    .workspace_root()
-                    .to_str()
-                    .expect("fixture workspace"),
-            ),
-    )?;
-    assert!(configuration.repository_watch().is_none());
-    scavenge_checkouts(&restarted, &fixture.core, &configuration)
-        .await
-        .expect("startup scavenges retired checkout");
-    assert!(!root.exists());
-    let flags: (bool, bool) = sqlx::query_as(
-        "SELECT submission_pending, checkout_removed FROM dispatch_ledger WHERE command_id = $1",
+    if !retired {
+        scavenge_checkouts(&restarted, &fixture.core)
+            .await
+            .expect("active checkout retained before lifecycle settlement");
+        assert!(root.join(".git").is_dir());
+        fixture.stop(session).await;
+    }
+    let unsettled: bool = sqlx::query_scalar(
+        "SELECT created_session_id IS NULL FROM dispatch_ledger WHERE command_id = $1",
     )
     .bind(fixture.command.into_uuid())
     .fetch_one(&fixture.module)
     .await?;
-    assert_eq!(flags, (true, true));
-    scavenge_checkouts(&restarted, &fixture.core, &configuration)
+    assert!(unsettled);
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("startup scavenges retired checkout");
+    assert!(!root.exists());
+    let flags: (bool, bool, bool) = sqlx::query_as(
+        "SELECT submission_pending, checkout_removed, created_session_id IS NULL FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.module)
+    .await?;
+    assert_eq!(flags, (true, true, true));
+    scavenge_checkouts(&restarted, &fixture.core)
         .await
         .expect("repeated startup is idempotent");
+    assert!(restarted.checkout_removal_candidates().await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn cleanup_uses_the_provisioning_root_after_configuration_changes()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let original = fixture.root(session);
+    fixture.change_workspace_root()?;
+    let replacement = fixture.root(session);
+    assert_ne!(original, replacement);
+    std::fs::create_dir_all(&replacement)?;
+    std::fs::write(replacement.join("keep"), "new workspace contents")?;
+    fixture.stop(session).await;
+    let restarted = RepoWatchStore::new(fixture.module.clone());
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("original workspace removed");
+    assert!(!original.exists());
+    assert_eq!(
+        std::fs::read_to_string(replacement.join("keep"))?,
+        "new workspace contents"
+    );
     assert!(restarted.checkout_removal_candidates().await?.is_empty());
     Ok(())
 }
@@ -860,7 +908,7 @@ async fn cleanup_rejects_a_symlink_replacing_the_session_root() -> Result<(), Bo
     std::fs::rename(&root, &retained)?;
     std::os::unix::fs::symlink(&retained, &root)?;
     fixture.stop(session).await;
-    scavenge_checkouts(&fixture.store, &fixture.core, &fixture.sink.models)
+    scavenge_checkouts(&fixture.store, &fixture.core)
         .await
         .expect("unsafe removal remains pending");
     assert!(std::fs::symlink_metadata(&root)?.is_symlink());

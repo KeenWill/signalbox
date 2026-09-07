@@ -24,7 +24,12 @@ use signalbox_persistence::{
     },
 };
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::{
+    ffi::OsString,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::PathBuf,
+    sync::Arc,
+};
 use uuid::Uuid;
 
 /// Submits retained commands with checkout provisioning inside the held creation.
@@ -65,7 +70,7 @@ async fn submit_with_checkout<Runner: signalbox_tools_exec::ProcessRunner>(
     (),
     signalbox_module_repo_watch_v2::dispatch::SubmissionError<RepositoryWatchCommandError>,
 > {
-    scavenge_checkouts(store, &sink.pool, &sink.models)
+    scavenge_checkouts(store, &sink.pool)
         .await
         .map_err(signalbox_module_repo_watch_v2::dispatch::SubmissionError::Sink)?;
     store
@@ -85,13 +90,7 @@ async fn submit_with_checkout<Runner: signalbox_tools_exec::ProcessRunner>(
 pub async fn scavenge_checkouts(
     store: &signalbox_module_repo_watch_v2::RepoWatchStore,
     core: &PgPool,
-    models: &HubModelConfiguration,
 ) -> Result<(), RepositoryWatchCommandError> {
-    let Some(tools) = models.daemon_tools() else {
-        return Ok(());
-    };
-    let roots = crate::daemon_tools::SessionWorkspaceRoots::try_new(tools.workspace_root())
-        .map_err(|_| RepositoryWatchCommandError::CheckoutRemovalFailed)?;
     let checkouts = store
         .checkout_removal_candidates()
         .await
@@ -99,7 +98,7 @@ pub async fn scavenge_checkouts(
     let sessions: Vec<Uuid> = checkouts
         .iter()
         .filter(|checkout| checkout.retired_reason.is_none())
-        .map(|checkout| checkout.session.into_uuid())
+        .map(|checkout| checkout.location.session.into_uuid())
         .collect();
     let terminal: std::collections::BTreeSet<Uuid> = if sessions.is_empty() {
         Default::default()
@@ -112,12 +111,15 @@ pub async fn scavenge_checkouts(
         .into_iter().collect()
     };
     for checkout in checkouts {
-        if checkout.retired_reason.is_none() && !terminal.contains(&checkout.session.into_uuid()) {
+        let session = checkout.location.session;
+        if checkout.retired_reason.is_none() && !terminal.contains(&session.into_uuid()) {
             continue;
         }
-        let roots = roots.clone();
+        let workspace_root = PathBuf::from(OsString::from_vec(checkout.location.workspace_root));
+        let roots = crate::daemon_tools::SessionWorkspaceRoots::try_new(&workspace_root)
+            .map_err(|_| RepositoryWatchCommandError::CheckoutRemovalFailed)?;
         let removal = tokio::task::spawn_blocking(move || {
-            crate::repo_watch_checkout::remove(&roots, checkout.session)
+            crate::repo_watch_checkout::remove(&roots, session)
         })
         .await;
         if !matches!(removal, Ok(Ok(()))) {
@@ -186,15 +188,28 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
             .iter()
             .find(|repository| repository.repository() == checkout.event.repository())
         {
+            let location = match checkout.location {
+                Some(location) => Some(location),
+                None => match self.core.models.daemon_tools() {
+                    Some(tools) => Some(
+                        self.store
+                            .retain_checkout_location(
+                                id,
+                                session,
+                                tools.workspace_root().as_os_str().as_bytes(),
+                            )
+                            .await
+                            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?,
+                    ),
+                    None => None,
+                },
+            };
             let provisioned = async {
-                let tools = self
-                    .core
-                    .models
-                    .daemon_tools()
-                    .ok_or(CheckoutProvisioningFailed::at(CheckoutStep::Configuration))?;
-                let roots =
-                    crate::daemon_tools::SessionWorkspaceRoots::try_new(tools.workspace_root())
-                        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+                let location =
+                    location.ok_or(CheckoutProvisioningFailed::at(CheckoutStep::Configuration))?;
+                let workspace_root = PathBuf::from(OsString::from_vec(location.workspace_root));
+                let roots = crate::daemon_tools::SessionWorkspaceRoots::try_new(&workspace_root)
+                    .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
                 let runner = self
                     .runner
                     .as_mut()
@@ -202,7 +217,7 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 crate::repo_watch_checkout::provision(
                     runner,
                     &roots,
-                    session,
+                    location.session,
                     checkout.event.repository(),
                     context,
                     &crate::repo_watch_credentials::RepositoryWatchClientLoader::new(repository),

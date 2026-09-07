@@ -28,6 +28,13 @@ pub struct DispatchCheckout {
     pub head: Option<CommitSha>,
     pub stop_command: Option<DurableCommandId>,
     pub retired_reason: Option<CheckoutRetirementReason>,
+    pub location: Option<CheckoutLocation>,
+}
+
+/// Provisioning location, independent of lifecycle settlement and current configuration.
+pub struct CheckoutLocation {
+    pub session: SessionId,
+    pub workspace_root: Vec<u8>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -37,12 +44,14 @@ struct CheckoutRow {
     checkout_head_sha: Option<String>,
     checkout_stop_command_id: Option<Uuid>,
     checkout_retired_reason: Option<String>,
+    checkout_workspace_root: Option<Vec<u8>>,
+    checkout_session_id: Option<Uuid>,
 }
 
 /// A checkout whose filesystem removal has not yet settled.
 pub struct CheckoutRemovalCandidate {
     pub command: DurableCommandId,
-    pub session: SessionId,
+    pub location: CheckoutLocation,
     pub retired_reason: Option<String>,
 }
 
@@ -51,9 +60,9 @@ impl RepoWatchStore {
     pub async fn checkout_removal_candidates(
         &self,
     ) -> Result<Vec<CheckoutRemovalCandidate>, StoreError> {
-        let rows: Vec<(Uuid, Uuid, Option<String>)> = sqlx::query_as(
-            "SELECT command_id, created_session_id, checkout_retired_reason FROM dispatch_ledger
-             WHERE created_session_id IS NOT NULL AND NOT checkout_removed
+        let rows: Vec<(Uuid, Uuid, Vec<u8>, Option<String>)> = sqlx::query_as(
+            "SELECT command_id, checkout_session_id, checkout_workspace_root, checkout_retired_reason FROM dispatch_ledger
+             WHERE checkout_session_id IS NOT NULL AND NOT checkout_removed
                AND (checkout_path IS NOT NULL OR checkout_retired_reason IS NOT NULL)",
         )
         .fetch_all(&self.pool)
@@ -61,9 +70,12 @@ impl RepoWatchStore {
         Ok(rows
             .into_iter()
             .map(
-                |(command, session, retired_reason)| CheckoutRemovalCandidate {
+                |(command, session, workspace_root, retired_reason)| CheckoutRemovalCandidate {
                     command: DurableCommandId::from_uuid(command),
-                    session: SessionId::from_uuid(session),
+                    location: CheckoutLocation {
+                        session: SessionId::from_uuid(session),
+                        workspace_root,
+                    },
                     retired_reason,
                 },
             )
@@ -88,12 +100,20 @@ impl RepoWatchStore {
         command: DurableCommandId,
     ) -> Result<Option<DispatchCheckout>, StoreError> {
         let row: Option<CheckoutRow> = sqlx::query_as(
-            "SELECT event.event_id, event.normalized_payload, ledger.checkout_head_sha, ledger.checkout_stop_command_id, ledger.checkout_retired_reason
+            "SELECT event.event_id, event.normalized_payload, ledger.checkout_head_sha, ledger.checkout_stop_command_id, ledger.checkout_retired_reason, ledger.checkout_workspace_root, ledger.checkout_session_id
              FROM dispatch_ledger AS ledger JOIN gh_event AS event ON event.event_id = ledger.event_id
              WHERE ledger.command_id = $1 AND ledger.command_kind = 'create_session'")
             .bind(command.into_uuid()).fetch_optional(&self.pool).await?;
         row.map(|row| {
             Ok(DispatchCheckout {
+                location: match (row.checkout_session_id, row.checkout_workspace_root) {
+                    (Some(session), Some(workspace_root)) => Some(CheckoutLocation {
+                        session: SessionId::from_uuid(session),
+                        workspace_root,
+                    }),
+                    (None, None) => None,
+                    _ => return Err(StoreError::InvalidRetainedCommand),
+                },
                 event: crate::event_decode::event(
                     RepoWatchEventId::from_uuid(row.event_id),
                     &row.normalized_payload,
@@ -120,6 +140,30 @@ impl RepoWatchStore {
             })
         })
         .transpose()
+    }
+
+    /// Pins cleanup identity before filesystem work, retaining it across retries.
+    pub async fn retain_checkout_location(
+        &self,
+        command: DurableCommandId,
+        session: SessionId,
+        workspace_root: &[u8],
+    ) -> Result<CheckoutLocation, StoreError> {
+        let (session, workspace_root): (Uuid, Vec<u8>) = sqlx::query_as(
+            "UPDATE dispatch_ledger
+             SET checkout_session_id = COALESCE(checkout_session_id, $2),
+                 checkout_workspace_root = COALESCE(checkout_workspace_root, $3)
+             WHERE command_id = $1 RETURNING checkout_session_id, checkout_workspace_root",
+        )
+        .bind(command.into_uuid())
+        .bind(session.into_uuid())
+        .bind(workspace_root)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(CheckoutLocation {
+            session: SessionId::from_uuid(session),
+            workspace_root,
+        })
     }
 
     /// Records the checkout at the derived root after Git has checked out its head.
