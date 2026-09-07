@@ -15,7 +15,6 @@ impl OauthCredentialRepository {
         }
         let mut transaction = self.pool.begin().await?;
         if let Some(outcome) = claim(&mut transaction, command).await? {
-            provisioning::commit(transaction).await?;
             return Ok(outcome);
         }
         provisioning::read_catalog(&mut transaction).await?;
