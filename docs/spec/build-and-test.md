@@ -9,9 +9,12 @@ libraries and binaries with all features enabled, including fixture binaries,
 and runs their unit tests, standalone integration targets, and library doctests
 through native Rust actions. Generated JavaScript contract tests use a declared
 Node.js toolchain. Compile-fail diagnostic fixtures use host Cargo and always
-execute. Separate Bazel PostgreSQL suites run the persistence and program-host
-integration binaries with a shared image digest declared as a compilation input.
-File-media format and registry conformance tests use native Bazel targets;
+execute. Bazel PostgreSQL suites run the ignored tests selected by the suite
+manifest, with its features, skips, binary partitions, and shard counts. Each
+manifest shard runs on its own CI worker. Their compilation is cacheable;
+database tests always execute. Daemon PostgreSQL targets use sorted JSON maps.
+The Rust workflow binds the Bazel results to `validate` under its change-scope
+gate. File-media format and registry conformance tests use native Bazel targets;
 process-isolation tests retain their provisioned Cargo job.
 
 ## Design decisions

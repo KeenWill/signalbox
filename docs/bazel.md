@@ -69,20 +69,27 @@ compile-fail sealing proofs. The standalone integration targets include the
 compile-fail diagnostic fixtures, which use the host Cargo environment and
 always execute.
 
-The PostgreSQL suites cover persistence and the JavaScript program host. They
-share the image digest in `tooling/postgres_test_image.rs`, which Renovate
-updates. The image pin, migrations, and example configuration are declared
-compilation inputs. With Docker:
+The PostgreSQL suites read packages, features, skipped test names, binary
+partitions, and shard counts from `.github/postgres-integration-suites.toml`.
+They include ignored library tests and standalone integration binaries. With
+Docker, run a suite by its manifest name (hyphens become underscores):
 
 ```bash
-bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //crates/persistence:postgres_tests
-bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //crates/program-runtime:postgres_tests
+bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //:postgres_persistence
+bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //:postgres_program_runtime
 ```
 
-Each test binary has its own cached result. PostgreSQL targets are manual so
-`//:bazel_tests` remains the non-PostgreSQL suite. The additive `bazel-postgres`
-CI job runs one binary at a time, with 16 test threads per binary; Cargo retains
-the full PostgreSQL gate.
+Daemon PostgreSQL targets use Cargo's sorted JSON map feature selection; the
+workspace dependency graph also serves the program host's insertion-ordered JSON
+requirements.
+
+The shared image digest, migrations, and example configuration are declared
+compilation inputs. PostgreSQL targets are manual and external: compilation is
+cacheable, tests always execute. The runtime partitions libtest's ignored-test
+inventory across each target's manifest-derived shards. CI gives each manifest
+shard its own matrix worker; each worker runs one partition per binary at a time
+with 16 test threads. The Rust workflow calls `bazel.yml` and binds its ordinary
+and PostgreSQL results to `validate` under the Rust change-scope gate.
 
 The checker job runs its eight Python suites with
 `bazel test //:python_checker_tests`. Bazel supplies Python 3.14, packages from

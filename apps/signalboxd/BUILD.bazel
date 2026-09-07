@@ -1,3 +1,4 @@
+load("@postgres_suites//:defs.bzl", "SUITES")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_unit_test")
@@ -8,7 +9,7 @@ CRATE_COMPILE_DATA = [
     "//crates/convergence:examples/repository.toml",
 ]
 
-CRATE_FEATURES = ["test-support"]
+CRATE_FEATURES = SUITES["signalboxd"]["crate_features"]
 
 CRATE_PROC_MACRO_DEPS = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"]
 
@@ -180,8 +181,8 @@ rust_doc_test(
 
 rust_integration_test(
     name = "live_tool_evals",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     compile_data = [
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
@@ -219,8 +220,8 @@ rust_integration_test(
 
 rust_integration_test(
     name = "live_tool_exercise",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     compile_data = [
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
@@ -258,8 +259,8 @@ rust_integration_test(
 
 rust_integration_test(
     name = "offline_reply",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     compile_data = [
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
@@ -297,8 +298,8 @@ rust_integration_test(
 
 rust_integration_test(
     name = "offline_tool_loop",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     compile_data = [
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
@@ -313,6 +314,7 @@ rust_integration_test(
         ":approval-judge-eval",
         ":signalbox-debug",
         ":signalboxd",
+        "//crates/convergence:fixtures",
     ],
     env = {
         "TMPDIR": "/tmp",
@@ -336,8 +338,8 @@ rust_integration_test(
 
 rust_integration_test(
     name = "process_protocol_runtime",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     compile_data = [
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
@@ -352,6 +354,7 @@ rust_integration_test(
         ":approval-judge-eval",
         ":signalbox-debug",
         ":signalboxd",
+        "//:config/session-templates.example.toml",
     ],
     env = {
         "TMPDIR": "/tmp",
@@ -375,8 +378,8 @@ rust_integration_test(
 
 rust_integration_test(
     name = "process_substrate",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     compile_data = [
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
@@ -414,8 +417,8 @@ rust_integration_test(
 
 rust_integration_test(
     name = "repo_watch_v2_postgres",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     compile_data = [
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
@@ -453,8 +456,8 @@ rust_integration_test(
 
 rust_integration_test(
     name = "web_http",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     compile_data = [
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
@@ -492,8 +495,8 @@ rust_integration_test(
 
 rust_integration_test(
     name = "web_session_input",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     compile_data = [
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
