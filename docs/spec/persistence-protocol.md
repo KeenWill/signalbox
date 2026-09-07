@@ -603,6 +603,22 @@ evidence. Rejected staging workspaces retain exact manifest and connection-epoch
 cleanup authority, and a release receipt records completion only under that
 authority.
 
+OAuth provisioning locks its profile and every retained pool co-member in
+reference order, rereads membership, and retries acquisition if membership grew.
+Pool-policy insertion locks every member in the same order. Authorization
+commits take a shared catalog lock; registration replacement takes its exclusive
+counterpart.
+
+OAuth refresh marks the current authorization generation under the profile row
+lock before exchange; replacement of returned tokens and marker clearing commit
+atomically, and recovery rereads the generation and marker. Delivery quarantine
+and its typed failure evidence commit together. Dispatch retains the row lock
+through copying tokens to the child's scratch home. Pool selection locks its
+OAuth profiles before reading quarantine and retains those locks through
+checkpointing. Deletion takes that lock, advances the profile generation,
+removes authorization and cached access, and commits its receipt together while
+retaining registration and history.
+
 ## Planned
 
 - Retiring an unacknowledged workspace release:
@@ -618,5 +634,5 @@ authority.
   [persistence-protocol design](../design/persistence-protocol.md).
 - A producer for the session-state-changed outbox event:
   [persistence-protocol design](../design/persistence-protocol.md).
-- Daemon-owned OAuth material storage:
+- OAuth refresh member-availability wakeups:
   [persistence-protocol design](../design/persistence-protocol.md).
