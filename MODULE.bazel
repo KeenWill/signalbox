@@ -9,6 +9,7 @@ single_version_override(
     patches = [
         "//tooling/bazel:patches/rustfmt-crate-roots.patch",
         "//tooling/bazel:patches/build-script-lints.patch",
+        "//tooling/bazel:patches/coverage-subprocesses.patch",
     ],
 )
 
@@ -131,3 +132,31 @@ http_archive(
     sha256 = "c1e67ef7b17a6300e136118bd1dc04725009cb376c1aad10abcf8cd453628d58",
     urls = ["https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.4-base-amd64.tar.gz"],
 )
+
+bazel_dep(name = "aspect_rules_ts", version = "3.10.1")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+
+pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
+pnpm.pnpm(pnpm_version = "10.34.5")
+use_repo(pnpm, "pnpm")
+
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
+npm.npm_translate_lock(
+    name = "npm",
+    data = [
+        "//clients/web:package.json",
+        "//clients/web:pnpm-workspace.yaml",
+    ],
+    npm_package_lock = "//clients/web:package-lock.json",
+    pnpm_lock = "//clients/web:pnpm-lock.yaml",
+    update_pnpm_lock = True,
+    use_home_npmrc = False,
+)
+use_repo(npm, "npm")
+
+playwright = use_extension("//tooling/bazel:playwright.bzl", "playwright")
+use_repo(playwright, "playwright_runtime")
+
+web_public_repository = use_repo_rule("//tooling/bazel:web_public.bzl", "web_public_repository")
+
+web_public_repository(name = "web_public")

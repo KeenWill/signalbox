@@ -7,10 +7,10 @@ use signalbox_ownership_seam::{
 
 pub(crate) fn observation_payload(
     observation: &RepoWatchObservation,
-    merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
+    merged_baselines: &[crate::ingest::MergedPullRequestBaseline],
 ) -> Value {
     let mut merged_baselines = merged_baselines.iter().collect::<Vec<_>>();
-    merged_baselines.sort_by_key(|baseline| baseline.number());
+    merged_baselines.sort_by_key(|baseline| baseline.state.number());
     json!({
         "signal_reviewers": observation
             .signal_reviewers()
@@ -47,7 +47,11 @@ pub(crate) fn observation_payload(
             .collect::<Vec<_>>(),
         "merged_pull_requests": merged_baselines
             .into_iter()
-            .map(merged_pull_request_payload)
+            .map(|entry| {
+                let mut value = merged_pull_request_payload(&entry.state);
+                value["merged_at"] = json!(entry.merged_at.unix_timestamp());
+                value
+            })
             .collect::<Vec<_>>(),
     })
 }
@@ -282,8 +286,14 @@ mod tests {
     fn merged_baseline_collection_order_is_not_projection_identity() {
         let observation =
             RepoWatchObservation::new(Vec::new(), RepoWatchRepositoryState::default());
-        let first = merged_baseline(1);
-        let second = merged_baseline(2);
+        let first = crate::ingest::MergedPullRequestBaseline {
+            state: merged_baseline(1),
+            merged_at: signalbox_ownership_seam::OffsetDateTime::UNIX_EPOCH,
+        };
+        let second = crate::ingest::MergedPullRequestBaseline {
+            state: merged_baseline(2),
+            merged_at: signalbox_ownership_seam::OffsetDateTime::UNIX_EPOCH,
+        };
 
         assert_eq!(
             observation_payload(&observation, &[first.clone(), second.clone()]),

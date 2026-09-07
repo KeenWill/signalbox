@@ -379,6 +379,28 @@ complete checked replacement and prior reloadable snapshots and the checked
 rule-set digest as durable intent. Template snapshots contain accepted
 prompt-file contents.
 
+Startup reload replay shares the serial request-reload boundary. Reload pauses
+sweep admission and stops and joins active sweep attempts and affected ingestion
+tasks before rule activation and event-tail capture. Only after that activation
+commits does core reconcile convergence targets from the retained intent. On a
+stale or conflicting rule-revision rejection, recovery first validates the prior
+snapshot against the current startup-only sections. If invalid, it terminalizes
+the intent with `configuration_reload_failed` without resuming workers, and
+startup recovery fails. Otherwise it resumes ingestion and sweep admission under
+the prior snapshot before terminalizing the intent with
+`configuration_reload_failed`, without replacing the running configuration.
+Other failures after either stops leave the intent pending until recovery
+installs the replacement snapshot and resumes them before terminalizing the
+claim. The [reload-intent input](ownership-seam.md) delivers rule activation
+only, and the module activates the rules atomically and idempotently by command
+identity and digest. The activation transaction captures each repository's
+current event tail and retains it for idempotent replay. Before replay activates
+any retained effects, startup validates the retained reloadable snapshot
+together with the on-disk startup-only sections; incompatibility fails startup
+and leaves the intent pending. Startup replays any undelivered intent from its
+retained payload even if the configuration files changed, before terminalizing
+its claim.
+
 Success returns `configuration_reloaded { command_id, reloaded_sections }`, with
 exactly `model_catalog`, `session_templates`, and `repo_watch` in that order.
 Failure returns `configuration_reload_failed { command_id, phase, reason }`;
@@ -443,8 +465,6 @@ clears none.
 
 - Credential-exclusion administration, a listing read and a clear mutation over
   active exclusions: [design](../design/process-protocol.md).
-- Repository-watch reload boundary and startup replay:
-  [design](../design/process-protocol.md).
 - Program-run cancellation request and receipt:
   [design](../design/process-protocol.md).
 - Runner creation and status requests, and the status read's failure evidence:

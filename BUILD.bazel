@@ -4,9 +4,10 @@ load("@rules_python//python:defs.bzl", "py_test")
 load("//tooling/bazel:api_documentation.bzl", "api_documentation")
 load("//tooling/bazel:native_generation.bzl", "native_generation")
 load("//tooling/bazel:source_manifest.bzl", "source_manifest")
-load("//tooling/bazel:testing.bzl", "rust_postgres_suite")
+load("//tooling/bazel:testing.bzl", "rust_coverage_suite", "rust_postgres_suite", "rust_selection_test")
 
 exports_files([
+    ".gitignore",
     ".github/workflows/claude-smoke.yml",
     ".github/workflows/codex-smoke.yml",
     ".cargo/config.toml",
@@ -57,6 +58,7 @@ py_test(
 test_suite(
     name = "python_checker_tests",
     tests = [
+        ":test_summarize_coverage",
         ":test_supervise_lifecycle",
         ":test_sweep_test_containers",
         "//scripts:checker_tests",
@@ -86,7 +88,7 @@ py_test(
 
 filegroup(
     name = "web_contract_fixtures",
-    srcs = glob(["clients/web/src/generated/web-contract*"]),
+    srcs = ["//clients/web:contract_fixtures"],
     visibility = ["//crates/web-contract:__pkg__"],
 )
 
@@ -629,9 +631,9 @@ test_suite(
     ],
 )
 
-js_library(
+alias(
     name = "web_contract_javascript",
-    srcs = ["clients/web/src/generated/web-contract.mjs"],
+    actual = "//clients/web:contract_javascript",
     visibility = ["//crates/web-contract:__pkg__"],
 )
 
@@ -674,34 +676,38 @@ rust_postgres_suite(
     },
 )
 
+DAEMON_TEST_BINARIES = {
+    "//apps/signalboxd:unit_tests": "signalboxd",
+    "//apps/signalboxd:signalboxd_unit_tests": "signalboxd",
+    "//apps/signalboxd:approval_judge_eval_unit_tests": "approval-judge-eval",
+    "//apps/signalboxd:signalbox_debug_unit_tests": "signalbox-debug",
+    "//apps/signalboxd:live_tool_evals": "live_tool_evals",
+    "//apps/signalboxd:live_tool_exercise": "live_tool_exercise",
+    "//apps/signalboxd:offline_reply": "offline_reply",
+    "//apps/signalboxd:offline_tool_loop": "offline_tool_loop",
+    "//apps/signalboxd:process_protocol_runtime": "process_protocol_runtime",
+    "//apps/signalboxd:process_substrate": "process_substrate",
+    "//apps/signalboxd:repo_watch_v2_postgres": "repo_watch_v2_postgres",
+    "//apps/signalboxd:web_http": "web_http",
+    "//apps/signalboxd:web_session_input": "web_session_input",
+}
+
 rust_postgres_suite(
     name = "signalboxd",
-    binaries = {
-        "//apps/signalboxd:unit_tests": "signalboxd",
-        "//apps/signalboxd:signalboxd_unit_tests": "signalboxd",
-        "//apps/signalboxd:approval_judge_eval_unit_tests": "approval-judge-eval",
-        "//apps/signalboxd:signalbox_debug_unit_tests": "signalbox-debug",
-        "//apps/signalboxd:live_tool_evals": "live_tool_evals",
-        "//apps/signalboxd:live_tool_exercise": "live_tool_exercise",
-        "//apps/signalboxd:offline_reply": "offline_reply",
-        "//apps/signalboxd:offline_tool_loop": "offline_tool_loop",
-        "//apps/signalboxd:process_protocol_runtime": "process_protocol_runtime",
-        "//apps/signalboxd:process_substrate": "process_substrate",
-        "//apps/signalboxd:repo_watch_v2_postgres": "repo_watch_v2_postgres",
-        "//apps/signalboxd:web_http": "web_http",
-        "//apps/signalboxd:web_session_input": "web_session_input",
-    },
+    binaries = DAEMON_TEST_BINARIES,
     json_preserve_order = False,
 )
 
+CLIENT_TEST_BINARIES = {
+    "//apps/client:unit_tests": "signalbox_client",
+    "//apps/client:signalbox_unit_tests": "signalbox",
+    "//apps/client:chat_end_to_end": "chat_end_to_end",
+    "//apps/client:end_to_end": "end_to_end",
+}
+
 rust_postgres_suite(
     name = "terminal-client",
-    binaries = {
-        "//apps/client:unit_tests": "signalbox_client",
-        "//apps/client:signalbox_unit_tests": "signalbox",
-        "//apps/client:chat_end_to_end": "chat_end_to_end",
-        "//apps/client:end_to_end": "end_to_end",
-    },
+    binaries = CLIENT_TEST_BINARIES,
 )
 
 test_suite(
@@ -913,3 +919,64 @@ test_suite(
 )
 
 exports_files(["clippy.toml"])
+
+rust_selection_test(
+    name = "coverage_isolation_ordinary",
+    args = [],
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+    test = "//crates/file-media-processor-runtime:isolation",
+)
+
+test_suite(
+    name = "coverage_workspace",
+    tags = ["manual"],
+    tests = [
+        ":coverage_isolation_ordinary",
+        ":media_integration_tests",
+        ":rust_integration_tests",
+        ":rust_unit_tests",
+        "//crates/file-media-adapters-audio:adapters",
+        "//crates/tools-exec:bwrap",
+    ],
+)
+
+rust_coverage_suite(
+    name = "coverage_persistence",
+    binaries = PERSISTENCE_TEST_BINARIES.keys(),
+)
+
+rust_coverage_suite(
+    name = "coverage_signalboxd",
+    binaries = DAEMON_TEST_BINARIES.keys(),
+    json_preserve_order = False,
+    skip = [
+        "live_daemon_executes_every_tool_family_and_denies_every_gate",
+        "bridge_build_direct_invocation_fixture",
+        "bridge_wait_",
+    ],
+)
+
+rust_coverage_suite(
+    name = "coverage_terminal_client",
+    binaries = CLIENT_TEST_BINARIES.keys(),
+    skip = ["terminal_client_completes_the_real_anthropic_path"],
+)
+
+py_test(
+    name = "test_summarize_coverage",
+    srcs = [
+        "tooling/summarize_coverage.py",
+        "tooling/test_summarize_coverage.py",
+    ],
+    main = "tooling/test_summarize_coverage.py",
+)
+
+js_library(
+    name = "web_gitignore",
+    srcs = [".gitignore"],
+    visibility = ["//clients/web:__pkg__"],
+)
