@@ -24,7 +24,7 @@ import time
 import unittest
 from pathlib import Path
 
-REPOSITORY = Path(__file__).resolve().parent.parent
+REPOSITORY = Path(__file__).absolute().parent.parent
 SWEEP = REPOSITORY / "tooling" / "sweep-test-containers.sh"
 PERSISTENCE_LIB = REPOSITORY / "crates" / "persistence" / "src" / "lib.rs"
 
@@ -170,13 +170,17 @@ def container_start_sites() -> tuple[list[str], list[str]]:
     later builds its container through `GenericImage`, a shared helper, or
     anything else, and an unmarked start would then pass unnoticed.
     """
-    tracked = subprocess.run(
-        ["git", "ls-files", "-z", "--", "*.rs"],
-        cwd=REPOSITORY,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.split("\0")
+    source_manifest = os.environ.get("SIGNALBOX_RUST_SOURCE_MANIFEST")
+    if source_manifest:
+        tracked = json.loads((REPOSITORY / source_manifest).read_text())
+    else:
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z", "--", "*.rs"],
+            cwd=REPOSITORY,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split("\0")
     sites = []
     unmarked = []
     for name in filter(None, tracked):

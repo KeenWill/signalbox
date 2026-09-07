@@ -1,5 +1,6 @@
 load("@python_deps//:requirements.bzl", "requirement")
 load("@rules_python//python:defs.bzl", "py_test")
+load("//tooling/bazel:source_manifest.bzl", "source_manifest")
 
 exports_files([
     "Cargo.lock",
@@ -37,8 +38,9 @@ py_test(
     srcs = ["tooling/test_sweep_test_containers.py"],
     data = [
         "tooling/sweep-test-containers.sh",
-        "//crates/persistence:src/lib.rs",
+        ":rust_source_manifest",
     ],
+    env = {"SIGNALBOX_RUST_SOURCE_MANIFEST": "$(rootpath :rust_source_manifest)"},
     main = "tooling/test_sweep_test_containers.py",
     tags = ["external"],
 )
@@ -249,4 +251,72 @@ test_suite(
         "//crates/web-contract:generate_web_contract_unit_tests",
         "//crates/web-contract:unit_tests",
     ],
+)
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["tooling/**/*.rs"]) + [
+        "//apps/client:rust_sources",
+        "//apps/signalbox-runner:rust_sources",
+        "//apps/signalboxd:rust_sources",
+        "//crates/application:rust_sources",
+        "//crates/approval-judge-eval:rust_sources",
+        "//crates/blob-store:rust_sources",
+        "//crates/blob-store-filesystem:rust_sources",
+        "//crates/blob-store-s3:rust_sources",
+        "//crates/cargo-bin-resolver:rust_sources",
+        "//crates/convergence:rust_sources",
+        "//crates/conversation-import-claude-code:rust_sources",
+        "//crates/conversation-import-codex:rust_sources",
+        "//crates/conversation-import-json:rust_sources",
+        "//crates/derive:rust_sources",
+        "//crates/domain:rust_sources",
+        "//crates/egress-transport:rust_sources",
+        "//crates/file-media-adapter-archives:rust_sources",
+        "//crates/file-media-adapter-office:rust_sources",
+        "//crates/file-media-adapter-pdf:rust_sources",
+        "//crates/file-media-adapter-svg:rust_sources",
+        "//crates/file-media-adapter-video:rust_sources",
+        "//crates/file-media-adapters-audio:rust_sources",
+        "//crates/file-media-adapters-image:rust_sources",
+        "//crates/file-media-adapters-text:rust_sources",
+        "//crates/file-media-linux-sandbox:rust_sources",
+        "//crates/file-media-processor-runtime:rust_sources",
+        "//crates/file-media-provider-runtime:rust_sources",
+        "//crates/file-media-runtime:rust_sources",
+        "//crates/model-provider-runtime:rust_sources",
+        "//crates/model-reference-catalog:rust_sources",
+        "//crates/model-runtime:rust_sources",
+        "//crates/model-runtime-anthropic:rust_sources",
+        "//crates/model-runtime-claude-cli:rust_sources",
+        "//crates/model-runtime-codex-cli:rust_sources",
+        "//crates/model-runtime-openai:rust_sources",
+        "//crates/modules/repo-watch-v2:rust_sources",
+        "//crates/newtype:rust_sources",
+        "//crates/ownership-seam:rust_sources",
+        "//crates/persistence:rust_sources",
+        "//crates/process-protocol:rust_sources",
+        "//crates/program-runtime:rust_sources",
+        "//crates/runner-wire:rust_sources",
+        "//crates/test-bin:rust_sources",
+        "//crates/tool-contract:rust_sources",
+        "//crates/tool-schema-derive:rust_sources",
+        "//crates/tools-basic:rust_sources",
+        "//crates/tools-code-host:rust_sources",
+        "//crates/tools-conversations:rust_sources",
+        "//crates/tools-exec:rust_sources",
+        "//crates/tools-file-media:rust_sources",
+        "//crates/tools-git:rust_sources",
+        "//crates/tools-github:rust_sources",
+        "//crates/tools-plan:rust_sources",
+        "//crates/tools-sessions:rust_sources",
+        "//crates/tools-web:rust_sources",
+        "//crates/tools-workspace:rust_sources",
+        "//crates/web-contract:rust_sources",
+    ],
+)
+
+source_manifest(
+    name = "rust_source_manifest",
+    srcs = [":rust_sources"],
 )

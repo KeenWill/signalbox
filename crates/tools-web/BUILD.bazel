@@ -59,3 +59,9 @@ rust_test(
     ],
     deps = ["//crates/application:signalbox_application"] + all_crate_deps(normal_dev = True),
 )
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
+)

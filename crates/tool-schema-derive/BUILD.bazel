@@ -53,3 +53,9 @@ rust_test(
     ],
     deps = ["//crates/tool-contract:signalbox_tool_contract"] + all_crate_deps(normal_dev = True),
 )
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
+)
