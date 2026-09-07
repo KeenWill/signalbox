@@ -55,12 +55,14 @@ cacheable. The daemon socket tests also run outside the sandbox to inspect the
 host's real ownership mapping. Other tests declare their fixture files as Bazel
 inputs. Cargo continues to run the integration tests and doctests.
 
-The PostgreSQL suite builds the persistence dependency closure and runs its 16
-PostgreSQL test binaries with a digest-pinned PostgreSQL image. Migrations and
-the example configuration are declared compilation inputs. With Docker:
+The PostgreSQL suites cover persistence and the JavaScript program host. They
+share the image digest in `tooling/postgres_test_image.rs`, which Renovate
+updates. The image pin, migrations, and example configuration are declared
+compilation inputs. With Docker:
 
 ```bash
 bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //crates/persistence:postgres_tests
+bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //crates/program-runtime:postgres_tests
 ```
 
 Each test binary has its own cached result. PostgreSQL targets are manual so

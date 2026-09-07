@@ -70,7 +70,9 @@ mod support;
 
 use support::blocked_backends_reached;
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+#[path = "../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+use postgres_test_image::POSTGRES_IMAGE_TAG;
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test";
 const DATABASE_NAME: &str = "signalbox";

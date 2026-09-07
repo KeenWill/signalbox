@@ -29,7 +29,9 @@ use testcontainers_modules::{
 };
 use uuid::Uuid;
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+#[path = "../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+use postgres_test_image::POSTGRES_IMAGE_TAG;
 const DATABASE_NAME: &str = "signalbox_blob";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";

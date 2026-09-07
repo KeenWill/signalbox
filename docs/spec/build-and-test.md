@@ -6,8 +6,9 @@ Signalbox's build tools compile its crates and verify their contracts.
 
 Cargo runs the full-workspace CI checks. Bazel builds the Rust workspace
 libraries and binaries with all features enabled, including fixture binaries,
-and runs their unit tests through native Rust actions. A separate Bazel
-PostgreSQL suite runs the persistence integration binaries.
+and runs their unit tests through native Rust actions. Separate Bazel PostgreSQL
+suites run the persistence and program-host integration binaries with a shared
+image digest declared as a compilation input.
 
 ## Design decisions
 
