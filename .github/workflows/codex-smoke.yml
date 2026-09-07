@@ -180,6 +180,8 @@ jobs:
         run: >-
           cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli
           --test live_smoke --no-run
+      - name: Check the pinned app-server schemas
+        run: bash tooling/codex-cli/schema/check.sh
       - name: Run credential-free pre-spend probes
         run: |
           set -euo pipefail

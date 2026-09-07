@@ -23,6 +23,7 @@ const TOKEN: &str = "checkout-fixture-token";
 #[derive(Clone)]
 struct LocalGitRunner {
     bare: PathBuf,
+    redirect: Option<String>,
     steps: Arc<Mutex<Vec<String>>>,
 }
 
@@ -55,8 +56,51 @@ impl ProcessRunner for LocalGitRunner {
             .expect("steps lock")
             .push(request.arguments[0].to_string_lossy().into_owned());
         for argument in &mut request.arguments {
-            if argument == "https://github.com/checkout/project.git" {
-                *argument = self.bare.clone().into_os_string();
+            if argument == "https://github.com/checkout/project.git"
+                || argument == "https://github.com/contributor/project.git"
+            {
+                let authorization = tokio::process::Command::new("git")
+                    .args(["config", "--get-urlmatch", "http.extraheader"])
+                    .arg(&argument)
+                    .current_dir(&request.working_directory)
+                    .env_clear()
+                    .envs(&request.environment)
+                    .output()
+                    .await
+                    .expect("resolve Git URL authorization");
+                if argument == "https://github.com/checkout/project.git" {
+                    assert!(authorization.status.success());
+                    assert!(authorization.stdout.starts_with(b"Authorization: Basic "));
+                    let unrelated = tokio::process::Command::new("git")
+                        .args([
+                            "config",
+                            "--get-urlmatch",
+                            "http.extraheader",
+                            "https://github.com/unrelated/project.git",
+                        ])
+                        .current_dir(&request.working_directory)
+                        .env_clear()
+                        .envs(&request.environment)
+                        .output()
+                        .await
+                        .expect("resolve unrelated repository authorization");
+                    assert!(unrelated.stdout.is_empty());
+                } else {
+                    assert!(authorization.stdout.is_empty());
+                    assert_eq!(
+                        request.environment.get(OsStr::new("GIT_CONFIG_VALUE_0")),
+                        Some(&"".into())
+                    );
+                }
+                if let Some(url) = &self.redirect {
+                    *argument = url.into();
+                    request.environment.insert(
+                        "GIT_CONFIG_KEY_0".into(),
+                        format!("http.{url}.extraheader").into(),
+                    );
+                } else {
+                    *argument = self.bare.clone().into_os_string();
+                }
             }
         }
         let output = tokio::process::Command::new(&request.program)
@@ -93,10 +137,15 @@ struct CheckoutFixture {
     runner: LocalGitRunner,
     command: DurableCommandId,
     head: CommitSha,
+    catalog: String,
 }
 
 impl CheckoutFixture {
     async fn new() -> Result<Self, Box<dyn Error>> {
+        Self::with_head_repository("checkout/project").await
+    }
+
+    async fn with_head_repository(head_repository: &str) -> Result<Self, Box<dyn Error>> {
         let (container, core, url) = postgres().await?;
         migrate(&core).await?;
         sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
@@ -139,7 +188,7 @@ impl CheckoutFixture {
                 "/srv/signalbox/workspace",
                 root.to_str().expect("fixture root"),
             );
-        let models = HubModelConfiguration::parse(&format!(
+        let catalog = format!(
             r#"{catalog}
 [repository_watch]
 version = 1
@@ -161,7 +210,8 @@ kind = "dispatch_session"
 template = "watch"
 "#,
             credential.display()
-        ))?;
+        );
+        let models = HubModelConfiguration::parse(&catalog)?;
         let configuration = models
             .repository_watch()
             .expect("repository watch configuration");
@@ -184,7 +234,7 @@ template = "watch"
                                 NonZeroU64::new(1).expect("positive PR number"),
                             ),
                             head_sha: head.clone(),
-                            head_repository: repository.clone(),
+                            head_repository: RepositorySlug::try_new(head_repository.to_owned())?,
                             base_branch: BranchName::try_new(String::from("main"))?,
                             head_branch: BranchName::try_new(String::from("review"))?,
                             title: PullRequestTitle::try_new(String::from(
@@ -275,10 +325,12 @@ system_prompt = "Inspect repository activity."
             },
             runner: LocalGitRunner {
                 bare,
+                redirect: None,
                 steps: Arc::default(),
             },
             command,
             head,
+            catalog,
         })
     }
 
@@ -320,6 +372,195 @@ system_prompt = "Inspect repository activity."
         .expect("created session");
         SessionId::from_uuid(id)
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn authenticated_clone_refuses_a_same_origin_repository_redirect()
+-> Result<(), Box<dyn Error>> {
+    use axum::{http::StatusCode, response::IntoResponse};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let location = format!("{origin}/transferred/project.git/info/refs?service=git-upload-pack");
+    let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let recorded = recorded.clone();
+        let location = location.clone();
+        async move {
+            recorded.lock().expect("requests").push((
+                request.uri().path().to_owned(),
+                request.headers().contains_key("authorization"),
+            ));
+            if request.uri().path().starts_with("/checkout/") {
+                (StatusCode::FOUND, [("location", location)]).into_response()
+            } else {
+                StatusCode::UNAUTHORIZED.into_response()
+            }
+        }
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.runner.redirect = Some(format!("{origin}/checkout/project.git"));
+    fixture.dispatch().await;
+    server.abort();
+    assert_eq!(
+        *requests.lock().expect("requests"),
+        [(String::from("/checkout/project.git/info/refs"), true)],
+    );
+    let failure: (String, String) = sqlx::query_as(
+        "SELECT checkout_retired_reason, checkout_failure_step FROM dispatch_ledger WHERE command_id = $1",
+    ).bind(fixture.command.into_uuid()).fetch_one(&fixture.module).await?;
+    assert_eq!(
+        failure,
+        (
+            String::from("checkout_provisioning_failed"),
+            String::from("clone")
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn replay_preserves_a_provisioned_session_after_repository_removal()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
+    fixture.sink.models = Arc::new(HubModelConfiguration::parse(
+        &fixture.catalog.replace("checkout/project", "other/project"),
+    )?);
+    std::fs::remove_file(fixture._files.path().join("poll-token"))?;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.dispatch().await;
+    let ledger: (String, Option<String>, bool) = sqlx::query_as(
+        "SELECT checkout_head_sha, checkout_retired_reason, submission_pending FROM dispatch_ledger WHERE command_id = $1",
+    ).bind(fixture.command.into_uuid()).fetch_one(&fixture.module).await?;
+    assert_eq!(ledger, (fixture.head.as_str().to_owned(), None, false));
+    let state: (bool, bool) = sqlx::query_as(
+        "SELECT state_kind = 'terminal', start_gate_held FROM session_lifecycle WHERE session_id = $1",
+    ).bind(session.into_uuid()).fetch_one(&fixture.core).await?;
+    assert_eq!(state, (false, true));
+    assert_eq!(
+        *fixture.runner.steps.lock().expect("steps"),
+        ["clone", "fetch", "checkout"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn recovery_terminalizes_an_unconfigured_repository_without_a_sticky_stop()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = CheckoutFixture::new().await?;
+    let original_models = fixture.sink.models.clone();
+    fixture.sink.models = Arc::new(HubModelConfiguration::parse(
+        &fixture.catalog.replace("checkout/project", "other/project"),
+    )?);
+    let configuration = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("configuration");
+    fixture
+        .store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                configuration.repositories()[0].repository(),
+                configuration.rules(),
+            )],
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+    std::fs::remove_file(fixture._files.path().join("poll-token"))?;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let disposition: (String, String, String, bool, Uuid) = sqlx::query_as(
+        "SELECT repository, status, checkout_retired_reason, submission_pending, checkout_stop_command_id
+         FROM dispatch_ledger WHERE command_id = $1",
+    ).bind(fixture.command.into_uuid()).fetch_one(&fixture.module).await?;
+    assert_eq!(disposition.0, "checkout/project");
+    assert_eq!(disposition.1, "applied");
+    assert_eq!(disposition.2, "repository_unconfigured");
+    assert!(!disposition.3);
+    let state: (String, String, bool, bool) = sqlx::query_as(
+        "SELECT state_kind, terminal_outcome_kind, terminal_stop_sticky, start_gate_held
+         FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(
+        state,
+        (
+            String::from("terminal"),
+            String::from("stopped"),
+            false,
+            true
+        )
+    );
+    assert!(fixture.runner.steps.lock().expect("steps").is_empty());
+    assert!(
+        fixture
+            .store
+            .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+            .await?
+            .is_empty()
+    );
+
+    // Replay a submission follow-up after configuration reintroduces the repository.
+    // The retained terminal reason must still select the original non-sticky command.
+    sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
+    fixture.sink.models = original_models;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.dispatch().await;
+    assert_eq!(fixture.session().await, session);
+    let stop: (Uuid, String) = sqlx::query_as(
+        "SELECT checkout_stop_command_id, checkout_retired_reason FROM dispatch_ledger WHERE command_id = $1",
+    ).bind(fixture.command.into_uuid()).fetch_one(&fixture.module).await?;
+    assert_eq!(
+        stop,
+        (disposition.4, String::from("repository_unconfigured"))
+    );
+    let stops: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM session_lifecycle_command WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&fixture.core)
+            .await?;
+    assert_eq!(stops, 1);
+    assert!(fixture.runner.steps.lock().expect("steps").is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn fork_heads_are_fetched_without_the_watched_repository_credential()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = CheckoutFixture::with_head_repository("contributor/project").await?;
+    fixture.dispatch().await;
+    let roots = SessionWorkspaceRoots::try_new(
+        fixture
+            .sink
+            .models
+            .daemon_tools()
+            .expect("tools")
+            .workspace_root(),
+    )?;
+    let checkout = git2::Repository::open(roots.derived_path(fixture.session().await))?;
+    assert_eq!(
+        checkout.head()?.target().expect("head").to_string(),
+        fixture.head.as_str()
+    );
+    Ok(())
 }
 
 #[tokio::test]

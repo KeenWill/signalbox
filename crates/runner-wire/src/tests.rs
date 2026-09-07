@@ -14,7 +14,7 @@ const ARBITRARY_UUID_F: &str = "00000000-0000-4000-8000-000000000006";
 const ARBITRARY_UUID_G: &str = "00000000-0000-4000-8000-000000000007";
 const ARBITRARY_UUID_H: &str = "00000000-0000-4000-8000-000000000008";
 const EXPECTED_ADVERTISEMENT_DIGEST: &str =
-    "d2cfb8a873b962f27dab0882992b14e194bf441c7002e00a237d6ed0f32fd187";
+    "083656c2f2cc5b8ce6da8c6f0a93b2cfe0f837a1fae8dc7cb3e4d1bf48897c98";
 const EXPECTED_CLONE_URL_DIGEST: &str =
     "1a65f9f5977dc0dcfaae9165099f5639eaa3562991fa3242153f363c868ce930";
 const EXPECTED_MANIFEST_DIGEST: &str =
@@ -101,6 +101,7 @@ fn release_correlation() -> ReleaseCorrelation {
 
 fn advertisement() -> Advertisement {
     Advertisement {
+        default_working_directory: None,
         capability_classes: vec![capability("workstation")],
         tools: vec![tool("git_fetch")],
         workspace_capabilities: vec![WorkspaceCapability::WorktreePerSession],
@@ -595,6 +596,7 @@ fn manifest_rejects_abbreviated_revision() {
 fn ready_frame_rejects_manifest_digest_disagreement() {
     let invalid = Message::WorkspaceReady(WorkspaceReady {
         correlation: provision_correlation(),
+        working_directory: "/workspace/ready".to_owned(),
         ready: ReadyManifest {
             manifest: manifest(),
             manifest_digest: digest(EXPECTED_ADVERTISEMENT_DIGEST),
@@ -613,6 +615,7 @@ fn ready_frame_rejects_nondeterministic_relative_path() {
         .unwrap_or_else(|error| panic!("changed manifest digests: {error}"));
     let invalid = Message::WorkspaceReady(WorkspaceReady {
         correlation: provision_correlation(),
+        working_directory: "/workspace/ready".to_owned(),
         ready: ReadyManifest {
             manifest: ready_manifest,
             manifest_digest,
@@ -639,6 +642,28 @@ fn advertisement_digest_preimage_is_pinned() {
         .unwrap_or_else(|error| panic!("advertisement digests: {error}"));
 
     assert_eq!(actual.as_str(), EXPECTED_ADVERTISEMENT_DIGEST);
+}
+
+#[test]
+fn advertisement_binds_and_round_trips_the_runner_default_directory() {
+    let mut successor = advertisement();
+    successor.default_working_directory = Some("/workspace/successor".to_owned());
+    let domain = successor
+        .clone()
+        .try_into_domain()
+        .expect("absolute runner directory");
+    assert_eq!(
+        Advertisement::try_from(&domain).expect("checked advertisement"),
+        successor
+    );
+    let digest = advertisement_digest(&successor).expect("checked directory digest");
+    successor.default_working_directory = Some("/workspace/predecessor".to_owned());
+    assert_ne!(
+        advertisement_digest(&successor).expect("distinct directory digest"),
+        digest
+    );
+    successor.default_working_directory = Some("relative/path".to_owned());
+    assert!(successor.validate().is_err());
 }
 
 #[test]
@@ -703,6 +728,7 @@ fn ready_frame_rejects_manifest_correlation_disagreement() {
         .unwrap_or_else(|error| panic!("changed manifest digests: {error}"));
     let invalid = Message::WorkspaceReady(WorkspaceReady {
         correlation: provision_correlation(),
+        working_directory: "/workspace/ready".to_owned(),
         ready: ReadyManifest {
             manifest: ready_manifest,
             manifest_digest: digest,

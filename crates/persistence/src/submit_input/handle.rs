@@ -100,6 +100,9 @@ where
             | CommandKind::ProvisionOauthCredential
             | CommandKind::ReprovisionOauthCredential
             | CommandKind::DeleteOauthCredential
+            | CommandKind::ReplaceLostRunner
+            | CommandKind::AbandonLostRunner
+            | CommandKind::PromotePendingRunner
             | CommandKind::SessionLifecycle,
         ) => {
             return Ok(TransactionDecision::Rollback(
@@ -152,6 +155,9 @@ where
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner
                 | CommandKind::SessionLifecycle,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },

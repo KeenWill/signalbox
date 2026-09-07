@@ -6,6 +6,7 @@ use super::*;
 pub struct ProcessRuntime {
     configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     recovery_reporter: Option<FatalRecoveryReporter>,
+    oauth_service: Option<Arc<crate::OauthCredentialService>>,
     listener: LocalProcessListener,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
@@ -28,6 +29,12 @@ pub(super) struct ProcessFanouts {
 }
 
 impl ProcessRuntime {
+    /// Shares model dispatch's OAuth cache with credential administration.
+    pub fn with_oauth_service(mut self, service: Arc<crate::OauthCredentialService>) -> Self {
+        self.oauth_service = Some(service);
+        self
+    }
+
     /// Composes the guarded listener, fenced database, nudge, and static models.
     pub fn new(
         listener: LocalProcessListener,
@@ -65,6 +72,7 @@ impl ProcessRuntime {
         Self {
             configuration_reload: None,
             recovery_reporter: None,
+            oauth_service: None,
             listener,
             pool,
             eligibility_nudge,
@@ -161,10 +169,22 @@ impl ProcessRuntime {
     /// Serves requests and dispatches durable updates until `shutdown` changes
     /// to true or its sender closes.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), ProcessRuntimeError> {
+        let oauth = signalbox_persistence::oauth_credential::OauthCredentialRepository::new(
+            self.pool.clone(),
+        );
+        oauth
+            .abandon_pending()
+            .await
+            .map_err(ProcessRuntimeError::OauthRecovery)?;
+        oauth
+            .replace_registrations(&self.model_configuration.oauth_registrations())
+            .await
+            .map_err(ProcessRuntimeError::OauthRecovery)?;
         let fanouts = self.fanouts;
         let connection_dependencies = ConnectionDependencies {
             configuration_reload: self.configuration_reload,
             recovery_reporter: self.recovery_reporter,
+            oauth_service: self.oauth_service,
             pool: self.pool.clone(),
             eligibility_nudge: self.eligibility_nudge.clone(),
             tool_dispatch_gate: self.tool_dispatch_gate,

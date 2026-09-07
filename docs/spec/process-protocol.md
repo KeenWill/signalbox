@@ -411,6 +411,15 @@ no control characters. A pending reload returns `unavailable` with the message
 `reload-configuration` with optional `--command-id` for retries and prints the
 installed sections or failure phase and reason.
 
+`replace_lost_runner` and `abandon_lost_runner` carry the command and session
+identities; replacement also carries a nullable complete checkout revision.
+`promote_pending_runner` carries the command identity and pending enrollment
+request identity. Each returns a correlated closed terminal receipt, and equal
+pending replacement replay waits on the same durable operation. The terminal
+client exposes `runner replace <session> [--revision <sha>]`,
+`runner abandon <session>`, and `runner promote <enrollment-request-id>`, with
+an optional `--command-id` for replay.
+
 OAuth administration has three requests, `provision_oauth_credential`,
 `reprovision_oauth_credential`, and `delete_oauth_credential`, each carrying
 `profile` and a user-global `command_id`. The terminal client exposes them as
@@ -420,24 +429,46 @@ OAuth administration has three requests, `provision_oauth_credential`,
 absolute HTTPS URI without user information or fragment, at most 4,096 UTF-8
 bytes. The terminal receipt is
 `oauth_credential_receipt { command_id, profile, outcome }`; its closed outcome
-and failure vocabulary live in `crates/process-protocol/src/response.rs`. An
-undeclared profile records `failed { reason: unknown_profile }`; a declared
-non-OAuth profile records `failed { reason: non_oauth_profile }`. Neither starts
-an exchange or mutates credential state. An equal command replays its stored
-receipt before current registration is evaluated, and conflicting reuse is
-rejected. The terminal client verifies the command and profile correlations and
-prints authorization details before the receipt.
+and failure vocabulary live in `crates/process-protocol/src/response.rs`. For
+provisioning and re-provisioning, an undeclared profile records
+`failed { reason: unknown_profile }`; a declared non-OAuth profile records
+`failed { reason: non_oauth_profile }`. Neither starts an exchange or mutates
+credential state. An equal command replays its stored receipt before current
+registration is evaluated, and conflicting reuse is rejected. The terminal
+client verifies the command and profile correlations and prints authorization
+details before the receipt.
+
+OAuth exchange claims retain validated authorization instructions before
+emission; invalid progress fields yield `device_endpoint_rejected`. Equal
+pending commands replay available instructions and report busy; startup records
+`abandoned` for pending exchanges; an ambiguous claim commit or failure to
+retain or send authorization progress or commit exchange completion raises the
+daemon's recovery signal. Authorization and its terminal receipt commit
+atomically after generation and current-registration checks; stale generations
+yield `superseded`, and changed registrations yield
+`failed { reason: registration_changed }`. Initial provisioning with stored
+authorization returns `already_provisioned` without an exchange; re-provisioning
+without authorization returns `not_provisioned`.
+
+Deletion uses OAuth registration or administration history even without a
+current declaration; a pool-lock row alone does not qualify. Without retained
+identity it records the same unknown-profile or non-OAuth failure. A new
+deletion holds the dispatch profile lock, advances the generation, removes
+authorization and cached access, and returns `deleted` or `already_deleted` when
+no authorization was stored; equal replay changes nothing. Current registration
+and referenced history remain, and a child already holding a copied token
+finishes. Successful re-provisioning replaces authorization and clears every
+OAuth delivery-origin quarantine and cached access; failed re-provisioning
+clears none.
 
 ## Planned
 
-- OAuth credential provisioning, re-provisioning after rejected refresh, and
-  deletion: [design](../design/process-protocol.md).
 - Credential-exclusion administration, a listing read and a clear mutation over
   active exclusions: [design](../design/process-protocol.md).
 - Program-run cancellation request and receipt:
   [design](../design/process-protocol.md).
-- Runner creation, status, and recovery requests, and the status read's failure
-  evidence: [design](../design/process-protocol.md).
+- Runner creation and status requests, and the status read's failure evidence:
+  [design](../design/process-protocol.md).
 - `spawn_session` creation of a delegated child:
   [design](../design/process-protocol.md).
 - Cascade metadata on stop receipts: [design](../design/process-protocol.md).

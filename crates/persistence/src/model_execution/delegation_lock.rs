@@ -1,4 +1,5 @@
-use super::{ModelCallCorruption, ModelCallRepositoryError, lock_session};
+use super::live_turn::lock_session;
+use super::{ModelCallCorruption, ModelCallRepositoryError};
 use crate::mapping::{
     session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
 };

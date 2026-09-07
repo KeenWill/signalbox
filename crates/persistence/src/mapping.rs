@@ -1844,6 +1844,12 @@ pub(crate) enum DurableCommandKind {
     WithdrawGitRemote,
     /// Session lifecycle command.
     SessionLifecycle,
+    /// Runner recovery command.
+    ReplaceLostRunner,
+    /// Runner recovery command.
+    AbandonLostRunner,
+    /// Runner recovery command.
+    PromotePendingRunner,
 }
 
 /// Encodes a durable-command kind as its closed PostgreSQL spelling.
@@ -1868,6 +1874,10 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::WithdrawGitRemote => "withdraw_git_remote",
         DurableCommandKind::ReloadConfiguration => "reload_configuration",
         DurableCommandKind::SessionLifecycle => "session_lifecycle",
+        DurableCommandKind::ReplaceLostRunner => "replace_lost_runner",
+        DurableCommandKind::AbandonLostRunner => "abandon_lost_runner",
+        DurableCommandKind::PromotePendingRunner => "promote_pending_runner",
+
         DurableCommandKind::ProvisionOauthCredential => "provision_oauth_credential",
         DurableCommandKind::ReprovisionOauthCredential => "reprovision_oauth_credential",
         DurableCommandKind::DeleteOauthCredential => "delete_oauth_credential",
@@ -1896,6 +1906,10 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "withdraw_git_remote" => Some(DurableCommandKind::WithdrawGitRemote),
         "session_lifecycle" => Some(DurableCommandKind::SessionLifecycle),
         "reload_configuration" => Some(DurableCommandKind::ReloadConfiguration),
+        "replace_lost_runner" => Some(DurableCommandKind::ReplaceLostRunner),
+        "abandon_lost_runner" => Some(DurableCommandKind::AbandonLostRunner),
+        "promote_pending_runner" => Some(DurableCommandKind::PromotePendingRunner),
+
         "provision_oauth_credential" => Some(DurableCommandKind::ProvisionOauthCredential),
         "reprovision_oauth_credential" => Some(DurableCommandKind::ReprovisionOauthCredential),
         "delete_oauth_credential" => Some(DurableCommandKind::DeleteOauthCredential),

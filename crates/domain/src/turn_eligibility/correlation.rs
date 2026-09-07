@@ -285,6 +285,7 @@ pub(super) fn validate_start(
     origin_by_turn: &BTreeMap<TurnId, SemanticTranscriptEntryRef>,
     model_identity_entry: Option<SemanticTranscriptEntryRef>,
     compaction_chain: &[&crate::ContextCompaction],
+    placement_frontiers: &[ContextFrontierId],
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
     referenced_snapshots: &mut BTreeSet<ContextFrontierId>,
 ) -> Result<AcceptedInputTurnStart, AcceptedInputSchedulingReconstitutionFailure> {
@@ -352,7 +353,15 @@ pub(super) fn validate_start(
                 && snapshot.has_semantic_prefix_and_suffix(result, suffix.iter().copied())
         })
     });
-    if !membership_matches {
+    let placement_matches = placement_frontiers
+        .iter()
+        .filter_map(|frontier| snapshots.get(frontier))
+        .rfind(|boundary| boundary.is_semantic_prefix_of(snapshot))
+        .is_some_and(|boundary| {
+            prefix.is_none_or(|prefix| prefix.is_semantic_prefix_of(boundary))
+                && snapshot.has_semantic_prefix_and_suffix(boundary, suffix.iter().copied())
+        });
+    if !membership_matches && !placement_matches {
         return Err(
             AcceptedInputSchedulingReconstitutionFailure::StartingFrontierMismatch { turn },
         );
@@ -444,6 +453,7 @@ pub(super) fn tool_round_terminal_producing_call(
     terminal_marker: SemanticTranscriptEntryRef,
     terminal_tool_attempts: &[crate::EndedToolAttempt],
     terminal_tool_denials: &[ToolApprovalResolution],
+    inadmissible_requests: &[crate::ToolRequest],
     model_calls: &BTreeMap<crate::ModelCallId, ReconstitutedModelCall>,
     assistant_by_call: &BTreeMap<crate::ModelCallId, BTreeSet<SemanticTranscriptEntryRef>>,
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
@@ -459,6 +469,7 @@ pub(super) fn tool_round_terminal_producing_call(
         ToolRoundResultWindow::TerminalClosure,
         terminal_tool_attempts,
         terminal_tool_denials,
+        inadmissible_requests,
         model_calls,
         assistant_by_call,
         snapshots,
@@ -480,6 +491,7 @@ pub(super) fn tool_round_continuation_producing_call(
     results_end: usize,
     round_tool_attempts: &[crate::EndedToolAttempt],
     round_tool_denials: &[ToolApprovalResolution],
+    inadmissible_requests: &[crate::ToolRequest],
     model_calls: &BTreeMap<crate::ModelCallId, ReconstitutedModelCall>,
     assistant_by_call: &BTreeMap<crate::ModelCallId, BTreeSet<SemanticTranscriptEntryRef>>,
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
@@ -492,6 +504,7 @@ pub(super) fn tool_round_continuation_producing_call(
         ToolRoundResultWindow::Continuation,
         round_tool_attempts,
         round_tool_denials,
+        inadmissible_requests,
         model_calls,
         assistant_by_call,
         snapshots,
@@ -522,6 +535,7 @@ fn tool_round_producing_call_in_window(
     window: ToolRoundResultWindow,
     terminal_tool_attempts: &[crate::EndedToolAttempt],
     terminal_tool_denials: &[ToolApprovalResolution],
+    inadmissible_requests: &[crate::ToolRequest],
     model_calls: &BTreeMap<crate::ModelCallId, ReconstitutedModelCall>,
     assistant_by_call: &BTreeMap<crate::ModelCallId, BTreeSet<SemanticTranscriptEntryRef>>,
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
@@ -643,8 +657,24 @@ fn tool_round_producing_call_in_window(
                                 && denied_requests.contains(actual)
                                 && observed_denials.insert(*actual)
                         }
+                        Some(SemanticTranscriptEntryPayload::ToolInadmissible {
+                            request: actual,
+                        }) => {
+                            *actual == request
+                                && inadmissible_requests.iter().any(|record| {
+                                    record.id() == request
+                                        && record.session() == terminal.frontier().owning_session()
+                                        && record.turn() == turn
+                                        && record.producing_call() == **call_id
+                                        && record.inadmissible_reason().is_some()
+                                })
+                        }
                         Some(SemanticTranscriptEntryPayload::ToolClosed { request: actual }) => {
-                            window == ToolRoundResultWindow::TerminalClosure && *actual == request
+                            window == ToolRoundResultWindow::TerminalClosure
+                                && *actual == request
+                                && !inadmissible_requests
+                                    .iter()
+                                    .any(|record| record.id() == request)
                         }
                         _ => false,
                     }

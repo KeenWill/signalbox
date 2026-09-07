@@ -3,6 +3,7 @@ use super::*;
 pub(super) struct ConnectionDependencies {
     pub(super) configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     pub(super) recovery_reporter: Option<FatalRecoveryReporter>,
+    pub(super) oauth_service: Option<Arc<crate::OauthCredentialService>>,
     pub(super) pool: PgPool,
     pub(super) eligibility_nudge: InProcessEligibilityNudge,
     pub(super) tool_dispatch_gate: InProcessToolDispatchGate,
@@ -53,6 +54,7 @@ pub(super) async fn serve_connections(
     let services = ConnectionServices {
         configuration_reload: dependencies.configuration_reload,
         recovery_reporter: dependencies.recovery_reporter,
+        oauth_service: dependencies.oauth_service,
         pool: dependencies.pool,
         eligibility_nudge: dependencies.eligibility_nudge,
         tool_dispatch_gate: dependencies.tool_dispatch_gate,
@@ -558,10 +560,13 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::ReadReviewOrchestration { .. }
         | ClientRequest::StopTurn { .. }
         | ClientRequest::DecideToolRequest { .. }
+        | ClientRequest::OverrideDeniedToolRequest { .. }
+        | ClientRequest::ReplaceLostRunner { .. }
+        | ClientRequest::AbandonLostRunner { .. }
+        | ClientRequest::PromotePendingRunner { .. }
         | ClientRequest::ProvisionOauthCredential { .. }
         | ClientRequest::ReprovisionOauthCredential { .. }
-        | ClientRequest::DeleteOauthCredential { .. }
-        | ClientRequest::OverrideDeniedToolRequest { .. } => false,
+        | ClientRequest::DeleteOauthCredential { .. } => false,
     }
 }
 pub(super) fn retain_inbound_frame_permit_during_import_admission(
@@ -765,10 +770,13 @@ impl SnapshotReaderAdmission {
             | ClientRequest::RecordReviewPublicationOutcomes { .. }
             | ClientRequest::StopTurn { .. }
             | ClientRequest::DecideToolRequest { .. }
+            | ClientRequest::OverrideDeniedToolRequest { .. }
+            | ClientRequest::ReplaceLostRunner { .. }
+            | ClientRequest::AbandonLostRunner { .. }
+            | ClientRequest::PromotePendingRunner { .. }
             | ClientRequest::ProvisionOauthCredential { .. }
         | ClientRequest::ReprovisionOauthCredential { .. }
-        | ClientRequest::DeleteOauthCredential { .. }
-        | ClientRequest::OverrideDeniedToolRequest { .. } => Self::NotRequired,
+        | ClientRequest::DeleteOauthCredential { .. } => Self::NotRequired,
         }
     }
 }
