@@ -874,7 +874,6 @@ impl PostgresModelCallRepository {
                                      AND entry.payload_kind IN (
                                          'assistant_text',
                                          'provider_compaction',
-                                         'provider_reasoning',
                                          'assistant_tool_use'
                                      )
                                 THEN 0
@@ -928,8 +927,6 @@ impl PostgresModelCallRepository {
                                     WHEN 'context_summary' THEN
                                         COALESCE(octet_length(entry.context_summary_value), 0)
                                     WHEN 'assistant_text' THEN
-                                        COALESCE(octet_length(entry.assistant_text_value), 0)
-                                    WHEN 'provider_reasoning' THEN
                                         COALESCE(octet_length(entry.assistant_text_value), 0)
                                     WHEN 'provider_compaction' THEN
                                         CASE WHEN $5::boolean THEN
@@ -997,7 +994,6 @@ impl PostgresModelCallRepository {
                                           latest_call.call_kind = 'ordinary'
                                           AND entry.payload_kind IN (
                                               'assistant_text',
-                                              'provider_reasoning',
                                               'assistant_tool_use'
                                           )
                                           AND entry.producing_model_call_id =

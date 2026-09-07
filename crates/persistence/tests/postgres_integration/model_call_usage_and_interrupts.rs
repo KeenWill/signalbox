@@ -5,8 +5,8 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn provider_reasoning_covered_by_reported_output_is_not_charged_again()
--> Result<(), Box<dyn Error>> {
+async fn omitted_provider_reasoning_contributes_no_content_allowance() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     for (offset, compacted, output_tokens) in [
         (0, false, Some(8)),
@@ -76,14 +76,7 @@ async fn provider_reasoning_covered_by_reported_output_is_not_charged_again()
             )
             .await?
             .expect("provider input usage retained");
-        assert_eq!(
-            reported.projected_unreported_content_bytes(),
-            if compacted || output_tokens.is_some() {
-                0
-            } else {
-                u64::try_from(raw.len())?
-            }
-        );
+        assert_eq!(reported.projected_unreported_content_bytes(), 0);
     }
     pool.close().await;
     drop(container);
@@ -1485,6 +1478,162 @@ async fn latest_reported_usage_excludes_unreplayed_provider_compaction_bytes()
             .saturating_add(compaction_bytes)
     );
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unreported_tool_round_omits_provider_reasoning_from_content_allowance()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6e7b;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let correlation = authorized.observation_correlation();
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            correlation.bind_terminal_observation_with_usage(
+                ModelCallTerminalObservation::Completed {
+                    assistant_text: vec![
+                        AssistantText::try_new(String::from("reported baseline reply"))
+                            .expect("fixture assistant text is valid"),
+                    ],
+                },
+                ProviderReportedTokenUsage::unreported()
+                    .with_input_tokens(Some(80))
+                    .with_output_tokens(Some(3)),
+            ),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let second_turn = TurnId::from_uuid(Uuid::from_u128(seed + 42));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 40,
+                seed + 1,
+                "request before unreported tool round",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 41)),
+            Some(second_turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 43),
+            starting_frontier: Uuid::from_u128(seed + 44),
+            initial_attempt: Uuid::from_u128(seed + 45),
+        },
+    )
+    .await?;
+    let second_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 46));
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                fixture.session,
+                second_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 47)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 48)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 49)),
+                |_| panic!("the fixture has no pending steering to reclassify"),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == second_call
+    ));
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                fixture.session,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 50)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 51)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 52)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 53)),
+                |_| panic!("the fixture has no pending steering to reclassify"),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Ready { .. }
+    ));
+    let AuthorizeModelCallOutcome::Authorized(second_authorized) = repository
+        .authorize_send(fixture.session, second_call)
+        .await?
+    else {
+        panic!("the retained second call authorizes");
+    };
+    let reasoning = signalbox_domain::ProviderReasoningItem::try_new(String::from(
+        r#"{"type":"reasoning","id":"rs_unreported","summary":[],"encrypted_content":"opaque continuation"}"#,
+    )).expect("complete reasoning fixture");
+    let response = ToolUsingAssistantResponse::try_from_parts(vec![
+        AssistantResponsePart::ProviderReasoning(reasoning),
+        AssistantResponsePart::ToolCall(ToolCallProposal::new(
+            ToolName::try_new(String::from("current_time")).expect("fixture tool name"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments"),
+        )),
+    ])
+    .expect("response carries a tool call");
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 57));
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            second_authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+                    response,
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
+                }),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![
+                    ToolResponsePartIdentity::provider_reasoning(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 54)),
+                    ),
+                    ToolResponsePartIdentity::tool_call(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 55)),
+                        ToolRequestId::from_uuid(Uuid::from_u128(seed + 56)),
+                        InitialToolApproval::Confirm,
+                    ),
+                ],
+                terminal_frontier,
+                None,
+            )),
+            |_| panic!("no pending steering"),
+        )
+        .await?;
+    let reported = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            FastMode::Disabled,
+            false,
+            terminal_frontier,
+        )
+        .await?
+        .expect("the older usage-bearing call remains the baseline");
+    assert_eq!(reported.usage().input_tokens(), Some(80));
+    assert_eq!(
+        reported.projected_unreported_content_bytes(),
+        u64::try_from(
+            "request before unreported tool round".len() + "current_time".len() + "{}".len()
+        )?
+    );
     pool.close().await;
     drop(container);
     Ok(())
