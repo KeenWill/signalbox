@@ -340,12 +340,19 @@ entries; imported provenance is restricted to imported-ancestry sessions and the
 exact selected prefix, and stays outside every native subject-identity
 constraint.
 
+A spawned child is placed in its parent's directory. A pathless parent yields a
+pathless child, and a child of a parent in the root directory carries the
+parent's acknowledged global-read root rather than deriving a new one-segment
+path. The derived placement carries only the path and does not copy the parent's
+complete placement. The session-placement surface implements it.
+
 The initial path placement is pinned by creation, and only the
 `UpdateSessionPlacement` command changes it, appending a versioned event that
 names its predecessor and command identity; creation appends version one, so no
 update rewrites history. Every current-placement load authenticates the
 contiguous history from version one through the selected head against each
-event's typed receipt and registry claim, rejects a head when history contains a
+event's typed receipt and registry claim or the spawning request and
+authenticated parent placement version, rejects a head when history contains a
 later event, and fails closed as typed corruption on a missing or lagging head,
 cross-wired history, or invalid command fact. A placement path requires one to
 sixty-four nonempty dot-separated segments of at most sixty-four bytes each,
@@ -611,13 +618,13 @@ at most one immutable parent-child relationship, and persistence admits a spawn
 only from the complete parent relationship inventory held under the spawn
 transaction's lock together with the child-session uniqueness check.
 
-Typed await and message requests act only on their exact relationship and only
-under sealed in-flight dispatch authority carrying the complete immutable
-request. Outcome authority is checked against the relationship before recording,
-including an exact match to this spawn's delegated-task turn; an equal
-authority-and-outcome replay is idempotent, continue-running preserves the
-active lifecycle, and every other outcome terminalizes it. Message delivery
-remains available after a terminal outcome.
+Typed spawn, await, and message requests require sealed in-flight dispatch
+authority carrying the complete immutable request; await and message requests
+act only on their exact relationship. Outcome authority is checked against the
+relationship before recording, including an exact match to this spawn's
+delegated-task turn; an equal authority-and-outcome replay is idempotent,
+continue-running preserves the active lifecycle, and every other outcome
+terminalizes it. Message delivery remains available after a terminal outcome.
 
 A user termination command carries a parent-alone or parent-and-descendants
 scope, and parent-alone does not evaluate descendants. Each evaluated edge

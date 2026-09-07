@@ -148,6 +148,7 @@ pub enum SessionDelegationCorruption {
 
 ```rust
 pub enum SessionDelegationRepositoryError {
+    Placement(session_placement::SessionPlacementRepositoryError),
     Database(error::Error),
     CommitAmbiguous(error::Error),
     ToolLoop(tool_loop::ToolLoopRepositoryError),
@@ -160,6 +161,11 @@ impl fmt::Display for session_delegation::SessionDelegationRepositoryError {
 }
 impl error::Error for session_delegation::SessionDelegationRepositoryError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+impl convert::From<session_placement::SessionPlacementRepositoryError>
+    for session_delegation::SessionDelegationRepositoryError
+{
+    fn from(error: session_placement::SessionPlacementRepositoryError) -> Self;
 }
 impl convert::From<error::Error> for session_delegation::SessionDelegationRepositoryError {
     fn from(error: error::Error) -> Self;
@@ -237,4 +243,51 @@ impl session_delegation::SessionDelegationRepository {
         session_delegation::SessionDelegationRepositoryError,
     >;
 }
+impl session_delegation::SessionDelegationRepository {
+    pub async fn record_spawn(
+        &self,
+        request: signalbox_domain::DelegatedSpawnRequest,
+        dispatch: &signalbox_domain::ToolDispatchAuthority,
+        candidates: session_delegation::SpawnSessionCandidates,
+    ) -> result::Result<
+        session_delegation::RecordDelegationSpawnOutcome,
+        session_delegation::SessionDelegationRepositoryError,
+    >;
+    pub async fn record_process_spawn(
+        &self,
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+        request: signalbox_domain::ToolRequestId,
+        task: string::String,
+        policy: signalbox_domain::ChildRelationshipPolicy,
+        candidates: session_delegation::SpawnSessionCandidates,
+    ) -> result::Result<
+        session_delegation::ProcessDelegationOutcome<(
+            signalbox_domain::DelegatedSpawnRequest,
+            boxed::Box<signalbox_domain::SessionDelegation>,
+        )>,
+        session_delegation::SessionDelegationRepositoryError,
+    >;
+}
+```
+
+## SpawnSessionCandidates
+
+```rust
+pub struct SpawnSessionCandidates {
+    pub child: signalbox_domain::SessionId,
+    pub turn: signalbox_domain::TurnId,
+    pub entry: signalbox_domain::SemanticTranscriptEntryId,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug
+```
+
+## RecordDelegationSpawnOutcome
+
+```rust
+pub enum RecordDelegationSpawnOutcome {
+    Recorded(boxed::Box<signalbox_domain::SessionDelegation>),
+    Rejected(session_delegation::DelegationOperationRejection),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

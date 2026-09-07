@@ -371,6 +371,15 @@ provider delta or a metadata title or tag. A single explicit raw-output option
 is the only opt-in to unescaped text. A recorded review finding carries an
 opaque caller-supplied file-path key.
 
+`spawn_session` carries a bounded `task` and the closed relationship object and
+returns `session_spawned { tool_request_id, child_session_id, relationship }`.
+The placement-owned creation transaction that implements the parent-directory
+default creates the child; it preserves the exact-request and authority rules of
+the delegation contracts in
+[sessions-and-transcript](sessions-and-transcript.md), and the task string fits
+both the delegation-content ceiling and its complete normalized JSON argument
+envelope.
+
 ## Planned
 
 - OAuth credential provisioning, re-provisioning after rejected refresh, and
@@ -382,8 +391,6 @@ opaque caller-supplied file-path key.
   [design](../design/process-protocol.md).
 - Runner creation, status, and recovery requests, and the status read's failure
   evidence: [design](../design/process-protocol.md).
-- `spawn_session` creation of a delegated child:
-  [design](../design/process-protocol.md).
 - Cascade metadata on stop receipts: [design](../design/process-protocol.md).
 - Typed projection of credential-pool exhaustion and of the
   credential-availability wait: [design](../design/process-protocol.md).

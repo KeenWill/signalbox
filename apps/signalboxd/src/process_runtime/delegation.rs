@@ -1,20 +1,106 @@
 use super::*;
 
-pub(super) async fn reject_uncomposed_spawn<Writer>(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closed spawn request keeps its exact correlation and payload explicit"
+)]
+pub(super) async fn handle_spawn_session<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    task: String,
+    relationship: WireDelegationPolicy,
+    services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    write_error(
-        writer,
-        version,
-        request_id,
-        ProtocolError::without_detail(ErrorCode::InvalidRequest),
-    )
-    .await
+    let policy = match relationship {
+        WireDelegationPolicy::Background {} => {
+            signalbox_domain::ChildRelationshipPolicy::Background
+        }
+        WireDelegationPolicy::Bound {
+            on_parent_stopped,
+            on_parent_cancelled,
+        } => signalbox_domain::ChildRelationshipPolicy::Bound {
+            on_parent_stopped: spawn_child_action(on_parent_stopped),
+            on_parent_cancelled: spawn_child_action(on_parent_cancelled),
+        },
+    };
+    let port = PostgresSessionDelegationPort::new(services.pool.clone());
+    let parent = SessionId::from_uuid(session_id.into_uuid());
+    match port
+        .spawn_process_session(
+            parent,
+            TurnId::from_uuid(turn_id.into_uuid()),
+            ToolRequestId::from_uuid(tool_request_id.into_uuid()),
+            task,
+            policy,
+        )
+        .await
+    {
+        Ok(ProcessDelegationOutcome::Applied(receipt)) => {
+            nudge_delegation_issuer(&services.eligibility_nudge, parent);
+            nudge_delegation_issuer(&services.eligibility_nudge, receipt.child());
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionSpawned {
+                    tool_request_id,
+                    child_session_id: wire_uuid(receipt.child().into_uuid()),
+                    relationship,
+                },
+            )
+            .await
+        }
+        Ok(ProcessDelegationOutcome::InvalidRequest) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            )
+            .await
+        }
+        Ok(ProcessDelegationOutcome::Rejected(rejection)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                process_delegation_rejection(
+                    rejection,
+                    session_id,
+                    turn_id,
+                    tool_request_id,
+                    session_id,
+                ),
+            )
+            .await
+        }
+        Err(error) => {
+            write_delegation_port_error(writer, version, request_id, session_id, error).await
+        }
+    }
+}
+
+const fn spawn_child_action(
+    action: signalbox_process_protocol::BoundChildAction,
+) -> signalbox_domain::BoundChildAction {
+    match action {
+        signalbox_process_protocol::BoundChildAction::KeepRunning => {
+            signalbox_domain::BoundChildAction::KeepRunning
+        }
+        signalbox_process_protocol::BoundChildAction::Stop => {
+            signalbox_domain::BoundChildAction::Stop
+        }
+        signalbox_process_protocol::BoundChildAction::Cancel => {
+            signalbox_domain::BoundChildAction::Cancel
+        }
+    }
 }
 
 #[expect(
@@ -631,6 +717,13 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let protocol_error = match error {
+        PostgresSessionDelegationPortError::Repository(
+            signalbox_persistence::session_delegation::SessionDelegationRepositoryError::Placement(error),
+        ) => match error {
+            SessionPlacementRepositoryError::Database(_) => unavailable_protocol_error(InternalDiagnostic::SessionDelegationDatabase),
+            SessionPlacementRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_commit_ambiguous(),
+            SessionPlacementRepositoryError::Corruption(_) | SessionPlacementRepositoryError::InvalidCommandId => internal_protocol_error(Some(session_id.into_uuid()), InternalDiagnostic::SessionDelegationCorruption),
+        },
         PostgresSessionDelegationPortError::Repository(
             signalbox_persistence::session_delegation::SessionDelegationRepositoryError::Database(
                 _,

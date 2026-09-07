@@ -8,8 +8,9 @@ use signalbox_domain::{
     DelegationWait, DelegationWaitMode, SessionId, ToolDispatchAuthority, ToolRequestId, TurnId,
 };
 use signalbox_persistence::session_delegation::{
-    ProcessDelegationOutcome, RecordDelegationMessageOutcome, RecordDelegationWaitOutcome,
-    RecordedDelegationMessage, SessionDelegationRepository, SessionDelegationRepositoryError,
+    ProcessDelegationOutcome, RecordDelegationMessageOutcome, RecordDelegationSpawnOutcome,
+    RecordDelegationWaitOutcome, RecordedDelegationMessage, SessionDelegationRepository,
+    SessionDelegationRepositoryError, SpawnSessionCandidates,
 };
 use signalbox_tools_sessions::{
     AwaitSessionPortOutcome, AwaitSessionReceipt, DeliveredChildResult, SessionDelegationPort,
@@ -88,6 +89,34 @@ impl PostgresSessionDelegationPort {
                     }
                 },
             ),
+        }
+    }
+
+    pub(crate) async fn spawn_process_session(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        request: ToolRequestId,
+        task: String,
+        policy: signalbox_domain::ChildRelationshipPolicy,
+    ) -> Result<ProcessDelegationOutcome<SpawnSessionReceipt>, PostgresSessionDelegationPortError>
+    {
+        match self
+            .repository
+            .record_process_spawn(session, turn, request, task, policy, spawn_candidates())
+            .await?
+        {
+            ProcessDelegationOutcome::Applied((logical, relation)) => {
+                let receipt = SpawnSessionReceipt::from_relation(&logical, &relation)
+                    .ok_or(PostgresSessionDelegationPortError::Contract)?;
+                Ok(ProcessDelegationOutcome::Applied(receipt))
+            }
+            ProcessDelegationOutcome::InvalidRequest => {
+                Ok(ProcessDelegationOutcome::InvalidRequest)
+            }
+            ProcessDelegationOutcome::Rejected(rejection) => {
+                Ok(ProcessDelegationOutcome::Rejected(rejection))
+            }
         }
     }
 
@@ -211,6 +240,12 @@ impl Error for PostgresSessionDelegationPortError {
 impl ClassifyOperatorFailure for PostgresSessionDelegationPortError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
+            Self::Repository(SessionDelegationRepositoryError::Placement(error)) => match error {
+                signalbox_persistence::session_placement::SessionPlacementRepositoryError::Database(_) => OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+                signalbox_persistence::session_placement::SessionPlacementRepositoryError::CommitAmbiguous(_) => OperatorFailureClass::Infrastructure { commit_ambiguous: true },
+                signalbox_persistence::session_placement::SessionPlacementRepositoryError::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
+                signalbox_persistence::session_placement::SessionPlacementRepositoryError::InvalidCommandId => OperatorFailureClass::CallerOrHubBug,
+            },
             Self::Repository(SessionDelegationRepositoryError::Database(_)) => {
                 OperatorFailureClass::Infrastructure {
                     commit_ambiguous: false,
@@ -252,12 +287,27 @@ impl SessionDelegationPort for PostgresSessionDelegationPort {
 
     async fn spawn_session(
         &mut self,
-        _request: DelegatedSpawnRequest,
-        _dispatch: ToolDispatchAuthority,
+        request: DelegatedSpawnRequest,
+        dispatch: ToolDispatchAuthority,
     ) -> Result<SessionDelegationPortOutcome<SpawnSessionReceipt>, Self::Error> {
-        // Delegated creation remains fail-closed until the placement-owned
-        // creation transaction supplies the child's decided placement proof.
-        Ok(SessionDelegationPortOutcome::Rejected)
+        let candidates = spawn_candidates();
+        let first = self
+            .repository
+            .record_spawn(request.clone(), &dispatch, candidates)
+            .await;
+        match reconcile_commit_ambiguous(first, || {
+            self.repository
+                .record_spawn(request.clone(), &dispatch, candidates)
+        })
+        .await?
+        {
+            RecordDelegationSpawnOutcome::Recorded(relation) => {
+                let receipt = SpawnSessionReceipt::from_relation(&request, &relation)
+                    .ok_or(PostgresSessionDelegationPortError::Contract)?;
+                Ok(SessionDelegationPortOutcome::Applied(receipt))
+            }
+            RecordDelegationSpawnOutcome::Rejected(_) => Ok(SessionDelegationPortOutcome::Rejected),
+        }
     }
 
     async fn await_session(
@@ -302,6 +352,14 @@ impl SessionDelegationPort for PostgresSessionDelegationPort {
                 Ok(SessionDelegationPortOutcome::DurablyRejected)
             }
         }
+    }
+}
+
+fn spawn_candidates() -> SpawnSessionCandidates {
+    SpawnSessionCandidates {
+        child: SessionId::from_uuid(uuid::Uuid::now_v7()),
+        turn: TurnId::from_uuid(uuid::Uuid::now_v7()),
+        entry: signalbox_domain::SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
     }
 }
 

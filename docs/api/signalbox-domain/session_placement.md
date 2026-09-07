@@ -55,6 +55,7 @@ impl SessionPlacement {
         intent: RootPlacementGlobalReadIntent,
     ) -> result::Result<Self, SessionPlacementError>;
     pub fn path(&self) -> option::Option<&SessionPlacementPath>;
+    pub fn delegated_child(&self, child: SessionId) -> Self;
     pub const fn records_root_global_read_intent(&self) -> bool;
     pub fn decide_cross_session_read(&self, target: &Self) -> SessionReadScopeDecision;
 }
