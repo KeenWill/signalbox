@@ -56,6 +56,9 @@ use uuid::Uuid;
 // The configured merged-subject retention window is seven days.
 const MERGED_RETENTION: Duration = Duration::from_secs(604_800);
 
+#[path = "repo_watch_v2/checkout.rs"]
+mod checkout;
+
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 
 fn event_candidate<'a>(

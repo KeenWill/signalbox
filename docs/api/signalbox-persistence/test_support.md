@@ -44,3 +44,12 @@ impl test_support::FleetSoakCensusRepository {
     ) -> result::Result<test_support::FleetSoakCensus, error::Error>;
 }
 ```
+
+## inject_deadline_diagnostic_failure
+
+```rust
+#[cfg(feature = "test-support")]
+pub async fn inject_deadline_diagnostic_failure(
+    pool: &sqlx_postgres::PgPool,
+) -> result::Result<(), error::Error>;
+```

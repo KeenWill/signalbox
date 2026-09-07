@@ -306,6 +306,7 @@ impl ContextCompactionModel for UnavailableContextCompactionModel {
 struct ConnectionServices {
     configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     recovery_reporter: Option<FatalRecoveryReporter>,
+    oauth_service: Option<Arc<crate::OauthCredentialService>>,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
@@ -352,6 +353,7 @@ impl InboundFrameBudgets {
     }
 }
 
+mod runner_recovery;
 mod runtime;
 
 use runtime::{ProcessFanouts, nudge_delegation_issuer};

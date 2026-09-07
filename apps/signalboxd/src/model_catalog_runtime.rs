@@ -30,11 +30,15 @@ type Runtime = ConfiguredModelRuntime<
 >;
 
 /// Startup-only transport bounds used when composing an admitted catalog.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ModelRuntimeFactory {
     exchange_timeout: Option<Duration>,
     post_kill_reap_bound: Option<Duration>,
     native_message_limit: Option<usize>,
+    oauth_delivery: Option<(
+        Arc<dyn signalbox_model_runtime_codex_cli::OauthCredentialProvider>,
+        Arc<signalbox_model_runtime_codex_cli::OauthCredentialRoot>,
+    )>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -82,7 +86,18 @@ impl ModelRuntimeFactory {
             exchange_timeout,
             post_kill_reap_bound,
             native_message_limit,
+            oauth_delivery: None,
         }
+    }
+
+    /// Shares startup OAuth delivery with every catalog-composed adapter.
+    pub fn with_oauth_delivery(
+        mut self,
+        provider: Arc<dyn signalbox_model_runtime_codex_cli::OauthCredentialProvider>,
+        root: Arc<signalbox_model_runtime_codex_cli::OauthCredentialRoot>,
+    ) -> Self {
+        self.oauth_delivery = Some((provider, root));
+        self
     }
 
     /// Constructs adapters without provider I/O using this snapshot's routes and capabilities.
@@ -115,7 +130,7 @@ impl ModelRuntimeFactory {
         } else {
             None
         };
-        ConfiguredModelRuntime::new(
+        let runtime = ConfiguredModelRuntime::new(
             anthropic,
             openai,
             models,
@@ -123,7 +138,11 @@ impl ModelRuntimeFactory {
             self.post_kill_reap_bound,
             self.native_message_limit,
         )
-        .map_err(|error| ModelRuntimeBuildError(error.cause_code()))
+        .map_err(|error| ModelRuntimeBuildError(error.cause_code()))?;
+        Ok(match &self.oauth_delivery {
+            Some((provider, root)) => runtime.with_oauth_delivery(provider.clone(), root.clone()),
+            None => runtime,
+        })
     }
 }
 

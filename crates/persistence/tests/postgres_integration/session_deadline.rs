@@ -15,6 +15,7 @@ use signalbox_persistence::{
     scheduler::PostgresEligibilitySweep,
     session_deadline::{
         PostgresSessionDeadlineRepository, SessionDeadlineBounds, SessionDeadlinePassOutcome,
+        SessionDeadlineRepositoryError,
     },
     session_lifecycle::SessionLifecycleRepository,
     session_lifecycle_command::{
@@ -23,6 +24,147 @@ use signalbox_persistence::{
 };
 
 const SEED: u128 = 0x11fe_9000;
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retiring_a_held_dispatch_without_input_leaves_subsequent_deadline_passes_idle()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(next_test_submit_uuid()),
+        SessionCreationProvenance::module_dispatched(
+            signalbox_domain::ModuleDispatch::RepositoryWatch {
+                dispatch: signalbox_domain::RepoWatchDispatchId::from_uuid(next_test_submit_uuid()),
+            },
+        ),
+        SessionConfigurationDefaults::new(direct(SEED)),
+    )
+    .with_lifecycle(StartGate::Held, SessionOwnership::Owned, None)
+    .prepare(SessionId::from_uuid(next_test_submit_uuid()))
+    .expect("pathless held dispatch is preparable");
+    let session = creation.applied_result().session();
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+    let deadline_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?;
+    let repository = PostgresSessionDeadlineRepository::new(
+        deadline_pool.clone(),
+        SessionDeadlineBounds::new(Some(Duration::ZERO), None),
+    );
+
+    assert_eq!(
+        repository.expire_next().await?,
+        SessionDeadlinePassOutcome::Retired { session }
+    );
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(&deadline_pool)
+        .await?;
+    let rollbacks_before: i64 = sqlx::query_scalar(
+        "SELECT xact_rollback FROM pg_stat_database WHERE datname = current_database()",
+    )
+    .fetch_one(&pool)
+    .await?;
+    for pass in 1..=24 {
+        assert_eq!(
+            repository.expire_next().await?,
+            SessionDeadlinePassOutcome::Idle,
+            "idle pass {pass}"
+        );
+    }
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(&deadline_pool)
+        .await?;
+    let rollbacks_after: i64 = sqlx::query_scalar(
+        "SELECT xact_rollback FROM pg_stat_database WHERE datname = current_database()",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        rollbacks_after, rollbacks_before,
+        "idle passes perform no transaction rollback"
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM session_deadline WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(remaining, 0);
+
+    deadline_pool.close().await;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn deadline_query_failure_retains_the_statement_and_postgres_diagnostic()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    sqlx::query("ALTER TABLE session_deadline RENAME COLUMN expires_at TO unavailable_expiry")
+        .execute(&pool)
+        .await?;
+    let error = PostgresSessionDeadlineRepository::new(
+        pool.clone(),
+        SessionDeadlineBounds::new(None, None),
+    )
+    .expire_next()
+    .await
+    .expect_err("candidate selection requires the expiry column");
+
+    let SessionDeadlineRepositoryError::Database { query, source } = error else {
+        panic!("a failed SELECT retains its database diagnostic: {error:?}");
+    };
+    assert_eq!(query, "select_deadline_candidate");
+    let database = source.as_database_error().expect("PostgreSQL query error");
+    assert_eq!(database.code().as_deref(), Some("42703"));
+    assert_eq!(database.message(), "column \"expires_at\" does not exist");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn admission_deadline_materializes_the_configured_duration() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let creation = owned_creation(10, StartGate::Held);
+    let session = creation.applied_result().session();
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+    let repository = PostgresSessionDeadlineRepository::new(
+        pool.clone(),
+        SessionDeadlineBounds::new(Some(Duration::from_secs(3600)), None),
+    );
+
+    assert_eq!(
+        repository.expire_next().await?,
+        SessionDeadlinePassOutcome::Armed { session }
+    );
+    let expiry_matches: bool = sqlx::query_scalar(
+        "SELECT expires_at = armed_at + INTERVAL '1 hour' FROM session_deadline WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        expiry_matches,
+        "the deadline retains the configured hour of admission time"
+    );
+    assert_eq!(
+        repository.expire_next().await?,
+        SessionDeadlinePassOutcome::Idle
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
 
 fn owned_creation(seed: u128, gate: StartGate) -> PreparedCreateSession {
     CreateSession::new(

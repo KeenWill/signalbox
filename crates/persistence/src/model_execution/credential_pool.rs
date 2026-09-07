@@ -354,6 +354,7 @@ pub(super) async fn load_durable_pool_exclusions(
     .await?
     .into_iter()
     .collect::<HashSet<_>>();
+    excluded.extend(crate::oauth_credential::quarantined_profiles(connection, policy).await?);
     let actions = sqlx::query_as::<_, (i64, String, String, Uuid, Uuid)>(
         "SELECT action_id, credential_reference, action_kind,
                 observed_session_id, observed_turn_id
@@ -619,6 +620,7 @@ pub(super) async fn persist_call_pool_policy(
     call: ModelCallId,
     policy: &CredentialPoolRuntimePolicy,
 ) -> Result<(), ModelCallRepositoryError> {
+    crate::oauth_credential::lock_pool_members(connection, policy).await?;
     sqlx::query(
         "INSERT INTO model_call_credential_pool_policy
             (model_call_id, pool_name, on_pool_exhausted,

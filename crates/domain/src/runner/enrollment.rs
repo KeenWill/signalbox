@@ -14,9 +14,11 @@ use std::{
     sync::atomic::AtomicU64, sync::atomic::Ordering,
 };
 
-/// Active or terminally revoked logical enrollment.
+/// Pending, active, or terminally revoked logical enrollment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunnerEnrollmentState {
+    /// The successor admits only connection and command-bound provisioning work.
+    Pending,
     /// The enrollment may register runner availability.
     Active,
     /// The enrollment is terminally unable to register.
@@ -51,6 +53,34 @@ impl PartialEq for RunnerEnrollment {
 impl Eq for RunnerEnrollment {}
 
 impl RunnerEnrollment {
+    /// Validates a successor's immutable advertisement without granting execution authority.
+    pub fn new_pending(
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        authentication: RunnerAuthenticationId,
+        allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+        advertisement: RunnerAdvertisement,
+        catalog: &RunnerCatalog,
+    ) -> Result<(Self, ValidatedRunnerRegistration), RunnerDomainError> {
+        let mut enrollment = Self::new(enrollment, runner, authentication, allowed_classes);
+        let registration = enrollment.register(advertisement, catalog)?;
+        enrollment.state = RunnerEnrollmentState::Pending;
+        enrollment
+            .registration_active
+            .store(false, Ordering::Release);
+        Ok((enrollment, registration))
+    }
+
+    /// Activates the exact pending facts after their command-authorized durable installation.
+    pub fn promote_pending_in_place(&mut self) -> Result<(), RunnerDomainError> {
+        if self.state != RunnerEnrollmentState::Pending {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        self.state = RunnerEnrollmentState::Active;
+        self.registration_active.store(true, Ordering::Release);
+        Ok(())
+    }
+
     /// Creates an active logical enrollment with no issued registration revision.
     pub fn new(
         enrollment: RunnerEnrollmentId,
@@ -237,6 +267,7 @@ impl RunnerEnrollment {
                 profiles,
                 workspaces: advertisement.workspaces,
                 sandboxes: advertisement.sandboxes,
+                default_working_directory: advertisement.default_working_directory,
                 repositories: advertisement.repositories,
                 revision,
                 current_revision: Arc::clone(&self.registration_revision),
@@ -391,6 +422,7 @@ pub struct ValidatedRunnerRegistration {
     profiles: BTreeMap<CredentialProfileName, CredentialProfilePolicy>,
     workspaces: BTreeSet<WorkspaceCapability>,
     sandboxes: BTreeSet<RunnerSandboxProfile>,
+    default_working_directory: Option<crate::RunnerWorkingDirectory>,
     repositories: BTreeMap<WorkspaceRepositoryKey, RunnerRepositoryEntry>,
     revision: RunnerGeneration,
     pub(super) current_revision: Arc<AtomicU64>,
@@ -408,6 +440,7 @@ impl PartialEq for ValidatedRunnerRegistration {
             && self.profiles == other.profiles
             && self.workspaces == other.workspaces
             && self.sandboxes == other.sandboxes
+            && self.default_working_directory == other.default_working_directory
             && self.repositories == other.repositories
             && self.revision == other.revision
     }
@@ -503,6 +536,10 @@ impl ValidatedRunnerRegistration {
     pub fn sandboxes(&self) -> impl Iterator<Item = RunnerSandboxProfile> + '_ {
         self.sandboxes.iter().copied()
     }
+    /// Returns the default directory reported by this exact registration.
+    pub fn default_working_directory(&self) -> Option<&crate::RunnerWorkingDirectory> {
+        self.default_working_directory.as_ref()
+    }
 
     /// Iterates the advertised repository entries in key order.
     pub fn repositories(&self) -> impl Iterator<Item = &RunnerRepositoryEntry> {
@@ -529,7 +566,8 @@ impl ValidatedRunnerRegistration {
             input.workspaces.clone(),
             input.sandboxes.clone(),
             input.repositories.clone(),
-        );
+        )
+        .with_default_working_directory(input.default_working_directory.clone());
         let stored_tool_count = input.tools.len();
         let stored_tools: BTreeMap<_, _> = input
             .tools
@@ -604,4 +642,6 @@ pub struct ValidatedRunnerRegistrationReconstitutionInput {
     pub sandboxes: BTreeSet<RunnerSandboxProfile>,
     /// The exact advertised repository entries.
     pub repositories: Vec<RunnerRepositoryEntry>,
+    /// The default directory reported with this registration.
+    pub default_working_directory: Option<crate::RunnerWorkingDirectory>,
 }
