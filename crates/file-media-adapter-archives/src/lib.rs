@@ -48,7 +48,7 @@ const READ_RANGES: u32 = 1;
 const OUTPUT_DEPTH: u32 = 5;
 const OUTPUT_NODES: u64 = 5_000;
 const OUTPUT_STRING_BYTES: usize = 480_000;
-// PKWARE APPNOTE section 4.3.12 defines a 46-byte central-directory header.
+// The PKWARE APPNOTE defines a 46-byte central-directory header.
 const ZIP_CENTRAL_HEADER_BYTES: usize = 46;
 const DECODE_BUFFER_BYTES: usize = 8_192;
 

@@ -47,14 +47,14 @@ const ZIP_PREFIX_BYTES: u64 = 4;
 const ZIP_SUFFIX_BYTES: u64 = 65_536;
 const MAX_ZIP64_EOCD_BYTES: u64 = 64 * 1024;
 // The 22-byte ZIP EOCD and 65,535-byte comment leave 21 bytes before the suffix, followed
-// backward by the 20-byte ZIP64 locator and bounded ZIP64 record (PKWARE APPNOTE 4.3.15–4.3.16).
+// backward by the 20-byte ZIP64 locator and bounded ZIP64 record (PKWARE APPNOTE).
 const EOCD_PRECEDING_BYTES: u64 = 21 + 20 + MAX_ZIP64_EOCD_BYTES;
 const SELECTED_PART_NAME_BYTES: u64 = 20;
 const MAX_SELECTED_PARTS: u64 = 3;
 const VALIDATION_SOURCE_BYTES: u64 = 262_144;
 const CONTENT_TYPES_COMPRESSED_BYTES: u64 = 64 * 1024;
 const PACKAGE_RELS_COMPRESSED_BYTES: u64 = 8 * 1024;
-// PKWARE APPNOTE section 4.3.7 defines a 30-byte local-file header.
+// The PKWARE APPNOTE defines a 30-byte local-file header.
 const LOCAL_HEADER_BYTES: u64 = 30;
 const CONTENT_TYPES_NAME_BYTES: u64 = 19;
 const PACKAGE_RELS_NAME_BYTES: u64 = 11;
