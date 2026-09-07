@@ -263,29 +263,14 @@ pub(crate) fn decode_response<C: Clone>(
     let Some(status) = response.status.as_deref() else {
         return loss("response lacks status".to_string(), None);
     };
-    for item in &items {
-        if item.id.as_deref().is_none_or(str::is_empty) {
-            return loss(
-                "response output item lacks a non-empty id".to_string(),
-                None,
-            );
-        }
-        let ConvertedItem {
-            parts,
-            refused: item_refused,
-        } = match convert_item(item, status) {
-            Ok(result) => result,
-            Err(detail) => return loss(detail, None),
-        };
-        for part in &parts {
-            if let AssistantPart::ToolCall(call) = part
-                && !ids.insert(call.id.as_str().to_string())
-            {
-                return loss("response repeats a function call_id".to_string(), None);
-            }
-        }
-        content.extend(parts);
-        refused |= item_refused;
+    if items
+        .iter()
+        .any(|item| item.id.as_deref().is_none_or(str::is_empty))
+    {
+        return loss(
+            "response output item lacks a non-empty id".to_string(),
+            None,
+        );
     }
     let mut finish = map_terminal(
         status,
@@ -295,6 +280,29 @@ pub(crate) fn decode_response<C: Clone>(
             .map(|d| d.reason.as_str()),
         tool_calls,
     );
+    let finish_at_loss =
+        (!matches!(finish, FinishReason::Unrecognized { .. })).then(|| finish.clone());
+    for item in &items {
+        let ConvertedItem {
+            parts,
+            refused: item_refused,
+        } = match convert_item(item, status) {
+            Ok(result) => result,
+            Err(detail) => return loss(detail, finish_at_loss.clone()),
+        };
+        for part in &parts {
+            if let AssistantPart::ToolCall(call) = part
+                && !ids.insert(call.id.as_str().to_string())
+            {
+                return loss(
+                    "response repeats a function call_id".to_string(),
+                    finish_at_loss.clone(),
+                );
+            }
+        }
+        content.extend(parts);
+        refused |= item_refused;
+    }
     if matches!(finish, FinishReason::Unrecognized { .. }) {
         return loss(
             "unrecognized response terminal status or incomplete reason".to_string(),
@@ -895,5 +903,68 @@ mod tests {
                 ..
             })
         ));
+    }
+    #[test]
+    fn buffered_item_conversion_loss_retains_only_recognized_terminal_finishes() {
+        for defect in ["role", "call_id", "name", "arguments", "duplicate_call_id"] {
+            for reason in [
+                None,
+                Some("max_output_tokens"),
+                Some("content_filter"),
+                Some("future"),
+            ] {
+                let has_tools = defect != "role";
+                let mut first = json!({"type":"function_call","id":"fc_first","status":"completed","call_id":"call_first","name":"lookup","arguments":"{}"});
+                let mut second = json!({"type":"function_call","id":"fc_second","status":"completed","call_id":"call_second","name":"lookup","arguments":"{}"});
+                if defect == "role" {
+                    first = json!({"type":"message","id":"msg_first","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ready"}]});
+                    second = first.clone();
+                    second["id"] = json!("msg_second");
+                    second["role"] = json!("user");
+                } else if defect == "duplicate_call_id" {
+                    second["call_id"] = first["call_id"].clone();
+                } else {
+                    second.as_object_mut().unwrap().remove(defect);
+                }
+                let status = if reason.is_some() {
+                    "incomplete"
+                } else {
+                    "completed"
+                };
+                let mut value = response();
+                value["status"] = json!(status);
+                if let Some(reason) = reason {
+                    value["incomplete_details"] = json!({"reason":reason});
+                }
+                value["output"] = json!([first, second]);
+                let (TerminalEvidence::BoundaryLoss(loss), observations) = decode(value) else {
+                    panic!("invalid output must remain boundary loss");
+                };
+                let expected = match reason {
+                    None if has_tools => Some(FinishReason::ToolUse),
+                    None => Some(FinishReason::EndTurn),
+                    Some("max_output_tokens") => Some(FinishReason::MaxOutputTokens),
+                    Some("content_filter") => Some(FinishReason::Refusal),
+                    _ => None,
+                };
+                assert_eq!(loss.finish_reported, expected, "{defect} {reason:?}");
+                assert_eq!(
+                    loss.tool_calls,
+                    if has_tools {
+                        ToolCallsAtLoss::Opened
+                    } else {
+                        ToolCallsAtLoss::NoneOpened
+                    }
+                );
+                assert!(matches!(
+                    loss.cause,
+                    LossCause::ResponseUnintelligible { .. }
+                ));
+                assert!(!observations.iter().any(|o| matches!(
+                    o.fact,
+                    ObservationFact::ToolCallProposed(_) | ObservationFact::FinishReported(_)
+                )));
+            }
+        }
     }
 }

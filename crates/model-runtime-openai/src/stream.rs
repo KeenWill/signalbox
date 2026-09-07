@@ -613,7 +613,7 @@ impl StreamDecoder {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
-    use signalbox_model_runtime::{CompletionFinish, Observation, ProviderErrorKind};
+    use signalbox_model_runtime::{CompletionFinish, FinishReason, Observation, ProviderErrorKind};
 
     fn terminal() -> Value {
         json!({"type":"response.completed", "response":{"id":"resp_fixture","object":"response","model":"model-fixture","status":"completed",
@@ -1793,5 +1793,75 @@ mod tests {
             matches!(apply(&mut decoder, terminal(), &mut sink), StreamStep::Terminal(evidence)
             if matches!(*evidence, TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {tool_calls: ToolCallsAtLoss::Opened, ..})))
         );
+    }
+    #[test]
+    fn streamed_item_conversion_loss_retains_only_recognized_terminal_finishes() {
+        for defect in ["role", "call_id", "name", "arguments", "duplicate_call_id"] {
+            for reason in [
+                None,
+                Some("max_output_tokens"),
+                Some("content_filter"),
+                Some("future"),
+            ] {
+                let has_tools = defect != "role";
+                let mut first = json!({"type":"function_call","id":"fc_first","status":"completed","call_id":"call_first","name":"lookup","arguments":"{}"});
+                let mut second = json!({"type":"function_call","id":"fc_second","status":"completed","call_id":"call_second","name":"lookup","arguments":"{}"});
+                if defect == "role" {
+                    first = json!({"type":"message","id":"msg_first","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ready"}]});
+                    second = first.clone();
+                    second["id"] = json!("msg_second");
+                    second["role"] = json!("user");
+                } else if defect == "duplicate_call_id" {
+                    second["call_id"] = first["call_id"].clone();
+                } else {
+                    second.as_object_mut().unwrap().remove(defect);
+                }
+                let status = if reason.is_some() {
+                    "incomplete"
+                } else {
+                    "completed"
+                };
+                let mut event = terminal();
+                event["type"] = json!(format!("response.{status}"));
+                event["response"]["status"] = json!(status);
+                if let Some(reason) = reason {
+                    event["response"]["incomplete_details"] = json!({"reason":reason});
+                }
+                event["response"]["output"] = json!([first, second]);
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut observations = Vec::new();
+                let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut observations)
+                else {
+                    panic!("terminal event must terminate");
+                };
+                let TerminalEvidence::BoundaryLoss(loss) = *evidence else {
+                    panic!("invalid output must remain boundary loss");
+                };
+                let expected = match reason {
+                    None if has_tools => Some(FinishReason::ToolUse),
+                    None => Some(FinishReason::EndTurn),
+                    Some("max_output_tokens") => Some(FinishReason::MaxOutputTokens),
+                    Some("content_filter") => Some(FinishReason::Refusal),
+                    _ => None,
+                };
+                assert_eq!(loss.finish_reported, expected, "{defect} {reason:?}");
+                assert_eq!(
+                    loss.tool_calls,
+                    if has_tools {
+                        ToolCallsAtLoss::Opened
+                    } else {
+                        ToolCallsAtLoss::NoneOpened
+                    }
+                );
+                assert!(matches!(
+                    loss.cause,
+                    LossCause::StreamProtocolViolation { .. }
+                ));
+                assert!(!observations.iter().any(|o| matches!(
+                    o.fact,
+                    ObservationFact::ToolCallProposed(_) | ObservationFact::FinishReported(_)
+                )));
+            }
+        }
     }
 }
