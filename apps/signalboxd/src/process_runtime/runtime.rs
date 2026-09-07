@@ -4,6 +4,7 @@ use super::*;
 /// durable and streaming fan-outs, and one guarded Unix listener.
 #[derive(Debug)]
 pub struct ProcessRuntime {
+    configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     recovery_reporter: Option<FatalRecoveryReporter>,
     oauth_service: Option<Arc<crate::OauthCredentialService>>,
     listener: LocalProcessListener,
@@ -69,6 +70,7 @@ impl ProcessRuntime {
         let (streaming_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         let (monitor_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         Self {
+            configuration_reload: None,
             recovery_reporter: None,
             oauth_service: None,
             listener,
@@ -88,6 +90,15 @@ impl ProcessRuntime {
                 monitor: monitor_updates,
             },
         }
+    }
+
+    /// Shares the daemon's serial configuration reload and atomic catalog holder.
+    pub fn with_configuration_reload(
+        mut self,
+        reload: crate::configuration_reload::ConfigurationReload,
+    ) -> Self {
+        self.configuration_reload = Some(reload);
+        self
     }
 
     /// Wires the goal-mode disposition that arms automatic resumption when an adopt
@@ -171,6 +182,7 @@ impl ProcessRuntime {
             .map_err(ProcessRuntimeError::OauthRecovery)?;
         let fanouts = self.fanouts;
         let connection_dependencies = ConnectionDependencies {
+            configuration_reload: self.configuration_reload,
             recovery_reporter: self.recovery_reporter,
             oauth_service: self.oauth_service,
             pool: self.pool.clone(),

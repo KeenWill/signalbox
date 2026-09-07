@@ -522,8 +522,12 @@ pub(super) async fn run_submit_input<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let termination_command =
-        matches!(receipt_kind, InputReceiptKind::Stop).then_some(request.command_id());
+    let command_id = request.command_id();
+    let repository = match receipt_kind {
+        InputReceiptKind::Stop => repository.with_stop_receipt(),
+        InputReceiptKind::Submission => repository,
+    };
+    let receipt_repository = repository.clone();
     let mut service = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
         ConfiguredSubmitInputTransaction {
@@ -539,10 +543,19 @@ where
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::TurnOrigin(result),
         ))) => {
-            let termination = if let Some(command) = termination_command {
+            let recorded_stop = match receipt_repository.is_recorded_stop(command_id).await {
+                Ok(value) => value,
+                Err(error) => {
+                    return write_submit_input_repository_error(
+                        writer, version, request_id, session_id, error,
+                    )
+                    .await;
+                }
+            };
+            let termination = if recorded_stop {
                 match recorded_termination(
                     receipt_pool,
-                    command,
+                    command_id,
                     SessionId::from_uuid(session_id.into_uuid()),
                 )
                 .await

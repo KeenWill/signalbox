@@ -720,3 +720,5 @@ mod tests {
 }
 
 pub mod credential_pool_exhaustion;
+/// Durable configuration reload intent and receipts.
+pub mod reload_configuration;

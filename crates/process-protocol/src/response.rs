@@ -168,6 +168,22 @@ pub enum ServerMessage {
         run_id: CanonicalUuid,
         outcome: crate::ProgramRunCancellationOutcome,
     },
+    /// The retained replacement configuration is installed.
+    ConfigurationReloaded {
+        /// Durable reload identity.
+        command_id: crate::CommandId,
+        /// Complete inventory installed by this reload.
+        reloaded_sections: Vec<ReloadedSection>,
+    },
+    /// Configuration reload was refused without replacing the running snapshot.
+    ConfigurationReloadFailed {
+        /// Durable reload identity.
+        command_id: crate::CommandId,
+        /// Operation that refused the reload.
+        phase: ConfigurationReloadPhase,
+        /// Bounded sanitized diagnostic, containing no configuration values.
+        reason: String,
+    },
     /// Durable replacement receipt.
     RunnerReplacementReceipt {
         /// Command whose terminal result committed.
@@ -1120,6 +1136,19 @@ impl ServerMessage {
                     return Err(FrameValidationError::MetadataShape);
                 }
             }
+            Self::ConfigurationReloaded {
+                reloaded_sections, ..
+            } if reloaded_sections.as_slice() != ReloadedSection::ALL => {
+                return Err(FrameValidationError::ConfigurationReloadShape);
+            }
+            Self::ConfigurationReloadFailed { reason, .. } => {
+                if reason.is_empty()
+                    || reason.len() > MAX_CONFIGURATION_RELOAD_REASON_BYTES
+                    || reason.chars().any(char::is_control)
+                {
+                    return Err(FrameValidationError::ConfigurationReloadShape);
+                }
+            }
             Self::ConversationSummary { conversation } => conversation.validate()?,
             Self::ModelCapabilityItem { capabilities, .. } => capabilities.validate()?,
             Self::ModelCapabilitiesEnd { capability_count }
@@ -1252,4 +1281,40 @@ impl ServerMessage {
         }
         Ok(())
     }
+}
+
+/// Maximum UTF-8 length of a sanitized reload diagnostic.
+pub const MAX_CONFIGURATION_RELOAD_REASON_BYTES: usize = 1024;
+
+/// Closed inventory of reloadable sections.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReloadedSection {
+    /// Models, aliases, and their rate catalog.
+    ModelCatalog,
+    /// Resolved session templates.
+    SessionTemplates,
+    /// Repository ingestion, rules, and convergence configuration.
+    RepoWatch,
+}
+
+impl ReloadedSection {
+    /// The complete catalog replacement inventory in wire order.
+    pub const ALL: [Self; 3] = [Self::ModelCatalog, Self::SessionTemplates, Self::RepoWatch];
+}
+
+/// Closed reload failure phases.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationReloadPhase {
+    /// A configured file could not be read.
+    Read,
+    /// Replacement configuration did not validate.
+    Validate,
+    /// Rule activation was refused.
+    Activate,
+    /// Convergence target reconciliation failed.
+    Reconcile,
+    /// Runtime installation failed.
+    Install,
 }

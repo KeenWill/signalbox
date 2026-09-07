@@ -337,6 +337,15 @@ impl BoundWebHttpListener {
 }
 
 impl WebHttpRuntime {
+    /// Supplies one current catalog snapshot to each browser request.
+    pub fn with_configuration_reload(
+        mut self,
+        reload: crate::configuration_reload::ConfigurationReload,
+    ) -> Self {
+        self.router = self.router.layer(axum::Extension(reload));
+        self
+    }
+
     /// Binds the production same-origin router.
     ///
     /// Fails construction when the pool cannot fund the shared snapshot
@@ -697,10 +706,15 @@ struct WebApiState {
 }
 
 async fn session_submit_input(
-    State(state): State<WebApiState>,
+    State(mut state): State<WebApiState>,
+    reload: Option<axum::Extension<crate::configuration_reload::ConfigurationReload>>,
     Path(session_id): Path<String>,
     request: Request,
 ) -> Response {
+    if let Some(axum::Extension(reload)) = reload {
+        state.model_configuration = Some(reload.catalogs().models);
+    }
+
     use signalbox_application::{
         EligibilityNudge as _, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
         UuidV7SubmitInputIdGenerator,

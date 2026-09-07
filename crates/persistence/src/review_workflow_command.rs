@@ -174,6 +174,7 @@ async fn inspect_existing(
             | CommandKind::RegisterWorkspace
             | CommandKind::MintGitRemote
             | CommandKind::WithdrawGitRemote
+            | CommandKind::ReloadConfiguration
             | CommandKind::SessionLifecycle
             | CommandKind::ReplaceLostRunner
             | CommandKind::AbandonLostRunner

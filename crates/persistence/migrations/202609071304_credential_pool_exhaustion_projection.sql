@@ -14,6 +14,7 @@ CREATE TABLE credential_pool_exhaustion_member (
     generation_ceiling bigint NOT NULL CHECK (generation_ceiling >= 0),
     action_id bigint REFERENCES credential_pool_member_action,
     member_action_ids bigint[] NOT NULL,
+    cleared_record_generations bigint[] NOT NULL,
     transient_observation_model_call_ids uuid[] NOT NULL,
     capacity_windows jsonb CHECK (jsonb_typeof(capacity_windows) = 'array'),
     record_generation bigint GENERATED ALWAYS AS ((evidence->'exclusion'->>'record_generation')::bigint) STORED REFERENCES credential_exclusion,
@@ -30,6 +31,12 @@ CREATE TRIGGER credential_pool_exhaustion_member_immutable BEFORE UPDATE OR DELE
 
 CREATE FUNCTION capture_credential_pool_exhaustion_reset_sources() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    SELECT COALESCE(array_agg(x.record_generation ORDER BY x.record_generation), '{}'::bigint[])
+      INTO NEW.cleared_record_generations
+      FROM credential_exclusion x
+      WHERE x.profile = NEW.profile AND x.record_generation <= NEW.generation_ceiling
+        AND EXISTS (SELECT 1 FROM clear_credential_exclusion_command cleared
+            WHERE cleared.cleared_generation = x.record_generation AND cleared.outcome = 'cleared');
     SELECT COALESCE(array_agg(a.action_id ORDER BY a.action_id), '{}'::bigint[])
       INTO NEW.member_action_ids
       FROM credential_pool_member_action a
@@ -72,11 +79,7 @@ WITH context AS (
               AND newer.kind = x.kind AND newer.origin = x.origin
               AND newer.pool_policy_id IS NOT DISTINCT FROM x.pool_policy_id
               AND newer.session_id IS NOT DISTINCT FROM x.session_id)
-        AND NOT EXISTS (
-          SELECT 1 FROM clear_credential_exclusion_command cleared
-          JOIN durable_command command USING (command_id)
-            WHERE cleared.cleared_generation = x.record_generation
-              AND cleared.outcome = 'cleared' AND command.claimed_at <= e.observed_at)
+        AND NOT (x.record_generation = ANY(e.cleared_record_generations))
 ), windows AS (
     SELECT (capacity_window->>'remaining_percent')::bigint AS remaining,
            (capacity_window->>'resets_at')::numeric AS reset_nanos

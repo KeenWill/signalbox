@@ -150,6 +150,26 @@ impl<'a> Output<'a> {
         self.stderr.flush()
     }
 
+    pub(crate) fn configuration_reloaded(
+        &mut self,
+        sections: &[signalbox_process_protocol::ReloadedSection],
+    ) -> io::Result<()> {
+        use signalbox_process_protocol::ReloadedSection;
+        write!(self.stdout, "reloaded")?;
+        for section in sections {
+            write!(
+                self.stdout,
+                " {}",
+                match section {
+                    ReloadedSection::ModelCatalog => "model_catalog",
+                    ReloadedSection::SessionTemplates => "session_templates",
+                    ReloadedSection::RepoWatch => "repo_watch",
+                }
+            )?;
+        }
+        writeln!(self.stdout)
+    }
+
     pub(crate) fn recovery_value(&mut self, name: &str, value: &str) -> io::Result<()> {
         writeln!(self.stderr, "{name}={value}")?;
         self.stderr.flush()

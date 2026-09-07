@@ -15,6 +15,9 @@ pub enum ClientRequest {
         command_id: CommandId,
         run_id: CanonicalUuid,
     },
+    ReloadConfiguration {
+        command_id: CommandId,
+    },
     ReplaceLostRunner {
         command_id: CommandId,
         session_id: CanonicalUuid,
