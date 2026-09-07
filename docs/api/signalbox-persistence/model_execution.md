@@ -316,6 +316,8 @@ impl model_execution::PostgresModelCallRepository {
         option::Option<model_execution::ProspectiveModelCall>,
         model_execution::ModelCallRepositoryError,
     >;
+}
+impl model_execution::PostgresModelCallRepository {
     pub async fn prepare_initial_call<NextSteeringIdentities>(
         &self,
         session: signalbox_domain::SessionId,
@@ -355,6 +357,8 @@ impl model_execution::PostgresModelCallRepository {
     where
         NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId
             + marker::Send;
+}
+impl model_execution::PostgresModelCallRepository {
     pub async fn fail_prepared_call<NextTurn>(
         &self,
         session: signalbox_domain::SessionId,

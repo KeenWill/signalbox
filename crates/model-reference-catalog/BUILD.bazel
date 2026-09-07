@@ -48,7 +48,12 @@ rust_doc_test(
 rust_integration_test(
     name = "catalog",
     srcs = glob(["tests/**/*.rs"]),
-    args = ["--test-threads=4"],
+    args = [
+        "--test-threads=4",
+        # The Cargo catalog suite checks the workspace's Cargo metadata.
+        "--skip",
+        "reference_catalog_has_no_workspace_dependency_edge",
+    ],
     compile_data = [
         "projections/consumer-equivalence.md",
         "projections/historical-pricing.md",

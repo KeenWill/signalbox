@@ -90,6 +90,16 @@ impl<C: Clone> EventDecoder<C> {
             .receive(&value)
             .map_err(|error| DecodeFailure::stream_protocol(error.0))?;
         match event {
+            Event::RateLimitsUpdated => {
+                fold_uninterpreted(sink, &value, &[&["method"]]);
+                if let Some(snapshot) = self
+                    .client
+                    .rate_limits
+                    .capacity_snapshot(std::time::SystemTime::now())
+                {
+                    sink.observe_rate_limits(self.correlation.clone(), snapshot);
+                }
+            }
             Event::ThreadStarted(id) => {
                 fold_uninterpreted(sink, &value, &[&["result", "thread", "id"]]);
                 let sanitized = sink.redact_terminal_failure_text(&id);

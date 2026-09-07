@@ -11,6 +11,77 @@ use signalbox_domain::{
     WorkspaceRepositoryKey as DomainWorkspaceRepositoryKey,
 };
 
+/// Closed terminal refusal of a runner recovery command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerRecoveryRejection {
+    /// The session does not exist.
+    SessionNotFound,
+    /// The placement is not lost.
+    PlacementNotLost,
+    /// An active turn needs its ordinary control flow.
+    ExistingControlRequired,
+    /// The pending enrollment request does not identify a pending candidate.
+    PendingRunnerNotFound,
+    /// The predecessor is not lost or the candidate is not connected.
+    RunnerUnavailable,
+    /// Another replacement command owns the placement.
+    ReplacementPending,
+    /// The candidate cannot satisfy the placement.
+    PlacementUnavailable,
+    /// A checkout revision requires a repository placement.
+    RevisionWithoutRepository,
+    /// Workspace provisioning failed.
+    ProvisioningFailed,
+}
+
+/// Replacement's durable terminal outcome.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunnerReplacementOutcome {
+    /// The successor placement was installed.
+    Replaced {
+        /// Successor runner.
+        runner_id: CanonicalUuid,
+        /// Positive successor placement revision.
+        placement_revision: crate::PositiveCanonicalU64,
+    },
+    /// No successor was installed.
+    Rejected {
+        /// Closed terminal refusal.
+        reason: RunnerRecoveryRejection,
+    },
+}
+
+/// Abandonment's durable terminal outcome.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunnerAbandonmentOutcome {
+    /// The lost placement was retired.
+    Abandoned,
+    /// The placement was retained.
+    Rejected {
+        /// Closed terminal refusal.
+        reason: RunnerRecoveryRejection,
+    },
+}
+
+/// Promotion's durable terminal outcome.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunnerPromotionOutcome {
+    /// The pending enrollment was activated.
+    Promoted {
+        /// Promoted runner identity.
+        runner_id: CanonicalUuid,
+    },
+    /// Enrollment authority was retained.
+    Rejected {
+        /// Closed terminal refusal.
+        reason: RunnerRecoveryRejection,
+    },
+}
+
 /// Sandbox profile selected by one runner placement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum RunnerSandboxProfile {

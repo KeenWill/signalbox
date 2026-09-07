@@ -453,6 +453,26 @@ impl RunnerStateRoot {
         Ok(())
     }
 
+    /// Fsyncs an exact promotion of the retained candidate receipt.
+    pub fn record_promotion(&mut self, receipt: EnrollmentReceipt) -> Result<(), RunnerStateError> {
+        let current = self
+            .state
+            .receipt()
+            .ok_or(RunnerStateError::InvalidTransition)?;
+        let mut promoted = current.clone();
+        promoted.authority = EnrollmentAuthority::Active;
+        if promoted != receipt {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        if current == &receipt {
+            return Ok(());
+        }
+        let next = RunnerState::Enrolled { receipt };
+        write_state(&self.directory, &next)?;
+        self.state = next;
+        Ok(())
+    }
+
     /// Atomically advances the durable receipt after accepted re-registration.
     pub fn record_registration(
         &mut self,
@@ -603,6 +623,7 @@ mod tests {
 
     fn empty_advertisement() -> Advertisement {
         Advertisement {
+            default_working_directory: None,
             capability_classes: Vec::new(),
             tools: Vec::new(),
             workspace_capabilities: Vec::new(),
@@ -637,6 +658,30 @@ mod tests {
         let reopened = RunnerStateRoot::open(&path).expect("the private root reopens");
 
         assert_eq!(reopened.state().request_id(), request_id);
+    }
+
+    #[test]
+    fn exact_pending_promotion_survives_reopen_and_rejects_changed_identity() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = RunnerStateRoot::open(&path).expect("the private root opens");
+        let active = receipt(root.state().request_id());
+        let mut pending = active.clone();
+        pending.authority = EnrollmentAuthority::ReplacementPending;
+        root.record_receipt(pending)
+            .expect("the pending receipt is recorded");
+        let mut wrong = active.clone();
+        wrong.runner_id = active.enrollment_id;
+        assert!(root.record_promotion(wrong).is_err());
+
+        root.record_promotion(active.clone())
+            .expect("the exact promotion commits");
+        root.record_promotion(active.clone())
+            .expect("equal promotion replays");
+        drop(root);
+
+        let reopened = RunnerStateRoot::open(&path).expect("the promoted root reopens");
+        assert_eq!(reopened.state().receipt(), Some(&active));
     }
 
     #[test]
