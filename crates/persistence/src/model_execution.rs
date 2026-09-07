@@ -722,11 +722,10 @@ impl PostgresModelCallRepository {
                     ON headroom.session_id = model_call.session_id
                    AND headroom.producing_model_call_id = model_call.model_call_id
                  WHERE model_call.session_id = $1
-                   AND model_call.resolved_provider_model_identity_id = $2
-                   AND model_call.effective_provider_model_identity_id = $8
+                   AND model_call.effective_provider_model_identity_id = $7
                    AND model_call.state_kind = 'terminal'
                    AND model_call.usage_input_tokens IS NOT NULL
-                   AND settings.resolved_model_settings #>> '{effective,fast_mode}' = $6
+                   AND settings.resolved_model_settings #>> '{effective,fast_mode}' = $5
                    AND NOT EXISTS (
                        SELECT 1
                          FROM latest_compaction AS latest
@@ -768,7 +767,7 @@ impl PostgresModelCallRepository {
                        false AS has_provider_compaction,
                        NULL::numeric AS proven_unreported_content_bytes
                   FROM latest_compaction AS latest
-                 WHERE latest.resolved_provider_model_identity_id = $8
+                 WHERE latest.resolved_provider_model_identity_id = $7
                    AND latest.state_kind = 'terminal'
                    AND latest.terminal_disposition_kind = 'completed'
                    AND latest.usage_input_tokens IS NOT NULL
@@ -788,7 +787,7 @@ impl PostgresModelCallRepository {
                 -- projected member except its summary is content the next
                 -- request adds to that summary.
                 SELECT prospective.source_session_id, prospective.semantic_entry_id
-                  FROM UNNEST($3::uuid[], $4::uuid[])
+                  FROM UNNEST($2::uuid[], $3::uuid[])
                        AS prospective(source_session_id, semantic_entry_id)
                 EXCEPT
                 SELECT reported.source_session_id, reported.semantic_entry_id
@@ -809,7 +808,7 @@ impl PostgresModelCallRepository {
                     COALESCE(latest_call.proven_unreported_content_bytes, 0)
                     -- Entries an uncommitted preview minted have no durable row
                     -- to score; the preview measured their content itself.
-                    + $5::numeric
+                    + $4::numeric
                     + (
                         SELECT COALESCE(SUM(
                             CASE
@@ -877,7 +876,7 @@ impl PostgresModelCallRepository {
                                     WHEN 'assistant_text' THEN
                                         COALESCE(octet_length(entry.assistant_text_value), 0)
                                     WHEN 'provider_compaction' THEN
-                                        CASE WHEN $7::boolean THEN
+                                        CASE WHEN $6::boolean THEN
                                             COALESCE(octet_length(entry.assistant_text_value), 0)
                                         ELSE 0 END
                                     WHEN 'assistant_tool_use' THEN
@@ -959,7 +958,6 @@ impl PostgresModelCallRepository {
                FROM latest_call",
         )
         .bind(session_id_to_uuid(session))
-        .bind(target.identity().into_uuid())
         .bind(&member_sessions)
         .bind(&member_entries)
         .bind(Decimal::from(uncommitted_content_bytes))

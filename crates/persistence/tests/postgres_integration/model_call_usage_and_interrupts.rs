@@ -638,6 +638,45 @@ async fn effective_target_baseline_rejects_changed_alternate_mapping() -> Result
         )
         .await?;
 
+    let equivalent_selected_target = ResolvedProviderTarget::naming(
+        ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 32)),
+    );
+    let equivalent_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (
+            equivalent_selected_target,
+            Arc::<str>::from("test-model-family"),
+            None,
+        ),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| {
+        catalog.with_fast_targets([
+            (selected_target, old_fast_target),
+            (equivalent_selected_target, old_fast_target),
+        ])
+    })
+    .expect("both selections share one effective target");
+    let equivalent_selection = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(equivalent_families);
+    assert!(
+        equivalent_selection
+            .latest_reported_usage(
+                session,
+                equivalent_selected_target,
+                FastMode::Enabled,
+                true,
+                terminal_frontier,
+            )
+            .await?
+            .is_some(),
+        "a different selection that maps to the same serving target reuses the baseline"
+    );
+
     let new_families = ModelCredentialFamilyCatalog::try_new([
         (selected_target, Arc::<str>::from("test-model-family"), None),
         (new_fast_target, Arc::<str>::from("test-model-family"), None),
@@ -1301,6 +1340,39 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
         target,
     )])
     .expect("one dedicated-compaction target forms a catalog");
+    let equivalent_selected_target = ResolvedProviderTarget::naming(
+        ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 0x51)),
+    );
+    let equivalent_families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (
+            equivalent_selected_target,
+            Arc::<str>::from("test-model-family"),
+            None,
+        ),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(equivalent_selected_target, target)]))
+    .expect("the alternate selection maps to the compaction serving target");
+    let equivalent_selection = PostgresModelCallRepository::new(
+        pool.clone(),
+        fast_targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(equivalent_families);
+    assert!(
+        equivalent_selection
+            .latest_reported_usage(
+                fixture.session,
+                equivalent_selected_target,
+                FastMode::Enabled,
+                false,
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
+            )
+            .await?
+            .is_some(),
+        "a dedicated compaction remains eligible through another selection for its serving target"
+    );
+
     let fast_families = ModelCredentialFamilyCatalog::try_new([
         (target, Arc::<str>::from("test-model-family"), None),
         (fast_target, Arc::<str>::from("test-model-family"), None),
