@@ -3,6 +3,7 @@ load(":native_runtime.bzl", "native_runtime")
 native_runtime(
     name = "native_runtime",
     libraries = "@linux_test_runtime//:libraries",
+    patchelf = "@patchelf//:bin/patchelf",
     visibility = ["//visibility:public"],
 )
 
