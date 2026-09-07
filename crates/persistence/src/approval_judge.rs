@@ -873,7 +873,7 @@ async fn persist_headless_escalation(
                  ON attempt.attempt_id = entry.tool_result_attempt_id
               WHERE entry.source_session_id = $1
                 AND entry.payload_kind IN (
-                    'tool_execution_result', 'tool_denied', 'tool_closed_by_turn_end'
+                    'tool_execution_result', 'tool_denied', 'tool_inadmissible', 'tool_closed_by_turn_end'
                 )
                 AND (entry.tool_result_request_id = $2 OR attempt.request_id = $2)",
         )
@@ -884,17 +884,18 @@ async fn persist_headless_escalation(
         let result = match rows.as_slice() {
             [] => {
                 let entry = next_closed_result_entry(request.id());
-                let decision_kind: Option<String> = sqlx::query_scalar(
-                    "SELECT decision_kind FROM tool_approval_decision WHERE request_id = $1",
+                let payload_kind: String = sqlx::query_scalar(
+                    "SELECT CASE
+                        WHEN request.inadmissible_reason IS NOT NULL THEN 'tool_inadmissible'
+                        WHEN decision.decision_kind = 'deny' THEN 'tool_denied'
+                        ELSE 'tool_closed_by_turn_end' END
+                     FROM tool_request AS request
+                     LEFT JOIN tool_approval_decision AS decision USING (request_id)
+                     WHERE request.request_id = $1",
                 )
                 .bind(tool_request_id_to_uuid(request.id()))
-                .fetch_optional(&mut *connection)
+                .fetch_one(&mut *connection)
                 .await?;
-                let payload_kind = if decision_kind.as_deref() == Some("deny") {
-                    "tool_denied"
-                } else {
-                    "tool_closed_by_turn_end"
-                };
                 sqlx::query(
                     "INSERT INTO semantic_transcript_entry
                         (source_session_id, semantic_entry_id, payload_kind,
