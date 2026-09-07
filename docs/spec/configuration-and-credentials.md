@@ -145,9 +145,9 @@ one pool, and every member of that pool carries the mapping's adapter. A pool's
 name is 1 through 256 unpadded NUL-free bytes and it holds 1 through 1,024
 members, each with a priority within the pool. Priorities need not be unique or
 contiguous: `tie_break` resolves equal values, and gaps let a later profile take
-an intermediate rank. Both `tie_break`, which admits `first_listed`, and
-`on_pool_exhausted`, which is `park` or `fail`, are required. The five trigger
-keys `on_quota_exhausted`, `on_rate_limited`, `on_overloaded`,
+an intermediate rank. Both `tie_break`, which admits `first_listed` and
+`least_used`, and `on_pool_exhausted`, which is `park` or `fail`, are required.
+The five trigger keys `on_quota_exhausted`, `on_rate_limited`, `on_overloaded`,
 `on_credential_rejected`, and `on_headroom_low` each carry one action from the
 closed set `stay`, `switch_next_turn`, `switch_now`, `avoid_new_sessions`, and
 `quarantine`; an omitted key selects `stay`, and a one-member pool is the
@@ -162,6 +162,16 @@ The model-call observation commit retains a reported capacity snapshot against
 the call's credential reference, including each window's remaining percentage,
 reported duration and reset instant. The latest observation time wins across
 calls; an absent snapshot preserves the retained evidence.
+
+A member's headroom is the minimum of its primary and secondary windows. An
+expired or missing reset means unknown capacity. `least_used` prefers members
+with known capacity. Ties break by configured order. Within an equal priority,
+`least_used` prefers greater headroom. A member's `headroom_reserve_percent`
+overrides the pool reserve; a known headroom at or below the reserve excludes
+that member from selection. A retained observation at or below the reserve fires
+`on_headroom_low` under the call's frozen policy; with no reserve, the trigger
+threshold is zero. Unknown capacity neither excludes a member nor fires a
+headroom action.
 
 The session-template catalog is read after the model catalog. Each template
 binds a name and version to a model or alias, a system prompt, and a
@@ -319,9 +329,10 @@ resolves to one secret remain two members, and the cost is bounded to one extra
 successor attempt that fails as its predecessor did.
 
 Settings whose effect the daemon cannot supply are typed startup failures rather
-than retained and inert: `round_robin`, `least_used`, any headroom reserve, a
-non-`stay` `on_headroom_low`, and a `switch_now` whose adapter cannot prove
-non-acceptance for that trigger's cause unless it is `on_credential_rejected`.
+than retained and inert: `round_robin` and a `switch_now` whose adapter cannot
+prove non-acceptance for that trigger's cause unless it is
+`on_credential_rejected`. Codex pools admit `least_used`, headroom reserves and
+non-`stay` `on_headroom_low`; adapters without capacity evidence reject them.
 Why: a configured protection that silently never fires reads as one the
 deployment has.
 
@@ -694,9 +705,9 @@ do not use it.
 - Codex CLI `file` and `oauth` deliveries, with provisioning, refresh,
   quarantine, and restore rules for a daemon-owned authorization:
   [design](../design/configuration-and-credentials.md).
-- Bounded credential-home concurrency and capacity-dependent selection:
-  `max_concurrent_invocations`, `round_robin`, `least_used`, and headroom
-  reserves: [design](../design/configuration-and-credentials.md).
+- Bounded credential-home concurrency and round-robin selection:
+  `max_concurrent_invocations` and `round_robin`:
+  [design](../design/configuration-and-credentials.md).
 - Credential-exclusion lifecycle: reset-aware expiry, operator clear, probe
   recovery, action-head generations, and origin-aware clearing:
   [design](../design/configuration-and-credentials.md).

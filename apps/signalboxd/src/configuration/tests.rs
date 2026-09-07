@@ -16,7 +16,13 @@ use signalbox_domain::{
     SessionTemplateName, SettingOverlay, ToolApprovalPosture,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
-use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
+use signalbox_persistence::{
+    model_execution::{
+        CredentialPoolRuntimeAction, CredentialPoolRuntimeExhaustion, CredentialPoolRuntimeMember,
+        CredentialPoolRuntimePolicy, CredentialPoolRuntimeTieBreak,
+    },
+    process_read::ProcessModelCallInputTokenSemantics,
+};
 use signalbox_tools_basic::{CURRENT_TIME_NAME, ECHO_NAME};
 use signalbox_tools_web::{WEB_FETCH_NAME, WebFetchEgressPolicy};
 use uuid::Uuid;
@@ -5436,3 +5442,54 @@ fn configuration_rejects_codex_switch_now_on_low_headroom() {
     );
 }
 
+#[test]
+fn configuration_projects_codex_capacity_policy_into_runtime_catalog() {
+    let pool = r#"[[credential_pools]]
+name = "codex-main"
+tie_break = "least_used"
+on_pool_exhausted = "fail"
+headroom_reserve_percent = 10
+on_headroom_low = "switch_next_turn"
+members = [{ profile = "codex-subscription-primary", priority = 2, headroom_reserve_percent = 23 }]"#;
+    let directory = tempfile::tempdir().expect("fixture directory is available");
+    let executable = std::env::current_exe().expect("test executable has a path");
+    let source = configuration_with_codex_paths(&executable, directory.path());
+    let source = format!(
+        r#"{source}
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000002"
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "codex"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#
+    );
+    let configuration = HubModelConfiguration::parse(&source.replace(CODEX_POOL, pool))
+        .expect("Codex admits capacity policy");
+    let catalog = configuration.credential_pool_runtime_catalog();
+    let projected = catalog
+        .values()
+        .find(|policy| policy.name() == "codex-main");
+    let expected = CredentialPoolRuntimePolicy::new(
+        "codex-main",
+        vec![
+            CredentialPoolRuntimeMember::new(
+                "codex-subscription-primary",
+                std::num::NonZeroU32::new(2).expect("configured priority is nonzero"),
+            )
+            .with_headroom_reserve(Some(23)),
+        ],
+        CredentialPoolRuntimeExhaustion::Fail,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .with_capacity_policy(
+        CredentialPoolRuntimeTieBreak::LeastUsed,
+        Some(10),
+        CredentialPoolRuntimeAction::SwitchNextTurn,
+    );
+    assert_eq!(projected, Some(&expected));
+}

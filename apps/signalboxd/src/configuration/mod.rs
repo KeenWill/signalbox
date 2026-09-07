@@ -56,7 +56,8 @@ use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
     model_execution::{
         CredentialPoolRuntimeAction, CredentialPoolRuntimeCatalog, CredentialPoolRuntimeExhaustion,
-        CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy, ToolContinuationUsageLimit,
+        CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy, CredentialPoolRuntimeTieBreak,
+        ToolContinuationUsageLimit,
     },
     process_read::ProcessModelCallInputTokenSemantics,
 };
@@ -1671,6 +1672,7 @@ impl HubModelConfiguration {
                     .into_iter()
                     .map(|member| {
                         CredentialPoolRuntimeMember::new(member.profile(), member.priority())
+                            .with_headroom_reserve(member.headroom_reserve_percent())
                     })
                     .collect::<Vec<_>>();
                 Some((
@@ -1683,6 +1685,16 @@ impl HubModelConfiguration {
                         runtime_pool_action(pool.action(CredentialPoolTrigger::RateLimited)),
                         runtime_pool_action(pool.action(CredentialPoolTrigger::Overloaded)),
                         runtime_pool_action(pool.action(CredentialPoolTrigger::CredentialRejected)),
+                    )
+                    .with_capacity_policy(
+                        match pool.tie_break() {
+                            crate::credential_pools::CredentialPoolTieBreak::LeastUsed => {
+                                CredentialPoolRuntimeTieBreak::LeastUsed
+                            }
+                            _ => CredentialPoolRuntimeTieBreak::FirstListed,
+                        },
+                        pool.headroom_reserve_percent(),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::HeadroomLow)),
                     ),
                 ))
             })
