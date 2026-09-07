@@ -1,5 +1,5 @@
 import { QueryClient } from '@tanstack/react-query'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type {
   WebSessionLiveSnapshot,
   WebSessionLiveStreamEvent,
@@ -9,7 +9,16 @@ import { startSessionSynchronization } from './session-sync'
 import { actions, createAppStore, selectSessionSync } from './state'
 
 vi.mock('./product', () => ({ followSession: vi.fn(), readSessionLive: vi.fn() }))
-afterEach(() => vi.resetAllMocks())
+beforeEach(() => {
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
+    setTimeout(() => callback(0), 0),
+  )
+  vi.stubGlobal('cancelAnimationFrame', clearTimeout)
+})
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.resetAllMocks()
+})
 
 const snapshot = (sessionId: string): WebSessionLiveSnapshot => ({
   session_id: sessionId,
@@ -230,5 +239,159 @@ it('accounts for streamed bytes without encoding accumulated draft text again', 
   )
   encode.mockRestore()
   stop()
+  queries.clear()
+})
+
+it('keeps the streamed prefix across a durable update for the same active call', async () => {
+  const live = {
+    ...snapshot(draftSessionId),
+    active: {
+      turn_id: draftSessionId,
+      state: { kind: 'running' as const, model_call_id: draftSessionId },
+    },
+  }
+  vi.mocked(readSessionLive).mockResolvedValue({ ...live, observed_through: '42' })
+  vi.mocked(followSession).mockImplementation(async function* () {
+    yield { kind: 'snapshot', snapshot: live }
+    yield draft('Prefix ')
+    yield {
+      kind: 'durable',
+      cursor: '42',
+      address: { event_sequence: '42' },
+      event_kind: 'input_accepted',
+    }
+    yield draft('suffix')
+  })
+  const store = createAppStore()
+  const queries = new QueryClient()
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(draftSessionId))
+  await vi.waitFor(() =>
+    expect(selectSessionSync(store.getState()).drafts[0]?.content).toBe('Prefix suffix'),
+  )
+  stop()
+  queries.clear()
+})
+
+it('publishes a full byte budget of one-byte fragments as one complete display update', async () => {
+  const fragmentCount = 65_536
+  vi.mocked(followSession).mockImplementation(async function* () {
+    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    for (let index = 0; index < fragmentCount; index++) yield draft('x')
+  })
+  const store = createAppStore()
+  const queries = new QueryClient()
+  let draftPublications = 0
+  const unsubscribe = store.subscribe(() => {
+    if (selectSessionSync(store.getState()).drafts.length > 0) draftPublications++
+  })
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(draftSessionId))
+  await vi.waitFor(() =>
+    expect(selectSessionSync(store.getState()).drafts[0]?.content).toBe('x'.repeat(fragmentCount)),
+  )
+  expect(draftPublications).toBe(1)
+  stop()
+  unsubscribe()
+  queries.clear()
+})
+
+it.each(['turn', 'model call', 'completion'] as const)(
+  'discards drafts when a durable update changes the active %s',
+  async (change) => {
+    const otherId = '00000000-0000-0000-0000-000000000994'
+    const live = {
+      ...snapshot(draftSessionId),
+      observed_through: '42',
+      active:
+        change === 'completion'
+          ? null
+          : {
+              turn_id: change === 'turn' ? otherId : draftSessionId,
+              state: {
+                kind: 'running' as const,
+                model_call_id: change === 'model call' ? otherId : draftSessionId,
+              },
+            },
+    }
+    vi.mocked(readSessionLive).mockResolvedValue(live)
+    vi.mocked(followSession).mockImplementation(async function* () {
+      yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+      yield draft('Old call')
+      yield {
+        kind: 'durable',
+        cursor: '42',
+        address: { event_sequence: '42' },
+        event_kind: 'input_accepted',
+      }
+    })
+    const store = createAppStore()
+    const queries = new QueryClient()
+    const stop = startSessionSynchronization(store, queries)
+    store.dispatch(actions.sessionFollowRequested(draftSessionId))
+    await vi.waitFor(() => expect(selectSessionSync(store.getState()).snapshot).toEqual(live))
+    expect(selectSessionSync(store.getState()).drafts).toEqual([])
+    stop()
+    queries.clear()
+  },
+)
+
+it('keeps retained byte accounting when a durable update preserves the active call', async () => {
+  const live = {
+    ...snapshot(draftSessionId),
+    active: {
+      turn_id: draftSessionId,
+      state: { kind: 'running' as const, model_call_id: draftSessionId },
+    },
+  }
+  let requested = false
+  vi.mocked(readSessionLive).mockResolvedValue({ ...live, observed_through: '42' })
+  vi.mocked(followSession).mockImplementation(async function* (_sessionId, _signal, needsResync) {
+    yield { kind: 'snapshot', snapshot: live }
+    yield draft('é'.repeat(32_768))
+    yield {
+      kind: 'durable',
+      cursor: '42',
+      address: { event_sequence: '42' },
+      event_kind: 'input_accepted',
+    }
+    yield draft('x')
+    requested = needsResync?.() ?? false
+  })
+  const store = createAppStore()
+  const queries = new QueryClient()
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(draftSessionId))
+  await vi.waitFor(() => expect(requested).toBe(true))
+  expect(selectSessionSync(store.getState())).toMatchObject({ phase: 'resyncing', drafts: [] })
+  stop()
+  queries.clear()
+})
+
+it('cancels a pending draft publication when leaving the session', async () => {
+  let queued = () => {}
+  const queuedDraft = new Promise<void>((resolve) => {
+    queued = resolve
+  })
+  vi.mocked(followSession).mockImplementation(async function* () {
+    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    yield draft('Pending')
+    queued()
+  })
+  const store = createAppStore()
+  const queries = new QueryClient()
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(draftSessionId))
+  await queuedDraft
+  store.dispatch(actions.sessionFollowRequested(null))
+  let publications = 0
+  const unsubscribe = store.subscribe(() => {
+    publications++
+  })
+  await new Promise((resolve) => requestAnimationFrame(resolve))
+  expect(publications).toBe(0)
+  expect(selectSessionSync(store.getState())).toMatchObject({ sessionId: null, drafts: [] })
+  stop()
+  unsubscribe()
   queries.clear()
 })
