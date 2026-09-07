@@ -49,19 +49,21 @@ result before retiring any resulting approval and closing the request. Batch
 evaluation and staged replacement cannot continue between that observation and
 the request closure.
 
-An offered lease is already dispatched. On placement loss, side-effecting work
-receives the [runner contract's](../spec/runner-protocol.md) crash
-classification. Pure or idempotent work instead retains the lost attempt and
-requires a fresh physical attempt. When that retry needs a successor runner, all
-preceding requests first reach durable resolution, but none of the batch's
-result entries is projected yet. A distinct pre-continuation takeover
-transaction then locks the session, batch, retained lost attempt, and staged
-replacement; revalidates that every preceding request is resolved and that this
-request alone is recovery-pending; installs the successor placement; and
-consumes the staged replacement before a retry lease can be offered. It neither
-appends tool-result entries nor prepares a continuation. This recovery takeover
-is the exception to waiting for the lost offered request to resolve. The request
-remains recovery-pending until its fresh attempt resolves or
+An offered lease is already dispatched. With durable no-execution proof, loss
+permits a checked successor generation for every effect class while retaining
+the unexecuted attempt, as the [runner contract](../spec/runner-protocol.md)
+requires. Without that proof, side-effecting work receives crash classification;
+pure or idempotent work instead retains the lost attempt and requires a fresh
+physical attempt. When that retry needs a successor runner, all preceding
+requests first reach durable resolution, but none of the batch's result entries
+is projected yet. A distinct pre-continuation takeover transaction then locks
+the session, batch, retained lost attempt, and staged replacement; revalidates
+that every preceding request is resolved and that this request alone is
+recovery-pending; installs the successor placement; and consumes the staged
+replacement before a retry lease can be offered. It neither appends tool-result
+entries nor prepares a continuation. This recovery takeover is the exception to
+waiting for the lost offered request to resolve. The request remains
+recovery-pending until its fresh attempt resolves or
 [terminalization wins](turn-lifecycle-and-scheduling.md). If the retry resolves
 first, later requests execute in proposal order. Once the whole batch resolves,
 the ordinary continuation transaction projects every result in proposal order
@@ -175,18 +177,21 @@ a second result projection. It records that resolution for every unresolved
 runner-locus request before dispatch, including earlier approved requests in a
 parked batch, then resumes batch evaluation. A prepared judge call is retired
 without authorization atomically with request closure; an in-flight judge call
-reaches its observation boundary first. Side-effecting offered attempts receive
-effect-class crash classification. A pure or idempotent offered attempt lost
-with its placement retains that attempt; after every preceding request resolves,
-a distinct pre-continuation takeover transaction installs the successor and
-consumes the staged replacement before a fresh physical attempt is offered
-there, without requiring the old and new runner ids to match. It projects no
-result and prepares no continuation. Unless terminalization closes the retained
-attempt and request and suppresses retry, the request remains recovery-pending
-until that retry resolves; later requests then execute in proposal order before
-the ordinary continuation transaction projects the complete batch.
-Executor-dispatched attempts otherwise complete or receive effect-class crash
-classification; placement loss never rewrites or cancels them.
+reaches its observation boundary first. Offered attempts lost with durable
+no-execution proof permit a checked successor generation for every effect class,
+retaining the unexecuted attempt. Without that proof, side-effecting offered
+attempts receive effect-class crash classification. A pure or idempotent offered
+attempt lost without that proof retains that attempt; after every preceding
+request resolves, a distinct pre-continuation takeover transaction installs the
+successor and consumes the staged replacement before a fresh physical attempt is
+offered there, without requiring the old and new runner ids to match. It
+projects no result and prepares no continuation. Unless terminalization closes
+the retained attempt and request and suppresses retry, the request remains
+recovery-pending until that retry resolves; later requests then execute in
+proposal order before the ordinary continuation transaction projects the
+complete batch. Executor-dispatched attempts otherwise complete or receive
+effect-class crash classification; placement loss never rewrites or cancels
+them.
 
 A request a declaring family marks inadmissible resolves before approval with no
 approval state, no judge call, no attempt row, and no executor work; it projects
