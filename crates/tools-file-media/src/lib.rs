@@ -32,9 +32,8 @@ const INVALID_INSPECT_ARGUMENTS: &str =
     "expected exactly a canonical digest and optional visible-part selector";
 const INVALID_READ_ARGUMENTS: &str = "expected a canonical digest, view, optional selector, and exactly one of object options or continuation";
 const RESULT_TOO_LARGE_DETAIL: &str = r#"{"status":"result_too_large"}"#;
-// numeric-bound: ceiling - reserves processor-frame space for validated evidence and framing
+// The remaining processor-frame space carries validation evidence and framing.
 const MAX_INITIAL_OPTIONS_BYTES: usize = MAX_PROCESSOR_FRAME_BYTES / 4;
-// numeric-bound: hard safety ceiling - bounds recursive JSON serialization and destruction work
 const MAX_FILE_READ_ARGUMENT_DEPTH: usize = 256;
 
 /// Checked service request for `file_inspect`.

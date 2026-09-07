@@ -104,10 +104,7 @@ pub const CODEX_CLI_CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
 
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
-// numeric-bound: guard - bounds structured repository-watch rules retained by the shared
-// convergence configuration parser
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
-// numeric-bound: guard - bounds actions decoded for one retained repository-watch rule
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
 /// One provider-availability cause a pool trigger can react to.
 ///
@@ -487,10 +484,7 @@ pub const MAX_COMPACTION_PROMPT_UTF8_BYTES: usize = 1_048_576;
 /// Default maximum assembled source bytes for one conversation import.
 pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 
-// numeric-bound: guard - bounds independently credentialed repositories available to the shared
-// convergence sweep
 const MAX_WATCHED_REPOSITORIES: usize = 128;
-// numeric-bound: guard - bounds reviewer identities decoded by the retained configuration grammar
 const MAX_SIGNAL_REVIEWERS: usize = 128;
 
 /// Loopback-only reference address selected when the webhook listener table

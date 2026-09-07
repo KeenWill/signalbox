@@ -278,8 +278,8 @@ mod tests {
         .expect("prepared completed-call invalidation derives sealed facts")
     }
 
-    /// Prepared ends directly as exact known failure
-    /// while every open logical dependency remains an atomic closure requirement.
+    /// Prepared ends directly as exact known failure while every open logical dependency remains an
+    /// atomic closure requirement.
     #[test]
     fn prepared_invalidation_binds_atomic_failure_only() {
         let facts = prepared_facts([
@@ -330,8 +330,8 @@ mod tests {
         ));
     }
 
-    /// unclassified work or blocking ambiguity rejects
-    /// the atomic-only path with exact facts and source phase unchanged.
+    /// unclassified work or blocking ambiguity rejects the atomic-only path with exact facts and
+    /// source phase unchanged.
     #[test]
     fn incomplete_prepared_physical_closure_rejects_unchanged() {
         assert_incomplete_physical_closure_rejects_unchanged(IssuedOperationClosure::Unclassified);

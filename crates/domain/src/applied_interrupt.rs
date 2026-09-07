@@ -543,8 +543,8 @@ mod tests {
         )
     }
 
-    /// the exact applied interrupt result alone
-    /// supplies proof tied to its command, predecessor, input, and successor.
+    /// the exact applied interrupt result alone supplies proof tied to its command, predecessor,
+    /// input, and successor.
     #[test]
     fn exact_applied_interrupt_constructs_correlated_authority() {
         let predecessor = accepted_ordinary(1);
@@ -563,8 +563,8 @@ mod tests {
         assert_eq!(result.successor_order(), facts.successor.order());
     }
 
-    /// nested applications produce structurally
-    /// exact proof values for their distinct commands and active predecessors.
+    /// nested applications produce structurally exact proof values for their distinct commands and
+    /// active predecessors.
     #[test]
     fn nested_interrupt_proofs_preserve_exact_identity() {
         let root = accepted_ordinary(1);
@@ -582,8 +582,8 @@ mod tests {
         assert_ne!(first.proof(), nested.proof());
     }
 
-    /// an authoritative rejection contains no
-    /// applied work facts and cannot supply cancellation authority.
+    /// an authoritative rejection contains no applied work facts and cannot supply cancellation
+    /// authority.
     #[test]
     fn rejected_command_cannot_construct_proof() {
         let no_known_work: [AcceptedInputQueueWork; 0] = [];
@@ -604,8 +604,8 @@ mod tests {
         );
     }
 
-    /// no other delivery discriminator can be
-    /// cross-wired to applied interrupt work and acquire authority.
+    /// no other delivery discriminator can be cross-wired to applied interrupt work and acquire
+    /// authority.
     #[test]
     fn non_interrupt_commands_cannot_construct_proof() {
         assert_non_interrupt_delivery_rejected(DeliveryRequest::StartWhenNoActiveTurn {
@@ -635,8 +635,8 @@ mod tests {
         );
     }
 
-    /// the stored accepted treatment and exact
-    /// authoritative predecessor must match the applied command payload.
+    /// the stored accepted treatment and exact authoritative predecessor must match the applied
+    /// command payload.
     #[test]
     fn cross_wired_delivery_or_target_is_rejected() {
         let predecessor = accepted_ordinary(1);
@@ -666,8 +666,8 @@ mod tests {
         );
     }
 
-    /// predecessor, accepted input, and successor associations
-    /// must all remain in the command's session.
+    /// predecessor, accepted input, and successor associations must all remain in the command's
+    /// session.
     #[test]
     fn every_cross_session_association_is_rejected() {
         let predecessor_work = accepted_ordinary(1);
@@ -749,8 +749,8 @@ mod tests {
         );
     }
 
-    /// the newly accepted input must be the exact successor's
-    /// origin, never steering or another turn's origin.
+    /// the newly accepted input must be the exact successor's origin, never steering or another
+    /// turn's origin.
     #[test]
     fn non_origin_and_wrong_origin_dispositions_are_rejected() {
         assert_non_origin_disposition_rejected(AcceptedInputDisposition::OriginOf(turn_id(9)));
@@ -786,8 +786,8 @@ mod tests {
         );
     }
 
-    /// the accepted position and typed successor priority must
-    /// describe the same exact interrupt-created work.
+    /// the accepted position and typed successor priority must describe the same exact
+    /// interrupt-created work.
     #[test]
     fn cross_wired_position_or_priority_is_rejected() {
         let predecessor = accepted_ordinary(1);
@@ -836,8 +836,8 @@ mod tests {
         );
     }
 
-    /// the successor must be new and its target must
-    /// exist in the complete pre-application queue projection.
+    /// the successor must be new and its target must exist in the complete pre-application queue
+    /// projection.
     #[test]
     fn preexisting_successor_or_missing_predecessor_is_rejected() {
         let predecessor = accepted_ordinary(1);
@@ -861,8 +861,8 @@ mod tests {
         );
     }
 
-    /// existing priority facts cannot already claim
-    /// another immediate interrupt successor for the same predecessor.
+    /// existing priority facts cannot already claim another immediate interrupt successor for the
+    /// same predecessor.
     #[test]
     fn competing_interrupt_successor_is_rejected() {
         let predecessor = accepted_ordinary(1);
@@ -881,8 +881,7 @@ mod tests {
         );
     }
 
-    /// priority cannot move an input ahead of a
-    /// predecessor that was accepted later.
+    /// priority cannot move an input ahead of a predecessor that was accepted later.
     #[test]
     fn time_inverted_interrupt_successor_is_rejected() {
         let predecessor = accepted_ordinary(2);

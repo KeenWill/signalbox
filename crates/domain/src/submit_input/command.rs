@@ -1,4 +1,5 @@
-//! Durable submit-input commands and authoritative-state preparation for `docs/spec/turn-lifecycle-and-scheduling.md`.
+//! Durable submit-input commands and authoritative-state preparation for
+//! `docs/spec/turn-lifecycle-and-scheduling.md`.
 
 use super::prepared::PreparedSubmitInput;
 use super::prepared::SubmitInputPreparationError;

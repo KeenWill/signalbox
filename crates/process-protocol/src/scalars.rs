@@ -54,58 +54,45 @@ impl<'de> Deserialize<'de> for ProtocolVersion {
 }
 
 /// Maximum encoded frame size, including its final newline.
-// numeric-bound: guard - protects process memory from oversized wire frames
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// Maximum decoded source bytes carried by one conversation-import append.
 ///
 /// The half-frame raw-byte bound leaves fixed headroom for canonical padded
 /// base64, the request envelope, and the maximum-width correlation identity.
-// numeric-bound: derived guard from MAX_FRAME_BYTES
 pub const MAX_CONVERSATION_IMPORT_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum decoded bytes carried by one immutable-blob append.
-// numeric-bound: derived guard from MAX_FRAME_BYTES
 pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum decoded bytes returned by one direct blob-range request.
-// numeric-bound: derived guard from MAX_FRAME_BYTES
 pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum number of simultaneously open JSON objects and arrays in one frame.
-// numeric-bound: guard - protects parser stack and latency from pathological nesting
 pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
 
 /// Maximum UTF-8 bytes in one transcript content fragment.
-// numeric-bound: guard - protects frame memory from pathological content fragmentation
 pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
 
 /// Maximum total UTF-8 bytes in one complete metadata object or filter.
-// numeric-bound: guard - protects metadata row and frame memory from pathological text volume
 pub const MAX_SESSION_METADATA_TOTAL_UTF8_BYTES: usize = 262_144;
 
 /// Maximum UTF-8 bytes in one indexed metadata tag or attribute key.
-// numeric-bound: guard - protects database index keys from oversized values
 pub const MAX_SESSION_METADATA_INDEXED_UTF8_BYTES: usize = 1_024;
 
 /// Maximum entries in one deployment model-alias catalog.
-// numeric-bound: guard - protects model-alias catalog frame memory and wire size
 pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
 /// Maximum entries in one deployment model-capability catalog.
-// numeric-bound: guard - protects model-capability catalog frame memory and wire size
 pub const MAX_MODEL_CAPABILITY_CATALOG_ENTRIES: usize = 10_000;
 
 /// Maximum canonical decimal USD amount text.
-// numeric-bound: not-a-bound - the longest canonical rust_decimal spelling
 pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 30;
 
 /// Maximum UTF-8 bytes in one deployment-owned billing rate version.
-// numeric-bound: guard - preserves the advertised billing-rate wire grammar
 pub const MAX_RATE_VERSION_UTF8_BYTES: usize = 128;
 
 /// Maximum finding-indexed members in one review-orchestration request.
-// numeric-bound: guard - protects review-request memory and wire size
 pub const MAX_REVIEW_ORCHESTRATION_MEMBERS: usize = 1_024;
 
 #[derive(signalbox_derive::Accessors)]
@@ -520,7 +507,6 @@ pub struct CanonicalDollarAmount(
 impl CanonicalDollarAmount {
     /// Validates one shortest nonnegative base-ten decimal spelling.
     pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
-        // numeric-bound: not-a-bound - fixed rust_decimal coefficient representation
         const MAX_DECIMAL_COEFFICIENT: u128 = 79_228_162_514_264_337_593_543_950_335;
 
         let (integer, fraction) = value

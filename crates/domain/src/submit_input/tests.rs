@@ -1,4 +1,5 @@
-//! Submit-input preparation and reconstitution tests for `docs/spec/turn-lifecycle-and-scheduling.md`.
+//! Submit-input preparation and reconstitution tests for
+//! `docs/spec/turn-lifecycle-and-scheduling.md`.
 
 use std::collections::{BTreeSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
@@ -800,9 +801,8 @@ fn assert_rejection_reconstitution_fails(
     );
 }
 
-/// comparison excludes only command identity and
-/// includes the fixed user actor, session, exact content, delivery
-/// discriminator, and every delivery field.
+/// comparison excludes only command identity and includes the fixed user actor, session, exact
+/// content, delivery discriminator, and every delivery field.
 #[test]
 fn comparison_payload_is_structural() {
     let baseline = start_command(1, "hello", 1);
@@ -866,8 +866,8 @@ fn comparison_payload_is_structural() {
     assert_ne!(parent_alone_interrupt, conflicting_interrupt_replay);
 }
 
-/// start preparation creates exact
-/// queued-origin disposition, ordinary position, and frozen provenance.
+/// start preparation creates exact queued-origin disposition, ordinary position, and frozen
+/// provenance.
 #[test]
 fn start_prepares_complete_queued_work() {
     let command = start_command(1, "hello", 1);
@@ -910,8 +910,8 @@ fn start_prepares_complete_queued_work() {
     );
 }
 
-/// per-call settings participate in authoritative
-/// origin derivation and remain explicit in the frozen request.
+/// per-call settings participate in authoritative origin derivation and remain explicit in the
+/// frozen request.
 #[test]
 fn per_call_settings_are_frozen_for_the_origin() {
     let selection = direct(2);
@@ -973,8 +973,8 @@ fn per_call_settings_are_frozen_for_the_origin() {
     );
 }
 
-/// the legacy preparation path fails closed when a caller
-/// supplies settings that require a capability record.
+/// the legacy preparation path fails closed when a caller supplies settings that require a
+/// capability record.
 #[test]
 fn legacy_preparation_rejects_unvalidated_per_call_settings() {
     let selection = direct(2);
@@ -1003,8 +1003,8 @@ fn legacy_preparation_rejects_unvalidated_per_call_settings() {
     );
 }
 
-/// catalog-free preparation cannot carry settings
-/// validated for an alias's prior direct target across a retarget.
+/// catalog-free preparation cannot carry settings validated for an alias's prior direct target
+/// across a retarget.
 #[test]
 fn legacy_preparation_rejects_alias_retarget_settings() {
     let prior_selection = direct(2);
@@ -1146,8 +1146,8 @@ fn legacy_reconstitution_rejects_alias_retarget_settings() {
     );
 }
 
-/// explicit alias requests freeze the supplied immutable
-/// definition, while a missing definition is a typed recorded rejection.
+/// explicit alias requests freeze the supplied immutable definition, while a missing definition is
+/// a typed recorded rejection.
 #[test]
 fn alias_definition_is_frozen_or_rejected() {
     let command = SubmitInput::new(
@@ -1223,8 +1223,7 @@ fn assert_vacant_slot_records_rejection(
     assert_eq!(prepared.result(), &SubmitInputResult::Rejected(expected));
 }
 
-/// active-work variants record the exact
-/// expected turn in a no-active-turn rejection.
+/// active-work variants record the exact expected turn in a no-active-turn rejection.
 #[test]
 fn active_modes_reject_when_no_turn_is_active() {
     assert_vacant_slot_records_rejection(
@@ -1268,9 +1267,8 @@ fn active_modes_reject_when_no_turn_is_active() {
     );
 }
 
-/// matching after-current input
-/// creates ordinary queued origin work with the next acceptance position
-/// and exact frozen configuration.
+/// matching after-current input creates ordinary queued origin work with the next acceptance
+/// position and exact frozen configuration.
 #[test]
 fn matching_after_current_prepares_ordinary_turn_origin() {
     let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -1310,8 +1308,7 @@ fn matching_after_current_prepares_ordinary_turn_origin() {
     );
 }
 
-/// matching safe-point input creates
-/// pending steering bound to the exact active turn and carries no
+/// matching safe-point input creates pending steering bound to the exact active turn and carries no
 /// turn-origin fields.
 #[test]
 fn matching_next_safe_point_prepares_pending_steering() {
@@ -1346,8 +1343,8 @@ fn matching_next_safe_point_prepares_pending_steering() {
     assert_eq!(steering.binding().source_turn(), active_turn);
 }
 
-/// a vacant-slot start submitted while the slot
-/// is occupied records the exact authoritative active turn.
+/// a vacant-slot start submitted while the slot is occupied records the exact authoritative active
+/// turn.
 #[test]
 fn occupied_slot_start_records_active_turn_presence() {
     let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -1466,8 +1463,8 @@ fn delegated_active_turn_accepts_correlated_interrupt_successor() {
     );
 }
 
-/// delegation-origin slot ownership cannot bypass the
-/// capability evidence required by an explicit per-call setting.
+/// delegation-origin slot ownership cannot bypass the capability evidence required by an explicit
+/// per-call setting.
 #[test]
 fn delegated_successor_rejects_unvalidated_per_call_settings() {
     let selection = direct(2);
@@ -1513,8 +1510,8 @@ fn delegated_successor_rejects_unvalidated_per_call_settings() {
     );
 }
 
-/// every active-work delivery mode
-/// records its stale target against the exact authoritative active turn.
+/// every active-work delivery mode records its stale target against the exact authoritative active
+/// turn.
 #[test]
 fn occupied_slot_active_work_records_stale_target() {
     let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -1567,8 +1564,8 @@ fn occupied_slot_active_work_records_stale_target() {
     ));
 }
 
-/// matching interrupt preparation
-/// creates the exact immediate successor and sole cancellation proof.
+/// matching interrupt preparation creates the exact immediate successor and sole cancellation
+/// proof.
 #[test]
 fn occupied_slot_matching_interrupt_applies() {
     let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -1603,8 +1600,8 @@ fn occupied_slot_matching_interrupt_applies() {
     );
 }
 
-/// runner recovery does not invent a new
-/// non-consuming rejection that would foreclose stop-before-abandonment.
+/// runner recovery does not invent a new non-consuming rejection that would foreclose
+/// stop-before-abandonment.
 #[test]
 fn runner_recovery_preserves_interrupt_authority() {
     let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -1779,10 +1776,9 @@ fn approval_wait_turn(current: &Session) -> AcceptedInputSchedulingProjection {
     .expect("the parked approval-wait scheduling facts are complete")
 }
 
-/// an interrupt against a parked approval
-/// wait records the typed rejection instead of accepting a successor; the
-/// wait remains parked until its canonical decision command resolves the
-/// approval obligation.
+/// an interrupt against a parked approval wait records the typed rejection instead of accepting a
+/// successor; the wait remains parked until its canonical decision command resolves the approval
+/// obligation.
 #[test]
 fn interrupt_against_parked_approval_wait_is_rejected() {
     let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -1819,8 +1815,7 @@ fn interrupt_against_parked_approval_wait_is_rejected() {
     );
 }
 
-/// the recorded parked-approval interrupt
-/// rejection reconstructs exactly.
+/// the recorded parked-approval interrupt rejection reconstructs exactly.
 #[test]
 fn parked_approval_interrupt_rejection_reconstitutes_exactly() {
     let session = session_id(1);
@@ -1843,9 +1838,8 @@ fn parked_approval_interrupt_rejection_reconstitutes_exactly() {
     );
 }
 
-/// parked-approval interrupt rejection
-/// replay fails closed when the command's delivery or expected active turn
-/// is cross-wired against the recorded rejection.
+/// parked-approval interrupt rejection replay fails closed when the command's delivery or expected
+/// active turn is cross-wired against the recorded rejection.
 #[test]
 fn parked_approval_interrupt_rejection_evidence_is_exact() {
     let session = session_id(1);
@@ -1878,8 +1872,7 @@ fn parked_approval_interrupt_rejection_evidence_is_exact() {
     );
 }
 
-/// after-current preparation records
-/// the exact stale session-defaults version.
+/// after-current preparation records the exact stale session-defaults version.
 #[test]
 fn occupied_slot_after_current_records_stale_defaults_version() {
     let stale_session = session(1, 2, ModelSelectionRequest::Direct(direct(2)));
@@ -1907,8 +1900,7 @@ fn occupied_slot_after_current_records_stale_defaults_version() {
     ));
 }
 
-/// after-current preparation records the exact
-/// unresolved model alias.
+/// after-current preparation records the exact unresolved model alias.
 #[test]
 fn occupied_slot_after_current_records_unknown_alias() {
     let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -1944,8 +1936,7 @@ fn occupied_slot_after_current_records_unknown_alias() {
     ));
 }
 
-/// both occupied-slot acceptance paths
-/// record exhaustion of the validated session acceptance tail.
+/// both occupied-slot acceptance paths record exhaustion of the validated session acceptance tail.
 #[test]
 fn occupied_slot_acceptance_records_position_exhaustion() {
     let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -1979,8 +1970,8 @@ fn occupied_slot_acceptance_records_position_exhaustion() {
     ));
 }
 
-/// occupied-slot preparation rejects a scheduling
-/// projection from another session without claiming the command.
+/// occupied-slot preparation rejects a scheduling projection from another session without claiming
+/// the command.
 #[test]
 fn occupied_slot_preparation_rejects_cross_session_projection() {
     let wrong_session = session(2, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -2010,8 +2001,7 @@ fn occupied_slot_preparation_rejects_cross_session_projection() {
     assert_eq!(wrong_active_session.command(), &command);
 }
 
-/// a queued projection cannot stand in for the
-/// authoritative active turn.
+/// a queued projection cannot stand in for the authoritative active turn.
 #[test]
 fn occupied_slot_preparation_requires_active_projection() {
     let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -2035,8 +2025,7 @@ fn occupied_slot_preparation_requires_active_projection() {
     assert_eq!(not_active.command(), &command);
 }
 
-/// each occupied-slot delivery mode requires the
-/// exact candidate shape it can apply.
+/// each occupied-slot delivery mode requires the exact candidate shape it can apply.
 #[test]
 fn occupied_slot_preparation_rejects_mismatched_turn_candidate_shape() {
     let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -2073,8 +2062,7 @@ fn occupied_slot_preparation_rejects_mismatched_turn_candidate_shape() {
     );
 }
 
-/// no occupied-slot acceptance path can
-/// reuse the active turn's canonical origin identity.
+/// no occupied-slot acceptance path can reuse the active turn's canonical origin identity.
 #[test]
 fn occupied_slot_preparation_rejects_active_origin_identity_reuse() {
     let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -2113,8 +2101,8 @@ fn occupied_slot_preparation_rejects_active_origin_identity_reuse() {
     );
 }
 
-/// missing sessions, stale defaults, unknown
-/// aliases, and exhausted positions remain distinct terminal results.
+/// missing sessions, stale defaults, unknown aliases, and exhausted positions remain distinct
+/// terminal results.
 #[test]
 fn authoritative_rejections_are_typed() {
     let command = start_command(1, "hello", 1);
@@ -2253,8 +2241,7 @@ fn applied_reconstitution_checks_complete_correlations() {
     );
 }
 
-/// both occupied applied
-/// shapes reconstruct only from exact treatment and source correlations.
+/// both occupied applied shapes reconstruct only from exact treatment and source correlations.
 #[test]
 fn occupied_applied_shapes_reconstitute_exactly() {
     let after = after_applied_input()
@@ -2307,8 +2294,8 @@ fn assert_replay_survives_lifecycle_progress(advanced: &AcceptedInputLifecycle) 
     ));
 }
 
-/// replay reconstructs the immutable original
-/// pending-steering receipt independently of its mutable lifecycle.
+/// replay reconstructs the immutable original pending-steering receipt independently of its mutable
+/// lifecycle.
 #[test]
 fn pending_steering_replay_survives_lifecycle_progress() {
     let initial = AcceptedInputLifecycle::new(
@@ -2342,9 +2329,8 @@ fn applied_result(result: &SubmitInputResult) -> &SubmitInputAppliedResult {
     }
 }
 
-/// a canonical turn origin can come from
-/// either an original turn-producing receipt or a later visible
-/// reclassification of immutable pending steering.
+/// a canonical turn origin can come from either an original turn-producing receipt or a later
+/// visible reclassification of immutable pending steering.
 #[test]
 fn reclassified_turn_origins_support_replay() {
     let predecessor_position = SessionInputPosition::first()
@@ -2445,8 +2431,8 @@ fn reclassified_turn_origins_support_replay() {
     );
 }
 
-/// model rendering recovers the final accepted
-/// input's exact user content from a fully checked reclassification chain.
+/// model rendering recovers the final accepted input's exact user content from a fully checked
+/// reclassification chain.
 #[test]
 fn reclassified_origin_preserves_renderable_user_content() {
     let origin = reclassified_turn_origin();
@@ -2481,9 +2467,8 @@ fn assert_terminal_source_authenticates_reclassification(disposition: TurnDispos
     .expect("every terminal source disposition authenticates reclassification");
 }
 
-/// reclassification replay admits every
-/// terminal disposition and recursively validates a source turn that was
-/// itself created by steering reclassification.
+/// reclassification replay admits every terminal disposition and recursively validates a source
+/// turn that was itself created by steering reclassification.
 #[test]
 fn reclassification_accepts_all_terminal_sources_and_chains() {
     assert_terminal_source_authenticates_reclassification(TurnDisposition::Completed);
@@ -2602,9 +2587,8 @@ fn assert_cross_wired_reclassified_origin_fails_closed(
     );
 }
 
-/// a pending receipt becomes canonical origin
-/// evidence only with its exact reclassified lifecycle, queue facts, and
-/// earlier distinct terminal source origin.
+/// a pending receipt becomes canonical origin evidence only with its exact reclassified lifecycle,
+/// queue facts, and earlier distinct terminal source origin.
 #[test]
 fn reclassified_turn_origin_rejects_cross_wired_facts() {
     let mut wrong_lifecycle = reclassified_turn_origin();
@@ -2698,8 +2682,7 @@ fn reclassified_origin_chain_ending_at(
     origin
 }
 
-/// validation remains bounded by heap-backed
-/// input size rather than call-stack depth.
+/// validation remains bounded by heap-backed input size rather than call-stack depth.
 #[test]
 fn reclassified_origin_validation_is_iterative() {
     let origin = reclassified_origin_chain_ending_at(16_384);
@@ -2709,9 +2692,8 @@ fn reclassified_origin_validation_is_iterative() {
     assert_eq!(validated.turn, turn_id(16_390));
 }
 
-/// command, accepted-input, and turn identities
-/// remain unique across the complete reclassification chain, not only
-/// adjacent source/origin pairs.
+/// command, accepted-input, and turn identities remain unique across the complete reclassification
+/// chain, not only adjacent source/origin pairs.
 #[test]
 fn reclassified_origin_rejects_ancestor_identity_reuse() {
     let command_reuse = append_unchecked_reclassified_origin(
@@ -2768,8 +2750,8 @@ fn assert_terminal_proof_command_is_tracked(
     );
 }
 
-/// the user-global command identity set includes
-/// every command carried by terminal authority in the origin chain.
+/// the user-global command identity set includes every command carried by terminal authority in the
+/// origin chain.
 #[test]
 fn reclassified_origin_tracks_terminal_proof_commands() {
     let proof_command = command_id(0x90);
@@ -2861,8 +2843,8 @@ fn reclassified_origin_tracks_terminal_proof_commands() {
     );
 }
 
-/// after-current replay carries the active predecessor's
-/// canonical origin and must follow it in session acceptance order.
+/// after-current replay carries the active predecessor's canonical origin and must follow it in
+/// session acceptance order.
 #[test]
 fn after_reconstitution_requires_predecessor_chronology() {
     let mut missing_predecessor = after_applied_input();
@@ -2898,8 +2880,8 @@ fn after_reconstitution_requires_predecessor_chronology() {
     );
 }
 
-/// an interrupt origin may follow the exact terminal
-/// delegated predecessor even though that turn has no accepted input.
+/// an interrupt origin may follow the exact terminal delegated predecessor even though that turn
+/// has no accepted input.
 #[test]
 fn interrupt_reconstitution_admits_exact_non_accepted_predecessor() {
     let input = interrupt_applied_input_with_non_accepted_predecessor(session_id(1), turn_id(7));
@@ -2909,8 +2891,7 @@ fn interrupt_reconstitution_admits_exact_non_accepted_predecessor() {
         .expect("the exact non-accepted interrupt predecessor is admitted");
 }
 
-/// non-accepted predecessor evidence remains scoped to the
-/// command's exact session.
+/// non-accepted predecessor evidence remains scoped to the command's exact session.
 #[test]
 fn interrupt_reconstitution_rejects_cross_session_non_accepted_predecessor() {
     let input = interrupt_applied_input_with_non_accepted_predecessor(session_id(2), turn_id(7));
@@ -2924,8 +2905,7 @@ fn interrupt_reconstitution_rejects_cross_session_non_accepted_predecessor() {
     );
 }
 
-/// non-accepted predecessor evidence must name the exact
-/// turn targeted by the interrupt command.
+/// non-accepted predecessor evidence must name the exact turn targeted by the interrupt command.
 #[test]
 fn interrupt_reconstitution_rejects_cross_wired_non_accepted_predecessor() {
     let input = interrupt_applied_input_with_non_accepted_predecessor(session_id(1), turn_id(6));
@@ -2939,8 +2919,8 @@ fn interrupt_reconstitution_rejects_cross_wired_non_accepted_predecessor() {
     );
 }
 
-/// non-accepted predecessor evidence cannot weaken the
-/// accepted-origin chronology required by after-current delivery.
+/// non-accepted predecessor evidence cannot weaken the accepted-origin chronology required by
+/// after-current delivery.
 #[test]
 fn after_current_rejects_non_accepted_predecessor() {
     let mut input = after_applied_input();
@@ -2960,8 +2940,7 @@ fn after_current_rejects_non_accepted_predecessor() {
     );
 }
 
-/// after-current replay cannot reuse any identity from its
-/// active predecessor origin.
+/// after-current replay cannot reuse any identity from its active predecessor origin.
 #[test]
 fn after_reconstitution_rejects_predecessor_identity_reuse() {
     let mut turn_reuse = after_applied_input();
@@ -3022,8 +3001,8 @@ fn after_reconstitution_rejects_predecessor_identity_reuse() {
     );
 }
 
-/// pending-steering replay cannot reuse either user-global
-/// identity from its canonical source origin.
+/// pending-steering replay cannot reuse either user-global identity from its canonical source
+/// origin.
 #[test]
 fn pending_steering_rejects_source_identity_reuse() {
     let mut accepted_input_reuse = pending_steering_input();
@@ -3083,8 +3062,8 @@ fn assert_pending_steering_fact_fails_closed(
     );
 }
 
-/// every independent pending-steering fact is
-/// checked before the immutable receipt is reconstructed.
+/// every independent pending-steering fact is checked before the immutable receipt is
+/// reconstructed.
 #[test]
 fn pending_steering_reconstitution_rejects_cross_wired_facts() {
     assert_pending_steering_fact_fails_closed(
@@ -3572,8 +3551,8 @@ fn rejected_reconstitution_rejects_every_cross_wired_fact() {
     );
 }
 
-/// every rejection that records an
-/// authoritative active turn carries that turn's exact canonical origin.
+/// every rejection that records an authoritative active turn carries that turn's exact canonical
+/// origin.
 #[test]
 fn active_state_rejections_reconstruct_from_canonical_origins() {
     assert_reconstitutes_rejection(
@@ -3645,8 +3624,7 @@ fn active_state_rejections_reconstruct_from_canonical_origins() {
     );
 }
 
-/// configuration and position
-/// rejections reconstruct only for delivery modes that can record them,
+/// configuration and position rejections reconstruct only for delivery modes that can record them,
 /// with occupied modes carrying their exact active origin.
 #[test]
 fn configuration_and_position_rejections_follow_delivery() {
@@ -3794,9 +3772,8 @@ fn configuration_and_position_rejections_follow_delivery() {
     );
 }
 
-/// rejection replay fails closed when required
-/// active-origin evidence is omitted, extra, cross-wired, or command-ID
-/// aliased.
+/// rejection replay fails closed when required active-origin evidence is omitted, extra,
+/// cross-wired, or command-ID aliased.
 #[test]
 fn rejected_active_origin_evidence_is_exact() {
     assert_rejection_reconstitution_fails(
@@ -3912,8 +3889,8 @@ fn rejected_active_origin_evidence_is_exact() {
     );
 }
 
-/// state-carrying rejection replay
-/// validates the delivery discriminator and both expected/actual turns.
+/// state-carrying rejection replay validates the delivery discriminator and both expected/actual
+/// turns.
 #[test]
 fn state_rejections_validate_delivery_and_turns() {
     assert_rejection_reconstitution_fails(
@@ -3956,8 +3933,7 @@ fn state_rejections_validate_delivery_and_turns() {
     );
 }
 
-/// interrupt replay admits the same
-/// configuration and position rejections as preparation, while a
+/// interrupt replay admits the same configuration and position rejections as preparation, while a
 /// safe-point request still carries no configurable model choice.
 #[test]
 fn interrupt_rejections_reconstitute_exactly() {
@@ -4046,8 +4022,8 @@ fn interrupt_rejections_reconstitute_exactly() {
     .expect("an interrupt position-exhaustion rejection reconstructs");
 }
 
-/// preparation against another command's session is a
-/// nonterminal correlation failure retaining the unchanged command.
+/// preparation against another command's session is a nonterminal correlation failure retaining the
+/// unchanged command.
 #[test]
 fn preparation_rejects_a_cross_wired_session() {
     let command = start_command(1, "hello", 1);

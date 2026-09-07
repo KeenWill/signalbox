@@ -86,9 +86,8 @@ pub enum IssuedOperationRef {
 
 /// A canonical nonempty set of exact issued-operation references.
 ///
-/// Empty or duplicate input is rejected by [`Self::try_from_operations`].
-/// the private field also prevents
-/// bypassing that boundary:
+/// Empty or duplicate input is rejected by [`Self::try_from_operations`]. the private field also
+/// prevents bypassing that boundary:
 ///
 /// ```compile_fail
 /// use std::collections::BTreeSet;
@@ -159,8 +158,7 @@ pub enum NonEmptyIssuedOperationRefsError {
 /// Authority from one applied exact-set user decision to stop for
 /// reconciliation.
 ///
-/// raw command and turn identities cannot construct
-/// this proof:
+/// raw command and turn identities cannot construct this proof:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{AppliedStopForReconciliationProof, DurableCommandId, TurnId};
@@ -230,9 +228,8 @@ pub enum ReconciliationReason {
 
 /// Complete immutable evidence named by a reconciliation-required turn.
 ///
-/// fields remain
-/// private because only the later aggregate can validate that the set is exact
-/// and unacknowledged and that the reason matches its durable evidence:
+/// fields remain private because only the later aggregate can validate that the set is exact and
+/// unacknowledged and that the reason matches its durable evidence:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{NonEmptyIssuedOperationRefs, ReconciliationMarker, ReconciliationReason};
@@ -313,17 +310,15 @@ pub(crate) fn test_reconciliation_marker(
 
 /// One active phase; every value retains the session's progressing-turn slot.
 ///
-/// Variant fields make a running phase own exactly one current attempt and
-/// each wait own its exact subject with no optional attempt.
-/// a current attempt cannot be omitted from `Running`:
+/// Variant fields make a running phase own exactly one current attempt and each wait own its exact
+/// subject with no optional attempt. a current attempt cannot be omitted from `Running`:
 ///
 /// ```compile_fail
 /// use signalbox_domain::ActiveTurnPhase;
 /// let _ = ActiveTurnPhase::Running;
 /// ```
 ///
-/// nor can an approval wait carry an
-/// independent attempt:
+/// nor can an approval wait carry an independent attempt:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{ActiveTurnPhase, CurrentTurnAttempt, ToolRequestId};
@@ -379,16 +374,14 @@ impl ActiveTurnPhase {
 
 /// The immutable terminal classification carried by a turn.
 ///
-/// cancellation cannot omit its purpose-specific
-/// proof:
+/// cancellation cannot omit its purpose-specific proof:
 ///
 /// ```compile_fail
 /// use signalbox_domain::TurnDisposition;
 /// let _ = TurnDisposition::Cancelled;
 /// ```
 ///
-/// reconciliation
-/// likewise cannot omit its complete marker:
+/// reconciliation likewise cannot omit its complete marker:
 ///
 /// ```compile_fail
 /// use signalbox_domain::TurnDisposition;
@@ -537,8 +530,7 @@ mod tests {
         assert_ne!(model, tool);
     }
 
-    /// empty and duplicate caller
-    /// collections cannot construct the canonical ambiguity set.
+    /// empty and duplicate caller collections cannot construct the canonical ambiguity set.
     #[test]
     fn ambiguity_set_rejects_empty_and_duplicate_input() {
         assert_eq!(
@@ -553,8 +545,7 @@ mod tests {
         );
     }
 
-    /// valid reorderings construct
-    /// equal canonical sets and preserve every exact reference.
+    /// valid reorderings construct equal canonical sets and preserve every exact reference.
     #[test]
     fn ambiguity_set_is_canonical_and_exact() {
         let forward = operations(&[1, 2, 3]);
@@ -582,8 +573,8 @@ mod tests {
         );
     }
 
-    /// starting lineage remains a closed typed
-    /// algebra independently of frontier construction authority.
+    /// starting lineage remains a closed typed algebra independently of frontier construction
+    /// authority.
     #[test]
     fn starting_lineage_distinguishes_first_and_exact_predecessor() {
         let predecessor = turn_id(1);
@@ -606,9 +597,8 @@ mod tests {
         ));
     }
 
-    /// the opaque start value retains the exact lineage/frontier
-    /// pair, but its module-private construction does not claim the later
-    /// eligibility transition is implemented.
+    /// the opaque start value retains the exact lineage/frontier pair, but its module-private
+    /// construction does not claim the later eligibility transition is implemented.
     #[test]
     fn turn_start_shape_couples_lineage_and_exact_frontier() {
         let snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
@@ -637,8 +627,7 @@ mod tests {
         assert_eq!(start.frontier(), snapshot.frontier());
     }
 
-    /// every active phase
-    /// retains the slot and structurally carries exactly its required subject.
+    /// every active phase retains the slot and structurally carries exactly its required subject.
     #[test]
     fn active_phases_retain_slot_with_exact_subjects() {
         let attempt_id = turn_attempt_id(1);
@@ -685,8 +674,7 @@ mod tests {
         ));
     }
 
-    /// every marker
-    /// reason retains the exact canonical ambiguity set and typed authority.
+    /// every marker reason retains the exact canonical ambiguity set and typed authority.
     #[test]
     fn reconciliation_markers_preserve_exact_sets_and_reasons() {
         let ambiguous_operations = operations(&[1, 2]);
@@ -727,8 +715,7 @@ mod tests {
         assert_eq!(marker.reason(), &reason);
     }
 
-    /// cancellation and reconciliation terminal
-    /// values retain their exact proof-bearing payloads.
+    /// cancellation and reconciliation terminal values retain their exact proof-bearing payloads.
     #[test]
     fn terminal_dispositions_preserve_exact_payloads() {
         let expected_cause = interrupt(1);

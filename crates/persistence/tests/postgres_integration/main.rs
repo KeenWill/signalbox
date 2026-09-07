@@ -2730,7 +2730,6 @@ fn start_input(
 }
 
 /// Attachment byte ceiling the restart fixture admits, well above its one-byte blob.
-// numeric-bound: tunable - bounds fixture attachment admission
 const FIXTURE_ATTACHMENT_MAXIMUM_BYTES: u64 = 1_024;
 
 /// Builds one submit input whose content optionally carries a blob attachment.

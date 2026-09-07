@@ -29,7 +29,8 @@ pub const MAX_NDJSON_ITEM_BYTES: usize = 64 * 1024;
 /// Hard safety ceiling on one ephemeral provider text fragment. Production
 /// splits deltas at this bound, so the generated decoder rejects anything
 /// larger as a value the server cannot emit.
-// numeric-bound: hard safety - leaves room for worst-case JSON escaping and the event envelope
+// Six-byte JSON escapes expand 8 KiB to 48 KiB, leaving 16 KiB of the NDJSON item
+// for its envelope.
 pub const MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES: usize = 8_192;
 
 /// Identity of the one exact browser contract this daemon serves.

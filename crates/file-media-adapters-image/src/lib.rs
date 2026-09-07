@@ -28,7 +28,6 @@ pub(crate) const DIMENSION_LIMIT_EXCEEDED_REASON: &str = "dimension_limit_exceed
 pub(crate) const PIXEL_LIMIT_EXCEEDED_REASON: &str = "pixel_limit_exceeded";
 
 /// Maximum encoded bytes one image adapter accepts.
-// numeric-bound: ceiling - protects worker memory and decode latency from oversized inputs
 pub const MAX_IMAGE_SOURCE_BYTES: u64 = 262_144;
 
 #[derive(Clone, Copy, Debug)]

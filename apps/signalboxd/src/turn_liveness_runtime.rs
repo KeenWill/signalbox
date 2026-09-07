@@ -88,7 +88,6 @@ const ROTATION_CEILING_CAUSE: &str = "turn_liveness_rotation_ceiling_reached";
 /// page, so the rotation's end is learned from one further read that returns
 /// nothing; the loop allows that probe past this ceiling and counts no
 /// candidates from it.
-// numeric-bound: guard - prevents a non-converging liveness inventory scan
 const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
 /// Deployment policy for one turn-liveness scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
