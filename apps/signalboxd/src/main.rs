@@ -1547,6 +1547,14 @@ async fn run_hub(
     } else {
         None
     };
+    let scheduler_pool = pool.clone();
+    let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
+    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::with_options(
+        sweep,
+        reconciliation_sweep_interval,
+        nudge_buffer_capacity,
+    );
+
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
         .map(|configuration| configuration.exec_supervisor_executable().to_path_buf());
@@ -1554,6 +1562,7 @@ async fn run_hub(
         Some(tool_configuration) => DaemonTools::try_new_production(
             SystemCurrentTimeClock,
             pool.clone(),
+            eligibility_nudge.clone(),
             MappedDaemonCredentialInputs {
                 web_search: web_search_credentials,
                 code_host: code_host_credentials.clone(),
@@ -1570,6 +1579,7 @@ async fn run_hub(
         None => DaemonTools::try_new_without_tool_mappings(
             SystemCurrentTimeClock,
             pool.clone(),
+            eligibility_nudge.clone(),
             BaseDaemonCredentialInputs {
                 web_search: web_search_credentials,
                 code_host: code_host_credentials,
@@ -1879,13 +1889,6 @@ async fn run_hub(
     tracing::info!(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
-    );
-    let scheduler_pool = pool.clone();
-    let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
-    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::with_options(
-        sweep,
-        reconciliation_sweep_interval,
-        nudge_buffer_capacity,
     );
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let repository_watch_runtime = {

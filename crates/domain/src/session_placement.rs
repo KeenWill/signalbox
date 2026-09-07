@@ -160,6 +160,23 @@ impl SessionPlacement {
         self.path.as_ref()
     }
 
+    /// Places a child beside this session, preserving pathless and acknowledged root scope.
+    pub fn delegated_child(&self, child: SessionId) -> Self {
+        let Some(path) = &self.path else {
+            return Self::pathless();
+        };
+        let Some((directory, _)) = path.as_str().rsplit_once('.') else {
+            return self.clone();
+        };
+        Self {
+            path: Some(SessionPlacementPath(format!(
+                "{directory}.{}",
+                child.as_uuid().simple()
+            ))),
+            root_global_read_intent: false,
+        }
+    }
+
     /// Returns whether creation recorded explicit root-global-read intent.
     pub const fn records_root_global_read_intent(&self) -> bool {
         self.root_global_read_intent
@@ -540,6 +557,25 @@ mod tests {
 
     fn scoped(value: &str) -> SessionPlacement {
         SessionPlacement::scoped(SessionPlacementPath::try_new(value.to_owned()).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn delegated_child_preserves_the_parents_directory_scope() {
+        let child = SessionId::from_uuid(uuid::Uuid::nil());
+        assert_eq!(
+            scoped("projects.review.parent").delegated_child(child),
+            scoped("projects.review.00000000000000000000000000000000")
+        );
+        assert_eq!(
+            SessionPlacement::pathless().delegated_child(child),
+            SessionPlacement::pathless()
+        );
+        let root = SessionPlacement::root_global_read(
+            SessionPlacementPath::try_new("operator".into()).unwrap(),
+            RootPlacementGlobalReadIntent::Acknowledged,
+        )
+        .unwrap();
+        assert_eq!(root.delegated_child(child), root);
     }
 
     #[test]

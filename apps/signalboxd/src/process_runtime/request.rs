@@ -1536,8 +1536,25 @@ where
             )
             .await
         }
-        ClientRequest::SpawnSession { .. } => {
-            reject_uncomposed_spawn(writer, version, request_id).await
+        ClientRequest::SpawnSession {
+            session_id,
+            turn_id,
+            tool_request_id,
+            task,
+            relationship,
+        } => {
+            handle_spawn_session(
+                writer,
+                version,
+                request_id,
+                session_id,
+                turn_id,
+                tool_request_id,
+                task,
+                relationship,
+                services,
+            )
+            .await
         }
         ClientRequest::AwaitSession {
             session_id,

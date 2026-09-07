@@ -2,18 +2,16 @@
 
 This design is not built; it extends
 [process-protocol.md](../spec/process-protocol.md) with the wire surfaces the
-owner has committed and the daemon and terminal client do not implement, apart
-from the terminal client's existing `spawn_session` half.
+owner has committed and the daemon and terminal client do not implement.
 
 ## Goal
 
 Future implementation of these surfaces under protocol version 1 must pair each
 daemon handler with its terminal-client consumer in the same change:
-credential-exclusion administration, program-run cancellation, runner placement
-facts, `spawn_session`, cascade metadata on stop receipts, and the typed
-projection of credential-pool exhaustion and of the credential-availability
-wait. The terminal client already sends `spawn_session` and validates its
-receipt, so that surface needs only its daemon transaction.
+credential-exclusion administration, program-run
+cancellation, runner placement facts, cascade metadata on stop receipts, and the
+typed projection of credential-pool exhaustion and of the
+credential-availability wait.
 
 ## Design
 
@@ -95,13 +93,6 @@ later runner facts: a new fact adds a state and its members to this event kind,
 never a second kind. A snapshot's session summary carries the same runner
 object, with connection health present exactly for a pinned placement.
 
-`spawn_session` carries a bounded `task` and the closed relationship object and
-returns `session_spawned { tool_request_id, child_session_id, relationship }`.
-The placement-owned creation transaction that implements the parent-directory
-default creates the child; it preserves the exact-request and authority rules of
-the delegation contracts on the spec page, and the task string fits both the
-delegation-content ceiling and its complete normalized JSON argument envelope.
-
 A successful cascade receipt for `stop_goal` or `stop_turn` carries the selected
 `descendant_scope` and the exact count of recorded descendant dispositions, so a
 zero-child choice and an unperformed cascade cannot be confused. An equal
@@ -143,13 +134,10 @@ call-free terminal attempt. The endings these shapes project belong to
 
 ## Compatibility constraints
 
-`spawn_session` and `session_spawned` are admitted version-1 variants: the
-daemon decodes `spawn_session` and rejects it without mutation, and no daemon
-path produces `session_spawned`. `runner_state_transition` is an admitted
-version-1 event variant that the daemon projects when the outbox carries a
-runner state transition. Every other request and message above is outside the
-closed inventories in `crates/process-protocol` until the daemon and client
-implement its surface together.
+`runner_state_transition` is an admitted version-1 event variant that the daemon
+projects when the outbox carries a runner state transition. Every other request
+and message above is outside the closed inventories in `crates/process-protocol`
+until the daemon and client implement its surface together.
 
 No response code is reserved for an authorization failure, because client
 identity, authentication, authorization, and revocation are undecided.
