@@ -1,6 +1,7 @@
 //! Checkout facts retained on the dispatch command ledger.
 
 use crate::{RepoWatchStore, StoreError};
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_ownership_seam::{
     CommitSha, DurableCommandId, RepoWatchEvent, RepoWatchEventId, SessionId,
 };
@@ -38,6 +39,23 @@ pub struct CheckoutLocation {
     pub workspace_root: Vec<u8>,
 }
 
+/// Filesystem identity retained before Git writes into the checkout directory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckoutDirectoryIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+#[derive(sqlx::FromRow)]
+struct CheckoutRemovalRow {
+    command_id: Uuid,
+    checkout_session_id: Uuid,
+    checkout_workspace_root: Vec<u8>,
+    checkout_retired_reason: Option<String>,
+    checkout_device: Option<Decimal>,
+    checkout_inode: Option<Decimal>,
+}
+
 #[derive(sqlx::FromRow)]
 struct CheckoutRow {
     event_id: Uuid,
@@ -55,6 +73,7 @@ pub struct CheckoutRemovalCandidate {
     pub command: DurableCommandId,
     pub location: CheckoutLocation,
     pub retired_reason: Option<String>,
+    pub identity: Option<CheckoutDirectoryIdentity>,
 }
 
 impl RepoWatchStore {
@@ -62,25 +81,29 @@ impl RepoWatchStore {
     pub async fn checkout_removal_candidates(
         &self,
     ) -> Result<Vec<CheckoutRemovalCandidate>, StoreError> {
-        let rows: Vec<(Uuid, Uuid, Vec<u8>, Option<String>)> = sqlx::query_as(
-            "SELECT command_id, checkout_session_id, checkout_workspace_root, checkout_retired_reason FROM dispatch_ledger
+        let rows: Vec<CheckoutRemovalRow> = sqlx::query_as(
+            "SELECT command_id, checkout_session_id, checkout_workspace_root, checkout_retired_reason, checkout_device, checkout_inode FROM dispatch_ledger
              WHERE checkout_session_id IS NOT NULL AND NOT checkout_removed",
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(
-                |(command, session, workspace_root, retired_reason)| CheckoutRemovalCandidate {
-                    command: DurableCommandId::from_uuid(command),
+        rows.into_iter()
+            .map(|row| {
+                Ok(CheckoutRemovalCandidate {
+                    command: DurableCommandId::from_uuid(row.command_id),
                     location: CheckoutLocation {
-                        session: SessionId::from_uuid(session),
-                        workspace_root,
+                        session: SessionId::from_uuid(row.checkout_session_id),
+                        workspace_root: row.checkout_workspace_root,
                     },
-                    retired_reason,
-                },
-            )
-            .collect())
+                    retired_reason: row.checkout_retired_reason,
+                    identity: match (row.checkout_device, row.checkout_inode) {
+                        (Some(device), Some(inode)) => Some(decode_identity(device, inode)?),
+                        (None, None) => None,
+                        _ => return Err(StoreError::InvalidRetainedCommand),
+                    },
+                })
+            })
+            .collect()
     }
 
     /// Marks removal only after the derived checkout is absent.
@@ -168,6 +191,25 @@ impl RepoWatchStore {
         })
     }
 
+    /// Pins the directory identity once, preserving it across provisioning retries.
+    pub async fn retain_checkout_identity(
+        &self,
+        command: DurableCommandId,
+        identity: CheckoutDirectoryIdentity,
+    ) -> Result<CheckoutDirectoryIdentity, StoreError> {
+        let (device, inode): (Decimal, Decimal) = sqlx::query_as(
+            "UPDATE dispatch_ledger SET checkout_device = COALESCE(checkout_device, $2),
+                checkout_inode = COALESCE(checkout_inode, $3)
+             WHERE command_id = $1 RETURNING checkout_device, checkout_inode",
+        )
+        .bind(command.into_uuid())
+        .bind(Decimal::from(identity.device))
+        .bind(Decimal::from(identity.inode))
+        .fetch_one(&self.pool)
+        .await?;
+        decode_identity(device, inode)
+    }
+
     /// Records the checkout at the derived root after Git has checked out its head.
     pub async fn record_dispatch_checkout(
         &self,
@@ -192,4 +234,14 @@ impl RepoWatchStore {
             .bind(command.into_uuid()).bind(step).bind(status).bind(stop.into_uuid()).bind(reason.as_str()).fetch_one(&self.pool).await?;
         Ok(DurableCommandId::from_uuid(id))
     }
+}
+
+fn decode_identity(
+    device: Decimal,
+    inode: Decimal,
+) -> Result<CheckoutDirectoryIdentity, StoreError> {
+    Ok(CheckoutDirectoryIdentity {
+        device: device.to_u64().ok_or(StoreError::InvalidRetainedCommand)?,
+        inode: inode.to_u64().ok_or(StoreError::InvalidRetainedCommand)?,
+    })
 }

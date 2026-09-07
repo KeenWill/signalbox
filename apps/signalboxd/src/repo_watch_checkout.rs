@@ -5,6 +5,7 @@ use crate::{
 };
 use rustix::fs::{Mode, OFlags, mkdirat, openat};
 use signalbox_domain::{PullRequestEventContext, RepositorySlug, SessionId};
+use signalbox_module_repo_watch_v2::checkout::CheckoutDirectoryIdentity;
 use signalbox_tools_exec::{
     ProcessEnvironment, ProcessOutcome, ProcessRequest, ProcessRunner, ProcessStatusProtocol,
 };
@@ -68,10 +69,34 @@ impl CheckoutProvisioningFailed {
     }
 }
 
-pub(crate) async fn provision<Runner: ProcessRunner>(
-    runner: &mut Runner,
+pub(crate) struct CheckoutDirectory {
+    path: PathBuf,
+    directory: OwnedFd,
+    pub(crate) identity: CheckoutDirectoryIdentity,
+}
+
+pub(crate) fn prepare(
     roots: &SessionWorkspaceRoots,
     session: SessionId,
+) -> Result<CheckoutDirectory, CheckoutProvisioningFailed> {
+    let path = roots.derived_path(session);
+    let directory = provision_directory(&path)
+        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    let stat = rustix::fs::fstat(&directory)
+        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    Ok(CheckoutDirectory {
+        path,
+        directory,
+        identity: CheckoutDirectoryIdentity {
+            device: stat.st_dev,
+            inode: stat.st_ino,
+        },
+    })
+}
+
+pub(crate) async fn provision<Runner: ProcessRunner>(
+    runner: &mut Runner,
+    checkout: &CheckoutDirectory,
     repository: &RepositorySlug,
     pull_request: &PullRequestEventContext,
     credentials: &RepositoryWatchClientLoader,
@@ -80,9 +105,8 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
         .git_authorization()
         .await
         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Credential))?;
-    let path = roots.derived_path(session);
-    let directory = provision_directory(&path)
-        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    let path = &checkout.path;
+    let directory = &checkout.directory;
     // The descriptor remains open through every invocation; child cwd resolution
     // cannot redirect Git through a replaced session-directory pathname.
     let working_directory = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
@@ -110,7 +134,7 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
         "GIT_CONFIG_KEY_0".into(),
         format!("http.{repository_url}.extraheader").into(),
     );
-    match rustix::fs::statat(&directory, ".git", rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+    match rustix::fs::statat(directory, ".git", rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::NOENT) => {
             git(
                 runner,
@@ -159,8 +183,8 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
     .await?;
     // Use the standing path as the tools will, and reject directory replacement.
     let standing =
-        open_directory(&path).map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Verify))?;
-    let pinned_stat = rustix::fs::fstat(&directory)
+        open_directory(path).map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Verify))?;
+    let pinned_stat = rustix::fs::fstat(directory)
         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Verify))?;
     let standing_stat = rustix::fs::fstat(&standing)
         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Verify))?;
@@ -243,6 +267,7 @@ fn create_directory(
 pub(crate) fn remove(
     roots: &SessionWorkspaceRoots,
     session: SessionId,
+    identity: Option<CheckoutDirectoryIdentity>,
 ) -> Result<(), rustix::io::Errno> {
     let path = roots.derived_path(session);
     let parent = match open_directory(path.parent().ok_or(rustix::io::Errno::INVAL)?) {
@@ -251,27 +276,40 @@ pub(crate) fn remove(
         Err(error) => return Err(error),
     };
     let name = path.file_name().ok_or(rustix::io::Errno::INVAL)?;
-    let directory = match open_removal_directory(&parent, name) {
+    let directory = match pin_removal_directory(&parent, name) {
         Ok(directory) => directory,
         Err(rustix::io::Errno::NOENT) => return Ok(()),
         Err(error) => return Err(error),
     };
+    let stat = rustix::fs::fstat(&directory)?;
+    if identity
+        != Some(CheckoutDirectoryIdentity {
+            device: stat.st_dev,
+            inode: stat.st_ino,
+        })
+    {
+        return Err(rustix::io::Errno::STALE);
+    }
+    let directory = read_removal_directory(&directory)?;
     remove_contents(&directory)?;
     remove_directory_entry(&parent, name, &directory)
 }
 
-fn open_removal_directory(
+fn pin_removal_directory(
     parent: &OwnedFd,
     name: &std::ffi::OsStr,
 ) -> Result<OwnedFd, rustix::io::Errno> {
-    let directory = rustix::fs::openat2(
+    rustix::fs::openat2(
         parent,
         name,
         OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
         rustix::fs::ResolveFlags::NO_XDEV,
-    )?;
-    let mode = Mode::from_raw_mode(rustix::fs::fstat(&directory)?.st_mode);
+    )
+}
+
+fn read_removal_directory(directory: &OwnedFd) -> Result<OwnedFd, rustix::io::Errno> {
+    let mode = Mode::from_raw_mode(rustix::fs::fstat(directory)?.st_mode);
     if !mode.contains(Mode::RWXU) {
         // O_PATH pins unreadable directories; procfs addresses that inode for chmod.
         rustix::fs::chmodat(
@@ -281,7 +319,7 @@ fn open_removal_directory(
             rustix::fs::AtFlags::empty(),
         )?;
     }
-    openat(&directory, ".", DIRECTORY_FLAGS, Mode::empty())
+    openat(directory, ".", DIRECTORY_FLAGS, Mode::empty())
 }
 
 fn remove_contents(directory: &OwnedFd) -> Result<(), rustix::io::Errno> {
@@ -297,7 +335,7 @@ fn remove_contents(directory: &OwnedFd) -> Result<(), rustix::io::Errno> {
         if FileType::from_raw_mode(metadata.st_mode) == FileType::Directory {
             use std::os::unix::ffi::OsStrExt;
             let name = std::ffi::OsStr::from_bytes(name.to_bytes());
-            let child = open_removal_directory(directory, name)?;
+            let child = read_removal_directory(&pin_removal_directory(directory, name)?)?;
             remove_contents(&child)?;
             remove_directory_entry(directory, name, &child)?;
         } else {
@@ -365,6 +403,11 @@ mod tests {
         let source = temporary.path().join("source");
         std::fs::create_dir_all(&nested)?;
         std::fs::create_dir(&source)?;
+        let metadata = std::fs::metadata(&root)?;
+        let identity = Some(CheckoutDirectoryIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        });
         for bind in [false, true] {
             let mut mount = Command::new("mount");
             if bind {
@@ -384,12 +427,15 @@ mod tests {
                     std::fs::metadata(&nested)?.dev()
                 );
             }
-            assert_eq!(remove(&roots, session), Err(rustix::io::Errno::XDEV));
+            assert_eq!(
+                remove(&roots, session, identity),
+                Err(rustix::io::Errno::XDEV)
+            );
             assert_eq!(std::fs::metadata(&nested)?.mode() & 0o777, 0o500);
             assert_eq!(std::fs::read(nested.join("keep"))?, b"mounted contents");
             assert!(Command::new("umount").arg(&nested).status()?.success());
         }
-        remove(&roots, session)?;
+        remove(&roots, session, identity)?;
         assert!(!root.exists());
         assert_eq!(std::fs::read(source.join("keep"))?, b"mounted contents");
         Ok(())

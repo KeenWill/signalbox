@@ -1139,6 +1139,57 @@ async fn cleanup_uses_the_provisioning_root_after_configuration_changes()
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn cleanup_rejects_a_different_directory_at_the_provisioned_path()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let root = fixture.root(session);
+    let retained = fixture._files.path().join("retained");
+    std::fs::rename(&root, &retained)?;
+    std::fs::create_dir(&root)?;
+    std::fs::write(root.join("keep"), "substituted directory")?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500))?;
+    fixture.stop(session).await;
+    let restarted = RepoWatchStore::new(fixture.module.clone());
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("identity mismatch leaves removal pending");
+    assert_eq!(
+        std::fs::read_to_string(root.join("keep"))?,
+        "substituted directory"
+    );
+    assert_eq!(
+        std::fs::metadata(&root)?.permissions().mode() & 0o777,
+        0o500
+    );
+    assert_eq!(
+        std::fs::read_to_string(retained.join("review.txt"))?,
+        "retained head\n"
+    );
+    assert_eq!(restarted.checkout_removal_candidates().await?.len(), 1);
+
+    let substitute = fixture._files.path().join("substitute");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::rename(&root, &substitute)?;
+    std::fs::rename(&retained, &root)?;
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("restored original identity permits removal");
+    assert!(!root.exists());
+    assert!(restarted.checkout_removal_candidates().await?.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(substitute.join("keep"))?,
+        "substituted directory"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn cleanup_rejects_a_symlink_replacing_the_session_root() -> Result<(), Box<dyn Error>> {
     use signalboxd::repo_watch_dispatch::scavenge_checkouts;
     let mut fixture = CheckoutFixture::new().await?;
