@@ -9,6 +9,33 @@ final class ProcessProtocolTests: XCTestCase {
   private let toolRequestID = "33333333-3333-4333-8333-333333333333"
   private let blobDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+  func testToolInadmissibleDecodesItsRequestAndResult() throws {
+    let content = "execution_failed: placement_lost"
+    let entry = try SignalboxJSONCoding.decoder().decode(
+      SignalboxTranscriptEntry.self,
+      from: Data(
+        #"{"type":"tool_inadmissible","tool_request_id":"\#(toolRequestID)","content":"\#(content)"}"#.utf8)
+    )
+
+    XCTAssertEqual(
+      entry,
+      .toolInadmissible(
+        toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID), content: content))
+  }
+
+  func testToolInadmissibleRejectsAnAttemptIdentity() throws {
+    let entry = try SignalboxJSONCoding.decoder().decode(
+      SignalboxTranscriptEntry.self,
+      from: Data(
+        #"{"type":"tool_inadmissible","tool_request_id":"\#(toolRequestID)","tool_attempt_id":"\#(turnID)","content":"placement_lost"}"#.utf8)
+    )
+
+    guard case .unknown(_, _, let diagnostic) = entry else {
+      return XCTFail("An inadmissible request has no physical result attempt.")
+    }
+    XCTAssertNotNil(diagnostic)
+  }
+
   func testClientFrameUsesVersionOneAndCanonicalStringScalars() throws {
     let frame = SignalboxProcessClientFrame(
       requestID: try SignalboxRequestID(validating: 7),

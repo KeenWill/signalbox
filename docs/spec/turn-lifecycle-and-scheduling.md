@@ -41,6 +41,9 @@ goal turn that still lacks its goal disposition. A pass activates a turn and
 then drives its model call through the execution ports owned by
 [model-call-execution](model-call-execution.md) and [tool-loop](tool-loop.md).
 
+Connection-loss propagation retains a post-commit eligibility hint when the
+nudge channel is full and retries when capacity becomes available.
+
 Every component deadline covers one physical operation. A running turn with no
 model call, tool attempt, or durable wait outstanding is reached by none of them
 and would hold its slot forever. A turn-liveness watchdog
@@ -256,13 +259,13 @@ configured attempt budget is spent, the recovery row becomes exhausted, the wait
 remains unchanged, and the process transcript sets operator action required.
 
 Startup acquires the single-daemon guard, fences the prior pool incarnation once
-the fence migration has run, runs the remaining migrations, completes the
-generic scan, initializes every configured blob store, marks prior-process
-runner connections lost, binds the runner socket, binds the process socket, and
-then starts enrollment, admission, dispatch, and scheduling concurrently. No
-request, dispatch cursor advance, scheduler pass, or runner admission occurs
-before recovery completes. Any phase failure is a failed startup with a
-classified, key-bearing log line and a failure exit code.
+the fence migration has run, runs the remaining migrations, marks prior-process
+runner connections lost and propagates their loss before the generic scan,
+initializes every configured blob store, binds the runner socket, binds the
+process socket, and then starts enrollment, admission, dispatch, and scheduling
+concurrently. No request, dispatch cursor advance, scheduler pass, or runner
+admission occurs before recovery completes. Any phase failure is a failed
+startup with a classified, key-bearing log line and a failure exit code.
 
 Each scan transaction classifies the lost tenure by its durable evidence and
 never fabricates a live end. A running turn with no model call ends its attempt

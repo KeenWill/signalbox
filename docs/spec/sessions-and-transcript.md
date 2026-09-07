@@ -258,7 +258,8 @@ every earlier entry stays in order. Two frontiers are equal only if they are the
 same frontier; comparing content is a separate explicit operation. Compaction
 changes which entries are visible to the model, never what is stored. A summary
 cannot hide an unsummarized prefix, and its end boundary must close every tool
-exchange it covers.
+exchange it covers. `ToolInadmissible` closes its request for both explicit and
+automatic compaction boundaries.
 
 An accepted-input turn binds its configuration when its input is accepted, and a
 delegated-task or delegation-wake turn binds the configuration stored with its

@@ -648,7 +648,12 @@ impl PostgresApprovalJudgeRepository {
         let encoded = encode_usage(usage);
         if state == ApprovalJudgeStateStorageKind::Terminal {
             let exact: bool = sqlx::query_scalar(
-                "SELECT terminal_disposition_kind = $1
+                "SELECT (terminal_disposition_kind = $1 OR (
+                            terminal_disposition_kind = 'cancelled' AND $7
+                            AND EXISTS (SELECT 1 FROM tool_request AS request
+                                WHERE request.request_id = tool_approval_judge_model_call.request_id
+                                  AND request.inadmissible_reason = 'placement_lost')
+                        ))
                         AND recommendation_kind IS NULL AND rationale IS NULL
                         AND input_tokens IS NOT DISTINCT FROM $2
                         AND output_tokens IS NOT DISTINCT FROM $3
@@ -664,6 +669,10 @@ impl PostgresApprovalJudgeRepository {
             .bind(encoded.cache_creation)
             .bind(encoded.cache_read)
             .bind(prepared.call.into_uuid())
+            .bind(
+                disposition == FailedApprovalJudgeDisposition::KnownFailed
+                    && usage == ProviderReportedTokenUsage::unreported(),
+            )
             .fetch_one(&mut *transaction)
             .await?;
             transaction.rollback().await?;
@@ -864,7 +873,7 @@ async fn persist_headless_escalation(
                  ON attempt.attempt_id = entry.tool_result_attempt_id
               WHERE entry.source_session_id = $1
                 AND entry.payload_kind IN (
-                    'tool_execution_result', 'tool_denied', 'tool_closed_by_turn_end'
+                    'tool_execution_result', 'tool_denied', 'tool_inadmissible', 'tool_closed_by_turn_end'
                 )
                 AND (entry.tool_result_request_id = $2 OR attempt.request_id = $2)",
         )
@@ -875,17 +884,18 @@ async fn persist_headless_escalation(
         let result = match rows.as_slice() {
             [] => {
                 let entry = next_closed_result_entry(request.id());
-                let decision_kind: Option<String> = sqlx::query_scalar(
-                    "SELECT decision_kind FROM tool_approval_decision WHERE request_id = $1",
+                let payload_kind: String = sqlx::query_scalar(
+                    "SELECT CASE
+                        WHEN request.inadmissible_reason IS NOT NULL THEN 'tool_inadmissible'
+                        WHEN decision.decision_kind = 'deny' THEN 'tool_denied'
+                        ELSE 'tool_closed_by_turn_end' END
+                     FROM tool_request AS request
+                     LEFT JOIN tool_approval_decision AS decision USING (request_id)
+                     WHERE request.request_id = $1",
                 )
                 .bind(tool_request_id_to_uuid(request.id()))
-                .fetch_optional(&mut *connection)
+                .fetch_one(&mut *connection)
                 .await?;
-                let payload_kind = if decision_kind.as_deref() == Some("deny") {
-                    "tool_denied"
-                } else {
-                    "tool_closed_by_turn_end"
-                };
                 sqlx::query(
                     "INSERT INTO semantic_transcript_entry
                         (source_session_id, semantic_entry_id, payload_kind,
@@ -1721,7 +1731,7 @@ async fn headless_escalation_identities(
 /// replay must check the persisted continuation identity rather than accept a
 /// newly supplied one.
 ///
-/// A later request in the same batch that is still undecided, or decided by
+/// A later admissible request in the batch that is still undecided, or decided by
 /// anything other than a proposal-time source, is evidence that this completion
 /// was not the last: those decisions land after the batch is proposed. The
 /// proposal-time sources are the ones the proposing transaction itself records —
@@ -1741,6 +1751,7 @@ async fn exact_completion_continuation(
               ON decision.request_id = later.request_id
            WHERE later.producing_model_call_id = $1
              AND later.request_ordinal > $2
+             AND later.inadmissible_reason IS NULL
              AND (
                  decision.request_id IS NULL
                  OR decision.decision_source
