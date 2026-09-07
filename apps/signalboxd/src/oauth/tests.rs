@@ -8,9 +8,15 @@ use std::{
 #[tokio::test]
 async fn oauth_refresh_rotates_once_and_preserves_identity_when_omitted()
 -> Result<(), Box<dyn std::error::Error>> {
+    let expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs()
+        + 3600;
+    let access_token = jwt(serde_json::json!({"exp":expiry}));
+    let started = Instant::now();
     let (client, registration, server) = https_server(vec![(
         200,
-        serde_json::json!({"access_token":"fresh-access", "refresh_token":"replacement-refresh", "expires_in":3600}),
+        serde_json::json!({"access_token":access_token, "refresh_token":"replacement-refresh"}),
     )])?;
     let stored = OauthAuthorization {
         refresh_token: "initial-refresh".into(),
@@ -25,10 +31,14 @@ async fn oauth_refresh_rotates_once_and_preserves_identity_when_omitted()
         )
         .await
         .map_err(|_| "refresh failed")?;
-    assert_eq!(result.access_token.expose_bytes(), b"fresh-access");
+    assert_eq!(result.access_token.expose_bytes(), access_token.as_bytes());
     assert_eq!(result.authorization.refresh_token, "replacement-refresh");
     assert_eq!(result.authorization.identity_token, stored.identity_token);
-    assert!(result.expires_at.is_some());
+    let expires_at = result
+        .expires_at
+        .expect("JWT expiry is retained without expires_in");
+    assert!(expires_at > started + Duration::from_secs(3598));
+    assert!(expires_at <= Instant::now() + Duration::from_secs(3600));
     let requests = server.join().map_err(|_| "TLS server panicked")??;
     assert_eq!(requests.len(), 1);
     assert_eq!(
@@ -344,5 +354,64 @@ async fn oauth_device_redirect_is_rejected_without_following()
         Some(Failure::DeviceEndpointRejected)
     );
     assert_eq!(server.join().map_err(|_| "TLS server panicked")??.len(), 1);
+    Ok(())
+}
+
+pub(super) fn jwt(claims: serde_json::Value) -> String {
+    format!(
+        "header.{}.signature",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+    )
+}
+
+#[tokio::test]
+async fn oauth_refresh_keeps_unknown_expiry_and_marks_past_claims_expired()
+-> Result<(), Box<dyn std::error::Error>> {
+    let stored = OauthAuthorization {
+        refresh_token: "initial-refresh".into(),
+        identity_token: "retained-identity".into(),
+        account_identity: serde_json::json!({"subject":"subject"}),
+    };
+    for token in [
+        "opaque-access".to_owned(),
+        "header.not-base64!.signature".to_owned(),
+        jwt(serde_json::json!({})),
+        jwt(serde_json::json!({"exp":"invalid"})),
+        jwt(serde_json::json!({"exp":u64::MAX})),
+    ] {
+        let (client, registration, server) =
+            https_server(vec![(200, serde_json::json!({"access_token":token}))])?;
+        let result = client
+            .refresh(
+                &registration,
+                &stored,
+                &mut signalbox_model_runtime::CancellationSignal::never(),
+            )
+            .await
+            .map_err(|_| "refresh failed")?;
+        assert!(result.expires_at.is_none());
+        assert_eq!(result.access_token.expose_bytes(), token.as_bytes());
+        assert_eq!(server.join().map_err(|_| "TLS server panicked")??.len(), 1);
+    }
+    for expiry in [0, -1] {
+        let (client, registration, server) = https_server(vec![(
+            200,
+            serde_json::json!({"access_token":jwt(serde_json::json!({"exp":expiry}))}),
+        )])?;
+        let result = client
+            .refresh(
+                &registration,
+                &stored,
+                &mut signalbox_model_runtime::CancellationSignal::never(),
+            )
+            .await
+            .map_err(|_| "refresh failed")?;
+        assert!(
+            result
+                .expires_at
+                .is_some_and(|deadline| deadline <= Instant::now())
+        );
+        assert_eq!(server.join().map_err(|_| "TLS server panicked")??.len(), 1);
+    }
     Ok(())
 }

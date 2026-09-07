@@ -517,14 +517,22 @@ mod tests {
             .connect_with(signalbox_persistence::local_test_connection_options(&url)?)
             .await?;
         signalbox_persistence::migrate(&pool).await?;
+        let expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+            + 3600;
+        let access_token =
+            super::super::tests::jwt(serde_json::json!({"exp":expiry, "jti":"shared-access"}));
+        let replacement_token =
+            super::super::tests::jwt(serde_json::json!({"exp":expiry, "jti":"replacement-access"}));
         let (client, registration, server) = super::super::tests::https_server(vec![
             (
                 200,
-                serde_json::json!({"access_token":"shared-access", "refresh_token":"rotated-refresh", "expires_in":3600}),
+                serde_json::json!({"access_token":access_token, "refresh_token":"rotated-refresh"}),
             ),
             (
                 200,
-                serde_json::json!({"access_token":"replacement-access", "refresh_token":"second-rotation", "expires_in":3600}),
+                serde_json::json!({"access_token":replacement_token, "refresh_token":"second-rotation"}),
             ),
         ])?;
         let repository = OauthCredentialRepository::new(pool.clone());
@@ -606,11 +614,26 @@ mod tests {
         b.map_err(|_| "joined delivery")?;
         assert_eq!(
             first.0.expect("material").access_token.expose_bytes(),
-            b"shared-access"
+            access_token.as_bytes()
         );
         assert_eq!(
             second.0.expect("material").access_token.expose_bytes(),
-            b"shared-access"
+            access_token.as_bytes()
+        );
+        let mut sequential = Installer::default();
+        assert_eq!(
+            service
+                .prepare("profile", &mut sequential, CancellationSignal::never())
+                .await,
+            Ok(OauthDeliveryOutcome::Delivered)
+        );
+        assert_eq!(
+            sequential
+                .0
+                .expect("sequential material")
+                .access_token
+                .expose_bytes(),
+            access_token.as_bytes()
         );
         assert_eq!(
             service
@@ -696,7 +719,7 @@ mod tests {
                 .expect("replacement material")
                 .access_token
                 .expose_bytes(),
-            b"replacement-access"
+            replacement_token.as_bytes()
         );
         let deletion = OauthCredentialCommand {
             command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
@@ -723,7 +746,7 @@ mod tests {
                 .expect("copied material survives deletion")
                 .access_token
                 .expose_bytes(),
-            b"replacement-access"
+            replacement_token.as_bytes()
         );
         assert_eq!(
             service
