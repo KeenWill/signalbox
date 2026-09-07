@@ -296,7 +296,7 @@ pub(crate) struct RateLimits {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct RateLimitWindow {
-    pub(crate) used_percent: i32,
+    pub(crate) used_percent: f64,
     pub(crate) resets_at: Option<i64>,
 }
 
@@ -314,7 +314,7 @@ impl RateLimits {
         let latest = [self.primary.as_ref(), self.secondary.as_ref()]
             .into_iter()
             .flatten()
-            .filter(|window| window.used_percent >= 100)
+            .filter(|window| window.used_percent >= 100.0)
             .filter_map(|window| window.resets_at)
             .max()?;
         let reset = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(
