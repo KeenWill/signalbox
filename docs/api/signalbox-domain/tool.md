@@ -657,6 +657,7 @@ impl ToolCallProposal {
 pub enum AssistantResponsePart {
     Text(AssistantText),
     ProviderCompaction(ProviderCompactionBlock),
+    ProviderReasoning(ProviderReasoningItem),
     ToolCall(ToolCallProposal),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq

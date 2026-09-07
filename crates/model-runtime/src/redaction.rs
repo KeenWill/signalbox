@@ -544,7 +544,8 @@ pub fn redact_evidence(
             failed_closed => failed_closed,
         },
         TerminalEvidence::Completed(mut completion) => {
-            if provider_compaction_contains_credential(&completion.content, api_key) {
+            if let Some(error_token) = provider_item_credential_error(&completion.content, api_key)
+            {
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
                     exchange: redact_exchange(completion.exchange, api_key),
                     reported_model: completion.reported_model.map(|model| {
@@ -553,7 +554,7 @@ pub fn redact_evidence(
                     kind: ProviderErrorKind::Unrecognized,
                     non_acceptance_proven: false,
                     native: NativeErrorFacts {
-                        error_token: Some("credential_in_provider_compaction".to_string()),
+                        error_token: Some(error_token.to_string()),
                         error_code: None,
                         message: None,
                     },
@@ -576,7 +577,7 @@ pub fn redact_evidence(
             TerminalEvidence::Completed(completion)
         }
         TerminalEvidence::Refused(mut refusal) => {
-            if provider_compaction_contains_credential(&refusal.content, api_key) {
+            if let Some(error_token) = provider_item_credential_error(&refusal.content, api_key) {
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
                     exchange: redact_exchange(refusal.exchange, api_key),
                     reported_model: refusal.reported_model.map(|model| {
@@ -585,7 +586,7 @@ pub fn redact_evidence(
                     kind: ProviderErrorKind::Unrecognized,
                     non_acceptance_proven: false,
                     native: NativeErrorFacts {
-                        error_token: Some("credential_in_provider_compaction".to_string()),
+                        error_token: Some(error_token.to_string()),
                         error_code: None,
                         message: None,
                     },
@@ -607,6 +608,45 @@ pub fn redact_evidence(
             TerminalEvidence::Refused(refusal)
         }
     }
+}
+
+fn provider_item_credential_error(
+    content: &[AssistantPart],
+    credential: &CredentialValue,
+) -> Option<&'static str> {
+    if provider_reasoning_contains_credential(content, credential) {
+        Some("credential_in_provider_reasoning")
+    } else if provider_compaction_contains_credential(content, credential) {
+        Some("credential_in_provider_compaction")
+    } else {
+        None
+    }
+}
+
+fn provider_reasoning_contains_credential(
+    content: &[AssistantPart],
+    credential: &CredentialValue,
+) -> bool {
+    let key = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    if key.is_empty()
+        || !content
+            .iter()
+            .any(|part| matches!(part, AssistantPart::ProviderReasoning { .. }))
+    {
+        return false;
+    }
+    let mut matcher = CredentialBoundaryMatcher::new(key);
+    content.iter().any(|part| {
+        if let AssistantPart::ProviderReasoning { item_json } = part
+            && (item_json.contains(key) || json_escapes_decode_to_credential(item_json, key))
+        {
+            return true;
+        }
+        let reasoning = matches!(part, AssistantPart::ProviderReasoning { .. });
+        inspect_durable_assistant_part_fields(part, &mut |value, _| {
+            matcher.inspect(value, reasoning)
+        })
+    })
 }
 
 fn provider_compaction_contains_credential(
@@ -752,6 +792,10 @@ fn inspect_durable_assistant_part_fields(
                     .is_some_and(|signature| inspect(signature, false))
         }
         AssistantPart::RedactedThinking { data } => inspect(data, false),
+        AssistantPart::ProviderReasoning { item_json } => {
+            inspect_canonical_json_strings(item_json, &mut |value| inspect(value, true))
+                .unwrap_or_else(|_| inspect(&decode_json_escapes(item_json), true))
+        }
         AssistantPart::ProviderCompaction { block_json } => {
             inspect_provider_compaction_fields(block_json, &mut |value| inspect(value, true))
         }
@@ -1045,6 +1089,9 @@ fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> A
         },
         // Credential-bearing blocks are rejected before this mapper because
         // replay requires the surviving opaque block byte-for-byte.
+        AssistantPart::ProviderReasoning { item_json } => {
+            AssistantPart::ProviderReasoning { item_json }
+        }
         AssistantPart::ProviderCompaction { block_json } => {
             AssistantPart::ProviderCompaction { block_json }
         }
@@ -1754,6 +1801,55 @@ mod tests {
                 AssistantPart::Text("loop tail".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn credential_bearing_reasoning_rejects_the_whole_completion_without_rewriting() {
+        let key = credential("fixture_secret");
+        for ciphertext in ["fixture_secret", r"fixture_\u0073ecret"] {
+            let evidence = TerminalEvidence::Completed(CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: vec![
+                    AssistantPart::Text("safe text".to_string()),
+                    AssistantPart::ProviderReasoning {
+                        item_json: format!(
+                            r#"{{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"{ciphertext}"}}"#
+                        ),
+                    },
+                ],
+                usage: TokenUsage::unreported(),
+            });
+            let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+                panic!("credential-bearing reasoning rejects all evidence");
+            };
+            assert_eq!(
+                error.native.error_token.as_deref(),
+                Some("credential_in_provider_reasoning")
+            );
+        }
+    }
+
+    #[test]
+    fn credential_free_reasoning_preserves_exact_json() {
+        let item_json = r#"{ "id":"rs_fixture", "type":"reasoning", "summary":[], "encrypted_content":"safe\u002dopaque" }"#.to_string();
+        let content = vec![AssistantPart::ProviderReasoning { item_json }];
+        let evidence = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            finish: CompletionFinish::EndTurn,
+            content: content.clone(),
+            usage: TokenUsage::unreported(),
+        });
+        let TerminalEvidence::Completed(completion) =
+            redact_evidence(evidence, &credential("fixture_secret"))
+        else {
+            panic!("clean reasoning remains replayable");
+        };
+        assert_eq!(completion.content, content);
     }
 
     #[test]

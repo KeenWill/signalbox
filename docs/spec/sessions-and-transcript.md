@@ -60,14 +60,17 @@ variant carrying its producing call and one complete validated opaque block.
 Buffered responses retain the provider object's exact bytes; streamed responses
 reconstruct an equivalent complete object from the validated start and delta
 fields. The resulting durable bytes replay unchanged to the same provider, are
-not assistant text, and do not cross transcript protocol output. A context
-summary carries the summary text its dedicated call produced and the inclusive
-range it stands for. An imported entry carries one normalized imported content
-value with its speaker attestation. A model-identity entry marks where executed
-history crossed to a different frozen model selection. Delegation entries record
-a delegated task, a delegation message, and a delivered result. A completed,
-cancelled, or failed turn ends with exactly one terminal marker; refused,
-reconciliation-required, and retired turns have none.
+not assistant text, and do not cross transcript protocol output.
+`ProviderReasoning` is a distinct semantic-entry payload variant carrying its
+producing call and one complete provider reasoning item retained byte-for-byte;
+the retained bytes are not assistant text and do not cross transcript protocol
+output. A context summary carries the summary text its dedicated call produced
+and the inclusive range it stands for. An imported entry carries one normalized
+imported content value with its speaker attestation. A model-identity entry
+marks where executed history crossed to a different frozen model selection.
+Delegation entries record a delegated task, a delegation message, and a
+delivered result. A completed, cancelled, or failed turn ends with exactly one
+terminal marker; refused, reconciliation-required, and retired turns have none.
 
 A `ContextCompaction` has six correlated immutable facts: its identity and
 optional predecessor, the source frontier, a dedicated model call, the

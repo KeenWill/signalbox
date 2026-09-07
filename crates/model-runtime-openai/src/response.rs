@@ -77,8 +77,12 @@ struct ConvertedItem {
     refused: bool,
 }
 
-/// Converts one terminal output item; reasoning has no durable producer here.
-fn convert_item(item: &WireOutputItem, response_status: &str) -> Result<ConvertedItem, String> {
+/// Converts one terminal output item while retaining opaque reasoning bytes.
+fn convert_item(
+    item: &WireOutputItem,
+    raw: &serde_json::value::RawValue,
+    response_status: &str,
+) -> Result<ConvertedItem, String> {
     match item.kind.as_str() {
         "reasoning" => {
             if let Some(status) = item.status.as_deref()
@@ -90,7 +94,14 @@ fn convert_item(item: &WireOutputItem, response_status: &str) -> Result<Converte
                 );
             }
             Ok(ConvertedItem {
-                parts: Vec::new(),
+                parts: item
+                    .encrypted_content
+                    .as_ref()
+                    .map(|_| AssistantPart::ProviderReasoning {
+                        item_json: raw.get().to_string(),
+                    })
+                    .into_iter()
+                    .collect(),
                 refused: false,
             })
         }
@@ -318,11 +329,11 @@ pub(crate) fn decode_response<C: Clone>(
     );
     let finish_at_loss =
         (!matches!(finish, FinishReason::Unrecognized { .. })).then(|| finish.clone());
-    for item in &items {
+    for (item, raw) in items.iter().zip(&output) {
         let ConvertedItem {
             parts,
             refused: item_refused,
-        } = match convert_item(item, status) {
+        } = match convert_item(item, raw, status) {
             Ok(result) => result,
             Err(detail) => return loss(detail, finish_at_loss.clone()),
         };
@@ -785,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_items_are_recognized_and_dropped_without_continuity() {
+    fn encrypted_reasoning_items_are_retained_in_output_order() {
         let mut value = response();
         value["output"].as_array_mut().unwrap().insert(
             0,
@@ -796,7 +807,9 @@ mod tests {
         };
         assert_eq!(
             result.content,
-            vec![AssistantPart::Text("ready".to_string())]
+            vec![AssistantPart::ProviderReasoning {
+                item_json: json!({"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"opaque"}).to_string(),
+            }, AssistantPart::Text("ready".to_string())]
         );
         assert!(
             !observations

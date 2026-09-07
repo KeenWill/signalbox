@@ -21,6 +21,7 @@ thiserror = "2.0.12"
 toml = "1.1.3"
 
 [dev-dependencies]
+signalbox-test-bin = { path = "../test-bin" }
 proptest = "1.7.0"
 
 [[bin]]

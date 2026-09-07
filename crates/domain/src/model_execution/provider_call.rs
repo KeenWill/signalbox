@@ -283,6 +283,11 @@ pub enum ModelCallTerminalObservation {
         /// Exact assistant text parts in final semantic order.
         assistant_text: Vec<AssistantText>,
     },
+    /// Definitive success retaining provider reasoning and no tool proposals.
+    CompletedWithProviderReasoning {
+        /// Exact text and reasoning parts in provider order.
+        response: Vec<AssistantResponsePart>,
+    },
     /// Definitive success containing provider compaction blocks and no tools.
     CompletedWithProviderCompaction {
         /// Exact text and provider compaction parts in provider order.
@@ -370,6 +375,7 @@ impl ModelCallTerminalObservation {
         match self {
             Self::Completed { .. }
             | Self::CompletedWithProviderCompaction { .. }
+            | Self::CompletedWithProviderReasoning { .. }
             | Self::CompletedWithTools { .. } => ModelCallDisposition::Completed,
             Self::KnownFailed => ModelCallDisposition::KnownFailed,
             Self::Refused | Self::RefusedWithProviderCompaction { .. } => {

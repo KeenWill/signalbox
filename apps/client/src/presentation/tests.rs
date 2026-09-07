@@ -1016,6 +1016,50 @@ fn terminal_selections_match_provider_compaction_by_turn_and_call() {
 }
 
 #[test]
+fn terminal_selections_match_provider_reasoning_by_turn_and_call() {
+    let selected_turn = wire_uuid(1);
+    let selected_call = wire_uuid(2);
+    let other_turn = wire_uuid(3);
+    let other_call = wire_uuid(4);
+    let selected_frontier = wire_uuid(5);
+    let reasoning = |turn_id, model_call_id| SnapshotEntry {
+        entry_index: 0,
+        source_session_id: wire_uuid(10),
+        entry_id: wire_uuid(11),
+        kind: SnapshotEntryKind::Marker(TranscriptEntry::ProviderReasoning {
+            turn_id,
+            model_call_id,
+        }),
+    };
+    let context = super::SnapshotSelectionContext::default();
+
+    for selection in [
+        SnapshotSelection::Completed {
+            turn_id: selected_turn,
+            model_call_id: selected_call,
+            terminal_entry_id: wire_uuid(12),
+        },
+        SnapshotSelection::Refused {
+            turn_id: selected_turn,
+            model_call_id: selected_call,
+            terminal_frontier_id: selected_frontier,
+        },
+        SnapshotSelection::ToolBatchProposed {
+            turn_id: selected_turn,
+            model_call_id: selected_call,
+        },
+        SnapshotSelection::ToolBatchResults {
+            turn_id: selected_turn,
+            model_call_id: selected_call,
+        },
+    ] {
+        assert!(selection.includes(&reasoning(selected_turn, selected_call), &context));
+        assert!(!selection.includes(&reasoning(other_turn, selected_call), &context));
+        assert!(!selection.includes(&reasoning(selected_turn, other_call), &context));
+    }
+}
+
+#[test]
 fn refused_terminal_reread_renders_its_provider_compaction_marker() {
     let selected_turn = wire_uuid(1);
     let selected_call = wire_uuid(2);
