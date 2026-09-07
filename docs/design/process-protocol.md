@@ -113,27 +113,27 @@ checked snapshot of every reloadable section, the rule-set digest, and the prior
 snapshot for refusal recovery as durable intent. The replacement snapshot
 contains the model catalog, session-template catalog, and repository-watch
 configuration, including rules, convergence targets, template, interval,
-credential path, webhook listener settings, and hook map. Core pauses sweep
-admission and stops and joins active sweep attempts before reconciling
-convergence targets from the retained intent. Reload stops and joins affected
-ingestion tasks before rule activation and event-tail capture. On a stale or
-conflicting rule-revision rejection, recovery first validates the prior snapshot
-against the current startup-only sections. If invalid, it terminalizes the
-intent with `configuration_reload_failed` without restoring targets or resuming
-workers, and startup recovery fails. Otherwise it restores the prior convergence
-targets and resumes ingestion and sweep admission under the prior snapshot
-before terminalizing the intent with `configuration_reload_failed`, without
-replacing the running configuration. Other failures after either stops leave the
-intent pending until recovery installs the replacement snapshot and resumes them
-before terminalizing the claim. The [reload-intent input](ownership-seam.md)
-delivers rule activation only, and the module activates the rules atomically and
-idempotently by command identity and digest. The activation transaction captures
-each repository's current event tail and retains it for idempotent replay.
-Before replay activates any retained effects, startup validates the retained
-reloadable snapshot together with the on-disk startup-only sections;
-incompatibility fails startup and leaves the intent pending. Startup replays any
-undelivered intent from its retained payload even if the configuration files
-changed, before terminalizing its claim. Success returns
+credential path, webhook listener settings, and hook map. Reload pauses sweep
+admission and stops and joins active sweep attempts and affected ingestion tasks
+before rule activation and event-tail capture. Only after that activation
+commits does core reconcile convergence targets from the retained intent. On a
+stale or conflicting rule-revision rejection, recovery first validates the prior
+snapshot against the current startup-only sections. If invalid, it terminalizes
+the intent with `configuration_reload_failed` without resuming workers, and
+startup recovery fails. Otherwise it resumes ingestion and sweep admission under
+the prior snapshot before terminalizing the intent with
+`configuration_reload_failed`, without replacing the running configuration.
+Other failures after either stops leave the intent pending until recovery
+installs the replacement snapshot and resumes them before terminalizing the
+claim. The [reload-intent input](ownership-seam.md) delivers rule activation
+only, and the module activates the rules atomically and idempotently by command
+identity and digest. The activation transaction captures each repository's
+current event tail and retains it for idempotent replay. Before replay activates
+any retained effects, startup validates the retained reloadable snapshot
+together with the on-disk startup-only sections; incompatibility fails startup
+and leaves the intent pending. Startup replays any undelivered intent from its
+retained payload even if the configuration files changed, before terminalizing
+its claim. Success returns
 `configuration_reloaded { command_id, reloaded_sections }`, whose sections are
 an array of the closed values `model_catalog`, `session_templates`, and
 `repo_watch`. Failure returns
