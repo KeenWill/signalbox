@@ -114,6 +114,7 @@ anchor, unless the anchor is a heading on the linking page.
 - [Credential availability design](../design/credential-availability.md)
 - [Identity and commands design](../design/identity-and-commands.md)
 - [Process protocol design](../design/process-protocol.md)
+- [Ownership seam design](../design/ownership-seam.md)
 - [Persistence protocol design](../design/persistence-protocol.md)
 - [Blob storage design](../design/blob-storage.md)
 - [File and media interpretation design](../design/file-and-media.md)

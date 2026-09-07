@@ -92,23 +92,25 @@ reaching the owner-private socket is the authority.
 Configuration reload is one `reload_configuration { command_id }` request
 carrying a user-global command identity. An equal command retry reports busy
 while pending or replays its stored result without re-reading configuration.
-Core first commits the reload command with a complete checked snapshot of every
-reloadable section and the rule-set digest as durable intent. The snapshot
-contains the model catalog, session-template catalog, and repository-watch
-configuration, including rules, convergence targets, template, interval,
-credential path, webhook listener settings, and hook map. Core reconciles
-convergence targets from the retained intent; the
-[reload-intent input](ownership-seam.md) delivers rule activation only, and the
-module activates the rules atomically and idempotently by command identity and
-digest. The activation transaction captures each repository's current event tail
-and retains it for idempotent replay. Before replay activates any retained
-effects, startup validates the retained reloadable snapshot together with the
-on-disk startup-only sections; incompatibility fails startup and leaves the
-intent pending. Startup replays any undelivered intent from its retained payload
-even if the configuration files changed, before terminalizing its claim. Success
-returns `configuration_reloaded { command_id, reloaded_sections }`, whose
-sections are an array of the closed values `model_catalog`, `session_templates`,
-and `repo_watch`. Failure returns
+Reloads, including startup replay, run serially from configuration read through
+intent delivery, task changes, snapshot swap, and terminal result. Core first
+commits the reload command with a complete checked snapshot of every reloadable
+section and the rule-set digest as durable intent. The snapshot contains the
+model catalog, session-template catalog, and repository-watch configuration,
+including rules, convergence targets, template, interval, credential path,
+webhook listener settings, and hook map. Core reconciles convergence targets
+from the retained intent; the [reload-intent input](ownership-seam.md) delivers
+rule activation only, and the module activates the rules atomically and
+idempotently by command identity and digest. The activation transaction captures
+each repository's current event tail and retains it for idempotent replay.
+Before replay activates any retained effects, startup validates the retained
+reloadable snapshot together with the on-disk startup-only sections;
+incompatibility fails startup and leaves the intent pending. Startup replays any
+undelivered intent from its retained payload even if the configuration files
+changed, before terminalizing its claim. Success returns
+`configuration_reloaded { command_id, reloaded_sections }`, whose sections are
+an array of the closed values `model_catalog`, `session_templates`, and
+`repo_watch`. Failure returns
 `configuration_reload_failed { command_id, phase, reason }`, sanitized as
 startup logs are. Which sections reload and the validate-then-swap rule belong
 to [configuration-and-credentials.md](../spec/configuration-and-credentials.md).
