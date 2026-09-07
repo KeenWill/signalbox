@@ -465,9 +465,15 @@ mod tests {
             .connect_with(signalbox_persistence::local_test_connection_options(&url)?)
             .await?;
         signalbox_persistence::migrate(&pool).await?;
+        let expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+            + 3600;
+        let access_token =
+            super::super::tests::jwt(serde_json::json!({"exp":expiry, "jti":"shared-access"}));
         let (client, registration, server) = super::super::tests::https_server(vec![(
             200,
-            serde_json::json!({"access_token":"shared-access", "refresh_token":"rotated-refresh", "expires_in":3600}),
+            serde_json::json!({"access_token":access_token, "refresh_token":"rotated-refresh"}),
         )])?;
         let repository = OauthCredentialRepository::new(pool.clone());
         repository
@@ -548,11 +554,26 @@ mod tests {
         b.map_err(|_| "joined delivery")?;
         assert_eq!(
             first.0.expect("material").access_token.expose_bytes(),
-            b"shared-access"
+            access_token.as_bytes()
         );
         assert_eq!(
             second.0.expect("material").access_token.expose_bytes(),
-            b"shared-access"
+            access_token.as_bytes()
+        );
+        let mut sequential = Installer::default();
+        assert_eq!(
+            service
+                .prepare("profile", &mut sequential, CancellationSignal::never())
+                .await,
+            Ok(OauthDeliveryOutcome::Delivered)
+        );
+        assert_eq!(
+            sequential
+                .0
+                .expect("sequential material")
+                .access_token
+                .expose_bytes(),
+            access_token.as_bytes()
         );
         assert_eq!(server.join().map_err(|_| "TLS server panicked")??.len(), 1);
         assert_eq!(

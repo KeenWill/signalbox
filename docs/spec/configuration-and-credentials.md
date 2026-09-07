@@ -733,8 +733,9 @@ replaces returned refresh and identity tokens in one commit, retaining either
 token when omitted; differing account identity quarantines. An ambiguous
 replacement commit is reread: a committed replacement is adopted and an
 uncleared marker quarantines. Access tokens live only in memory and refresh
-lazily after restart. Cached tokens with at most five minutes remaining refresh
-before installation to stay outside Codex's proactive-refresh window.
+lazily after restart. Cache expiry comes from the access-token JWT `exp` claim.
+Cached tokens with at most five minutes remaining refresh before installation to
+stay outside Codex's proactive-refresh window.
 
 Dispatch holds the profile row lock through copying access and identity tokens
 and account metadata into a scratch home, withholding the refresh token. The

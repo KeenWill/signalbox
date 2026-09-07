@@ -20,7 +20,6 @@ struct RefreshResponse {
     access_token: Option<String>,
     refresh_token: Option<String>,
     id_token: Option<String>,
-    expires_in: Option<u64>,
     error: Option<String>,
 }
 
@@ -102,12 +101,11 @@ impl OauthClient {
                 }
                 authorization.identity_token = identity_token;
             }
+            let expires_at = access_token_expiry(&access_token);
             Ok(Refreshed {
                 authorization,
                 access_token: CredentialValue::new(access_token.into_bytes()),
-                expires_at: response
-                    .expires_in
-                    .and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds))),
+                expires_at,
             })
         };
         cancellation
@@ -115,4 +113,30 @@ impl OauthClient {
             .await
             .unwrap_or(Err(Ambiguous))
     }
+}
+
+// The JWT claim supplies cache timing; it does not authenticate the token.
+fn access_token_expiry(token: &str) -> Option<Instant> {
+    #[derive(Deserialize)]
+    struct Claims {
+        exp: i64,
+    }
+
+    let mut parts = token.split('.');
+    let (header, payload, signature) = (parts.next()?, parts.next()?, parts.next()?);
+    if header.is_empty() || payload.is_empty() || signature.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: Claims = serde_json::from_slice(&bytes).ok()?;
+    let deadline = std::time::UNIX_EPOCH.checked_add(Duration::from_secs(
+        u64::try_from(claims.exp).unwrap_or_default(),
+    ))?;
+    let now = Instant::now();
+    let remaining = deadline
+        .duration_since(std::time::SystemTime::now())
+        .unwrap_or_default();
+    now.checked_add(remaining)
 }
