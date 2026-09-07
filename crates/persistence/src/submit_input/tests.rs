@@ -5,7 +5,8 @@ use super::decode::{
     map_imported_scheduling_error,
 };
 use signalbox_domain::{
-    DelegationContent, DelegationOutcomeKind, DelegationProvenanceReconstitutionInput,
+    DelegationContent, DelegationOutcome, DelegationOutcomeKind,
+    DelegationProvenanceReconstitutionInput,
 };
 
 use super::*;
