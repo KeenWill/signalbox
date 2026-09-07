@@ -378,6 +378,26 @@ impl RunnerProtocolStore {
         .execute(&mut **transaction)
         .await?;
         append_placement_boundary(transaction, command, ordinal, &replacement).await?;
+        let directory = lost_runner_working_directory(&replacement.placement);
+        let state = if row.decode_column::<Option<Uuid>>("lost_runner_id")?
+            == Some(enrollment.runner().into_uuid())
+            && row
+                .decode_column::<Option<String>>("requested_working_directory")?
+                .as_deref()
+                != directory.as_ref().map(RunnerWorkingDirectory::as_str)
+        {
+            DispatchedRunnerState::WorkingDirectoryChanged
+        } else {
+            DispatchedRunnerState::Replaced
+        };
+        append_recovery_placement_event(
+            transaction,
+            &replacement.placement,
+            enrollment.runner(),
+            ordinal,
+            state,
+        )
+        .await?;
         if let Some(authorization) = authorization {
             sqlx::query("INSERT INTO runner_replacement_workspace_consumption (authorization_id, command_id) VALUES ($1, $2)")
                 .bind(authorization.authorization.into_uuid()).bind(command.into_uuid()).execute(&mut **transaction).await?;
@@ -622,6 +642,14 @@ impl RunnerProtocolStore {
             .await?;
             sqlx::query("UPDATE runner_current_session_placement SET event_ordinal = $2 WHERE session_id = $1")
                 .bind(command.session.into_uuid()).bind(Decimal::from(ordinal)).execute(&mut **transaction).await?;
+            append_recovery_placement_event(
+                transaction,
+                &replacement.placement,
+                enrollment.runner(),
+                ordinal,
+                DispatchedRunnerState::Replaced,
+            )
+            .await?;
             return Ok(Some(ReplaceLostRunnerResult::Replaced {
                 runner: enrollment.runner(),
                 placement_revision: replacement.placement.revision(),
@@ -840,6 +868,15 @@ impl RunnerProtocolStore {
         .bind(Decimal::from(ordinal))
         .execute(&mut **transaction)
         .await?;
+        append_recovery_placement_event(
+            transaction,
+            &placement,
+            placement_loss_fence_runner(&placement)
+                .ok_or(RunnerProtocolCorruption::CrossWiredReference)?,
+            ordinal,
+            DispatchedRunnerState::Abandoned,
+        )
+        .await?;
         Ok(AbandonLostRunnerResult::Abandoned)
     }
 
@@ -964,6 +1001,32 @@ impl RunnerProtocolStore {
             runner: candidate.runner(),
         })
     }
+}
+
+async fn append_recovery_placement_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    placement: &SessionRunnerPlacement,
+    runner: RunnerId,
+    ordinal: u64,
+    state: DispatchedRunnerState,
+) -> Result<(), RunnerProtocolStoreError> {
+    outbox::append(
+        transaction,
+        OutboxEvent::RunnerStateTransition(RunnerStateOutboxEvent {
+            session: placement.session(),
+            runner,
+            placement_revision: placement.revision(),
+            sandbox: placement.request().sandbox,
+            working_directory: lost_runner_working_directory(placement),
+            state,
+            source: RunnerStateOutboxSource {
+                placement_event_ordinal: ordinal,
+                connection: None,
+            },
+        }),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn lock_replacement_enrollments(
