@@ -55,6 +55,8 @@ use uuid::Uuid;
 
 #[path = "repo_watch_v2/checkout.rs"]
 mod checkout;
+#[path = "repo_watch_v2/retirement.rs"]
+mod retirement;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 

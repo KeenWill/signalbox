@@ -160,11 +160,12 @@ replacement before retiring the running listener, and a bind failure preserves
 the running settings. In-flight deliveries retry against the replacement
 configuration.
 
-Lifecycle reactions accept only `session_terminal` or `goal_changed` inputs and
-only `release_start` or sticky-stop lifecycle commands. These are the command
-forms used for convergence release and stale-work termination; no module lease
-table or scheduler join exists. Each reaction in a multi-action batch has its
-own one-based ordinal. A reaction naming a committed dispatch remains admissible
+Lifecycle reactions accept `session_terminal`, `goal_changed`, and retained
+`pull_request_closed` or `pull_request_merged` facts and emit only
+`release_start` or sticky-stop lifecycle commands. These are the command forms
+used for convergence release and stale-work termination; no module lease table
+or scheduler join exists. Each reaction in a multi-action batch has its own
+one-based ordinal. A reaction naming a committed dispatch remains admissible
 after its rule is deactivated; deactivation prevents only new matched
 dispatches.
 
@@ -190,9 +191,12 @@ key.
 
 Goal commissioning or resumption releases the dispatched session's held start
 gate. Goal achievement or a user-stopped goal issues a parent-only sticky stop.
-Reactions retain their original rule and action even after configuration removes
-the rule. The module commits lifecycle effects before advancing its application
-cursor; the daemon acknowledges the corresponding seam event afterward.
+Closing or merging a pull request issues a parent-only sticky stop for its live
+dispatched session, with `pull_request_closed` or `pull_request_merged` retained
+as the ledger reason; an already terminal session is left alone. Reactions
+retain their original rule and action even after configuration removes the rule.
+The module commits lifecycle effects before advancing its application cursor;
+the daemon acknowledges the corresponding seam event afterward.
 
 The command adapter copies complete resolved template defaults without initial
 input or repository credentials and stamps the module issuer on creation claims;
@@ -227,8 +231,8 @@ Core and other modules receive no privileges on the module tables.
 A created session indexes its retained rule revision, event, dispatch, and
 action ordinal, so lifecycle reaction planning survives rule removal and process
 restart. Equal evaluation recovery finds the retained batch before considering
-newly reserved dispatch or command identities. A lifecycle reaction targets the
-session named by its trigger. A synchronous create-session command-identity
+newly reserved dispatch or command identities. A core lifecycle reaction targets
+the session named by its trigger. A synchronous create-session command-identity
 conflict is recorded as rejected on its retained action; an applied creation
 settles from its `SessionCreated` event.
 

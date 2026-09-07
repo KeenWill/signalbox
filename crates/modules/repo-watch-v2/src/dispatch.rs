@@ -156,6 +156,10 @@ impl RepoWatchStore {
         codec: &mut Codec,
     ) -> Result<(), StoreError> {
         self.apply_lifecycle_event(event).await?;
+        if matches!(event.kind(), LifecycleEventKind::SessionTerminal(_)) {
+            sqlx::query("UPDATE dispatch_ledger SET session_terminal_at = $2 WHERE created_session_id = $1 AND session_terminal_at IS NULL")
+                .bind(event.session().map(SessionId::into_uuid)).bind(event.recorded_at()).execute(&self.pool).await?;
+        }
         if let Some(session) = event.session() {
             if matches!(event.kind(), LifecycleEventKind::SessionTerminal(terminal)
                 if !matches!(terminal.outcome, SessionTerminalOutcome::Stopped { sticky: StopStickiness::Sticky }))
@@ -207,6 +211,78 @@ impl RepoWatchStore {
             event.sequence(),
         )
         .await?;
+        Ok(())
+    }
+
+    /// Retains a parent-only stop for each live dispatched session whose pull request ended.
+    pub async fn react_to_pull_request_lifecycle<
+        Factory: LifecycleCommandFactory,
+        Codec: SessionCommandCodec,
+    >(
+        &self,
+        factory: &mut Factory,
+        codec: &mut Codec,
+    ) -> Result<(), StoreError> {
+        #[derive(sqlx::FromRow)]
+        struct Retirement {
+            command_id: Uuid,
+            created_session_id: Uuid,
+            terminal_event_id: Uuid,
+            reason: String,
+            recorded_at: OffsetDateTime,
+        }
+        let mut transaction = self.pool.begin().await?;
+        let retirements: Vec<Retirement> = sqlx::query_as(
+            "SELECT origin.command_id, origin.created_session_id,
+                    terminal.event_id AS terminal_event_id, terminal.event_kind AS reason,
+                    terminal.recorded_at
+             FROM dispatch_ledger AS origin
+             JOIN gh_event AS dispatched ON dispatched.event_id = origin.event_id
+             JOIN LATERAL (
+                 SELECT fact.event_id, fact.event_kind, fact.recorded_at
+                 FROM gh_event AS fact
+                 WHERE fact.repository = dispatched.repository
+                   AND fact.pull_request_number = dispatched.pull_request_number
+                   AND fact.frontier_generation >= dispatched.frontier_generation
+                   AND fact.event_kind IN ('pull_request_closed', 'pull_request_merged')
+                 ORDER BY fact.repository_event_ordinal LIMIT 1
+             ) AS terminal ON true
+             WHERE origin.created_session_id IS NOT NULL AND origin.session_terminal_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM dispatch_ledger AS reaction
+                   WHERE reaction.dispatch_ref = origin.dispatch_ref
+                     AND reaction.action_ordinal = origin.action_ordinal
+                     AND reaction.retirement_event_id IS NOT NULL)
+             ORDER BY origin.command_id FOR UPDATE OF origin",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        for retirement in retirements {
+            let command = SessionCommand::lifecycle(factory.lifecycle(
+                SessionId::from_uuid(retirement.created_session_id),
+                SessionLifecycleOperation::Stop {
+                    sticky: StopStickiness::Sticky,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ))
+            .map_err(|_| StoreError::InvalidDispatchBatch)?;
+            let payload = codec
+                .encode(&command)
+                .ok_or(StoreError::InvalidRetainedCommand)?;
+            sqlx::query(
+                "INSERT INTO dispatch_ledger (
+                    dispatch_ref, action_ordinal, command_id, repository, rule_id, rule_revision,
+                    event_id, command_kind, command_payload, status, issued_at,
+                    retirement_event_id, retirement_reason)
+                 SELECT dispatch_ref, action_ordinal, $2, repository, rule_id, rule_revision,
+                    event_id, 'lifecycle', $3, 'pending', $4, $5, $6
+                 FROM dispatch_ledger WHERE command_id = $1
+                 ON CONFLICT (dispatch_ref, action_ordinal) WHERE retirement_event_id IS NOT NULL DO NOTHING")
+                .bind(retirement.command_id).bind(command.command_id().into_uuid()).bind(payload)
+                .bind(retirement.recorded_at).bind(retirement.terminal_event_id).bind(retirement.reason)
+                .execute(&mut *transaction).await?;
+        }
+        transaction.commit().await?;
         Ok(())
     }
 

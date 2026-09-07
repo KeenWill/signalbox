@@ -1928,6 +1928,7 @@ impl RepoWatchStore {
                FROM dispatch_ledger
               WHERE repository = $1 AND rule_id = $2 AND rule_revision = $3
                 AND event_id = $4 AND trigger_sequence IS NOT DISTINCT FROM $5
+                AND retirement_event_id IS NULL
               ORDER BY action_ordinal",
         )
         .bind(first.repository().as_str())
@@ -1995,7 +1996,7 @@ impl RepoWatchStore {
                 "SELECT action_ordinal FROM dispatch_ledger
                   WHERE dispatch_ref = $1 AND repository = $2 AND rule_id = $3
                     AND rule_revision = $4 AND event_id = $5
-                    AND trigger_sequence IS NULL",
+                    AND trigger_sequence IS NULL AND retirement_event_id IS NULL",
             )
             .bind(first.dispatch().into_uuid())
             .bind(first.repository().as_str())
@@ -2211,7 +2212,7 @@ impl RepoWatchStore {
                  ON retained_event.event_id = ledger.event_id
                 AND retained_event.repository = ledger.repository
               WHERE ledger.created_session_id = $1
-                AND ledger.trigger_sequence IS NULL
+                AND ledger.trigger_sequence IS NULL AND ledger.retirement_event_id IS NULL
               ORDER BY ledger.dispatch_ref, ledger.action_ordinal
               LIMIT 2",
         )

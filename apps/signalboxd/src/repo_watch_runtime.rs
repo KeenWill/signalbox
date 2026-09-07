@@ -327,6 +327,11 @@ impl RuntimeState {
                 .acknowledge(&event)
                 .await
                 .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
+        } else {
+            self.store
+                .react_to_pull_request_lifecycle(&mut self.factory, &mut codec)
+                .await
+                .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
         }
         for repository in configuration.repositories() {
             for rule in configuration.rules() {
