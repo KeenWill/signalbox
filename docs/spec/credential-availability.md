@@ -14,11 +14,12 @@ owns the endings of a credential-pool selection attempt.
 The machine runs in `crates/persistence/src/model_execution.rs` at two points.
 Preparation resolves the session's pool, admits a member, and pins the policy
 snapshot to the call. A fresh admission reselects the member the session's most
-recent call on that pool used while no durable exclusion removes it, otherwise
-the first member in policy order that none removes. The commit that closes a
-failed call applies the action the pinned policy fixes for the failure's cause,
-and either terminalizes the turn or prepares a successor attempt, whose member
-is admitted and call created at that attempt's preparation.
+recent call on that pool used while that member remains admissible; otherwise
+selection applies the pool's priority and tie-break rule to admissible members.
+The commit that closes a failed call applies the action the pinned policy fixes
+for the failure's cause, and either terminalizes the turn or prepares a
+successor attempt, whose member is admitted and call created at that attempt's
+preparation.
 
 An availability chain begins at a fresh admission inside one turn and holds the
 call that admission prepares, if any, and every successor that follows a

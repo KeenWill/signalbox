@@ -876,6 +876,7 @@ fn provider_error_script() -> Script {
 
 fn refusal_script() -> Script {
     Script::delivering(TerminalEvidence::Refused(RefusalEvidence {
+        reason: signalbox_model_runtime::RefusalReason::Unspecified,
         exchange: ExchangeFacts::default(),
         message_id: None,
         reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),

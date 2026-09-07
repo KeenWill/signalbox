@@ -596,6 +596,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     };
     match finish.completion_finish() {
         None => TerminalEvidence::Refused(RefusalEvidence {
+            reason: signalbox_model_runtime::RefusalReason::Unspecified,
             exchange,
             message_id,
             reported_model,
@@ -939,6 +940,10 @@ mod tests {
         let TerminalEvidence::Refused(refusal) = evidence else {
             panic!("a refusal stop reason must decode as refusal evidence, never completion");
         };
+        assert_eq!(
+            refusal.reason,
+            signalbox_model_runtime::RefusalReason::Unspecified
+        );
         assert_eq!(
             refusal.content,
             vec![AssistantPart::Text("I cannot help with that.".to_string())]

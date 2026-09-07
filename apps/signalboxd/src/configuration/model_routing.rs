@@ -122,13 +122,12 @@ impl ModelAdapter {
         }
     }
 
-    /// Reports whether this adapter observes remaining provider capacity.
-    ///
-    /// Neither composed runtime does. Listing the variants rather than
-    /// answering `false` outright makes a later adapter state its own answer.
+    /// Reports whether remaining-capacity policy is admitted for this adapter.
+    /// Missing evidence uses the policy's unknown-capacity behavior.
     pub(crate) const fn reports_remaining_capacity(self) -> bool {
         match self {
-            Self::Anthropic | Self::ClaudeCli | Self::CodexCli | Self::OpenAi => false,
+            Self::CodexCli => true,
+            Self::Anthropic | Self::ClaudeCli | Self::OpenAi => false,
         }
     }
 

@@ -74,8 +74,7 @@ observed before the loss, and whether a tool call had opened in the material the
 adapter decoded. A provider error may also carry an adapter-owned proof that the
 provider never accepted the request; this page owns that evidence, and
 [credential-availability](credential-availability.md) decides what the proof
-leads to. Refusal evidence reaches callers only from the Codex CLI and Claude
-Code CLI adapters.
+leads to.
 
 `SseFraming` is the provider-agnostic incremental parser both HTTP adapters
 build on, from transport byte chunks to event-stream records.
@@ -129,13 +128,13 @@ no adapter in the repository constructs it.
 The HTTP adapters never construct the incomplete-write unsent cause, because an
 HTTP server can act before end-of-request framing.
 
-Both HTTP decoders construct refusal evidence. Execute converts an ordinary
-refusal to an unrecognized provider error before returning, because a buffered
-HTTP request gives no proof that the response followed the complete upload. A
-refusal that carries at least one validated provider-compaction block with
-non-null replacement content remains refusal evidence because that completed
-replacement proves the provider processed and replaced the request context. A
-suffix containing only null-content no-op blocks does not supply that proof.
+Refusal evidence carries a typed reason: content policy, cyber policy,
+misalignment, or unspecified. Policy refusals carry no credential-rejection or
+non-acceptance proof. HTTP refusals with reported usage remain refusal evidence.
+Without reported usage, an HTTP refusal remains refusal evidence only when it
+carries a validated provider-compaction block with non-null replacement content
+and retained input and output counts; otherwise execute returns an unrecognized
+provider error.
 
 The Claude Code CLI never supplies the non-acceptance proof: it classifies
 failures from rendered prose by substring and exposes no structured native code.
@@ -523,14 +522,15 @@ Each CLI adapter's build derives its supported-version constant from the exact
 version in its pin manifest, so the manifest is the sole source. The daemon
 composition probes only the Codex CLI executable, and refuses startup before
 socket admission when its bounded probe cannot prove the installed executable
-reports that version; nothing probes the Claude Code executable before an
-exchange begins. Before spending anything, the Codex smoke asserts that the
-reported version equals the supported version and compares the CLI's complete
-feature list, including stage and default, with an exact classified inventory.
-In every smoke workflow, forks are excluded by GitHub secret withholding and by
-three explicit repository-name comparisons, no credential is echoed or passed in
-argv, and the test binary is compiled before any step carries the credential.
-The direct-HTTP smokes reference their secret only in the step that spends the
+reports that version and its SHA-256 matches the fork executable digest in the
+pin manifest; nothing probes the Claude Code executable before an exchange
+begins. Before spending anything, the Codex smoke asserts that the reported
+version equals the supported version and compares the CLI's complete feature
+list, including stage and default, with an exact classified inventory. In every
+smoke workflow, forks are excluded by GitHub secret withholding and by three
+explicit repository-name comparisons, no credential is echoed or passed in argv,
+and the test binary is compiled before any step carries the credential. The
+direct-HTTP smokes reference their secret only in the step that spends the
 exchange, and that step runs the compiled binary directly, so no build script or
 procedural macro runs while the key is readable. Each CLI smoke references its
 secret in a setup step before the exchange: the Claude smoke writes it to a file
@@ -563,5 +563,3 @@ turn-liveness causes.
   ([design](../design/runtime-substrate.md)).
 - Codex CLI OAuth delivery and the exact-value redaction it seeds before spawn
   ([design](../design/runtime-substrate.md)).
-- Refusal evidence from the direct HTTP adapters, which awaits an upload-proving
-  transport or evidence source ([design](../design/runtime-substrate.md)).

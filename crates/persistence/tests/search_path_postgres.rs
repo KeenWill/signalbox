@@ -44,8 +44,9 @@ use testcontainers_modules::{
     testcontainers::{ImageExt, runners::AsyncRunner},
 };
 
-const POSTGRES_IMAGE_TAG: &str =
-    "18.4-alpine3.23@sha256:996d0920e4ff9df1fc19dacb904492f3c1ec0ec1cc338f0ad7123be7731c5f5e";
+#[path = "../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+use postgres_test_image::POSTGRES_IMAGE_TAG;
 const DATABASE_NAME: &str = "signalbox_search_path";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";

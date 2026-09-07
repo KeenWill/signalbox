@@ -1442,6 +1442,7 @@ mod tests {
     fn refusal_redaction_covers_identifiers_model_and_content() {
         let key = credential("key_loop");
         let evidence = TerminalEvidence::Refused(RefusalEvidence {
+            reason: crate::RefusalReason::ContentPolicy,
             exchange: ExchangeFacts {
                 provider_request_id: Some(ProviderRequestId::new("request-key_loop")),
                 http_status: Some(200),
@@ -1480,6 +1481,7 @@ mod tests {
                 signature: Some("signature-[redacted]".to_string()),
             }
         );
+        assert_eq!(refusal.reason, crate::RefusalReason::ContentPolicy);
         assert_eq!(refusal.usage, TokenUsage::unreported());
     }
 

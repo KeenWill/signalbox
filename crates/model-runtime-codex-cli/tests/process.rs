@@ -2066,6 +2066,10 @@ async fn explicit_refusal_is_refusal_evidence() {
     .await;
 
     assert_eq!(
+        refused(&result.evidence).reason,
+        signalbox_model_runtime::RefusalReason::Unspecified
+    );
+    assert_eq!(
         refused(&result.evidence).content,
         vec![AssistantPart::Text(fixtures::REFUSAL_TEXT.to_string())]
     );

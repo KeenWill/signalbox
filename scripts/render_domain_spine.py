@@ -149,7 +149,7 @@ def format_rust(code):
         path = Path(temporary) / 'declarations.rs'
         path.write_text(code + '\n')
         result = subprocess.run([
-            'rustfmt', '--quiet', '--edition', '2021', '--emit', 'stdout',
+            os.environ.get('RUSTFMT', 'rustfmt'), '--quiet', '--edition', '2021', '--emit', 'stdout',
             '--config', 'max_width=100', str(path),
         ], check=False, capture_output=True, text=True)
     if result.returncode == 0:

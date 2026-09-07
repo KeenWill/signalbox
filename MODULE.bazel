@@ -2,6 +2,22 @@ module(name = "signalbox")
 
 bazel_dep(name = "rules_rust", version = "0.74.0")
 bazel_dep(name = "gcc_toolchain", version = "0.12.0")
+bazel_dep(name = "rules_python", version = "2.3.3")
+
+python_config = use_extension("@rules_python//python/extensions:config.bzl", "config")
+python_config.explicit_init_py(default = True)
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.defaults(python_version = "3.14")
+python.toolchain(python_version = "3.14")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "python_deps",
+    python_version = "3.14",
+    requirements_lock = "//:tooling/requirements-mdformat.txt",
+)
+use_repo(pip, "python_deps")
 
 gcc = use_extension("@gcc_toolchain//toolchain:module_extensions.bzl", "gcc_toolchains")
 gcc.toolchain(
@@ -32,6 +48,27 @@ host_tools.host_tools(
 use_repo(host_tools, "signalbox_rust_host_tools")
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+
+v8 = use_extension("//tooling/bazel:v8.bzl", "v8")
+use_repo(v8, "rusty_v8_archive")
+
+# Cached binaries cannot load JavaScript from a previous compilation sandbox.
+crate.annotation(
+    crate = "deno_core",
+    patch_args = ["-p1"],
+    patches = ["//tooling/bazel:patches/deno-embedded-javascript.patch"],
+)
+crate.annotation(
+    build_script_data = ["@rusty_v8_archive//file"],
+    build_script_env = {
+        "RUSTY_V8_ARCHIVE": "$(execpath @rusty_v8_archive//file)",
+        "RUSTY_V8_SRC_BINDING_PATH": "../gen/src_binding_simdutf_release_x86_64-unknown-linux-gnu.rs",
+    },
+    crate = "v8",
+    label_injections = {"@rusty_v8_archive": "@rusty_v8_archive"},
+    patch_args = ["-p1"],
+    patches = ["//tooling/bazel:patches/v8-build-output.patch"],
+)
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",
@@ -42,6 +79,13 @@ crate.from_cargo(
 use_repo(crate, "crates")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "patchelf",
+    build_file_content = 'exports_files(["bin/patchelf"])',
+    sha256 = "ce84f2447fb7a8679e58bc54a20dc2b01b37b5802e12c57eece772a6f14bf3f0",
+    urls = ["https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz"],
+)
 
 http_archive(
     name = "linux_test_runtime",

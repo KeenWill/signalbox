@@ -1,10 +1,9 @@
 //! Deployment-owned credential profiles, deliveries, and pools.
 //!
 //! `docs/spec/configuration-and-credentials.md` owns this grammar. This module
-//! parses it and admits only what the composed build can deliver: a profile
-//! naming a delivery no adapter surface provides, and a pool whose selection
-//! depends on capacity no adapter observes, are refused at startup rather than
-//! accepted inert.
+//! parses admitted deliveries and per-adapter capacity policies. Unsupported
+//! settings are refused at startup; admitted capacity policies treat missing
+//! evidence as unknown.
 
 use std::{
     collections::{HashMap, HashSet},

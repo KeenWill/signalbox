@@ -45,7 +45,7 @@ use signalbox_model_runtime_codex_cli::{
 };
 
 /// Overrides the executable under test. The default resolves through `PATH`;
-/// CI points it at the binary `npm ci` unpacked from the pin manifest.
+/// CI points it at the binary installed from the pinned release manifest.
 const EXECUTABLE_VARIABLE: &str = "SIGNALBOX_CODEX_SMOKE_EXECUTABLE";
 
 /// Overrides the model. The default is the cheapest model this CLI advertises
@@ -401,6 +401,12 @@ async fn the_pinned_codex_cli_pre_spend_contract_holds() {
 }
 
 async fn assert_pre_spend_contract(executable: &std::path::Path) {
+    signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version(
+        executable,
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    .expect("the executable matches the manifest's upstream version and fork binary digest");
     assert_pinned_version(executable).await;
     assert_pinned_feature_inventory(executable).await;
     assert_ambient_skill_instructions_disabled(executable).await;
@@ -679,7 +685,7 @@ async fn assert_pinned_version(executable: &std::path::Path) {
         "the executable at `{}` reports {version}, but this smoke can \
          only produce compatibility evidence for the pinned \
          {SUPPORTED_CODEX_CLI_VERSION}; install the version pinned in \
-         tooling/codex-cli/package.json",
+         tooling/codex-cli/release.json",
         executable.display()
     );
 }
@@ -1547,6 +1553,7 @@ fn decoded_response_accepts_refusal_without_completion_material() {
         ..TokenUsage::default()
     };
     let evidence = TerminalEvidence::Refused(RefusalEvidence {
+        reason: signalbox_model_runtime::RefusalReason::Unspecified,
         exchange: exchange.clone(),
         message_id: None,
         reported_model: None,

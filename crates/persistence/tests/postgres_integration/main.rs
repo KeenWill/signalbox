@@ -27,6 +27,7 @@ mod approval_decisions;
 mod attention;
 mod convergence_sweep;
 mod credential_capacity;
+mod credential_capacity_policy;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;
@@ -222,7 +223,9 @@ use testcontainers_modules::{
 
 use support::{blocked_backends_reached, blocked_backends_reached_on};
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+#[path = "../../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+use postgres_test_image::POSTGRES_IMAGE_TAG;
 const DATABASE_NAME: &str = "signalbox_integration";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
