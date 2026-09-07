@@ -217,10 +217,15 @@ class ManifestParsingTests(unittest.TestCase):
 
 
 class RunMatrixTests(unittest.TestCase):
-    def test_each_suite_runs_once_with_bazel_responsible_for_shards(self):
-        self.assertEqual(run_matrix((suite(name="alpha", shards=6), suite(name="terminal-client"))),
-                         {"include": [{"suite": "alpha", "target": "//:postgres_alpha"},
-                                      {"suite": "terminal-client", "target": "//:postgres_terminal_client"}]})
+    def test_each_manifest_partition_has_its_own_worker(self):
+        rows = run_matrix((suite(name="alpha", shards=6), suite(name="terminal-client")))["include"]
+        self.assertEqual(len(rows), 7)
+        alpha = [row for row in rows if row["suite"] == "alpha"]
+        self.assertEqual([row["shard_index"] for row in alpha], [0, 1, 2, 3, 4, 5])
+        self.assertEqual({row["shard_count"] for row in alpha}, {6})
+        self.assertEqual({row["target"] for row in alpha}, {"//:postgres_alpha"})
+        self.assertEqual(rows[-1], {"suite": "terminal-client", "target": "//:postgres_terminal_client",
+                                    "shard_count": 1, "shard_index": 0})
 
 
 class WorkflowAgreementTests(unittest.TestCase):
@@ -247,6 +252,14 @@ class WorkflowAgreementTests(unittest.TestCase):
     def test_allowed_failure_is_rejected(self):
         text = (ROOT / ".github/workflows/bazel.yml").read_text().replace("  bazel-postgres:\n", "  bazel-postgres:\n    continue-on-error: true\n")
         self.assertTrue(any("blocking" in failure for failure in self.disagreements(bazel=text)))
+
+    def test_each_worker_cannot_run_all_shards(self):
+        text = (ROOT / ".github/workflows/bazel.yml").read_text().replace("--test_sharding_strategy=disabled", "")
+        self.assertTrue(any("matrix shard" in failure for failure in self.disagreements(bazel=text)))
+
+    def test_worker_index_must_reach_the_native_wrapper(self):
+        text = (ROOT / ".github/workflows/bazel.yml").read_text().replace('"$BAZEL_POSTGRES_SHARD_INDEX"', '0')
+        self.assertTrue(any("matrix shard" in failure for failure in self.disagreements(bazel=text)))
 
     def test_missing_aggregate_assertion_is_rejected(self):
         text = (ROOT / ".github/workflows/rust.yml").read_text().replace('test "$BAZEL_RESULT" = success', 'echo done')
@@ -549,7 +562,7 @@ class CommandLineTests(unittest.TestCase):
         self.assertTrue(matrix["include"])
         self.assertEqual(
             sorted(matrix["include"][0]),
-            ["suite", "target"],
+            ["shard_count", "shard_index", "suite", "target"],
         )
 
     def test_check_reports_the_resolved_topology(self) -> None:

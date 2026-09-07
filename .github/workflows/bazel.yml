@@ -52,8 +52,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.postgres-matrix.outputs.matrix) }}
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
-    # The job builds and executes all binary shards of one manifest suite.
-    timeout-minutes: 30
+    # Each worker runs one manifest partition across the suite's binaries.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -65,9 +65,11 @@ jobs:
         env:
           BAZEL_REMOTE_CACHE: ${{ vars.BAZEL_REMOTE_CACHE }}
           BAZEL_POSTGRES_TARGET: ${{ matrix.target }}
+          BAZEL_POSTGRES_SHARD_INDEX: ${{ matrix.shard_index }}
+          BAZEL_POSTGRES_SHARD_COUNT: ${{ matrix.shard_count }}
         run: |
           cache_args=()
           if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
             cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
           fi
-          bazel test --keep_going --flaky_test_attempts=2 --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" "$BAZEL_POSTGRES_TARGET"
+          bazel test --keep_going --flaky_test_attempts=2 --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_sharding_strategy=disabled --test_env=SIGNALBOX_TEST_SHARD_INDEX="$BAZEL_POSTGRES_SHARD_INDEX" --test_env=SIGNALBOX_TEST_TOTAL_SHARDS="$BAZEL_POSTGRES_SHARD_COUNT" --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" "$BAZEL_POSTGRES_TARGET"

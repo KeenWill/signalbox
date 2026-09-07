@@ -48,8 +48,14 @@ def _native_runtime_impl(ctx):
             '  export CARGO_TARGET_DIR="${TEST_TMPDIR}/cargo-target"',
             '  cd "${CARGO_MANIFEST_DIR}"',
             "fi",
+            # CI allocates one worker per manifest shard; local Bazel schedules
+            # the declared shard_count itself.
+            'if [[ -n "${SIGNALBOX_TEST_TOTAL_SHARDS:-}" ]]; then',
+            '  export TEST_TOTAL_SHARDS="${SIGNALBOX_TEST_TOTAL_SHARDS}"',
+            '  export TEST_SHARD_INDEX="${SIGNALBOX_TEST_SHARD_INDEX:?}"',
+            "fi",
             "if (( ${TEST_TOTAL_SHARDS:-0} > 1 )); then",
-            '  touch "${TEST_SHARD_STATUS_FILE:?}"',
+            '  if [[ -n "${TEST_SHARD_STATUS_FILE:-}" ]]; then touch "$TEST_SHARD_STATUS_FILE"; fi',
             '  "$patched_executable" "$@" --list > "${TEST_TMPDIR}/test-list"',
             "  selected=()",
             "  index=0",

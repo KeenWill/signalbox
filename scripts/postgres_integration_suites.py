@@ -217,10 +217,11 @@ def load_suites(root: Path) -> tuple[Suite, ...]:
 
 
 def run_matrix(suites: tuple[Suite, ...]) -> dict[str, list[dict[str, object]]]:
-    """Run each suite once; Bazel partitions its binaries by shard_count."""
+    """Give every manifest shard its own worker and native test partition."""
     return {"include": [
-        {"suite": suite.name, "target": "//:postgres_" + suite.name.replace("-", "_")}
-        for suite in suites
+        {"suite": suite.name, "target": "//:postgres_" + suite.name.replace("-", "_"),
+         "shard_index": index, "shard_count": suite.shards}
+        for suite in suites for index in range(suite.shards)
     ]}
 
 
@@ -353,6 +354,16 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                and any(references_variable(word, variables["target"]) for word in tokens[2:])
                for tokens, variables, blocking in executed):
         failures.append(f"{WORKFLOW} bazel-postgres runs no blocking matrix-target Bazel test")
+    if not any(tokens[:2] == ["bazel", "test"]
+               and "--test_sharding_strategy=disabled" in tokens
+               and all(variables.get(field) and any(
+                   word.startswith("--test_env=" + environment + "=")
+                   and references_variable(word, variables[field]) for word in tokens)
+                   for field, environment in (
+                       ("shard_index", "SIGNALBOX_TEST_SHARD_INDEX"),
+                       ("shard_count", "SIGNALBOX_TEST_TOTAL_SHARDS")))
+               for tokens, variables, _ in executed):
+        failures.append(f"{WORKFLOW} bazel-postgres does not select its matrix shard exactly once")
     if _resolved_runs_on(run.get("runs-on", "")) != "signalbox-docker":
         failures.append(f"{WORKFLOW} bazel-postgres must run on signalbox-docker")
     rust_jobs = workflow_document(rust).get("jobs", {})
