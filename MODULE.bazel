@@ -2,11 +2,14 @@ module(name = "signalbox")
 
 bazel_dep(name = "rules_rust", version = "0.74.0")
 
-# Follow crate modules like cargo fmt; include! fragments are not crate roots.
+# Match Cargo formatting and build-script lint policy.
 single_version_override(
     module_name = "rules_rust",
     patch_strip = 1,
-    patches = ["//tooling/bazel:patches/rustfmt-crate-roots.patch"],
+    patches = [
+        "//tooling/bazel:patches/rustfmt-crate-roots.patch",
+        "//tooling/bazel:patches/build-script-lints.patch",
+    ],
 )
 
 bazel_dep(name = "gcc_toolchain", version = "0.12.0")

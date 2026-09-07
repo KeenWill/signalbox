@@ -13,6 +13,7 @@ native_runtime(
 exports_files([
     "check_generated.py",
     "check_markdown.py",
+    "patches/build-script-lints.patch",
     "patches/deno-embedded-javascript.patch",
     "patches/serde-json-suite-order.patch",
     "patches/rustfmt-crate-roots.patch",

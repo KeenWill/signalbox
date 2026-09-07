@@ -24,6 +24,7 @@ cargo_build_script(
         "package.json",
     ],
     edition = crate_edition(),
+    lint_config = ":cargo_lints",
     rustc_env_files = [":cargo_environment"],
     deps = all_crate_deps(build = True),
 )
