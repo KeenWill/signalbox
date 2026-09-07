@@ -14,7 +14,7 @@
 | request | 2 | 0 | 0 | [request](request.md) |
 | response | 4 | 0 | 1 | [response](response.md) |
 | review | 32 | 0 | 0 | [review](review.md) |
-| runner | 11 | 0 | 0 | [runner](runner.md) |
+| runner | 15 | 0 | 0 | [runner](runner.md) |
 | scalars | 28 | 0 | 3 | [scalars](scalars.md) |
 | session | 12 | 0 | 0 | [session](session.md) |
 | settings | 17 | 0 | 0 | [settings](settings.md) |

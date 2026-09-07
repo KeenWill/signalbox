@@ -2200,6 +2200,8 @@ impl Error for ProcessConnectionError {
 /// Fatal local-process runtime failure.
 #[derive(Debug)]
 pub enum ProcessRuntimeError {
+    /// OAuth claim recovery or catalog installation failed before accepting work.
+    OauthRecovery(signalbox_persistence::oauth_credential::OauthCredentialRepositoryError),
     /// The guarded listener could not accept a connection.
     Accept(io::Error),
     /// A completed snapshot spool could not be read for transmission.
@@ -2231,6 +2233,7 @@ pub enum ProcessRuntimeError {
 impl fmt::Display for ProcessRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::OauthRecovery(_) => "OAuth credential startup recovery failed",
             Self::Accept(_) => "the local process listener failed",
             Self::SpoolIo(_) => "the local process server could not read a snapshot spool",
             Self::Encode(_) => "the local process server could not encode a frame",
@@ -2271,7 +2274,8 @@ impl Error for ProcessRuntimeError {
             Self::ConnectionTask(error) => Some(error),
             Self::Dispatch(error) => Some(error),
             Self::CleanupSocket(error) => Some(error),
-            Self::EncodeInvariant
+            Self::OauthRecovery(_)
+            | Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed
             | Self::ImportBudgetClosed
             | Self::ReviewCommandBudgetClosed

@@ -3,7 +3,6 @@
 use std::{
     error::Error,
     num::NonZeroU64,
-    path::PathBuf,
     str::FromStr,
     sync::{
         Arc,
@@ -210,7 +209,7 @@ fn processor(
     ceilings: FileMediaProcessCeilings,
 ) -> Result<(SandboxedFileMediaProcessor, ReaderIdentity), Box<dyn Error>> {
     let (declaration, reader) = declaration()?;
-    let worker = PathBuf::from(env!("CARGO_BIN_EXE_signalbox-file-media-synthetic-worker"));
+    let worker = signalbox_test_bin::test_bin_path!("signalbox-file-media-synthetic-worker");
     let binding = WorkerBinding::try_new(worker, declaration)?;
     let processor =
         SandboxedFileMediaProcessor::try_new("/usr/bin/bwrap", vec![binding], ceilings)?;

@@ -2,7 +2,7 @@ load("@crates//:defs.bzl", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_unit_test")
 
 rust_package()
 
@@ -54,4 +54,83 @@ rust_unit_test(
 rust_api_json(
     name = "api_json",
     crate = ":signalbox_model_runtime_codex_cli",
+)
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_model_runtime_codex_cli",
+)
+
+rust_integration_test(
+    name = "live_smoke",
+    args = ["--test-threads=4"],
+    srcs = glob(["tests/**/*.rs"]),
+    compile_data = ["//:.github/workflows/codex-smoke.yml"],
+    crate_root = "tests/live_smoke.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [":signalbox-fake-codex-cli"],
+    env = {"NEXTEST_BIN_EXE_signalbox_fake_codex_cli": "$(rootpath :signalbox-fake-codex-cli)"},
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/model-runtime-codex-cli",
+        "CARGO_BIN_EXE_signalbox-fake-codex-cli": "$(rootpath :signalbox-fake-codex-cli)",
+    },
+    deps = [
+        ":build_script",
+        "//crates/model-runtime:signalbox_model_runtime",
+        "//crates/model-runtime-codex-cli:signalbox_model_runtime_codex_cli",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
+)
+
+rust_integration_test(
+    name = "pin",
+    args = ["--test-threads=4"],
+    srcs = glob(["tests/**/*.rs"]) + ["version_pin.rs"],
+    crate_root = "tests/pin.rs",
+    data = ["//:tooling/codex-cli/release.json"] + glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [":signalbox-fake-codex-cli"],
+    env = {"NEXTEST_BIN_EXE_signalbox_fake_codex_cli": "$(rootpath :signalbox-fake-codex-cli)"},
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/model-runtime-codex-cli",
+        "CARGO_BIN_EXE_signalbox-fake-codex-cli": "$(rootpath :signalbox-fake-codex-cli)",
+    },
+    deps = [
+        ":build_script",
+        "//crates/model-runtime:signalbox_model_runtime",
+        "//crates/model-runtime-codex-cli:signalbox_model_runtime_codex_cli",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
+)
+
+rust_integration_test(
+    name = "process",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    crate_root = "tests/process.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [":signalbox-fake-codex-cli"],
+    env = {"NEXTEST_BIN_EXE_signalbox_fake_codex_cli": "$(rootpath :signalbox-fake-codex-cli)"},
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/model-runtime-codex-cli",
+        "CARGO_BIN_EXE_signalbox-fake-codex-cli": "$(rootpath :signalbox-fake-codex-cli)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = [
+        ":build_script",
+        "//crates/model-runtime:signalbox_model_runtime",
+        "//crates/model-runtime-codex-cli:signalbox_model_runtime_codex_cli",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
 )

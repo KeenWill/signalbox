@@ -237,11 +237,14 @@ impl SessionMetadataRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
-                | CommandKind::ClearCredentialExclusion
-                | CommandKind::SessionLifecycle,
+                | CommandKind::ClearCredentialExclusion,
             ) => Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -596,11 +599,14 @@ async fn existing_or_conflicting(
         | CommandKind::RegisterWorkspace
         | CommandKind::MintGitRemote
         | CommandKind::WithdrawGitRemote
+        | CommandKind::SessionLifecycle
+        | CommandKind::ReplaceLostRunner
+        | CommandKind::AbandonLostRunner
+        | CommandKind::PromotePendingRunner
         | CommandKind::ProvisionOauthCredential
         | CommandKind::ReprovisionOauthCredential
         | CommandKind::DeleteOauthCredential
-        | CommandKind::ClearCredentialExclusion
-        | CommandKind::SessionLifecycle => {
+        | CommandKind::ClearCredentialExclusion => {
             return Ok(ReplaceSessionMetadataHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });

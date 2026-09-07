@@ -592,6 +592,7 @@ fn reconstitution_accepts_exact_compaction_result_then_origin() {
         &origins,
         None,
         &compaction_chain,
+        &[],
         &snapshots,
         &mut referenced_snapshots,
     )
@@ -694,6 +695,7 @@ fn reconstitution_accepts_exact_compaction_result_then_origin() {
         &origins,
         None,
         &compaction_chain,
+        &[],
         &snapshots,
         &mut historical_references,
     )
@@ -722,6 +724,7 @@ fn reconstitution_accepts_exact_compaction_result_then_origin() {
         &origins,
         None,
         &compaction_chain,
+        &[],
         &snapshots,
         &mut stale_references,
     )

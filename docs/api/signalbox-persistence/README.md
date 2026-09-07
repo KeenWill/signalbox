@@ -26,7 +26,7 @@
 | lifecycle_metrics | 8 | 0 | 0 | [lifecycle_metrics](lifecycle_metrics.md) |
 | mapping | 6 | 0 | 29 | [mapping](mapping.md) |
 | model_execution | 15 | 0 | 0 | [model_execution](model_execution.md) |
-| oauth_credential | 7 | 0 | 0 | [oauth_credential](oauth_credential.md) |
+| oauth_credential | 15 | 0 | 0 | [oauth_credential](oauth_credential.md) |
 | operator_status | 6 | 0 | 0 | [operator_status](operator_status.md) |
 | outbox | 31 | 0 | 7 | [types](outbox/types.md), [types-2](outbox/types-2.md), [functions](outbox/functions.md) |
 | plan | 3 | 0 | 0 | [plan](plan.md) |
@@ -36,7 +36,7 @@
 | repo_watch_command | 1 | 0 | 0 | [repo_watch_command](repo_watch_command.md) |
 | review_orchestration | 11 | 0 | 0 | [review_orchestration](review_orchestration.md) |
 | review_workflow | 10 | 0 | 0 | [review_workflow](review_workflow.md) |
-| runner_protocol | 27 | 0 | 0 | [types](runner_protocol/types.md), [types-2](runner_protocol/types-2.md) |
+| runner_protocol | 28 | 0 | 0 | [types](runner_protocol/types.md), [types-2](runner_protocol/types-2.md) |
 | scheduler | 2 | 0 | 0 | [scheduler](scheduler.md) |
 | search | 3 | 0 | 0 | [search](search.md) |
 | session | 3 | 0 | 0 | [session](session.md) |
@@ -53,7 +53,7 @@
 | startup | 4 | 0 | 0 | [startup](startup.md) |
 | submit_input | 5 | 0 | 0 | [submit_input](submit_input.md) |
 | termination_receipt | 2 | 0 | 1 | [termination_receipt](termination_receipt.md) |
-| test_support | 2 | 0 | 0 | [test_support](test_support.md) |
+| test_support | 2 | 0 | 1 | [test_support](test_support.md) |
 | tool_loop | 3 | 0 | 0 | [tool_loop](tool_loop.md) |
 | turn_liveness | 5 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | usage | 3 | 0 | 1 | [usage](usage.md) |

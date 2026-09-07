@@ -15,6 +15,25 @@ pub struct RepositoryWatchClientLoader {
 }
 
 impl RepositoryWatchClientLoader {
+    /// Supplies Git's authentication only through one invocation's environment.
+    pub(crate) async fn git_authorization(&self) -> Result<String, RepositoryWatchClientLoadError> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let credential = self
+            .credentials
+            .resolve(&self.reference)
+            .await
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+        let token = std::str::from_utf8(credential.expose_bytes())
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+        if token.is_empty() || token.contains(['\r', '\n', '\0']) {
+            return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
+        }
+        Ok(format!(
+            "Authorization: Basic {}",
+            STANDARD.encode(format!("x-access-token:{token}"))
+        ))
+    }
+
     /// Binds a repository's file reference without reading its credential.
     pub fn new(repository: &WatchedRepositoryConfiguration) -> Self {
         let reference = repository.credential_reference();

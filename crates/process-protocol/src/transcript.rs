@@ -793,6 +793,11 @@ impl ImportedTextPreview {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptEntry {
+    /// A reference-only successor placement boundary.
+    RunnerPlacementChanged {
+        /// Exact positive successor placement revision.
+        placement_revision: PositiveCanonicalU64,
+    },
     /// Exact delegated task that opened one child session.
     DelegatedTask {
         /// Tool request that spawned the child.
@@ -901,7 +906,14 @@ pub enum TranscriptEntry {
         /// Exact provider-visible denial content.
         content: String,
     },
-    /// One logical tool request closed because its turn ended.
+    /// One logical tool request resolved before dispatch.
+    ToolInadmissible {
+        /// Exact inadmissible tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact provider-visible inadmissibility content.
+        content: String,
+    },
+    /// The request closed when its turn ended.
     ToolClosed {
         /// Exact closed tool request.
         tool_request_id: CanonicalUuid,

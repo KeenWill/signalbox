@@ -368,6 +368,7 @@ impl RunnerCatalog {
 /// Availability-only runner advertisement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerAdvertisement {
+    pub(super) default_working_directory: Option<crate::RunnerWorkingDirectory>,
     pub(super) classes: BTreeSet<RunnerCapabilityClass>,
     pub(super) tools: BTreeSet<ToolName>,
     pub(super) profiles: BTreeSet<CredentialProfileName>,
@@ -394,6 +395,7 @@ impl RunnerAdvertisement {
             .map(|entry| (entry.key.clone(), entry))
             .collect();
         Self {
+            default_working_directory: None,
             classes: classes.into_iter().collect(),
             tools: tools.into_iter().collect(),
             profiles: profiles.into_iter().collect(),
@@ -401,6 +403,20 @@ impl RunnerAdvertisement {
             sandboxes: sandboxes.into_iter().collect(),
             repositories,
         }
+    }
+
+    /// Retains the runner-reported absolute default directory for this advertisement.
+    pub fn with_default_working_directory(
+        mut self,
+        directory: Option<crate::RunnerWorkingDirectory>,
+    ) -> Self {
+        self.default_working_directory = directory;
+        self
+    }
+
+    /// Returns the reported default directory, if this runner supplied one.
+    pub fn default_working_directory(&self) -> Option<&crate::RunnerWorkingDirectory> {
+        self.default_working_directory.as_ref()
     }
 
     /// Iterates the advertised capability classes in canonical order.
