@@ -1,4 +1,6 @@
 /target/
+/bazel-*
+/.bazelrc.local
 
 # The CLI pin manifests under tooling/codex-cli/ and
 # crates/model-runtime-claude-cli/ are committed; the executables `npm ci`

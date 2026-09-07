@@ -1,0 +1,4 @@
+test_suite(
+    name = "bazel_tests",
+    tests = ["//crates/newtype:unit_tests"],
+)
