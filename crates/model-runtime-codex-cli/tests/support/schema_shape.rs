@@ -132,12 +132,30 @@ pub(super) fn compatible(
     {
         return true;
     }
+    if expected["x-codex-unknown-tags"] == true {
+        return error_info(expected, expected_root, actual, actual_root, false).is_ok();
+    }
+    let expected_alternatives = alternatives(expected);
+    // Keep the optional error union together when checking that its known tags remain present.
+    if let Some(branches) = &expected_alternatives {
+        let allows_null = branches
+            .iter()
+            .any(|branch| dereference(branch, expected_root)["type"] == "null");
+        if let Some(error_schema) = branches
+            .iter()
+            .map(|branch| dereference(branch, expected_root))
+            .find(|branch| branch["x-codex-unknown-tags"] == true)
+            .filter(|_| allows_null && branches.len() == 2)
+        {
+            return error_info(error_schema, expected_root, actual, actual_root, true).is_ok();
+        }
+    }
     if let Some(variants) = alternatives(actual) {
         return variants
             .iter()
             .all(|branch| compatible(expected, expected_root, branch, actual_root));
     }
-    if let Some(variants) = alternatives(expected) {
+    if let Some(variants) = expected_alternatives {
         return variants
             .iter()
             .any(|branch| compatible(branch, expected_root, actual, actual_root));
@@ -150,13 +168,20 @@ pub(super) fn compatible(
         return false;
     }
     if expected["enum"].is_array()
-        && (!actual["enum"].is_array()
-            || !strings(&actual["enum"]).is_subset(&strings(&expected["enum"])))
+        && (!actual["enum"].is_array() || strings(&actual["enum"]) != strings(&expected["enum"]))
     {
         return false;
     }
     match expected_type {
-        Some("object") => object_fields(expected, expected_root, actual, actual_root).is_ok(),
+        Some("object") => match object_fields(expected, expected_root, actual, actual_root) {
+            Ok(additions) => {
+                for field in additions {
+                    println!("additive field {field}");
+                }
+                true
+            }
+            Err(_) => false,
+        },
         Some("array") => compatible(
             &expected["items"],
             expected_root,
@@ -170,4 +195,97 @@ pub(super) fn compatible(
         }
         _ => true,
     }
+}
+
+/// Preserve all representations of a tag, including both string and object forms.
+pub(super) fn variants(
+    schema: &Value,
+    root: &Value,
+) -> Result<std::collections::BTreeMap<String, Vec<Value>>, String> {
+    error_variants(schema, root, false)
+}
+
+fn error_variants(
+    schema: &Value,
+    root: &Value,
+    allows_null: bool,
+) -> Result<std::collections::BTreeMap<String, Vec<Value>>, String> {
+    let schema = dereference(schema, root);
+    let mut result: std::collections::BTreeMap<String, Vec<Value>> =
+        std::collections::BTreeMap::new();
+    if let Some(branches) = alternatives(schema) {
+        for branch in branches {
+            for (tag, shapes) in error_variants(&branch, root, allows_null)? {
+                result.entry(tag).or_default().extend(shapes);
+            }
+        }
+    } else if schema["type"] == "string" {
+        let tags = schema["enum"]
+            .as_array()
+            .ok_or("error string must enumerate its tags")?;
+        for tag in tags {
+            let name = tag.as_str().ok_or("error tag must be a string")?;
+            let mut shape = schema.clone();
+            shape["enum"] = serde_json::json!([tag]);
+            result.entry(name.to_owned()).or_default().push(shape);
+        }
+    } else if schema["type"] == "object" {
+        let fields = schema["properties"]
+            .as_object()
+            .ok_or("error envelope must name its tag")?;
+        if fields.len() != 1 || schema["additionalProperties"] != false {
+            return Err("error envelope must contain only its tag".into());
+        }
+        let tag = fields.keys().next().expect("one error tag");
+        if !strings(&schema["required"]).contains(tag.as_str()) {
+            return Err("error envelope must require its tag".into());
+        }
+        result.insert(tag.clone(), vec![schema.clone()]);
+    } else if !(allows_null && schema["type"] == "null") {
+        return Err("error must be a tagged string or object".into());
+    }
+    Ok(result)
+}
+
+pub(super) fn enum_members(
+    expected: &BTreeSet<&str>,
+    actual: &BTreeSet<&str>,
+) -> Result<Vec<String>, String> {
+    let missing: Vec<_> = expected.difference(actual).collect();
+    if !missing.is_empty() {
+        return Err(format!("enum members removed: {missing:?}"));
+    }
+    Ok(actual
+        .difference(expected)
+        .map(|tag| (*tag).to_owned())
+        .collect())
+}
+
+fn error_info(
+    expected: &Value,
+    expected_root: &Value,
+    actual: &Value,
+    actual_root: &Value,
+    allows_null: bool,
+) -> Result<(), String> {
+    let expected = variants(expected, expected_root)?;
+    let actual = error_variants(actual, actual_root, allows_null)?;
+    let additions = enum_members(
+        &expected.keys().map(String::as_str).collect(),
+        &actual.keys().map(String::as_str).collect(),
+    )?;
+    for tag in additions {
+        println!("CodexErrorInfo: additive member {tag}");
+    }
+    for (tag, shapes) in expected {
+        for candidate in &actual[&tag] {
+            if !shapes
+                .iter()
+                .any(|shape| compatible(shape, expected_root, candidate, actual_root))
+            {
+                return Err(format!("incompatible known error representation: {tag}"));
+            }
+        }
+    }
+    Ok(())
 }

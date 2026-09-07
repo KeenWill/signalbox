@@ -46,16 +46,18 @@ pub(crate) enum CodexErrorInfo {
     Unknown { tag: String },
 }
 
-// Unknown error tags use either wire representation; known payloads have their
-// own schema checks.
+// The schema guard checks the known shapes at the consumed field and admits
+// the decoder's unknown-tag fallback.
 #[cfg(test)]
 impl schemars::JsonSchema for CodexErrorInfo {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "CodexErrorInfo".into()
     }
 
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({"type": ["string", "object"]})
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = <KnownError as schemars::JsonSchema>::json_schema(generator);
+        schema.insert("x-codex-unknown-tags".into(), true.into());
+        schema
     }
 }
 
