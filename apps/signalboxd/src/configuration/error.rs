@@ -1,4 +1,4 @@
-use super::ModelAdapter;
+use super::model_routing::ModelAdapter;
 use signalbox_domain::ModelSelectionRequest;
 use std::{error::Error, fmt, sync::Arc};
 
