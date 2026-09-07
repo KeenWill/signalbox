@@ -775,6 +775,33 @@ fn absent_repository_watch_configuration_starts_no_watch_tasks() {
 }
 
 #[test]
+fn repository_watch_is_enabled_by_default() {
+    let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+        .expect("repository-watch configuration");
+    assert!(
+        configured
+            .repository_watch()
+            .expect("configured watch")
+            .enabled()
+    );
+}
+
+#[test]
+fn repository_watch_can_be_disabled_explicitly() {
+    let configured = HubModelConfiguration::parse(&configuration_with_repository_watch().replace(
+        "[repository_watch]\nversion = 1",
+        "[repository_watch]\nversion = 1\nenabled = false",
+    ))
+    .expect("disabled repository-watch configuration");
+    assert!(
+        !configured
+            .repository_watch()
+            .expect("configured watch")
+            .enabled()
+    );
+}
+
+#[test]
 fn repository_watch_normalizes_signal_reviewer_logins() {
     let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
         .expect("repository-watch fixture is valid");
@@ -1375,6 +1402,52 @@ fn repository_watch_parses_the_explicit_convergence_sweep() {
         example_numeric_duration("max_convergence_sweep_cool_off")
     );
     assert_eq!(repository.convergence_pull_requests(), [pull_request]);
+}
+
+#[tokio::test]
+async fn disabled_repository_watch_does_not_activate_configured_convergence_targets() {
+    use signalbox_application::InProcessEligibilityWorkSource;
+    use signalbox_persistence::scheduler::PostgresEligibilitySweep;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    let configured = HubModelConfiguration::parse(
+        &configuration_with_convergence_sweep()
+            .replace("[repository_watch]", "[repository_watch]\nenabled = false"),
+    )
+    .expect("disabled repository watch retains valid convergence configuration");
+    let watch = configured
+        .repository_watch()
+        .expect("repository watch configured");
+    assert!(
+        watch
+            .repositories()
+            .iter()
+            .any(|repository| !repository.convergence_pull_requests().is_empty()),
+        "explicit targets remain configured for a later enable"
+    );
+    assert!(
+        watch.convergence_sweep().is_none(),
+        "startup has no policy from which to collect targets"
+    );
+
+    let pool = PgPoolOptions::new().connect_lazy_with(PgConnectOptions::new());
+    let (nudge, _work) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    let unused_runtime_bounds =
+        crate::ConvergenceSweepNumericBounds::new(None, None, None, None, None, None, None);
+    let runtime = crate::ConvergenceSweepRuntime::try_new(
+        pool,
+        watch,
+        crate::SessionTemplateConfiguration::default(),
+        configured.clone(),
+        nudge,
+        unused_runtime_bounds,
+    )
+    .expect("disabled sweep requires no transport or database");
+    assert!(
+        runtime.is_none(),
+        "disabled repository watch cannot start a commissioning sweep"
+    );
 }
 
 #[test]
