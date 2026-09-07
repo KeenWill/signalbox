@@ -1,4 +1,5 @@
-use super::{APPLIED, REJECTED, configured_defaults_version, descendant_scope_to_str};
+use super::load::configured_defaults_version;
+use super::{APPLIED, REJECTED, descendant_scope_to_str};
 use crate::mapping::{
     accepted_input_id_to_uuid, defaults_version_to_numeric, durable_command_id_to_uuid,
     input_position_to_numeric, model_settings_overlay_to_json, turn_id_to_uuid,
