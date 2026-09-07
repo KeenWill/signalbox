@@ -160,6 +160,11 @@ priority order, skipping excluded ones and breaking ties by the snapshot's rule.
 Trigger actions and the exclusions they create are durable. Every availability
 ending is owned by [credential availability](credential-availability.md).
 
+The model-call observation commit retains a reported capacity snapshot against
+the call's credential reference, including each window's remaining percentage,
+reported duration and reset instant. The latest observation time wins across
+calls; an absent snapshot preserves the retained evidence.
+
 The session-template catalog is read after the model catalog. Each template
 binds a name and version to a model or alias, a system prompt, and a
 dangerous-tool blanket. A prompt is inline or a file reference, either relative

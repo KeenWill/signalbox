@@ -169,3 +169,11 @@ tower = { version = "0.5.3", default-features = false, features = ["util"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "live_tool_evals"
+path = "tests/live_tool_evals/main.rs"
+
+[[test]]
+name = "process_protocol_runtime"
+path = "tests/process_protocol_runtime/main.rs"

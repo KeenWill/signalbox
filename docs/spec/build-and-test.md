@@ -6,7 +6,7 @@ Signalbox's build tools compile its crates and verify their contracts.
 
 Cargo builds the Rust workspace and runs the required CI checks. Bazel compiles
 and tests the newtype, domain, and blob-store crates through native Rust
-actions.
+actions. A separate Bazel PostgreSQL target checks schema restore search paths.
 
 ## Design decisions
 

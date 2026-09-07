@@ -1,6 +1,8 @@
 //! Review target for `docs/spec/review-workflows.md`.
 
-use super::{ReviewChangeRequestNumber, ReviewKey, ReviewTargetId};
+use crate::ReviewTargetId;
+
+use super::{ReviewChangeRequestNumber, ReviewKey};
 
 /// What moving or immutable code-host subject a target snapshot represents.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

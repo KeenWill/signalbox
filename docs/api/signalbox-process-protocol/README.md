@@ -4,11 +4,18 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
-| root | 54 | 0 | 4 | [types](root/types.md), [types-2](root/types-2.md), [functions](root/functions.md) |
+| root | 2 | 0 | 4 | [types](root/types.md), [types-2](root/types-2.md), [functions](root/functions.md) |
 | delegation | 11 | 0 | 0 | [delegation](delegation.md) |
+| error | 4 | 0 | 0 | [error](error.md) |
+| event | 1 | 0 | 0 | [event](event.md) |
 | goal | 16 | 0 | 0 | [goal](goal.md) |
 | operator_status | 5 | 0 | 0 | [operator_status](operator_status.md) |
+| request | 2 | 0 | 0 | [request](request.md) |
+| response | 1 | 0 | 0 | [response](response.md) |
 | review | 32 | 0 | 0 | [review](review.md) |
 | runner | 11 | 0 | 0 | [runner](runner.md) |
 | scalars | 28 | 0 | 3 | [scalars](scalars.md) |
+| session | 12 | 0 | 0 | [session](session.md) |
+| settings | 17 | 0 | 0 | [settings](settings.md) |
+| transcript | 15 | 0 | 0 | [transcript](transcript.md) |
 | user_input | 3 | 0 | 0 | [user_input](user_input.md) |

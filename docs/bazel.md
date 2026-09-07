@@ -42,3 +42,14 @@ Tailscale client, use `--remote_cache=grpc://bazel-cache:9092`.
 The runtime launcher applies to the current unit-test binaries. Tests that
 invoke host programs or external services need those inputs declared before
 their results can join the shared cache.
+
+The PostgreSQL pilot builds the persistence dependency closure and runs the
+search-path restore tests with a digest-pinned PostgreSQL image. Migrations and
+the example configuration are declared compilation inputs. With Docker:
+
+```bash
+bazel test --test_env=DOCKER_HOST=unix:///var/run/docker.sock //crates/persistence:search_path_postgres
+```
+
+The target is manual so `//:bazel_tests` remains the unit suite. The additive
+`bazel-postgres` CI job runs the pilot; Cargo retains the full PostgreSQL gate.
