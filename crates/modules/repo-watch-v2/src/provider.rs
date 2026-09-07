@@ -18,7 +18,7 @@ use signalbox_ownership_seam::{
 
 use crate::{
     EventProducer, FrontierEventAdmission, RepoWatchStore, StoreError,
-    github::GitHubClient,
+    github::{GitHubClient, GitHubClientError},
     ingest::{RepositoryObservation, RepositoryTask},
     observation_decode::{array, conclusion, object_id, positive, text},
 };
@@ -37,22 +37,84 @@ query RepositoryWatchReviewThreads($owner: String!, $name: String!, $number: Int
   }
 }"#;
 
-/// External failures contain no request, credential, or provider-body details.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Provider failures retain request context without response bodies or credentials.
+#[derive(Debug)]
 pub enum ObservationError {
-    Transport,
+    Transport(GitHubClientError),
     InvalidResponse,
+    Request {
+        path: String,
+        source: Box<ObservationError>,
+    },
+}
+
+impl ObservationError {
+    fn at(self, path: &str) -> Self {
+        Self::Request {
+            path: path.to_owned(),
+            source: Box::new(self),
+        }
+    }
 }
 
 impl fmt::Display for ObservationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Transport => "repository-watch provider transport failed",
-            Self::InvalidResponse => "repository-watch provider observation is invalid",
-        })
+        match self {
+            Self::Transport(error) => write!(f, "{error}"),
+            Self::InvalidResponse => {
+                f.write_str("repository-watch provider observation is invalid")
+            }
+            Self::Request { path, source } => write!(f, "{path}: {source}"),
+        }
     }
 }
-impl Error for ObservationError {}
+impl Error for ObservationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+            Self::Request { source, .. } => Some(source),
+            Self::InvalidResponse => None,
+        }
+    }
+}
+
+struct ResponseValue {
+    value: Value,
+    path: String,
+}
+
+impl std::ops::Deref for ResponseValue {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        &self.value
+    }
+}
+
+impl ResponseValue {
+    fn admit<T>(&self, value: Option<T>) -> Result<T, ObservationError> {
+        value.ok_or_else(|| ObservationError::InvalidResponse.at(&self.path))
+    }
+    fn text(&self, value: &Value) -> Result<String, ObservationError> {
+        self.admit(text(value))
+    }
+    fn invalid(&self) -> ObservationError {
+        ObservationError::InvalidResponse.at(&self.path)
+    }
+}
+
+async fn read_page(
+    io: &impl GitHubObservationRead,
+    path: &str,
+) -> Result<(ResponseValue, bool), ObservationError> {
+    let (value, next) = io.page(path).await.map_err(|error| error.at(path))?;
+    Ok((
+        ResponseValue {
+            value,
+            path: path.to_owned(),
+        },
+        next,
+    ))
+}
 
 /// The external read capability used to build a complete observation.
 pub trait GitHubObservationRead: Send + Sync {
@@ -71,9 +133,10 @@ impl GitHubObservationRead for GitHubClient {
         let (body, next) = self
             .get_page(path)
             .await
-            .map_err(|_| ObservationError::Transport)?;
+            .map_err(ObservationError::Transport)?;
         Ok((
-            serde_json::from_slice(&body).map_err(|_| ObservationError::InvalidResponse)?,
+            serde_json::from_slice(&body)
+                .map_err(|_| ObservationError::InvalidResponse.at(path))?,
             next,
         ))
     }
@@ -82,8 +145,33 @@ impl GitHubObservationRead for GitHubClient {
         let body = self
             .graphql(request.to_string().into_bytes())
             .await
-            .map_err(|_| ObservationError::Transport)?;
-        serde_json::from_slice(&body).map_err(|_| ObservationError::InvalidResponse)
+            .map_err(ObservationError::Transport)?;
+        serde_json::from_slice(&body).map_err(|_| ObservationError::InvalidResponse.at("/graphql"))
+    }
+}
+
+struct ObservationReadCounts<'a, T> {
+    io: &'a T,
+    comments: std::sync::atomic::AtomicUsize,
+}
+
+impl<T: GitHubObservationRead> GitHubObservationRead for ObservationReadCounts<'_, T> {
+    async fn page(&self, path: &str) -> Result<(Value, bool), ObservationError> {
+        let result = self.io.page(path).await?;
+        if path
+            .split('?')
+            .next()
+            .is_some_and(|path| path.ends_with("/comments"))
+        {
+            self.comments.fetch_add(
+                result.0.as_array().map_or(0, Vec::len),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        Ok(result)
+    }
+    async fn threads(&self, request: Value) -> Result<Value, ObservationError> {
+        self.io.threads(request).await
     }
 }
 
@@ -110,10 +198,14 @@ pub enum RepositoryAttemptError<E> {
     FrontierConflict,
 }
 
-impl<Loader: RepositoryClientLoader> RepositoryTask for GitHubRepositoryTask<Loader> {
+impl<Loader: RepositoryClientLoader> RepositoryTask for GitHubRepositoryTask<Loader>
+where
+    Loader::Error: fmt::Debug,
+{
     type Error = RepositoryAttemptError<Loader::Error>;
 
     async fn poll(&mut self, producer: EventProducer) -> Result<(), Self::Error> {
+        let started = std::time::Instant::now();
         let baseline = self
             .store
             .ingest_baseline(&self.repository)
@@ -124,8 +216,12 @@ impl<Loader: RepositoryClientLoader> RepositoryTask for GitHubRepositoryTask<Loa
             .load_client()
             .await
             .map_err(RepositoryAttemptError::Client)?;
+        let counted = ObservationReadCounts {
+            io: &client,
+            comments: std::sync::atomic::AtomicUsize::new(0),
+        };
         let observed = fetch_observation(
-            &client,
+            &counted,
             &self.repository,
             &self.signal_reviewers,
             baseline.observation.as_ref(),
@@ -139,10 +235,38 @@ impl<Loader: RepositoryClientLoader> RepositoryTask for GitHubRepositoryTask<Loa
             .await
             .map_err(RepositoryAttemptError::Store)?
         {
-            FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged => Ok(()),
+            FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged => {
+                let state = observed.observation.state();
+                tracing::info!(
+                    repository = self.repository.as_str(),
+                    ?producer,
+                    open_pull_requests = state
+                        .pull_requests()
+                        .iter()
+                        .filter(|p| p.lifecycle() == RepoWatchPullRequestLifecycle::Open)
+                        .count(),
+                    branches = state.branch_heads().len(),
+                    workflow_runs = state.workflow_runs().len(),
+                    comments = counted.comments.load(std::sync::atomic::Ordering::Relaxed),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "repository-watch observation completed"
+                );
+                Ok(())
+            }
             FrontierEventAdmission::Stale | FrontierEventAdmission::ConflictingReuse => {
                 Err(RepositoryAttemptError::FrontierConflict)
             }
+        }
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for RepositoryAttemptError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Client(error) => write!(f, "repository-watch client: {error}"),
+            Self::Observation(error) => write!(f, "repository-watch observation: {error}"),
+            Self::Store(error) => write!(f, "repository-watch store: {error}"),
+            Self::FrontierConflict => f.write_str("repository-watch frontier conflict"),
         }
     }
 }
@@ -156,29 +280,31 @@ pub async fn fetch_observation(
     merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
 ) -> Result<RepositoryObservation, ObservationError> {
     let root = format!("/repos/{}", repository.as_str());
-    let (metadata, _) = io.page(&root).await?;
+    let (metadata, _) = read_page(io, &root).await?;
     let default_branch =
-        admit(BranchName::try_new(required_text(&metadata["default_branch"])?).ok())?;
-    let branch_heads = admit(array(
-        &Value::Array(pages(io, &format!("{root}/branches"), None).await?),
-        |v| {
-            Some(RepoWatchBranchHead::new(
-                BranchName::try_new(text(&v["name"])?).ok()?,
-                CommitSha::try_new(text(&v["commit"]["sha"])?).ok()?,
-            ))
-        },
-    ))?;
-    let default_head = admit(
-        branch_heads
-            .iter()
-            .find(|branch| branch.branch() == &default_branch),
-    )?
-    .head()
-    .clone();
+        metadata.admit(BranchName::try_new(metadata.text(&metadata["default_branch"])?).ok())?;
+    let branch_heads = pages(io, &format!("{root}/branches"), None)
+        .await?
+        .iter()
+        .map(|v| {
+            v.admit(Some(RepoWatchBranchHead::new(
+                v.admit(BranchName::try_new(v.text(&v["name"])?).ok())?,
+                v.admit(CommitSha::try_new(v.text(&v["commit"]["sha"])?).ok())?,
+            )))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let default_head = metadata
+        .admit(
+            branch_heads
+                .iter()
+                .find(|branch| branch.branch() == &default_branch),
+        )?
+        .head()
+        .clone();
     let mut numbers = pages(io, &format!("{root}/pulls?state=open"), None)
         .await?
         .iter()
-        .map(|v| admit(positive(&v["number"]).map(PullRequestNumber::new)))
+        .map(|v| v.admit(positive(&v["number"]).map(PullRequestNumber::new)))
         .collect::<Result<BTreeSet<_>, _>>()?;
     if let Some(previous) = previous {
         numbers.extend(
@@ -227,15 +353,19 @@ async fn pages(
     io: &impl GitHubObservationRead,
     path: &str,
     member: Option<&str>,
-) -> Result<Vec<Value>, ObservationError> {
+) -> Result<Vec<ResponseValue>, ObservationError> {
     let mut result = Vec::new();
     let mut page = 1_u64;
     loop {
-        let (value, next) = io.page(&page_path(path, page)).await?;
+        let (value, next) = read_page(io, &page_path(path, page)).await?;
         result.extend(
-            admit(member.map_or(&value, |key| &value[key]).as_array())?
+            value
+                .admit(member.map_or(&*value, |key| &value[key]).as_array())?
                 .iter()
-                .cloned(),
+                .map(|item| ResponseValue {
+                    value: item.clone(),
+                    path: value.path.clone(),
+                }),
         );
         if !next {
             return Ok(result);
@@ -261,21 +391,21 @@ async fn fetch_pull(
     merged: Option<&RepoWatchMergedPullRequestBaselineV1>,
 ) -> Result<RepoWatchPullRequestState, ObservationError> {
     let path = format!("{root}/pulls/{}", number.get());
-    let (detail, _) = io.page(&path).await?;
-    let context = admit(pull_context(
+    let (detail, _) = read_page(io, &path).await?;
+    let context = detail.admit(pull_context(
         &detail,
         previous
             .map(|state| state.context().head_repository())
             .or_else(|| merged.map(RepoWatchMergedPullRequestBaselineV1::head_repository)),
     ))?;
     if context.number() != number {
-        return Err(ObservationError::InvalidResponse);
+        return Err(detail.invalid());
     }
     let lifecycle = match (detail["state"].as_str(), detail["merged_at"].is_string()) {
         (Some("open"), false) => RepoWatchPullRequestLifecycle::Open,
         (Some("closed"), false) => RepoWatchPullRequestLifecycle::Closed,
         (Some("closed"), true) => RepoWatchPullRequestLifecycle::Merged,
-        _ => return Err(ObservationError::InvalidResponse),
+        _ => return Err(detail.invalid()),
     };
     let mergeable_state = match detail["mergeable"].as_bool() {
         Some(true) => MergeableState::Mergeable,
@@ -294,16 +424,14 @@ async fn fetch_pull(
     let mut completed_check_suites = Vec::new();
     let mut completed_check_runs = Vec::new();
     for suite in suites {
-        let id = admit(object_id(&suite["id"]))?;
+        let id = suite.admit(object_id(&suite["id"]))?;
         if suite["status"] == "completed" {
-            let result = admit(conclusion(&suite["conclusion"]))?;
+            let result = suite.admit(conclusion(&suite["conclusion"]))?;
             completed_check_suites.push(RepoWatchCheckSuiteObservation::new(
                 id,
-                admit(
-                    RepoWatchCheckCompletionGeneration::try_new(required_text(
-                        &suite["updated_at"],
-                    )?)
-                    .ok(),
+                suite.admit(
+                    RepoWatchCheckCompletionGeneration::try_new(suite.text(&suite["updated_at"])?)
+                        .ok(),
                 )?,
                 match result {
                     CheckConclusion::Success
@@ -328,7 +456,7 @@ async fn fetch_pull(
             if run["status"] != "completed" {
                 continue;
             }
-            completed_check_runs.push(admit(check_run(&run))?);
+            completed_check_runs.push(run.admit(check_run(&run))?);
         }
     }
     let mut reviews = Vec::new();
@@ -339,9 +467,9 @@ async fn fetch_pull(
             Some("COMMENTED") => Some(ReviewState::Commented),
             Some("DISMISSED") => None,
             Some("PENDING") => continue,
-            _ => return Err(ObservationError::InvalidResponse),
+            _ => return Err(review.invalid()),
         };
-        let id = admit(object_id(&review["id"]))?;
+        let id = review.admit(object_id(&review["id"]))?;
         let reviewer = if review["user"].is_null() {
             let Some(prior) = previous.and_then(|p| p.reviews().iter().find(|r| r.id() == id))
             else {
@@ -349,13 +477,14 @@ async fn fetch_pull(
             };
             prior.reviewer().clone()
         } else {
-            admit(RepoWatchAuthorLogin::try_new(required_text(&review["user"]["login"])?).ok())?
+            review
+                .admit(RepoWatchAuthorLogin::try_new(review.text(&review["user"]["login"])?).ok())?
         };
         reviews.push(RepoWatchReviewObservation::new(
             id,
             reviewer,
             state,
-            admit(CommitSha::try_new(required_text(&review["commit_id"])?).ok())?,
+            review.admit(CommitSha::try_new(review.text(&review["commit_id"])?).ok())?,
         ));
     }
     let threads = fetch_threads(io, repository, number).await?;
@@ -370,7 +499,7 @@ async fn fetch_pull(
         threads,
         reactions,
     })
-    .map_err(|_| ObservationError::InvalidResponse)
+    .map_err(|_| detail.invalid())
 }
 
 fn pull_context(
@@ -424,33 +553,42 @@ async fn fetch_threads(
     let (owner, name) = admit(repository.as_str().split_once('/'))?;
     let mut after = Value::Null;
     let mut threads = Vec::new();
+    let mut page = 1_u64;
     loop {
+        let path = format!(
+            "/graphql repository={} pull_request={} page={page}",
+            repository.as_str(),
+            number.get()
+        );
         let value = io
             .threads(json!({"query": THREADS_QUERY, "variables": {
                 "owner": owner, "name": name, "number": number.get(), "after": after,
             }}))
-            .await?;
+            .await
+            .map_err(|error| error.at(&path))?;
+        let value = ResponseValue { value, path };
         if value
             .get("errors")
             .is_some_and(|v| v.as_array().is_none_or(|v| !v.is_empty()))
         {
-            return Err(ObservationError::InvalidResponse);
+            return Err(value.invalid());
         }
         let connection = &value["data"]["repository"]["pullRequest"]["reviewThreads"];
-        for thread in admit(connection["nodes"].as_array())? {
+        for thread in value.admit(connection["nodes"].as_array())? {
             threads.push(RepoWatchThreadObservation::new(
-                admit(ReviewThreadId::try_new(required_text(&thread["id"])?).ok())?,
-                if admit(thread["isResolved"].as_bool())? {
+                value.admit(ReviewThreadId::try_new(value.text(&thread["id"])?).ok())?,
+                if value.admit(thread["isResolved"].as_bool())? {
                     RepoWatchThreadState::Resolved
                 } else {
                     RepoWatchThreadState::Open
                 },
             ));
         }
-        if !admit(connection["pageInfo"]["hasNextPage"].as_bool())? {
+        if !value.admit(connection["pageInfo"]["hasNextPage"].as_bool())? {
             return Ok(threads);
         }
-        after = Value::String(required_text(&connection["pageInfo"]["endCursor"])?);
+        after = Value::String(value.text(&connection["pageInfo"]["endCursor"])?);
+        page += 1;
     }
 }
 
@@ -474,14 +612,14 @@ async fn fetch_reactions(
     )
     .await?
     {
-        let id = admit(object_id(&comment["id"]))?;
+        let id = comment.admit(object_id(&comment["id"]))?;
         subjects.push((
             format!("{root}/issues/comments/{}/reactions", id.get()),
             ReactionSubject::IssueComment { id },
         ));
     }
     for comment in pages(io, &format!("{root}/pulls/{}/comments", number.get()), None).await? {
-        let id = admit(object_id(&comment["id"]))?;
+        let id = comment.admit(object_id(&comment["id"]))?;
         subjects.push((
             format!("{root}/pulls/comments/{}/reactions", id.get()),
             ReactionSubject::ReviewComment { id },
@@ -503,7 +641,7 @@ async fn fetch_reactions(
             reactions.push(RepoWatchReactionObservation::new(
                 subject,
                 reviewer.clone(),
-                admit(ReactionContent::try_new(required_text(&value["content"])?).ok())?,
+                value.admit(ReactionContent::try_new(value.text(&value["content"])?).ok())?,
             ));
         }
     }
@@ -519,42 +657,41 @@ async fn fetch_workflows(
 ) -> Result<Vec<RepoWatchWorkflowRunObservation>, ObservationError> {
     let mut runs = Vec::new();
     for workflow in pages(io, &format!("{root}/actions/workflows"), Some("workflows")).await? {
-        let id = admit(object_id(&workflow["id"]))?;
-        let name = admit(WorkflowName::try_new(required_text(&workflow["name"])?).ok())?;
+        let id = workflow.admit(object_id(&workflow["id"]))?;
+        let name = workflow.admit(WorkflowName::try_new(workflow.text(&workflow["name"])?).ok())?;
         let mut pending = branches.iter().map(|b| b.branch()).collect::<BTreeSet<_>>();
         let mut page = 1_u64;
         while !pending.is_empty() {
-            let (value, next) = io
-                .page(&page_path(
-                    &format!("{root}/actions/workflows/{}/runs", id.get()),
-                    page,
-                ))
-                .await?;
-            for run in admit(value["workflow_runs"].as_array())? {
+            let (value, next) = read_page(
+                io,
+                &page_path(&format!("{root}/actions/workflows/{}/runs", id.get()), page),
+            )
+            .await?;
+            for run in value.admit(value["workflow_runs"].as_array())? {
                 if run["status"] != "completed"
                     || run["head_repository"].is_null()
                     || run["head_branch"].is_null()
                 {
                     continue;
                 }
-                let head_repository = admit(
-                    RepositorySlug::try_new(required_text(&run["head_repository"]["full_name"])?)
-                        .ok(),
+                let head_repository = value.admit(
+                    RepositorySlug::try_new(value.text(&run["head_repository"]["full_name"])?).ok(),
                 )?;
                 if &head_repository != repository {
                     continue;
                 }
-                let branch = admit(BranchName::try_new(required_text(&run["head_branch"])?).ok())?;
+                let branch =
+                    value.admit(BranchName::try_new(value.text(&run["head_branch"])?).ok())?;
                 if !pending.remove(&branch) {
                     continue;
                 }
                 let candidate = RepoWatchWorkflowRunObservation::new(
-                    admit(object_id(&run["id"]))?,
+                    value.admit(object_id(&run["id"]))?,
                     id,
-                    RepoWatchWorkflowRunAttempt::new(admit(positive(&run["run_attempt"]))?),
+                    RepoWatchWorkflowRunAttempt::new(value.admit(positive(&run["run_attempt"]))?),
                     branch.clone(),
                     name.clone(),
-                    admit(conclusion(&run["conclusion"]))?,
+                    value.admit(conclusion(&run["conclusion"]))?,
                 );
                 let prior = previous.and_then(|p| {
                     p.state()
@@ -592,9 +729,6 @@ async fn fetch_workflows(
 
 fn admit<T>(value: Option<T>) -> Result<T, ObservationError> {
     value.ok_or(ObservationError::InvalidResponse)
-}
-fn required_text(value: &Value) -> Result<String, ObservationError> {
-    admit(text(value))
 }
 
 #[cfg(test)]
@@ -675,6 +809,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_branch_reports_its_original_page_after_pagination() {
+        let mut io = fixture();
+        let path = "/repos/example/project/branches?per_page=100&page=1";
+        io.pages.get_mut(path).expect("branch page").0[0]["commit"]["sha"] = json!("invalid");
+        io.pages.get_mut(path).expect("branch page").1 = true;
+        io.pages.insert(
+            String::from("/repos/example/project/branches?per_page=100&page=2"),
+            (json!([]), false),
+        );
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let error = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect_err("invalid branch");
+        assert_eq!(
+            error.to_string(),
+            format!("{path}: repository-watch provider observation is invalid")
+        );
+    }
+
+    #[tokio::test]
     async fn complete_observation_follows_pagination_and_keeps_only_configured_reactions() {
         let repository =
             RepositorySlug::try_new(String::from("example/project")).expect("repository");
@@ -714,7 +869,12 @@ mod tests {
         let repository =
             RepositorySlug::try_new(String::from("example/project")).expect("repository");
         let result = fetch_observation(&io, &repository, &[], None, &[]).await;
-        assert_eq!(result, Err(ObservationError::InvalidResponse));
+        let error = result.expect_err("partial GraphQL observation rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("/graphql repository=example/project pull_request=1 page=1")
+        );
     }
     #[tokio::test]
     async fn workflow_repository_comparison_uses_canonical_slugs() {

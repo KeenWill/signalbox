@@ -246,7 +246,7 @@ impl RepoWatchStore {
 
 /// One repository attempt, including external fetch and its durable commit.
 pub trait RepositoryTask: Send {
-    type Error;
+    type Error: std::fmt::Debug;
 
     fn poll(
         &mut self,
@@ -278,7 +278,7 @@ pub async fn run_repository_task(
         tokio::select! {
             _ = shutdown.changed() => return,
             result = task.poll(producer) => {
-                if result.is_err() { tracing::warn!("repository-watch observation failed"); }
+                if let Err(error) = result { tracing::warn!(?error, ?producer, "repository-watch observation failed"); }
             }
         }
     }
