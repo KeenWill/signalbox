@@ -552,5 +552,3 @@ turn-liveness causes.
   ([design](../design/runtime-substrate.md)).
 - Codex CLI OAuth delivery and the exact-value redaction it seeds before spawn
   ([design](../design/runtime-substrate.md)).
-- An upload-proving transport for HTTP refusals without reported usage or
-  completed provider compaction ([design](../design/runtime-substrate.md)).

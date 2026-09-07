@@ -5,14 +5,13 @@ This document holds committed design that is not built; it extends
 
 ## Goal
 
-Four capabilities extend the runtime boundary. The operation gains a typed
+Three capabilities extend the runtime boundary. The operation gains a typed
 workspace-instruction region so daemon-authored instructions reach a provider's
 instruction transport without being mixed into ordinary system text. The Codex
 CLI adapter gains file credential delivery, so a deployment can run it with a
 daemon-held API key instead of the CLI's ambient login, and OAuth delivery, with
 exact-value redaction of every delivered token installed before the child
-starts. The direct HTTP adapters gain a way to surface refusal evidence once a
-transport can prove the response followed the complete request upload.
+starts.
 
 ## Design
 
@@ -52,12 +51,6 @@ Ambient-mode shape redaction remains defense in depth and cannot replace
 exact-value redaction when preparation knows the token. Failure to install the
 scrub is a typed pre-spawn delivery failure.
 
-Refusal evidence over HTTP. Both HTTP decoders construct refusal evidence and
-execute downgrades it to an unrecognized provider error. Surfacing it requires a
-transport or evidence source that proves the response arrived only after the
-complete request upload; the downgrade is removed only for an exchange that
-carries that proof.
-
 ## Compatibility constraints
 
 No present runtime operation carries the workspace-instruction field and no
@@ -72,10 +65,6 @@ Codex file delivery as undelivered until the delivery exists.
 
 The exact-value redactor and the CLI shape redactor stay separate layers, and
 the CLI adapters keep a seam where exact values can be seeded before spawn.
-
-The refusal downgrade in both HTTP adapters holds for every exchange without
-complete-upload proof, and no caller treats an unrecognized provider error from
-an HTTP adapter as a refusal.
 
 ## Acceptance criteria
 
@@ -94,6 +83,3 @@ Every token OAuth delivery hands the Codex adapter is redacted in raw and
 JSON-escaped forms across chunk boundaries on stdout and stderr, before
 decoding, truncation, observations and evidence. A failure to install the scrub
 fails before spawn as a typed delivery failure.
-
-Refusal evidence leaves an HTTP adapter only for an exchange carrying upload
-proof; the Codex CLI path is unchanged.
