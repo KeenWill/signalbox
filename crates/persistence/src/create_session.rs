@@ -200,6 +200,7 @@ impl CreateSessionRepository {
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion
                 | CommandKind::SessionLifecycle,
             ) => {
                 transaction.rollback().await?;
@@ -258,6 +259,7 @@ impl CreateSessionRepository {
                     | CommandKind::ProvisionOauthCredential
                     | CommandKind::ReprovisionOauthCredential
                     | CommandKind::DeleteOauthCredential
+                    | CommandKind::ClearCredentialExclusion
                     | CommandKind::SessionLifecycle,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 None => {
@@ -320,6 +322,7 @@ impl CreateSessionRepository {
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion
                 | CommandKind::SessionLifecycle,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
         }

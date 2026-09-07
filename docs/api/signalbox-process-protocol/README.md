@@ -4,6 +4,7 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| credential_exclusions | 2 | 0 | 0 | [credential_exclusions](credential_exclusions.md) |
 | delegation | 11 | 0 | 0 | [delegation](delegation.md) |
 | error | 4 | 0 | 0 | [error](error.md) |
 | event | 1 | 0 | 0 | [event](event.md) |

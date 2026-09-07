@@ -139,6 +139,10 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ReviewOrchestration { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
+        | ServerMessage::CredentialExclusionStart {}
+        | ServerMessage::CredentialExclusion { .. }
+        | ServerMessage::CredentialExclusionEnd { .. }
+        | ServerMessage::CredentialExclusionCleared { .. }
         | ServerMessage::DeploymentLimits { .. } => ConversationImportResponse::Unexpected,
     }
 }

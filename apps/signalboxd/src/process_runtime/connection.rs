@@ -490,6 +490,8 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::CreateSessionFromTemplate { .. }
         | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
+        | ClientRequest::ListCredentialExclusions { .. }
+        | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}
         | ClientRequest::ListSessions {}
         | ClientRequest::ReadOperatorStatus {}
@@ -707,7 +709,9 @@ impl SnapshotReaderAdmission {
             | ClientRequest::CreateSessionFromTemplate { .. }
             | ClientRequest::CommissionSession { .. }
             | ClientRequest::ListTemplates {}
-            | ClientRequest::ReadDeploymentLimits {}
+            | ClientRequest::ListCredentialExclusions { .. }
+        | ClientRequest::ClearCredentialExclusion { .. }
+        | ClientRequest::ReadDeploymentLimits {}
             | ClientRequest::UpdateSessionPlacement { .. }
             | ClientRequest::AttachGoal { .. }
             | ClientRequest::ResumeGoal { .. }

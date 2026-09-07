@@ -110,6 +110,7 @@ impl SessionPlacementRepository {
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion
                 | CommandKind::SessionLifecycle,
             ) => {
                 transaction.rollback().await?;
@@ -167,6 +168,7 @@ impl SessionPlacementRepository {
                     | CommandKind::ProvisionOauthCredential
                     | CommandKind::ReprovisionOauthCredential
                     | CommandKind::DeleteOauthCredential
+                    | CommandKind::ClearCredentialExclusion
                     | CommandKind::SessionLifecycle,
                 ) => SessionPlacementRepositoryOutcome::ConflictingReuse { command_id },
                 None => {

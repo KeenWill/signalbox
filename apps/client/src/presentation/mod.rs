@@ -1,3 +1,4 @@
+mod credential_output;
 mod entry_output;
 mod event_output;
 mod session_output;

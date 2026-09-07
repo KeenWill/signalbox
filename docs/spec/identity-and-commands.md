@@ -148,6 +148,10 @@ For submit-input, equal replay returns the recorded result only when current
 durable state still proves that result correlates with committed effects;
 otherwise the adapter fails closed.
 
+`ClearCredentialExclusion` claims its exact target and terminal outcome in one
+append-only typed command record; equal replay returns that outcome before
+current exclusion state is evaluated.
+
 A claimed registry row whose typed record is missing, duplicated, of a
 mismatched kind, or undecodable is storage corruption, never an unseen command.
 Why: treating it as unseen would let one identifier acquire a second meaning.

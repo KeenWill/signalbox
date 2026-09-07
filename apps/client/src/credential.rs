@@ -1,4 +1,4 @@
-//! OAuth operator instructions and durable receipts (docs/spec/process-protocol.md).
+//! Credential administration, operator instructions, and durable receipts (docs/spec/process-protocol.md).
 
 use super::*;
 use crate::arguments::CredentialCommand;
@@ -8,30 +8,38 @@ pub(crate) async fn credential(
     output: &mut Output<'_>,
     command: CredentialCommand,
 ) -> Result<(), ClientError> {
-    let target = match &command {
-        CredentialCommand::Provision(target)
-        | CredentialCommand::Reprovision(target)
-        | CredentialCommand::Delete(target) => target,
+    let (target, make_request): (_, fn(CommandId, String) -> ClientRequest) = match command {
+        CredentialCommand::Exclusions { page_size, after } => {
+            return credential_exclusions::list(client, output, page_size, after).await;
+        }
+        CredentialCommand::Clear { target, command_id } => {
+            return credential_exclusions::clear(client, output, target, command_id).await;
+        }
+        CredentialCommand::Provision(target) => (target, |command_id, profile| {
+            ClientRequest::ProvisionOauthCredential {
+                command_id,
+                profile,
+            }
+        }),
+        CredentialCommand::Reprovision(target) => (target, |command_id, profile| {
+            ClientRequest::ReprovisionOauthCredential {
+                command_id,
+                profile,
+            }
+        }),
+        CredentialCommand::Delete(target) => (target, |command_id, profile| {
+            ClientRequest::DeleteOauthCredential {
+                command_id,
+                profile,
+            }
+        }),
     };
-    let profile = target.profile.clone();
+    let profile = target.profile;
     let (command_id, generated) = command_identity(target.command_id)?;
     if generated {
         output.recovery_value("command_id", &command_id.into_uuid().to_string())?;
     }
-    let request = match command {
-        CredentialCommand::Provision(_) => ClientRequest::ProvisionOauthCredential {
-            command_id,
-            profile: profile.clone(),
-        },
-        CredentialCommand::Reprovision(_) => ClientRequest::ReprovisionOauthCredential {
-            command_id,
-            profile: profile.clone(),
-        },
-        CredentialCommand::Delete(_) => ClientRequest::DeleteOauthCredential {
-            command_id,
-            profile: profile.clone(),
-        },
-    };
+    let request = make_request(command_id, profile.clone());
     let mut connection = client.mutation_request(request).await?;
     loop {
         let message = connection.message().await.map_err(ClientError::mutation)?;

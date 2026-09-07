@@ -144,6 +144,10 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::ReviewOrchestration { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
+        | ServerMessage::CredentialExclusionStart {}
+        | ServerMessage::CredentialExclusion { .. }
+        | ServerMessage::CredentialExclusionEnd { .. }
+        | ServerMessage::CredentialExclusionCleared { .. }
         | ServerMessage::DeploymentLimits { .. } => BlobUploadResponse::Unexpected,
     }
 }

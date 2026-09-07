@@ -365,6 +365,8 @@ pub use connection::shared_snapshot_reader_budget;
 use connection::*;
 mod request;
 use request::handle_request;
+mod credential_exclusions;
+use credential_exclusions::*;
 mod delegation;
 use delegation::*;
 mod review;

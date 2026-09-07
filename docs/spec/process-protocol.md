@@ -402,12 +402,41 @@ receipt before current registration is evaluated, and conflicting reuse is
 rejected. The terminal client verifies the command and profile correlations and
 prints authorization details before the receipt.
 
+Credential-exclusion administration is one `list_credential_exclusions` read
+carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
+carrying a user-global `command_id` and one closed `target` object. The target
+is `profile_quarantine { profile, record_generation }`,
+`membership_exclusion { pool_policy_id, profile, record_generation }`, or
+`session_displacement { session_id, pool_policy_id, profile, record_generation }`;
+chain exclusions remain insert-only and turn-local. The read lists every active
+exclusion the mutation admits, as its exact target object, and omits exactly the
+records the mutation rejects; the filter turns on the exclusion's origin, never
+on the profile's delivery. The origin filter rejects `oauth_refresh` quarantines
+and accepts `codex_home` quarantines. `page_size` is 1 through 100; `after` is
+null or one complete target object and is an exclusive keyset cursor. Results
+sort by target tag in the order above, then by each field's canonical order:
+UTF-8 bytes for configured names, UUID bytes for durable identities, numeric
+order for generations. The read opens with `credential_exclusion_start`, then
+one `credential_exclusion` per row, then
+`credential_exclusion_end { exclusion_count, next_after }` with a null
+`next_after` only at the end. The mutation marks exactly the named active
+generation cleared. A newer active generation at the target's own exact scope
+returns `stale_generation` before the named older generation is considered; the
+scope is the profile and origin for a profile quarantine, the pool policy and
+profile for a membership exclusion, and the session, pool policy, and profile
+for a session displacement. A target with no exactly matching retained record is
+`unknown_credential_exclusion`; an exact record an earlier command already
+cleared is `already_cleared`. Success returns
+`credential_exclusion_cleared { target, outcome }` with outcome `cleared` or
+`already_cleared`, and the inactive record is retained so the second answer is
+durable. An equal `command_id` replay returns its stored receipt before current
+state is evaluated. Both operations are authorized as every other request is:
+reaching the owner-private socket is the authority.
+
 ## Planned
 
 - OAuth credential provisioning, re-provisioning after rejected refresh, and
   deletion: [design](../design/process-protocol.md).
-- Credential-exclusion administration, a listing read and a clear mutation over
-  active exclusions: [design](../design/process-protocol.md).
 - Configuration reload request: [design](../design/process-protocol.md).
 - Program-run cancellation request and receipt:
   [design](../design/process-protocol.md).

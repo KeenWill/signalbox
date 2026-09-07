@@ -541,6 +541,7 @@ impl SubmitInputRepository {
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion
                 | CommandKind::SessionLifecycle,
             ) => Err(Self::wrong_kind(command_id)),
         }
@@ -655,6 +656,7 @@ where
             | CommandKind::ProvisionOauthCredential
             | CommandKind::ReprovisionOauthCredential
             | CommandKind::DeleteOauthCredential
+            | CommandKind::ClearCredentialExclusion
             | CommandKind::SessionLifecycle,
         ) => {
             return Ok(TransactionDecision::Rollback(
@@ -706,6 +708,7 @@ where
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion
                 | CommandKind::SessionLifecycle,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
