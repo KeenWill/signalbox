@@ -736,7 +736,8 @@ authentication with ambient credentials, keyrings, helpers, and external stores
 disabled; inability to deliver the home is a typed pre-send failure. An
 access-token rejection during an invocation neither quarantines the profile nor
 permits automatic call retry. Delivery failure evidence and quarantine commit
-atomically and bypass pool trigger policy.
+atomically and bypass pool trigger policy. OAuth quarantine reads lock only
+currently registered OAuth pool members.
 
 ## Planned
 
