@@ -5523,19 +5523,12 @@ context_window_tokens = 200000
 }
 
 #[test]
-fn reasoning_replay_family_controls_input_capability_and_durable_production() {
+fn reasoning_replay_family_changes_only_request_capabilities() {
     let source = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}");
     let untagged = HubModelConfiguration::parse(&source).expect("untagged targets are valid");
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
         Uuid::parse_str("20000000-0000-4000-8000-00000000000e").expect("fixture target UUID"),
     ));
-    assert!(
-        !untagged
-            .runtime_model_catalog()
-            .resolve(target)
-            .expect("OpenAI target")
-            .provider_reasoning_supported()
-    );
     assert_eq!(
         untagged
             .runtime_model_capability_catalog()
@@ -5549,12 +5542,16 @@ fn reasoning_replay_family_controls_input_capability_and_durable_production() {
         "provider_model = \"gpt-example\"\nreasoning_replay_family = \"shared\"",
     ))
     .expect("OpenAI family is valid");
-    assert!(
+    assert_eq!(
+        untagged
+            .runtime_model_catalog()
+            .resolve(target)
+            .expect("untagged OpenAI target"),
         tagged
             .runtime_model_catalog()
             .resolve(target)
-            .expect("OpenAI target")
-            .provider_reasoning_supported()
+            .expect("tagged OpenAI target"),
+        "replay family does not change the producer definition"
     );
     assert_eq!(
         tagged
@@ -5662,8 +5659,7 @@ reasoning_replay_family = "shared"
         configuration
             .runtime_model_catalog()
             .resolve(durable_target)
-            .expect("serving target")
-            .provider_reasoning_supported()
+            .is_some()
     );
 }
 

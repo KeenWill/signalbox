@@ -550,7 +550,7 @@ impl HubModelConfiguration {
             let max_output_tokens = required_positive_u32(model, "max_output_tokens")?;
             let context_window_tokens = required_positive_u32(model, "context_window_tokens")?;
             let provider_compaction = parse_provider_compaction_capability(model, mapping.adapter)?;
-            let reasoning_replay_family = record_reasoning_replay_family(
+            record_reasoning_replay_family(
                 model,
                 mapping.adapter,
                 provider_model,
@@ -680,8 +680,6 @@ impl HubModelConfiguration {
                 context_window_tokens,
             )
             .map_err(|_| HubModelConfigurationError::InvalidField)?;
-            let runtime_definition = runtime_definition
-                .with_provider_reasoning_support(reasoning_replay_family.is_some());
             let runtime_definition = if provider_compaction {
                 runtime_definition.with_provider_compaction()
             } else {
@@ -732,7 +730,7 @@ impl HubModelConfiguration {
                 let provider_model = provider_model.to_owned();
                 let provider_compaction =
                     parse_provider_compaction_capability(serving_target, mapping.adapter)?;
-                let reasoning_replay_family = record_reasoning_replay_family(
+                record_reasoning_replay_family(
                     serving_target,
                     mapping.adapter,
                     &provider_model,
@@ -758,8 +756,6 @@ impl HubModelConfiguration {
                     context_window_tokens,
                 )
                 .map_err(|_| HubModelConfigurationError::InvalidField)?;
-                let runtime_definition = runtime_definition
-                    .with_provider_reasoning_support(reasoning_replay_family.is_some());
                 runtime_definitions.push(if provider_compaction {
                     runtime_definition.with_provider_compaction()
                 } else {
