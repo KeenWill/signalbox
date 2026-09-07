@@ -48,6 +48,21 @@
       "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-signalbox\\.(?<build>\\d+)$",
       "autoReplaceStringTemplate": "\"sha256\": \"{{newDigest}}\""
     },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^tooling/codex-cli/release\\.json$/"],
+      // BINARY_SHA256SUMS names the extracted codex binary.
+      // Replace only the checksum so the grouped tag update stays independent.
+      "matchStringsStrategy": "recursive",
+      "matchStrings": [
+        "\"release\": \"(?<currentValue>rust-v[^\"]+)\"[\\s\\S]*",
+        "\"executableSha256\": \"(?<currentDigest>[a-f0-9]{64})\""
+      ],
+      "depNameTemplate": "KeenWill/codex",
+      "datasourceTemplate": "github-release-attachments",
+      "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-signalbox\\.(?<build>\\d+)$",
+      "autoReplaceStringTemplate": "\"executableSha256\": \"{{newDigest}}\""
+    },
   ],
   // The cargo manager's default file pattern ((^|/)Cargo\.toml$) already
   // covers the root manifest and every workspace member under crates/ and

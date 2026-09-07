@@ -1,7 +1,5 @@
-//! Reads the upstream version of the pinned fork release from
-//! `../../tooling/codex-cli/release.json` and exports it as the
-//! `SIGNALBOX_CODEX_CLI_VERSION` build environment variable the adapter and
-//! its pin test compare against.
+//! Exports the pinned upstream version and fork executable SHA-256 from
+//! `../../tooling/codex-cli/release.json` for startup verification.
 
 mod version_pin;
 
@@ -38,6 +36,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     })?;
 
+    let executable_sha256 = manifest
+        .get("executableSha256")
+        .and_then(serde_json::Value::as_str)
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| std::io::Error::other("pin manifest must declare the executable SHA-256"))?;
+
+    println!("cargo:rustc-env=SIGNALBOX_CODEX_CLI_SHA256={executable_sha256}");
     println!("cargo:rustc-env=SIGNALBOX_CODEX_CLI_VERSION={pinned}");
     Ok(())
 }

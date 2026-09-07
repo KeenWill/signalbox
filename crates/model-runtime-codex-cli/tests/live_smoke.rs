@@ -401,6 +401,12 @@ async fn the_pinned_codex_cli_pre_spend_contract_holds() {
 }
 
 async fn assert_pre_spend_contract(executable: &std::path::Path) {
+    signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version(
+        executable,
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    .expect("the executable matches the manifest's upstream version and fork binary digest");
     assert_pinned_version(executable).await;
     assert_pinned_feature_inventory(executable).await;
     assert_ambient_skill_instructions_disabled(executable).await;

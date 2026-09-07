@@ -13,6 +13,7 @@
 
 mod config;
 mod event;
+mod executable_pin;
 #[cfg(test)]
 mod redaction;
 mod runtime;

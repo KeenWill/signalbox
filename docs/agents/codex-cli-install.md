@@ -11,8 +11,9 @@ The installer downloads the `KeenWill/codex` release asset named in
 `tooling/codex-cli/release.json`, verifies its SHA-256, and extracts the
 multitool and companion binaries together. Set the dogfood Codex executable path
 to `$HOME/.local/lib/signalbox-codex/codex` during deployment. The binary
-reports the upstream version; the manifest tag also identifies the fork patch
-revision.
+reports the upstream version. Startup also checks its SHA-256 against the
+manifest to verify the exact fork binary.
 
-Renovate groups the release tag and asset checksum into one Codex CLI update.
-The compatibility smoke installs this same manifest before invoking the adapter.
+Renovate groups the release tag, asset checksum, and executable checksum into
+one Codex CLI update. The compatibility smoke installs this same manifest before
+invoking the adapter.

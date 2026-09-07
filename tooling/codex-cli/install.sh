@@ -15,4 +15,6 @@ curl --fail --location --retry 3 \
 printf '%s  %s\n' "$sha256" "$staging/$asset" | sha256sum --check -
 mkdir -p "$destination"
 tar -xzf "$staging/$asset" -C "$destination"
+executable_sha256=$(jq -er '.executableSha256' "$manifest")
+printf '%s  %s\n' "$executable_sha256" "$destination/codex" | sha256sum --check -
 "$destination/codex" --version
