@@ -48,9 +48,14 @@ pub(crate) fn output_tool_calls(
     census
 }
 
-pub(crate) fn convert_tool_call(item: &WireOutputItem) -> Result<ToolCallProposal, String> {
-    if item.status.as_deref() != Some("completed") {
-        return Err("function call item is not completed".to_string());
+pub(crate) fn convert_tool_call(
+    item: &WireOutputItem,
+    response_status: &str,
+) -> Result<ToolCallProposal, String> {
+    if item.status.as_deref() != Some("completed")
+        && !(response_status == "incomplete" && item.status.as_deref() == Some("incomplete"))
+    {
+        return Err("function call item status disagrees with its terminal response".to_string());
     }
     let (Some(id), Some(name), Some(arguments)) = (&item.call_id, &item.name, &item.arguments)
     else {
@@ -90,7 +95,10 @@ fn convert_item(item: &WireOutputItem, response_status: &str) -> Result<Converte
             })
         }
         "function_call" => Ok(ConvertedItem {
-            parts: vec![AssistantPart::ToolCall(convert_tool_call(item)?)],
+            parts: vec![AssistantPart::ToolCall(convert_tool_call(
+                item,
+                response_status,
+            )?)],
             refused: false,
         }),
         "message" => {
@@ -523,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn buffered_function_call_proposals_require_completed_item_status() {
+    fn buffered_function_call_content_respects_terminal_response_status() {
         for status in ["completed", "incomplete"] {
             for item_status in [
                 None,
@@ -537,14 +545,36 @@ mod tests {
                 if status == "incomplete" {
                     value["incomplete_details"] = json!({"reason":"max_output_tokens"});
                 }
+                let arguments = if status == "incomplete" && item_status == Some("incomplete") {
+                    r#"{"query":"part"#
+                } else {
+                    "{}"
+                };
                 let mut call = json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"});
+                call["arguments"] = json!(arguments);
                 if let Some(item_status) = item_status {
                     call["status"] = json!(item_status);
                 }
                 value["output"] = json!([call]);
                 let (evidence, observations) = decode(value);
-                if item_status == Some("completed") {
-                    assert!(matches!(evidence, TerminalEvidence::Completed(_)));
+                if item_status == Some("completed")
+                    || (status == "incomplete" && item_status == Some("incomplete"))
+                {
+                    let TerminalEvidence::Completed(result) = evidence else {
+                        panic!("matching function-call status must retain terminal content");
+                    };
+                    assert_eq!(
+                        result.finish,
+                        if status == "incomplete" {
+                            CompletionFinish::MaxOutputTokens
+                        } else {
+                            CompletionFinish::ToolUse
+                        }
+                    );
+                    assert!(
+                        matches!(result.content.as_slice(), [signalbox_model_runtime::AssistantPart::ToolCall(call)]
+                        if call.id.as_str() == "call_fixture" && call.arguments_json == arguments)
+                    );
                     assert!(
                         observations
                             .iter()

@@ -1300,7 +1300,7 @@ mod tests {
     }
 
     #[test]
-    fn streamed_function_call_proposals_require_completed_item_status() {
+    fn streamed_function_call_content_respects_terminal_response_status() {
         for status in ["completed", "incomplete"] {
             for item_status in [
                 None,
@@ -1315,18 +1315,50 @@ mod tests {
                 if status == "incomplete" {
                     event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
                 }
+                let arguments = if status == "incomplete" && item_status == Some("incomplete") {
+                    r#"{"query":"part"#
+                } else {
+                    "{}"
+                };
                 let mut call = json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"});
+                call["arguments"] = json!(arguments);
                 if let Some(item_status) = item_status {
                     call["status"] = json!(item_status);
                 }
                 event["response"]["output"] = json!([call]);
                 let mut decoder = StreamDecoder::new(ExchangeFacts::default());
                 let mut sink = Vec::new();
+                for fragment in [&arguments[..1], &arguments[1..]] {
+                    assert!(matches!(
+                        apply(
+                            &mut decoder,
+                            json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_fixture","delta":fragment}),
+                            &mut sink
+                        ),
+                        StreamStep::Continue
+                    ));
+                }
                 let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
                     panic!("terminal event must terminate");
                 };
-                if item_status == Some("completed") {
-                    assert!(matches!(*evidence, TerminalEvidence::Completed(_)));
+                if item_status == Some("completed")
+                    || (status == "incomplete" && item_status == Some("incomplete"))
+                {
+                    let TerminalEvidence::Completed(result) = *evidence else {
+                        panic!("matching function-call status must retain terminal content");
+                    };
+                    assert_eq!(
+                        result.finish,
+                        if status == "incomplete" {
+                            CompletionFinish::MaxOutputTokens
+                        } else {
+                            CompletionFinish::ToolUse
+                        }
+                    );
+                    assert!(
+                        matches!(result.content.as_slice(), [signalbox_model_runtime::AssistantPart::ToolCall(call)]
+                        if call.id.as_str() == "call_fixture" && call.arguments_json == arguments)
+                    );
                     assert!(
                         sink.iter()
                             .any(|o| matches!(o.fact, ObservationFact::ToolCallProposed(_)))
