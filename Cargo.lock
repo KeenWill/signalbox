@@ -4351,6 +4351,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
+ "signalbox-test-bin",
  "thiserror",
  "toml",
 ]
@@ -4500,6 +4501,7 @@ dependencies = [
  "serde_json",
  "signalbox-file-media-processor-runtime",
  "signalbox-file-media-runtime",
+ "signalbox-test-bin",
  "symphonia",
  "tokio",
 ]
@@ -4548,6 +4550,7 @@ dependencies = [
  "sha2 0.11.0",
  "signalbox-file-media-linux-sandbox",
  "signalbox-file-media-runtime",
+ "signalbox-test-bin",
  "tempfile",
  "tokio",
 ]

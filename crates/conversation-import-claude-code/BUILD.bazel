@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_unit_test")
 
 rust_package()
 
@@ -16,4 +16,28 @@ rust_library(
 rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_conversation_import_claude_code",
+)
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_conversation_import_claude_code",
+)
+
+rust_integration_test(
+    name = "real_transcripts",
+    args = ["--test-threads=4"],
+    srcs = glob(["tests/**/*.rs"]),
+    crate_root = "tests/real_transcripts.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [],
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/conversation-import-claude-code"},
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
+        "//crates/conversation-import-json:signalbox_conversation_import_json",
+        "//crates/domain:signalbox_domain",
+    ],
 )
