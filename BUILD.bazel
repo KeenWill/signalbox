@@ -1,6 +1,7 @@
 exports_files([
     "Cargo.lock",
     "Cargo.toml",
+    "config/signalboxd.example.toml",
 ])
 
 test_suite(
