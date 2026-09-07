@@ -59,3 +59,32 @@ filegroup(
     srcs = glob(["**/*.rs"]),
     visibility = ["//:__pkg__"],
 )
+
+rust_test(
+    name = "derive",
+    size = "small",
+    srcs = ["tests/derive.rs"],
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["--test-threads=16"],
+    crate_features = [],
+    crate_root = "tests/derive.rs",
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [":signalbox_tool_schema_derive"] + all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env_files = [":cargo_environment"],
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    tags = [],
+    deps = ["//crates/tool-contract:signalbox_tool_contract"] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)

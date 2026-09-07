@@ -66,9 +66,9 @@ bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.soc
 ```
 
 Each test binary has its own cached result. PostgreSQL targets are manual so
-`//:bazel_tests` remains the unit suite. The additive `bazel-postgres` CI job
-runs one binary at a time, with 16 test threads per binary; Cargo retains the
-full PostgreSQL gate.
+`//:bazel_tests` remains the non-PostgreSQL suite. The additive `bazel-postgres`
+CI job runs one binary at a time, with 16 test threads per binary; Cargo retains
+the full PostgreSQL gate.
 
 The checker job runs its eight Python suites with
 `bazel test //:python_checker_tests`. Bazel supplies Python 3.14, packages from
@@ -84,3 +84,8 @@ uses this target instead of installing a separate Python environment.
 The sweep's container-label check scans the declared workspace Rust source
 manifest inside test runfiles. Direct Python invocation continues to select
 tracked sources with Git.
+
+`bazel test //:rust_integration_tests` runs native macro, ownership-seam,
+provider-loopback, and filesystem conformance tests. It is included in
+`//:bazel_tests`. Filesystem conformance checks the host storage classification
+outside the sandbox and always executes; the other results are cacheable.

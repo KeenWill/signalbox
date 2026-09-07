@@ -83,7 +83,10 @@ filegroup(
 
 test_suite(
     name = "bazel_tests",
-    tests = [":rust_unit_tests"],
+    tests = [
+        ":rust_integration_tests",
+        ":rust_unit_tests",
+    ],
 )
 
 filegroup(
@@ -319,4 +322,17 @@ filegroup(
 source_manifest(
     name = "rust_source_manifest",
     srcs = [":rust_sources"],
+)
+
+test_suite(
+    name = "rust_integration_tests",
+    tests = [
+        "//crates/blob-store-filesystem:conformance",
+        "//crates/derive:accessors",
+        "//crates/derive:operator_error",
+        "//crates/model-runtime-anthropic:loopback",
+        "//crates/model-runtime-openai:loopback",
+        "//crates/ownership-seam:lifecycle_vocabulary",
+        "//crates/tool-schema-derive:derive",
+    ],
 )
