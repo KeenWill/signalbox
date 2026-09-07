@@ -194,16 +194,15 @@ impl Client {
             "item/started" | "item/completed" => {
                 let event: ItemNotification = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn_id)?;
+                self.activity.assistant_output_observed |=
+                    item_precludes_non_acceptance(&event.item);
                 if event.item.get("type").and_then(Value::as_str) == Some("agentMessage") {
                     let message = decode(&event.item)?;
-                    self.activity.assistant_output_observed = true;
                     Ok(Event::AgentMessage {
                         message,
                         completed: method == "item/completed",
                     })
                 } else {
-                    self.activity.assistant_output_observed |=
-                        event.item.get("type").and_then(Value::as_str) == Some("reasoning");
                     Ok(Event::Ignored)
                 }
             }
@@ -233,12 +232,8 @@ impl Client {
             "turn/completed" => {
                 let event: TurnCompleted = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn.id)?;
-                self.activity.assistant_output_observed |= event.turn.items.iter().any(|item| {
-                    matches!(
-                        item.get("type").and_then(Value::as_str),
-                        Some("agentMessage" | "reasoning")
-                    )
-                });
+                self.activity.assistant_output_observed |=
+                    event.turn.items.iter().any(item_precludes_non_acceptance);
                 if event.turn.status == TurnStatus::InProgress {
                     return Ok(Event::Ignored);
                 }
@@ -248,4 +243,11 @@ impl Client {
             _ => Ok(Event::Ignored),
         }
     }
+}
+
+fn item_precludes_non_acceptance(item: &Value) -> bool {
+    !matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("userMessage" | "hookPrompt")
+    )
 }

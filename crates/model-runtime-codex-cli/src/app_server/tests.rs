@@ -463,6 +463,127 @@ fn reasoning_in_a_nonterminal_turn_summary_defeats_later_non_acceptance_proof() 
 }
 
 #[test]
+fn model_authored_items_defeat_proof_after_a_nonretrying_failure_notification() {
+    for kind in [
+        "plan",
+        "commandExecution",
+        "mcpToolCall",
+        "fileChange",
+        "dynamicToolCall",
+        "collabAgentToolCall",
+        "subAgentActivity",
+        "webSearch",
+        "imageView",
+        "sleep",
+        "imageGeneration",
+        "enteredReviewMode",
+        "exitedReviewMode",
+        "contextCompaction",
+        "functionCallOutput",
+        "futureModelItem",
+    ] {
+        for method in ["item/started", "item/completed"] {
+            let mut client = running();
+            client
+                .receive(&peer::notification(
+                    method,
+                    json!({"item":{"id":"model-item","type":kind}}),
+                ))
+                .expect("item notification");
+            client
+                .receive(&peer::notification(
+                    "error",
+                    json!({"willRetry":false,
+                        "error":{"message":"quota failure","codexErrorInfo":"usageLimitExceeded"}
+                    }),
+                ))
+                .expect("nonretrying failure telemetry");
+            let Event::Terminal(turn) = client
+                .receive(&peer::turn("failed", json!("usageLimitExceeded")))
+                .expect("failed turn")
+            else {
+                panic!("failure closes the turn");
+            };
+            assert!(
+                !client.activity.proves_non_acceptance(
+                    turn.status,
+                    turn.error
+                        .as_ref()
+                        .and_then(|error| error.codex_error_info.as_ref())
+                ),
+                "{method}: {kind}"
+            );
+        }
+    }
+}
+
+#[test]
+fn model_authored_turn_summary_items_defeat_non_acceptance_proof() {
+    for kind in [
+        "plan",
+        "commandExecution",
+        "mcpToolCall",
+        "fileChange",
+        "dynamicToolCall",
+        "collabAgentToolCall",
+        "subAgentActivity",
+        "webSearch",
+        "imageView",
+        "sleep",
+        "imageGeneration",
+        "enteredReviewMode",
+        "exitedReviewMode",
+        "contextCompaction",
+        "functionCallOutput",
+        "futureModelItem",
+    ] {
+        let mut client = running();
+        let mut terminal = peer::turn("failed", json!("usageLimitExceeded"));
+        terminal["params"]["turn"]["items"] = json!([{"id":"model-item","type":kind}]);
+        let Event::Terminal(turn) = client.receive(&terminal).expect("failed turn") else {
+            panic!("failure closes the turn");
+        };
+        assert!(
+            !client.activity.proves_non_acceptance(
+                turn.status,
+                turn.error
+                    .as_ref()
+                    .and_then(|error| error.codex_error_info.as_ref())
+            ),
+            "{kind}"
+        );
+    }
+}
+
+#[test]
+fn input_only_items_do_not_alone_defeat_non_acceptance_proof() {
+    for kind in ["userMessage", "hookPrompt"] {
+        let mut client = running();
+        let item = json!({"id":"input-item","type":kind});
+        client
+            .receive(&peer::notification("item/started", json!({"item":item})))
+            .expect("input item starts");
+        client
+            .receive(&peer::notification("item/completed", json!({"item":item})))
+            .expect("input item completes");
+        let mut terminal = peer::turn("failed", json!("usageLimitExceeded"));
+        terminal["params"]["turn"]["items"] = json!([item]);
+        let Event::Terminal(turn) = client.receive(&terminal).expect("failed turn") else {
+            panic!("failure closes the turn");
+        };
+        assert!(
+            client.activity.proves_non_acceptance(
+                turn.status,
+                turn.error
+                    .as_ref()
+                    .and_then(|error| error.codex_error_info.as_ref())
+            ),
+            "{kind}"
+        );
+    }
+}
+
+#[test]
 fn completed_or_interrupted_status_never_proves_non_acceptance() {
     for status in ["completed", "interrupted"] {
         let mut client = running();
