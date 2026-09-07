@@ -2,161 +2,6 @@
 
 # review_workflow
 
-## ReviewKey
-
-```rust
-pub struct ReviewKey(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ReviewKey {
-    pub fn try_new(value: string::String) -> result::Result<Self, ReviewValueError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## ReviewText
-
-```rust
-pub struct ReviewText(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ReviewText {
-    pub fn try_new(value: string::String) -> result::Result<Self, ReviewValueError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## ReviewValueFailure
-
-```rust
-pub enum ReviewValueFailure {
-    Empty,
-    ContainsNull,
-    TooLong { maximum_bytes: usize },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewValueError
-
-```rust
-pub struct ReviewValueError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewValueError {
-    pub const fn failure(&self) -> ReviewValueFailure;
-    pub fn value(&self) -> &str;
-    pub fn into_parts(self) -> (string::String, ReviewValueFailure);
-}
-```
-
-## ReviewChangeRequestNumber
-
-```rust
-pub struct ReviewChangeRequestNumber(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ReviewChangeRequestNumber {
-    pub const fn try_new(value: u64) -> result::Result<Self, ReviewPositiveNumberError>;
-    pub const fn get(self) -> u64;
-}
-```
-
-## ReviewEventOrdinal
-
-```rust
-pub struct ReviewEventOrdinal(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ReviewEventOrdinal {
-    pub const fn one() -> Self;
-    pub const fn try_new(value: u32) -> result::Result<Self, ReviewPositiveNumberError>;
-    pub const fn get(self) -> u32;
-}
-```
-
-## ReviewPositiveNumberError
-
-```rust
-pub struct ReviewPositiveNumberError;
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewConfidence
-
-```rust
-pub struct ReviewConfidence(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ReviewConfidence {
-    pub const fn try_from_basis_points(
-        basis_points: u16,
-    ) -> result::Result<Self, ReviewConfidenceError>;
-    pub const fn basis_points(self) -> u16;
-}
-```
-
-## ReviewConfidenceError
-
-```rust
-pub struct ReviewConfidenceError {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewConfidenceError {
-    pub const fn basis_points(self) -> u16;
-}
-```
-
-## ReviewFindingConfidenceAxes
-
-```rust
-pub struct ReviewFindingConfidenceAxes {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ReviewFindingConfidenceAxes {
-    pub const fn new(
-        is_real_confidence: ReviewConfidence,
-        severity_label_confidence: ReviewConfidence,
-    ) -> Self;
-    pub const fn is_real_confidence(self) -> ReviewConfidence;
-    pub const fn severity_label_confidence(self) -> ReviewConfidence;
-}
-```
-
-## ReviewPolicyVersion
-
-```rust
-pub struct ReviewPolicyVersion(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ReviewPolicyVersion {
-    pub const fn one() -> Self;
-    pub const fn try_new(value: u32) -> result::Result<Self, ReviewPositiveNumberError>;
-    pub const fn get(self) -> u32;
-}
-```
-
-## ReviewPolicy
-
-```rust
-pub struct ReviewPolicy {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPolicy {
-    pub const fn try_new(
-        version: ReviewPolicyVersion,
-        minimum_judge_confidence: ReviewConfidence,
-        minimum_publication_confidence: ReviewConfidence,
-    ) -> result::Result<Self, ReviewPolicyError>;
-    pub const fn version_one() -> Self;
-    pub const fn version(self) -> ReviewPolicyVersion;
-    pub const fn minimum_judge_confidence(self) -> ReviewConfidence;
-    pub const fn minimum_publication_confidence(self) -> ReviewConfidence;
-}
-```
-
-## ReviewPolicyError
-
-```rust
-pub struct ReviewPolicyError {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPolicyError {
-    pub const fn into_parts(self) -> (ReviewPolicyVersion, ReviewConfidence, ReviewConfidence);
-}
-```
-
 ## ReviewTargetSubject
 
 ```rust
@@ -1449,4 +1294,159 @@ pub enum ReviewExternalLinkTransitionFailure {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPolicyVersion
+
+```rust
+pub struct ReviewPolicyVersion(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ReviewPolicyVersion {
+    pub const fn one() -> Self;
+    pub const fn try_new(value: u32) -> result::Result<Self, ReviewPositiveNumberError>;
+    pub const fn get(self) -> u32;
+}
+```
+
+## ReviewPolicy
+
+```rust
+pub struct ReviewPolicy {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPolicy {
+    pub const fn try_new(
+        version: ReviewPolicyVersion,
+        minimum_judge_confidence: ReviewConfidence,
+        minimum_publication_confidence: ReviewConfidence,
+    ) -> result::Result<Self, ReviewPolicyError>;
+    pub const fn version_one() -> Self;
+    pub const fn version(self) -> ReviewPolicyVersion;
+    pub const fn minimum_judge_confidence(self) -> ReviewConfidence;
+    pub const fn minimum_publication_confidence(self) -> ReviewConfidence;
+}
+```
+
+## ReviewPolicyError
+
+```rust
+pub struct ReviewPolicyError {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPolicyError {
+    pub const fn into_parts(self) -> (ReviewPolicyVersion, ReviewConfidence, ReviewConfidence);
+}
+```
+
+## ReviewKey
+
+```rust
+pub struct ReviewKey(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ReviewKey {
+    pub fn try_new(value: string::String) -> result::Result<Self, ReviewValueError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## ReviewText
+
+```rust
+pub struct ReviewText(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ReviewText {
+    pub fn try_new(value: string::String) -> result::Result<Self, ReviewValueError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## ReviewValueFailure
+
+```rust
+pub enum ReviewValueFailure {
+    Empty,
+    ContainsNull,
+    TooLong { maximum_bytes: usize },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewValueError
+
+```rust
+pub struct ReviewValueError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewValueError {
+    pub const fn failure(&self) -> ReviewValueFailure;
+    pub fn value(&self) -> &str;
+    pub fn into_parts(self) -> (string::String, ReviewValueFailure);
+}
+```
+
+## ReviewChangeRequestNumber
+
+```rust
+pub struct ReviewChangeRequestNumber(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ReviewChangeRequestNumber {
+    pub const fn try_new(value: u64) -> result::Result<Self, ReviewPositiveNumberError>;
+    pub const fn get(self) -> u64;
+}
+```
+
+## ReviewEventOrdinal
+
+```rust
+pub struct ReviewEventOrdinal(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ReviewEventOrdinal {
+    pub const fn one() -> Self;
+    pub const fn try_new(value: u32) -> result::Result<Self, ReviewPositiveNumberError>;
+    pub const fn get(self) -> u32;
+}
+```
+
+## ReviewPositiveNumberError
+
+```rust
+pub struct ReviewPositiveNumberError;
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewConfidence
+
+```rust
+pub struct ReviewConfidence(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ReviewConfidence {
+    pub const fn try_from_basis_points(
+        basis_points: u16,
+    ) -> result::Result<Self, ReviewConfidenceError>;
+    pub const fn basis_points(self) -> u16;
+}
+```
+
+## ReviewConfidenceError
+
+```rust
+pub struct ReviewConfidenceError {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewConfidenceError {
+    pub const fn basis_points(self) -> u16;
+}
+```
+
+## ReviewFindingConfidenceAxes
+
+```rust
+pub struct ReviewFindingConfidenceAxes {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ReviewFindingConfidenceAxes {
+    pub const fn new(
+        is_real_confidence: ReviewConfidence,
+        severity_label_confidence: ReviewConfidence,
+    ) -> Self;
+    pub const fn is_real_confidence(self) -> ReviewConfidence;
+    pub const fn severity_label_confidence(self) -> ReviewConfidence;
+}
 ```

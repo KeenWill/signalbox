@@ -24,6 +24,7 @@ use crate::{
         tool_request_id, turn_attempt_id, turn_id,
     },
 };
+use crate::{FrozenModelSelection, ResolvedProviderTarget};
 
 #[test]
 fn always_confirm_approval_is_admitted_under_dangerous_blanket_posture() {
