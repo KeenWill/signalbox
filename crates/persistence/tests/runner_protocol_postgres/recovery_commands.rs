@@ -595,3 +595,154 @@ async fn recovery_abandons_a_delegated_session_after_its_runtime_terminal_bounda
     assert_eq!(store.abandon_lost_runner(command).await?, result);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_orderly_shutdown_does_not_admit_a_pristine_successor()
+-> Result<(), Box<dyn Error>> {
+    for transition in [
+        RunnerConnectionTransition::RunnerShutdown,
+        RunnerConnectionTransition::DaemonShutdown,
+    ] {
+        let (_container, pool) = migrated_postgres().await?;
+        let store = RunnerProtocolStore::new(pool, catalog());
+        let predecessor = store
+            .enroll_pristine(enrollment_request())
+            .await?
+            .into_receipt();
+        let connection = store
+            .open_connection(predecessor.identities().enrollment())
+            .await?;
+        store
+            .transition_connection(
+                predecessor.identities().enrollment(),
+                connection.epoch(),
+                transition,
+            )
+            .await?;
+        assert!(matches!(store.enroll_pristine(enrollment_request()).await,
+            Err(RunnerProtocolStoreError::EnrollmentRequest(
+                signalbox_persistence::runner_protocol::RunnerEnrollmentRequestFailure::ActiveEnrollmentExists { .. }
+            ))));
+        assert_eq!(
+            store
+                .load_enrollment(predecessor.identities().enrollment())
+                .await?
+                .expect("the shut-down enrollment remains authoritative")
+                .state(),
+            RunnerEnrollmentState::Active
+        );
+    }
+    Ok(())
+}
+
+enum SuccessorChainCandidate {
+    Pending,
+    Promoted,
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_pinned_session_uses_pending_successor_after_two_losses()
+-> Result<(), Box<dyn Error>> {
+    replace_through_successor_chain(SuccessorChainCandidate::Pending).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_pinned_session_uses_promoted_successor_after_two_losses()
+-> Result<(), Box<dyn Error>> {
+    replace_through_successor_chain(SuccessorChainCandidate::Promoted).await
+}
+
+async fn replace_through_successor_chain(
+    candidate_state: SuccessorChainCandidate,
+) -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, original, _, pin) = stored_pin_fixture(&pool).await?;
+    let connection = store
+        .load_connection(original.enrollment())
+        .await?
+        .expect("the original runner is connected");
+    store
+        .transition_connection(
+            original.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    append_runner_lost_projection(&pool, pin.placement.session()).await?;
+    let intermediate_request = enrollment_request();
+    let intermediate_request_id = intermediate_request.request();
+    let intermediate = store
+        .enroll_pristine(intermediate_request)
+        .await?
+        .into_receipt();
+    let connection = store
+        .open_connection(intermediate.identities().enrollment())
+        .await?;
+    assert_eq!(
+        store
+            .promote_pending_runner(PromotePendingRunner {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                enrollment_request: intermediate_request_id,
+            })
+            .await?,
+        RunnerRecoveryOutcome::Recorded(PromotePendingRunnerResult::Promoted {
+            runner: intermediate.identities().runner()
+        })
+    );
+    store
+        .transition_connection(
+            intermediate.identities().enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let candidate_request = enrollment_request();
+    let candidate_request_id = candidate_request.request();
+    let candidate = store
+        .enroll_pristine(candidate_request)
+        .await?
+        .into_receipt();
+    store
+        .open_connection(candidate.identities().enrollment())
+        .await?;
+    if matches!(candidate_state, SuccessorChainCandidate::Promoted) {
+        assert_eq!(
+            store
+                .promote_pending_runner(PromotePendingRunner {
+                    command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                    enrollment_request: candidate_request_id,
+                })
+                .await?,
+            RunnerRecoveryOutcome::Recorded(PromotePendingRunnerResult::Promoted {
+                runner: candidate.identities().runner()
+            })
+        );
+    }
+    let command = signalbox_domain::ReplaceLostRunner {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        session: pin.placement.session(),
+        revision: None,
+    };
+    let expected =
+        RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Replaced {
+            runner: candidate.identities().runner(),
+            placement_revision: pin
+                .placement
+                .revision()
+                .checked_next()
+                .expect("the successor revision fits"),
+        });
+    assert_eq!(store.replace_lost_runner(command.clone()).await?, expected);
+    assert_eq!(store.replace_lost_runner(command).await?, expected);
+    let placement = store
+        .load_placement(pin.placement.session())
+        .await?
+        .expect("the replacement placement is durable");
+    assert!(
+        matches!(placement.placement().state(), SessionRunnerPlacementState::Pinned(pinned) if pinned.runner == candidate.identities().runner())
+    );
+    Ok(())
+}

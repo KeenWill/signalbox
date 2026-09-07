@@ -236,17 +236,7 @@ impl RunnerProtocolStore {
                 .fetch_one(&mut **transaction)
                 .await?;
         let candidate = runner_enrollment_id(stage.decode_column("successor_enrollment_id")?);
-        lock_recovery_identities(transaction, &[predecessor, candidate.into_uuid()]).await?;
-        sqlx::query(crate::lock_inventory::RUNNER_RECOVERY_ENROLLMENTS)
-            .bind(vec![predecessor, candidate.into_uuid()])
-            .fetch_all(&mut **transaction)
-            .await?;
-        for enrollment in [runner_enrollment_id(predecessor), candidate] {
-            sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
-                .bind(enrollment.into_uuid())
-                .fetch_optional(&mut **transaction)
-                .await?;
-        }
+        lock_replacement_enrollments(transaction, predecessor, candidate.into_uuid()).await?;
         let connection = load_connection_head_in(transaction.as_mut(), candidate).await?;
         let mut enrollment = load_enrollment_in(transaction.as_mut(), candidate)
             .await?
@@ -530,12 +520,23 @@ impl RunnerProtocolStore {
             return Ok(rejected(Rejection::RevisionWithoutRepository));
         }
         let candidate = sqlx::query(
-            "SELECT successor.enrollment_id, successor.runner_id, receipt.request_id
-             FROM runner_enrollment AS predecessor
-             JOIN runner_pending_predecessor AS pending ON pending.predecessor_enrollment_id = predecessor.enrollment_id
-             JOIN runner_enrollment AS successor ON successor.enrollment_id = pending.enrollment_id
-             JOIN runner_enrollment_request_receipt AS receipt ON receipt.enrollment_id = successor.enrollment_id
-             WHERE NOT $2 AND predecessor.runner_id = $1 AND successor.state_kind IN ('pending', 'active')
+            "WITH RECURSIVE successors(enrollment_id) AS (
+                 SELECT pending.enrollment_id
+                 FROM runner_pending_predecessor AS pending
+                 JOIN runner_enrollment AS predecessor ON predecessor.enrollment_id = pending.predecessor_enrollment_id
+                 WHERE NOT $2 AND predecessor.runner_id = $1
+                 UNION
+                 SELECT pending.enrollment_id FROM runner_pending_predecessor AS pending
+                 JOIN successors ON successors.enrollment_id = pending.predecessor_enrollment_id
+             )
+             SELECT successor.enrollment_id, successor.runner_id, receipt.request_id
+             FROM successors JOIN runner_enrollment AS successor USING (enrollment_id)
+             JOIN runner_enrollment_request_receipt AS receipt USING (enrollment_id)
+             WHERE successor.state_kind IN ('pending', 'active') AND NOT EXISTS (
+                 SELECT 1 FROM runner_pending_predecessor AS pending
+                 JOIN runner_enrollment AS descendant ON descendant.enrollment_id = pending.enrollment_id
+                 WHERE pending.predecessor_enrollment_id = successor.enrollment_id
+                   AND descendant.state_kind IN ('pending', 'active'))
              UNION ALL
              SELECT enrollment.enrollment_id, enrollment.runner_id, receipt.request_id
              FROM runner_enrollment AS enrollment JOIN runner_enrollment_request_receipt AS receipt USING (enrollment_id)
@@ -553,15 +554,7 @@ impl RunnerProtocolStore {
                 .bind(lost_runner.into_uuid())
                 .fetch_one(&mut **transaction)
                 .await?;
-        lock_recovery_identities(transaction, &[predecessor_id, candidate_id.into_uuid()]).await?;
-        sqlx::query(crate::lock_inventory::RUNNER_RECOVERY_ENROLLMENTS)
-            .bind(vec![predecessor_id, candidate_id.into_uuid()])
-            .fetch_all(&mut **transaction)
-            .await?;
-        sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
-            .bind(candidate_id.into_uuid())
-            .fetch_optional(&mut **transaction)
-            .await?;
+        lock_replacement_enrollments(transaction, predecessor_id, candidate_id.into_uuid()).await?;
         let connection = load_connection_head_in(transaction.as_mut(), candidate_id).await?;
         if !connection
             .is_some_and(|connection| connection.state() == RunnerConnectionState::Connected)
@@ -954,12 +947,7 @@ impl RunnerProtocolStore {
         let old = load_connection_head_in(transaction.as_mut(), predecessor.enrollment()).await?;
         let new = load_connection_head_in(transaction.as_mut(), candidate.enrollment()).await?;
         if predecessor.state() != RunnerEnrollmentState::Active
-            || !old.is_some_and(|connection| {
-                matches!(
-                    connection.state(),
-                    RunnerConnectionState::Lost | RunnerConnectionState::Shutdown
-                )
-            })
+            || !old.is_some_and(|connection| connection.state() == RunnerConnectionState::Lost)
             || !new.is_some_and(|connection| connection.state() == RunnerConnectionState::Connected)
         {
             return Ok(PromotePendingRunnerResult::Rejected(
@@ -976,6 +964,35 @@ impl RunnerProtocolStore {
             runner: candidate.runner(),
         })
     }
+}
+
+async fn lock_replacement_enrollments(
+    transaction: &mut Transaction<'_, Postgres>,
+    lost: Uuid,
+    candidate: Uuid,
+) -> Result<(), RunnerProtocolStoreError> {
+    let predecessor: Option<Uuid> = sqlx::query_scalar(
+        "SELECT predecessor_enrollment_id FROM runner_pending_predecessor WHERE enrollment_id = $1",
+    )
+    .bind(candidate)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let mut enrollments = vec![lost, candidate];
+    enrollments.extend(predecessor);
+    enrollments.sort_unstable();
+    enrollments.dedup();
+    lock_recovery_identities(transaction, &enrollments).await?;
+    sqlx::query(crate::lock_inventory::RUNNER_RECOVERY_ENROLLMENTS)
+        .bind(&enrollments)
+        .fetch_all(&mut **transaction)
+        .await?;
+    for enrollment in enrollments {
+        sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+            .bind(enrollment)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn lock_recovery_identities(
