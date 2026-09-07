@@ -169,3 +169,7 @@ tower = { version = "0.5.3", default-features = false, features = ["util"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "process_protocol_runtime"
+path = "tests/process_protocol_runtime/main.rs"
