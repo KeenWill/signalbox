@@ -97,8 +97,9 @@ async fn spawn_session_requires_dispatch_and_replays_its_child() -> Result<(), B
 /// A model tool schedules its committed child with reconciliation sweeps disabled.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn model_spawn_nudges_child_without_a_reconciliation_sweep() -> Result<(), Box<dyn Error>> {
-    use signalbox_application::EligibilityWorkSource;
+async fn model_spawn_retains_child_hint_when_parent_fills_the_buffer() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_application::{EligibilityNudge, EligibilityWorkSource};
     use signalbox_tools_sessions::{SessionDelegationPort, SessionDelegationPortOutcome};
     const TASK: &str = "Inspect the delegated workspace";
     let runtime = RunningRuntime::start().await?;
@@ -158,13 +159,21 @@ async fn model_spawn_nudges_child_without_a_reconciliation_sweep() -> Result<(),
         signalbox_domain::ChildRelationshipPolicy::Background,
     )?;
     let (nudge, mut work_source) =
-        InProcessEligibilityWorkSource::with_options(NoSweep, None, None);
+        InProcessEligibilityWorkSource::with_options(NoSweep, None, std::num::NonZeroUsize::new(1));
+    assert_eq!(
+        nudge.nudge(session),
+        signalbox_application::EligibilityNudgeOutcome::Enqueued
+    );
     let mut port = signalboxd::PostgresSessionDelegationPort::new(runtime.pool.clone(), nudge);
     let SessionDelegationPortOutcome::Applied(receipt) =
         port.spawn_session(request, dispatch).await?
     else {
         panic!("model spawn must commit");
     };
+    assert_eq!(
+        timeout(Duration::from_secs(5), work_source.next()).await??,
+        session
+    );
     assert_eq!(
         timeout(Duration::from_secs(5), work_source.next()).await??,
         receipt.child(),

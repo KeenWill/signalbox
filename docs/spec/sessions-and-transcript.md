@@ -685,8 +685,6 @@ may return after the parent has stopped or cancelled.
   ([design](../design/sessions-and-transcript.md)).
 - Durable terminal-result reconstitution consumed by delegation result sealing
   ([design](../design/sessions-and-transcript.md)).
-- Spawned child defaulting into its parent's directory
-  ([design](../design/sessions-and-transcript.md)).
 - Static eligible-failure producer terminalizing a turn at eligibility without
   an attempt ([design](../design/sessions-and-transcript.md)).
 - Wait-transition failed-turn producer for a turn whose predecessor model call
