@@ -587,6 +587,10 @@ pub(crate) fn advertisement() -> RunnerAdvertisement {
         sandbox_profiles(),
         [repository_entry()],
     )
+    .with_default_working_directory(Some(
+        RunnerWorkingDirectory::try_new("/workspace/successor-default".to_owned())
+            .expect("absolute fixture default"),
+    ))
 }
 
 pub(crate) fn narrowed_advertisement() -> RunnerAdvertisement {
@@ -808,6 +812,31 @@ pub(crate) async fn prepared_pin_fixture_with_authorization(
     Box<dyn Error>,
 > {
     insert_session(pool).await?;
+    prepared_pin_fixture_for_stored_session(
+        pool,
+        authorize,
+        fixture_catalog,
+        fixture_overrides,
+        fixture_effect_kind,
+    )
+    .await
+}
+
+pub(crate) async fn prepared_pin_fixture_for_stored_session(
+    pool: &PgPool,
+    authorize: fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
+    fixture_catalog: RunnerCatalog,
+    fixture_overrides: RunnerToolPermissionOverrides,
+    fixture_effect_kind: &'static str,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+    ),
+    Box<dyn Error>,
+> {
     insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     set_fixture_physical_attempt_effect(pool, INITIAL_PHYSICAL_ATTEMPT, fixture_effect_kind)
         .await?;

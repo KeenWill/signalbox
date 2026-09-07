@@ -313,7 +313,11 @@ impl RunnerProtocolStore {
                 workspace.working_directory.clone()
             }
             (WorkingDirectorySelection::RunnerDefault, None) => {
-                lost.pinned().working_directory.clone()
+                let Some(directory) = registration.registration().default_working_directory()
+                else {
+                    return Ok(rejected(RunnerRecoveryRejection::PlacementUnavailable));
+                };
+                directory.clone()
             }
         };
         let ordinal = stored
@@ -506,6 +510,11 @@ impl RunnerProtocolStore {
             ),
             _ => return Ok(rejected(Rejection::PlacementNotLost)),
         };
+        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active')")
+            .bind(command.session.into_uuid()).fetch_one(&mut **transaction).await?;
+        if active {
+            return Ok(rejected(Rejection::ExistingControlRequired));
+        }
         let staging: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM runner_replacement_stage WHERE session_id = $1)",
         )
@@ -624,6 +633,15 @@ impl RunnerProtocolStore {
                 runner: enrollment.runner(),
                 placement_revision: replacement.placement.revision(),
             }));
+        }
+        if !registration
+            .registration()
+            .supports_sandbox(request.sandbox)
+            || matches!(&request.workspace, WorkspaceRequirement::RepositoryWorktree { repository }
+                if !registration.registration().supports_workspace(WorkspaceCapability::WorktreePerSession)
+                    || registration.registration().repository(repository).is_none())
+        {
+            return Ok(rejected(Rejection::PlacementUnavailable));
         }
         sqlx::query("INSERT INTO runner_replacement_stage (command_id, session_id, source_event_ordinal, successor_enrollment_id, successor_registration_revision) VALUES ($1, $2, $3, $4, $5)")
             .bind(command.command_id.into_uuid()).bind(command.session.into_uuid())
@@ -996,6 +1014,7 @@ async fn append_placement_boundary(
               AND terminal_frontier_id IS NOT NULL ORDER BY acceptance_position DESC LIMIT 1)
          UNION SELECT boundary.context_frontier_id FROM runner_session_placement_frontier AS head
             JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) WHERE head.session_id = $1
+         UNION SELECT seed_context_frontier_id FROM imported_session_seed WHERE session_id = $1
          UNION SELECT compaction.result_frontier_id FROM context_compaction AS compaction
             WHERE compaction.session_id = $1 AND NOT EXISTS (SELECT 1 FROM context_compaction AS successor WHERE successor.predecessor_compaction_id = compaction.context_compaction_id)",
     ).bind(session.into_uuid()).fetch_all(&mut **transaction).await?;
@@ -1074,15 +1093,8 @@ pub(super) async fn insert_replacement_result(
         .bind(command.into_uuid()).bind(if rejection.is_some() { "rejected" } else { "applied" })
         .bind(rejection).bind(runner).bind(revision).execute(&mut **transaction).await?;
     if rejection.is_some() {
-        sqlx::query("INSERT INTO runner_replacement_workspace_release (authorization_id, connection_epoch)
-            SELECT operation.authorization_id, head.connection_epoch
-            FROM runner_replacement_provisioning_authorization AS operation
-            JOIN runner_replacement_workspace_ready USING (authorization_id)
-            JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
-            JOIN runner_connection_event AS event ON event.enrollment_id = head.enrollment_id
-                AND event.connection_epoch = head.connection_epoch AND event.event_ordinal = head.connection_event_ordinal
-            WHERE operation.command_id = $1 AND event.state_kind = 'connected'")
-            .bind(command.into_uuid()).execute(&mut **transaction).await?;
+        super::provisioning::release_rejected_replacement_workspace(transaction.as_mut(), command)
+            .await?;
     }
     sqlx::query("SELECT pg_notify('runner_recovery', '')")
         .execute(&mut **transaction)

@@ -52,6 +52,13 @@ pub struct RepositoryEntry {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Advertisement {
+    /// Runner-reported absolute default directory; absence cannot authorize default-directory replacement.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::deserialize_present"
+    )]
+    pub default_working_directory: Option<String>,
     /// Sorted unique capability classes.
     pub capability_classes: Vec<CapabilityName>,
     /// Sorted unique tool names.
@@ -69,6 +76,13 @@ pub struct Advertisement {
 impl Advertisement {
     /// Checks inventory caps, order, uniqueness, and repository/profile pairing.
     pub fn validate(&self) -> Result<(), ValueError> {
+        if self
+            .default_working_directory
+            .as_ref()
+            .is_some_and(|directory| !directory.starts_with('/') || directory.contains('\0'))
+        {
+            return Err(ValueError::Correlation);
+        }
         validate_inventory(&self.capability_classes, MAX_CAPABILITY_CLASSES)?;
         validate_inventory(&self.tools, MAX_TOOLS)?;
         validate_inventory(&self.workspace_capabilities, MAX_WORKSPACE_CAPABILITIES)?;
@@ -147,6 +161,12 @@ impl Advertisement {
             workspaces,
             sandboxes,
             repositories,
+        )
+        .with_default_working_directory(
+            self.default_working_directory
+                .map(signalbox_domain::RunnerWorkingDirectory::try_new)
+                .transpose()
+                .map_err(|_| ValueError::Correlation)?,
         ))
     }
 }
@@ -156,6 +176,9 @@ impl TryFrom<&RunnerAdvertisement> for Advertisement {
 
     fn try_from(value: &RunnerAdvertisement) -> Result<Self, Self::Error> {
         let advertisement = Self {
+            default_working_directory: value
+                .default_working_directory()
+                .map(|directory| directory.as_str().to_owned()),
             capability_classes: value
                 .classes()
                 .map(|value| CapabilityName::try_new(value.as_str().to_owned()))
@@ -433,6 +456,12 @@ pub fn advertisement_digest(value: &Advertisement) -> Result<Digest, ValueError>
         .map(repository_record)
         .collect::<Vec<_>>();
     fields.inventory_bytes(records.iter().map(Vec::as_slice));
+    fields.optional(
+        value
+            .default_working_directory
+            .as_deref()
+            .map(str::as_bytes),
+    );
     Ok(fields.finish())
 }
 

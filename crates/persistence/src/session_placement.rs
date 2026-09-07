@@ -107,7 +107,10 @@ impl SessionPlacementRepository {
                 | CommandKind::SessionLifecycle
                 | CommandKind::ReplaceLostRunner
                 | CommandKind::AbandonLostRunner
-                | CommandKind::PromotePendingRunner,
+                | CommandKind::PromotePendingRunner
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential,
             ) => {
                 transaction.rollback().await?;
                 return Ok(SessionPlacementRepositoryOutcome::ConflictingReuse { command_id });
@@ -164,7 +167,10 @@ impl SessionPlacementRepository {
                     | CommandKind::SessionLifecycle
                     | CommandKind::ReplaceLostRunner
                     | CommandKind::AbandonLostRunner
-                    | CommandKind::PromotePendingRunner,
+                    | CommandKind::PromotePendingRunner
+                    | CommandKind::ProvisionOauthCredential
+                    | CommandKind::ReprovisionOauthCredential
+                    | CommandKind::DeleteOauthCredential,
                 ) => SessionPlacementRepositoryOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(SessionPlacementRepositoryError::Corruption(

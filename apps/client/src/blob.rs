@@ -145,7 +145,9 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::DeploymentLimits { .. }
         | ServerMessage::RunnerReplacementReceipt { .. }
         | ServerMessage::RunnerAbandonmentReceipt { .. }
-        | ServerMessage::RunnerPromotionReceipt { .. } => BlobUploadResponse::Unexpected,
+        | ServerMessage::RunnerPromotionReceipt { .. }
+        | ServerMessage::OauthCredentialAuthorization { .. }
+        | ServerMessage::OauthCredentialReceipt { .. } => BlobUploadResponse::Unexpected,
     }
 }
 

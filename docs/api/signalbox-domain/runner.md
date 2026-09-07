@@ -180,6 +180,11 @@ impl RunnerAdvertisement {
         sandboxes: impl collect::IntoIterator<Item = RunnerSandboxProfile>,
         repositories: impl collect::IntoIterator<Item = RunnerRepositoryEntry>,
     ) -> Self;
+    pub fn with_default_working_directory(
+        self,
+        directory: option::Option<RunnerWorkingDirectory>,
+    ) -> Self;
+    pub fn default_working_directory(&self) -> option::Option<&RunnerWorkingDirectory>;
     pub fn classes(&self) -> impl iterator::Iterator<Item = &RunnerCapabilityClass>;
     pub fn tools(&self) -> impl iterator::Iterator<Item = &ToolName>;
     pub fn profiles(&self) -> impl iterator::Iterator<Item = &CredentialProfileName>;
@@ -411,6 +416,7 @@ impl ValidatedRunnerRegistration {
     pub fn profiles(&self) -> impl iterator::Iterator<Item = &CredentialProfilePolicy>;
     pub fn workspaces(&self) -> impl iterator::Iterator<Item = WorkspaceCapability> + '_;
     pub fn sandboxes(&self) -> impl iterator::Iterator<Item = RunnerSandboxProfile> + '_;
+    pub fn default_working_directory(&self) -> option::Option<&RunnerWorkingDirectory>;
     pub fn repositories(&self) -> impl iterator::Iterator<Item = &RunnerRepositoryEntry>;
     pub fn reconstitute(
         enrollment: &RunnerEnrollment,
@@ -434,6 +440,7 @@ pub struct ValidatedRunnerRegistrationReconstitutionInput {
     pub workspaces: set::BTreeSet<WorkspaceCapability>,
     pub sandboxes: set::BTreeSet<RunnerSandboxProfile>,
     pub repositories: vec::Vec<RunnerRepositoryEntry>,
+    pub default_working_directory: option::Option<RunnerWorkingDirectory>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

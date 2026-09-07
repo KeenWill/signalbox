@@ -1,64 +1,22 @@
 -- Durable runner recovery command requests and terminal receipts.
 
-ALTER TABLE durable_command
-    DROP CONSTRAINT durable_command_kind_closed;
-
-ALTER TABLE durable_command
-    ADD CONSTRAINT durable_command_kind_closed CHECK (
-        command_kind = ANY (ARRAY[
-            'create_session'::text,
-            'create_session_from_imported_frontier'::text,
-            'replace_session_defaults'::text,
-            'replace_session_metadata'::text,
-            'submit_input'::text,
-            'decide_tool_request'::text,
-            'override_denied_tool_request'::text,
-            'review_workflow'::text,
-            'review_orchestration'::text,
-            'compact_session'::text,
-            'goal'::text,
-            'update_session_placement'::text,
-            'register_workspace'::text,
-            'mint_git_remote'::text,
-            'withdraw_git_remote'::text,
-            'session_lifecycle'::text,
-            'replace_lost_runner'::text,
-            'abandon_lost_runner'::text,
-            'promote_pending_runner'::text
-        ])
-    );
-
-ALTER TABLE durable_command
-    DROP CONSTRAINT durable_command_storage_version_supported;
-
-ALTER TABLE durable_command
-    ADD CONSTRAINT durable_command_storage_version_supported CHECK (
-        ((command_kind = 'create_session'::text)
-            AND (storage_version = ANY (ARRAY[1, 2, 3, 4, 5, 6, 7])))
-        OR ((command_kind = 'replace_session_defaults'::text)
-            AND (storage_version = ANY (ARRAY[1, 2, 3, 4])))
-        OR ((command_kind = 'create_session_from_imported_frontier'::text)
-            AND (storage_version = ANY (ARRAY[1, 2, 3, 5])))
-        OR ((command_kind = 'submit_input'::text) AND (storage_version = 3))
-        OR ((command_kind = ANY (ARRAY[
-                'replace_session_metadata'::text,
-                'decide_tool_request'::text,
-                'override_denied_tool_request'::text,
-                'review_workflow'::text,
-                'review_orchestration'::text,
-                'compact_session'::text,
-                'goal'::text,
-                'update_session_placement'::text,
-                'register_workspace'::text,
-                'mint_git_remote'::text,
-                'withdraw_git_remote'::text,
-                'session_lifecycle'::text,
-            'replace_lost_runner'::text,
-            'abandon_lost_runner'::text,
-            'promote_pending_runner'::text
-            ])) AND (storage_version = 1))
-    );
-
+DO $$
+DECLARE definition text;
+BEGIN
+    SELECT pg_get_constraintdef(oid) INTO STRICT definition FROM pg_constraint
+        WHERE conrelid = 'durable_command'::regclass AND conname = 'durable_command_kind_closed';
+    ALTER TABLE durable_command DROP CONSTRAINT durable_command_kind_closed;
+    EXECUTE 'ALTER TABLE durable_command ADD CONSTRAINT durable_command_kind_closed CHECK ('
+        || substring(definition FROM 7)
+        || ' OR command_kind IN (''replace_lost_runner'', ''abandon_lost_runner'', ''promote_pending_runner''))';
+    SELECT pg_get_constraintdef(oid) INTO STRICT definition FROM pg_constraint
+        WHERE conrelid = 'durable_command'::regclass AND conname = 'durable_command_storage_version_supported';
+    ALTER TABLE durable_command DROP CONSTRAINT durable_command_storage_version_supported;
+    EXECUTE 'ALTER TABLE durable_command ADD CONSTRAINT durable_command_storage_version_supported CHECK ('
+        || substring(definition FROM 7)
+        || ' OR (command_kind IN (''replace_lost_runner'', ''abandon_lost_runner'', ''promote_pending_runner'') AND storage_version = 1))';
+END;
+$$;
 
 CREATE TABLE replace_lost_runner_command (
     command_id uuid PRIMARY KEY,
@@ -155,6 +113,9 @@ BEGIN
             USING ERRCODE = '23505';
     END IF;
     CASE NEW.command_kind
+        WHEN 'provision_oauth_credential' THEN SELECT count(*) INTO matching_records FROM provision_oauth_credential_command WHERE command_id = NEW.command_id;
+        WHEN 'reprovision_oauth_credential' THEN SELECT count(*) INTO matching_records FROM reprovision_oauth_credential_command WHERE command_id = NEW.command_id;
+        WHEN 'delete_oauth_credential' THEN SELECT count(*) INTO matching_records FROM delete_oauth_credential_command WHERE command_id = NEW.command_id;
         WHEN 'create_session' THEN SELECT count(*) INTO matching_records FROM create_session_command WHERE command_id = NEW.command_id;
         WHEN 'create_session_from_imported_frontier' THEN SELECT count(*) INTO matching_records FROM create_session_from_imported_frontier_command WHERE command_id = NEW.command_id;
         WHEN 'replace_session_defaults' THEN SELECT count(*) INTO matching_records FROM replace_session_defaults_command WHERE command_id = NEW.command_id;

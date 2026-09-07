@@ -558,7 +558,10 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::OverrideDeniedToolRequest { .. }
         | ClientRequest::ReplaceLostRunner { .. }
         | ClientRequest::AbandonLostRunner { .. }
-        | ClientRequest::PromotePendingRunner { .. } => false,
+        | ClientRequest::PromotePendingRunner { .. }
+        | ClientRequest::ProvisionOauthCredential { .. }
+        | ClientRequest::ReprovisionOauthCredential { .. }
+        | ClientRequest::DeleteOauthCredential { .. } => false,
     }
 }
 pub(super) fn retain_inbound_frame_permit_during_import_admission(
@@ -764,7 +767,10 @@ impl SnapshotReaderAdmission {
             | ClientRequest::OverrideDeniedToolRequest { .. }
             | ClientRequest::ReplaceLostRunner { .. }
             | ClientRequest::AbandonLostRunner { .. }
-            | ClientRequest::PromotePendingRunner { .. } => Self::NotRequired,
+            | ClientRequest::PromotePendingRunner { .. }
+            | ClientRequest::ProvisionOauthCredential { .. }
+        | ClientRequest::ReprovisionOauthCredential { .. }
+        | ClientRequest::DeleteOauthCredential { .. } => Self::NotRequired,
         }
     }
 }
