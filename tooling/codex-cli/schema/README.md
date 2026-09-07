@@ -7,10 +7,10 @@ directory. They provide the offline schema fixtures.
 `cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli --test schema_fixtures -- --nocapture`
 compares them with schemas derived from the adapter's private wire types.
 Consumed fields must remain decoder-compatible, adapter-required fields must
-remain required, and turn statuses must match. Added fields and error members
-are reported; consumed fields and error members must remain present. Only the
-consumed notification, turn, error, and primary/secondary rate-window shapes are
-checked.
+remain required, and turn statuses must match. Tagged error objects contain only
+their tag. Compatible additions are reported; consumed fields and error members
+must remain present. Only the consumed notification, turn, error, and
+primary/secondary rate-window shapes are checked.
 
 `bash tooling/codex-cli/schema/check.sh` downloads the same three schemas from
 the release in `tooling/codex-cli/release.json` and runs that comparison. The

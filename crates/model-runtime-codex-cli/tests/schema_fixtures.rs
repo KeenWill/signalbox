@@ -168,6 +168,19 @@ fn check_errors(schema: &Value) -> Result<(), String> {
     let expected_schema = derived::<frame::KnownError>();
     let expected = variants(&expected_schema);
     let actual = variants(&schema["definitions"]["CodexErrorInfo"]);
+    for (tag, representations) in &actual {
+        for candidate in representations {
+            if candidate["type"] == "object"
+                && (candidate["additionalProperties"] != false
+                    || !strings(&candidate["required"]).contains(tag.as_str())
+                    || !candidate["properties"]
+                        .as_object()
+                        .is_some_and(|fields| fields.len() == 1 && fields.contains_key(tag)))
+            {
+                return Err(format!("error envelope must contain only its tag: {tag}"));
+            }
+        }
+    }
     let additions = enum_members(
         &expected.keys().map(String::as_str).collect(),
         &actual.keys().map(String::as_str).collect(),
@@ -182,7 +195,6 @@ fn check_errors(schema: &Value) -> Result<(), String> {
                 .find(|shape| schema_shape::compatible(shape, &expected_schema, candidate, schema))
                 .ok_or_else(|| format!("incompatible known error representation: {tag}"))?;
             if shape["type"] == "object" {
-                check_object(&tag, shape.clone(), candidate, schema);
                 check_object(
                     &tag,
                     shape["properties"][&tag].clone(),
@@ -292,7 +304,7 @@ fn a_known_unit_error_cannot_change_to_an_object_representation() {
         .unwrap()
         .retain(|tag| tag != "unauthorized");
     alternatives.push(serde_json::json!({
-        "type":"object", "required":["unauthorized"],
+        "type":"object", "additionalProperties":false, "required":["unauthorized"],
         "properties":{"unauthorized":{"type":"object"}}
     }));
     assert_eq!(
@@ -308,11 +320,54 @@ fn a_known_unit_error_cannot_add_an_object_representation() {
         .as_array_mut()
         .unwrap()
         .push(serde_json::json!({
-            "type":"object", "required":["unauthorized"],
+            "type":"object", "additionalProperties":false, "required":["unauthorized"],
             "properties":{"unauthorized":{"type":"object"}}
         }));
     assert_eq!(
         check_errors(&actual),
         Err("incompatible known error representation: unauthorized".into())
     );
+}
+
+#[test]
+fn a_tagged_error_envelope_cannot_add_a_sibling_field() {
+    let mut actual = schema("ErrorNotification");
+    let envelope = actual["definitions"]["CodexErrorInfo"]["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|shape| shape["properties"]["httpConnectionFailed"].is_object())
+        .unwrap();
+    envelope["properties"]["diagnostic"] = serde_json::json!({"type":"string"});
+    assert!(check_errors(&actual).is_err());
+}
+
+#[test]
+fn a_tagged_error_envelope_cannot_allow_arbitrary_fields() {
+    let mut actual = schema("ErrorNotification");
+    let envelope = actual["definitions"]["CodexErrorInfo"]["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|shape| shape["properties"]["httpConnectionFailed"].is_object())
+        .unwrap();
+    envelope
+        .as_object_mut()
+        .unwrap()
+        .remove("additionalProperties");
+    assert!(check_errors(&actual).is_err());
+}
+
+#[test]
+fn a_tagged_error_payload_can_add_a_field() {
+    let mut actual = schema("ErrorNotification");
+    let envelope = actual["definitions"]["CodexErrorInfo"]["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|shape| shape["properties"]["httpConnectionFailed"].is_object())
+        .unwrap();
+    envelope["properties"]["httpConnectionFailed"]["properties"]["diagnostic"] =
+        serde_json::json!({"type":"string"});
+    assert_eq!(check_errors(&actual), Ok(()));
 }
