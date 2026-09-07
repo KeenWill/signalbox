@@ -521,9 +521,10 @@ its text. An unknown or invalid field is rejected without its name, so
 opaque to code: no build-provided constant is compared against it. Catalogs are
 read at startup. `reload_configuration` validates the complete replacement and
 atomically replaces the model and alias catalog and session-template catalog.
-Repository-watch edits and startup-only edits require restart and leave the
-running configuration in place. Reload never rewrites evidence already recorded.
-File watching and polling are external callers of the verb.
+Repository-watch edits, startup-only edits, and model or template edits while
+repository watch is enabled require restart and leave the running configuration
+in place. Reload never rewrites evidence already recorded. File watching and
+polling are external callers of the verb.
 
 Every serving record states its family, and the adapter mapping rather than the
 selectable record pointing at it supplies its adapter and credential pool. Input
