@@ -888,3 +888,62 @@ fn assistant_items_in_the_turn_start_response_exclude_non_acceptance_proof() {
         )
     );
 }
+
+#[test]
+fn consumed_rate_limit_windows_choose_the_latest_reset_with_zero_saturation() {
+    use std::time::{Duration, UNIX_EPOCH};
+    for (snapshot, expected) in [
+        (
+            json!({"primary":{"usedPercent":100,"resetsAt":1100}}),
+            Some(Duration::from_secs(100)),
+        ),
+        (json!({"primary":{"usedPercent":90,"resetsAt":1100}}), None),
+        (
+            json!({"primary":{"usedPercent":99.5,"resetsAt":1100}}),
+            None,
+        ),
+        (
+            json!({"primary":{"usedPercent":100.0,"resetsAt":1100}}),
+            Some(Duration::from_secs(100)),
+        ),
+        (
+            json!({"primary":{"usedPercent":100,"resetsAt":1100},"secondary":{"usedPercent":100,"resetsAt":1400}}),
+            Some(Duration::from_secs(400)),
+        ),
+        (
+            json!({"primary":{"usedPercent":100,"resetsAt":900}}),
+            Some(Duration::ZERO),
+        ),
+        (
+            json!({"primary":{"usedPercent":100,"resetsAt":-1}}),
+            Some(Duration::ZERO),
+        ),
+        (json!({"primary":{"usedPercent":100}}), None),
+        (
+            json!({"individualLimit":{"remainingPercent":0,"resetsAt":1400}}),
+            None,
+        ),
+    ] {
+        let limits: super::frame::RateLimits =
+            serde_json::from_value(snapshot.clone()).expect("snapshot fixture");
+        assert_eq!(
+            limits.retry_after(UNIX_EPOCH + Duration::from_secs(1000)),
+            expected,
+            "{snapshot}"
+        );
+    }
+}
+
+#[test]
+fn sparse_rate_limit_notifications_preserve_a_previous_window() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let mut client = running();
+    client.receive(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":100,"resetsAt":1100}}}})).expect("initial snapshot");
+    client.receive(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":null,"secondary":{"usedPercent":90,"resetsAt":1400}}}})).expect("sparse snapshot");
+    assert_eq!(
+        client
+            .rate_limits
+            .retry_after(UNIX_EPOCH + Duration::from_secs(1000)),
+        Some(Duration::from_secs(100))
+    );
+}
