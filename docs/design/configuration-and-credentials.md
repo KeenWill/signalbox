@@ -33,7 +33,8 @@ activation's repository event tail, inside the reload boundary. A reload pauses
 sweep admission and stops and joins active sweep attempts before re-running
 convergence configured-target reconciliation inside the reload boundary; sweep
 admission resumes under the replacement snapshot on success or the prior
-snapshot on rule-revision rejection, as [reload recovery](process-protocol.md)
+snapshot on rule-revision rejection only if that snapshot validates against the
+current startup-only sections, as [reload recovery](process-protocol.md)
 requires. Enabling convergence while repository watch is enabled composes the
 sweep task; disabling either terminates the task. A running sweep reads the new
 targets, template, interval, and credential path at its next attempt.

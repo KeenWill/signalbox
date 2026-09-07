@@ -61,14 +61,15 @@ request alone is recovery-pending; installs the successor placement; and
 consumes the staged replacement before a retry lease can be offered. It neither
 appends tool-result entries nor prepares a continuation. This recovery takeover
 is the exception to waiting for the lost offered request to resolve. The request
-remains recovery-pending until its fresh attempt resolves, then later requests
-execute in proposal order. Once the whole batch resolves, the ordinary
-continuation transaction projects every result in proposal order and prepares
-the next call. Retry correlation crosses the placement boundary and therefore
-validates the lost attempt and successor placement generations without requiring
-their runner ids to match. An executor-dispatched attempt otherwise completes or
-receives its effect-class crash classification; placement loss never rewrites or
-cancels it.
+remains recovery-pending until its fresh attempt resolves or
+[terminalization wins](turn-lifecycle-and-scheduling.md). If the retry resolves
+first, later requests execute in proposal order. Once the whole batch resolves,
+the ordinary continuation transaction projects every result in proposal order
+and prepares the next call. Retry correlation crosses the placement boundary and
+therefore validates the lost attempt and successor placement generations without
+requiring their runner ids to match. An executor-dispatched attempt otherwise
+completes or receives its effect-class crash classification; placement loss
+never rewrites or cancels it.
 
 A family declares an admissibility check for a condition it can evaluate before
 approval. Where a family declares one, that check takes precedence over the
@@ -180,9 +181,10 @@ with its placement retains that attempt; after every preceding request resolves,
 a distinct pre-continuation takeover transaction installs the successor and
 consumes the staged replacement before a fresh physical attempt is offered
 there, without requiring the old and new runner ids to match. It projects no
-result and prepares no continuation. The request remains recovery-pending until
-that retry resolves; later requests then execute in proposal order before the
-ordinary continuation transaction projects the complete batch.
+result and prepares no continuation. Unless terminalization closes the retained
+attempt and request and suppresses retry, the request remains recovery-pending
+until that retry resolves; later requests then execute in proposal order before
+the ordinary continuation transaction projects the complete batch.
 Executor-dispatched attempts otherwise complete or receive effect-class crash
 classification; placement loss never rewrites or cancels them.
 
