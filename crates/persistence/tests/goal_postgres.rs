@@ -12,7 +12,7 @@ use std::error::Error;
 use support::{blocked_backends_reached, record_empty_instruction_manifest};
 
 use expect_test::expect;
-use signalbox_expect_table::table;
+use expectable::print;
 
 use signalbox_application::{
     AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
@@ -3466,10 +3466,9 @@ async fn acquire_peer_message_suffix(
     Ok(())
 }
 
-/// descendant-scoped goal stop takes its canonical
-/// cascade prefix before the ordinary root lock, so an overlapping peer-message
-/// prefix cannot form the child/root inversion that PostgreSQL reports as
-/// `40P01`.
+/// descendant-scoped goal stop takes its canonical cascade prefix before the ordinary root lock, so
+/// an overlapping peer-message prefix cannot form the child/root inversion that PostgreSQL reports
+/// as `40P01`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn goal_stop_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
@@ -3516,9 +3515,8 @@ async fn goal_stop_orders_cascade_before_peer_message() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// descendant-scoped input interrupt takes the same
-/// canonical cascade prefix before its root and scheduler locks, preventing the
-/// peer-message child/root inversion.
+/// descendant-scoped input interrupt takes the same canonical cascade prefix before its root and
+/// scheduler locks, preventing the peer-message child/root inversion.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn input_interrupt_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
@@ -3583,9 +3581,8 @@ async fn input_interrupt_orders_cascade_before_peer_message() -> Result<(), Box<
     Ok(())
 }
 
-/// when the descendant-scope root is itself a
-/// delegated child, the canonical session frontier includes its parent
-/// endpoint in the same ascending lock set.
+/// when the descendant-scope root is itself a delegated child, the canonical session frontier
+/// includes its parent endpoint in the same ascending lock set.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn descendant_frontier_includes_root_parent_endpoint() -> Result<(), Box<dyn Error>> {
@@ -3696,9 +3693,8 @@ async fn descendant_frontier_includes_root_parent_endpoint() -> Result<(), Box<d
     Ok(())
 }
 
-/// an applied descendant-scoped goal stop
-/// atomically records every edge, logically terminalizes active and queued
-/// bound children with exact provenance, and leaves the background child
+/// an applied descendant-scoped goal stop atomically records every edge, logically terminalizes
+/// active and queued bound children with exact provenance, and leaves the background child
 /// runnable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -4140,9 +4136,9 @@ async fn goal_stop_materializes_complete_delegation_cascade() -> Result<(), Box<
     Ok(())
 }
 
-/// a descendant-scoped lifecycle stop whose live
-/// turn is closed by its core interrupt carries `stopped` into the cascade, so
-/// a bound child follows `on_parent_stopped` rather than `on_parent_cancelled`.
+/// a descendant-scoped lifecycle stop whose live turn is closed by its core interrupt carries
+/// `stopped` into the cascade, so a bound child follows `on_parent_stopped` rather than
+/// `on_parent_cancelled`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn lifecycle_stop_interrupt_uses_stopped_child_policy() -> Result<(), Box<dyn Error>> {
@@ -4292,21 +4288,36 @@ async fn lifecycle_stop_interrupt_uses_stopped_child_policy() -> Result<(), Box<
 /// One derived cascade edge: which relationship it dispositions, the immediate
 /// parent kind that selected its action, and the causal source that supplied
 /// that kind.
-#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
 struct NestedCascadeEdgeFacts {
+    #[serde(serialize_with = "serialize_uuid")]
     spawning_tool_request_id: Uuid,
+    #[serde(serialize_with = "serialize_uuid")]
     parent_session_id: Uuid,
     termination_kind: String,
     source_kind: String,
+    #[serde(serialize_with = "serialize_optional_uuid")]
     source_spawning_tool_request_id: Option<Uuid>,
 }
 
 /// The recorded disposition one cascade edge published against its relationship.
-#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
 struct NestedCascadeOutcomeFacts {
+    #[serde(serialize_with = "serialize_uuid")]
     spawning_tool_request_id: Uuid,
     outcome_kind: String,
     reason_kind: String,
+}
+
+fn serialize_uuid<S: serde::Serializer>(id: &Uuid, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(id)
+}
+
+fn serialize_optional_uuid<S: serde::Serializer>(
+    id: &Option<Uuid>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(&id.map(|id| id.to_string()), serializer)
 }
 
 /// Every durable record a pruned edge must not have acquired.
@@ -4317,9 +4328,8 @@ struct PrunedEdgeRecordCounts {
     logical_terminals: i64,
 }
 
-/// a descendant-scoped stop descends into a nested
-/// relationship under its immediate parent's disposition, not under the root
-/// command's kind.
+/// a descendant-scoped stop descends into a nested relationship under its immediate parent's
+/// disposition, not under the root command's kind.
 ///
 /// The tree is two levels deep, which is what separates this behavior from the
 /// direct-child case the sibling cascade test already covers. Under the root
@@ -4465,11 +4475,11 @@ async fn nested_cascade_descends_under_immediate_parent_disposition() -> Result<
         ┌──────────────────────────────────────┬──────────────────────────────────────┬──────────────────┬────────────────────┬──────────────────────────────────────┐
         │ spawning_tool_request_id             │ parent_session_id                    │ termination_kind │ source_kind        │ source_spawning_tool_request_id      │
         ├──────────────────────────────────────┼──────────────────────────────────────┼──────────────────┼────────────────────┼──────────────────────────────────────┤
-        │ 00000000-0000-0000-0000-00000000f610 │ 00000000-0000-0000-0000-00000000f600 │ stopped          │ root               │ None                                 │
+        │ 00000000-0000-0000-0000-00000000f610 │ 00000000-0000-0000-0000-00000000f600 │ stopped          │ root               │                                      │
         │ 00000000-0000-0000-0000-00000000f620 │ 00000000-0000-0000-0000-00000000f601 │ cancelled        │ parent_disposition │ 00000000-0000-0000-0000-00000000f610 │
         └──────────────────────────────────────┴──────────────────────────────────────┴──────────────────┴────────────────────┴──────────────────────────────────────┘
     "#]]
-    .assert_eq(&table(edges));
+    .assert_eq(&print(&edges));
     expect![[r#"
         ┌──────────────────────────────────────┬─────────────────┬─────────────────────────────────────────┐
         │ spawning_tool_request_id             │ outcome_kind    │ reason_kind                             │
@@ -4478,15 +4488,15 @@ async fn nested_cascade_descends_under_immediate_parent_disposition() -> Result<
         │ 00000000-0000-0000-0000-00000000f620 │ child_stopped   │ parent_cancelled_parent_and_descendants │
         └──────────────────────────────────────┴─────────────────┴─────────────────────────────────────────┘
     "#]]
-    .assert_eq(&table(outcomes));
+    .assert_eq(&print(&outcomes));
 
     pool.close().await;
     drop(container);
     Ok(())
 }
 
-/// a descendant-scoped stop stops descending below a
-/// relationship that survives it, leaving that whole subtree runnable.
+/// a descendant-scoped stop stops descending below a relationship that survives it, leaving that
+/// whole subtree runnable.
 ///
 /// `background_child` keeps running under any parent termination, so the
 /// frontier never reaches its own child. The pruned grandchild's policy would
@@ -4641,18 +4651,18 @@ async fn nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dyn Er
         ┌──────────────────────────────────────┬──────────────────────────────────────┬──────────────────┬─────────────┬─────────────────────────────────┐
         │ spawning_tool_request_id             │ parent_session_id                    │ termination_kind │ source_kind │ source_spawning_tool_request_id │
         ├──────────────────────────────────────┼──────────────────────────────────────┼──────────────────┼─────────────┼─────────────────────────────────┤
-        │ 00000000-0000-0000-0000-00000000f710 │ 00000000-0000-0000-0000-00000000f700 │ stopped          │ root        │ None                            │
+        │ 00000000-0000-0000-0000-00000000f710 │ 00000000-0000-0000-0000-00000000f700 │ stopped          │ root        │                                 │
         └──────────────────────────────────────┴──────────────────────────────────────┴──────────────────┴─────────────┴─────────────────────────────────┘
     "#]]
-    .assert_eq(&table(edges));
+    .assert_eq(&print(&edges));
 
     pool.close().await;
     drop(container);
     Ok(())
 }
 
-/// a delegated turn that completes while holding
-/// next-safe-point steering reclassifies that steering into a successor turn.
+/// a delegated turn that completes while holding next-safe-point steering reclassifies that
+/// steering into a successor turn.
 ///
 /// A delegated turn has no accepted-input queue origin, so reclassification
 /// must resolve its configuration through the delegated origin rather than the
@@ -4814,9 +4824,8 @@ async fn delegated_turn_reclassifies_its_pending_steering() -> Result<(), Box<dy
     Ok(())
 }
 
-/// a cascade-terminalized child releases its
-/// compaction boundary. The retained delegated turn stays physically active, so
-/// preparation must read runtime relevance rather than the physical state and
+/// a cascade-terminalized child releases its compaction boundary. The retained delegated turn stays
+/// physically active, so preparation must read runtime relevance rather than the physical state and
 /// must source the logical terminal's frontier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]

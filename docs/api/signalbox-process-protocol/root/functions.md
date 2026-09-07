@@ -29,27 +29,23 @@ pub const MAX_USER_INPUT_DISPLAY_FILENAME_BYTES: usize;
 ## decode_client_line
 
 ```rust
-pub fn decode_client_line(line: &[u8]) -> result::Result<ClientFrame, scalars::FrameDecodeError>;
+pub fn decode_client_line(line: &[u8]) -> result::Result<ClientFrame, FrameDecodeError>;
 ```
 
 ## decode_server_line
 
 ```rust
-pub fn decode_server_line(line: &[u8]) -> result::Result<ServerFrame, scalars::FrameDecodeError>;
+pub fn decode_server_line(line: &[u8]) -> result::Result<ServerFrame, FrameDecodeError>;
 ```
 
 ## encode_client_line
 
 ```rust
-pub fn encode_client_line(
-    frame: &ClientFrame,
-) -> result::Result<vec::Vec<u8>, scalars::FrameEncodeError>;
+pub fn encode_client_line(frame: &ClientFrame) -> result::Result<vec::Vec<u8>, FrameEncodeError>;
 ```
 
 ## encode_server_line
 
 ```rust
-pub fn encode_server_line(
-    frame: &ServerFrame,
-) -> result::Result<vec::Vec<u8>, scalars::FrameEncodeError>;
+pub fn encode_server_line(frame: &ServerFrame) -> result::Result<vec::Vec<u8>, FrameEncodeError>;
 ```

@@ -486,8 +486,8 @@ async fn insert_exact_seed_members(
     Ok(())
 }
 
-/// one applied imported-frontier command can commit only with its
-/// exact ancestry, imported semantic prefix, and one-to-one seed frontier.
+/// one applied imported-frontier command can commit only with its exact ancestry, imported semantic
+/// prefix, and one-to-one seed frontier.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn exact_imported_session_seed_commits() -> Result<(), Box<dyn Error>> {
@@ -524,8 +524,8 @@ async fn exact_imported_session_seed_commits() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// the complete seed can be assembled in any in-transaction order;
-/// inserting its one-to-one link before the semantic prefix remains valid.
+/// the complete seed can be assembled in any in-transaction order; inserting its one-to-one link
+/// before the semantic prefix remains valid.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error>> {
@@ -561,9 +561,8 @@ async fn seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// a seed link inserted by a nested transaction still belongs to
-/// its top-level transaction, so the remaining prefix may be assembled after the
-/// savepoint is released.
+/// a seed link inserted by a nested transaction still belongs to its top-level transaction, so the
+/// remaining prefix may be assembled after the savepoint is released.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn savepoint_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error>> {
@@ -607,8 +606,8 @@ async fn savepoint_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// the one-to-one seed link can precede its imported session;
-/// the deferred ancestry check validates the final cross-table facts.
+/// the one-to-one seed link can precede its imported session; the deferred ancestry check validates
+/// the final cross-table facts.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn seed_link_can_precede_imported_session() -> Result<(), Box<dyn Error>> {
@@ -645,8 +644,8 @@ async fn seed_link_can_precede_imported_session() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// once the complete same-transaction seed check is discharged,
-/// another imported semantic row cannot extend the selected prefix.
+/// once the complete same-transaction seed check is discharged, another imported semantic row
+/// cannot extend the selected prefix.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn immediate_seed_check_seals_same_transaction_prefix() -> Result<(), Box<dyn Error>> {
@@ -694,8 +693,8 @@ async fn immediate_seed_check_seals_same_transaction_prefix() -> Result<(), Box<
     Ok(())
 }
 
-/// imported ancestry cannot commit without the separate one-to-one
-/// seed record, even when the materialized frontier content is exact.
+/// imported ancestry cannot commit without the separate one-to-one seed record, even when the
+/// materialized frontier content is exact.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn imported_ancestry_without_seed_is_rejected() -> Result<(), Box<dyn Error>> {
@@ -720,8 +719,7 @@ async fn imported_ancestry_without_seed_is_rejected() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// equal imported members in the wrong order are not the selected
-/// imported prefix.
+/// equal imported members in the wrong order are not the selected imported prefix.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn reordered_imported_seed_members_are_rejected() -> Result<(), Box<dyn Error>> {
@@ -768,8 +766,8 @@ async fn reordered_imported_seed_members_are_rejected() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// an imported semantic payload cannot fabricate any native
-/// accepted-input, turn, call, or tool evidence.
+/// an imported semantic payload cannot fabricate any native accepted-input, turn, call, or tool
+/// evidence.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn imported_semantic_entry_rejects_native_payload_columns() -> Result<(), Box<dyn Error>> {
@@ -800,8 +798,8 @@ async fn imported_semantic_entry_rejects_native_payload_columns() -> Result<(), 
     Ok(())
 }
 
-/// the new durable command discriminator still requires its complete
-/// typed record at the transaction boundary.
+/// the new durable command discriminator still requires its complete typed record at the
+/// transaction boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn imported_creation_registry_claim_requires_typed_record() -> Result<(), Box<dyn Error>> {
@@ -831,8 +829,8 @@ async fn imported_creation_registry_claim_requires_typed_record() -> Result<(), 
     Ok(())
 }
 
-/// the reciprocal template-provenance creation FK does not make
-/// the preexisting native command table truncatable.
+/// the reciprocal template-provenance creation FK does not make the preexisting native command
+/// table truncatable.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn native_creation_command_truncate_remains_rejected() -> Result<(), Box<dyn Error>> {
@@ -851,8 +849,8 @@ async fn native_creation_command_truncate_remains_rejected() -> Result<(), Box<d
     Ok(())
 }
 
-/// row-level immutability cannot be bypassed by truncating the table
-/// that carries exact seed-frontier membership.
+/// row-level immutability cannot be bypassed by truncating the table that carries exact
+/// seed-frontier membership.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dyn Error>> {
@@ -871,8 +869,8 @@ async fn seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// seed construction is ordered once per session; after the seed link
-/// exists, its imported semantic prefix cannot grow.
+/// seed construction is ordered once per session; after the seed link exists, its imported semantic
+/// prefix cannot grow.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn committed_seed_rejects_late_prefix_inserts() -> Result<(), Box<dyn Error>> {
@@ -996,8 +994,8 @@ async fn exact_reingestion_resolves_the_immutable_winner() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// imported raw bytes deduplicate by content identity while
-/// every ordered occurrence and semantic frontier reconstitutes.
+/// imported raw bytes deduplicate by content identity while every ordered occurrence and semantic
+/// frontier reconstitutes.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn imported_raw_blobs_deduplicate_and_reconstitute() -> Result<(), Box<dyn Error>> {
@@ -1058,8 +1056,7 @@ async fn converged_import_relations_remain_append_only() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// restart loading reconstructs the exact imported aggregate
-/// from catalogued raw blobs.
+/// restart loading reconstructs the exact imported aggregate from catalogued raw blobs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn imported_blob_round_trip_survives_pool_restart() -> Result<(), Box<dyn Error>> {
@@ -1081,9 +1078,9 @@ async fn imported_blob_round_trip_survives_pool_restart() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// appending Claude Code records creates a distinct exact
-/// snapshot while shared raw records remain content-addressed once and source
-/// session evidence groups both snapshots without identifying them.
+/// appending Claude Code records creates a distinct exact snapshot while shared raw records remain
+/// content-addressed once and source session evidence groups both snapshots without identifying
+/// them.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn grown_claude_source_is_new_snapshot_with_shared_lineage() -> Result<(), Box<dyn Error>> {
@@ -1165,9 +1162,9 @@ async fn grown_claude_source_is_new_snapshot_with_shared_lineage() -> Result<(),
     Ok(())
 }
 
-/// appending Codex records creates a distinct exact snapshot
-/// while shared raw records remain content-addressed once and source session
-/// evidence groups both snapshots without identifying them.
+/// appending Codex records creates a distinct exact snapshot while shared raw records remain
+/// content-addressed once and source session evidence groups both snapshots without identifying
+/// them.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn grown_codex_source_is_new_snapshot_with_shared_lineage() -> Result<(), Box<dyn Error>> {
@@ -1251,8 +1248,8 @@ async fn grown_codex_source_is_new_snapshot_with_shared_lineage() -> Result<(), 
     Ok(())
 }
 
-/// source-session lineage remains unknown when no record attests an
-/// identifier or when records attest conflicting identifiers.
+/// source-session lineage remains unknown when no record attests an identifier or when records
+/// attest conflicting identifiers.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn source_session_lineage_is_null_without_one_consistent_attestation()
@@ -1303,8 +1300,8 @@ async fn source_session_lineage_is_null_without_one_consistent_attestation()
     Ok(())
 }
 
-/// checked loading and exact reingestion reject
-/// non-null lineage evidence that disagrees with the reconstructed entries.
+/// checked loading and exact reingestion reject non-null lineage evidence that disagrees with the
+/// reconstructed entries.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn corrupt_source_session_lineage_fails_closed() -> Result<(), Box<dyn Error>> {
@@ -1392,8 +1389,8 @@ async fn corrupt_source_session_lineage_fails_closed() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// Codex rollout entries use the same append-only,
-/// content-addressed persistence boundary as every imported conversation.
+/// Codex rollout entries use the same append-only, content-addressed persistence boundary as every
+/// imported conversation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn codex_rollout_round_trip_is_idempotent_and_restart_safe() -> Result<(), Box<dyn Error>> {
@@ -1458,8 +1455,8 @@ async fn codex_rollout_round_trip_is_idempotent_and_restart_safe() -> Result<(),
     Ok(())
 }
 
-/// equal source bytes cannot resolve as replay when a drifting
-/// converter supplies a different normalized record and semantic projection.
+/// equal source bytes cannot resolve as replay when a drifting converter supplies a different
+/// normalized record and semantic projection.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn reingestion_rejects_converter_projection_drift() -> Result<(), Box<dyn Error>> {
@@ -1545,8 +1542,8 @@ async fn reingestion_rejects_converter_projection_drift() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// exact reingestion checks an existing snapshot
-/// before the new-digest blob path and cannot conceal durable raw corruption.
+/// exact reingestion checks an existing snapshot before the new-digest blob path and cannot conceal
+/// durable raw corruption.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn reingestion_does_not_mask_raw_corruption() -> Result<(), Box<dyn Error>> {
@@ -1587,8 +1584,8 @@ async fn reingestion_does_not_mask_raw_corruption() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-/// imports sharing raw blobs acquire their global content keys
-/// in one stable order even when the source occurrences are reversed.
+/// imports sharing raw blobs acquire their global content keys in one stable order even when the
+/// source occurrences are reversed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn concurrent_reversed_raws_use_stable_blob_order() -> Result<(), Box<dyn Error>> {
@@ -1644,8 +1641,8 @@ async fn concurrent_reversed_raws_use_stable_blob_order() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// overlapping imported-entry identity keys are
-/// acquired in one stable order even when transcript positions reverse them.
+/// overlapping imported-entry identity keys are acquired in one stable order even when transcript
+/// positions reverse them.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn concurrent_reversed_entry_ids_return_typed_collision() -> Result<(), Box<dyn Error>> {
@@ -1817,8 +1814,8 @@ async fn incomplete_import_header_cannot_commit() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// a newly inserted content-addressed raw blob cannot commit
-/// without at least one conversation-owned occurrence.
+/// a newly inserted content-addressed raw blob cannot commit without at least one
+/// conversation-owned occurrence.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn unowned_raw_source_record_cannot_commit() -> Result<(), Box<dyn Error>> {

@@ -6,12 +6,12 @@
 
 ```rust
 pub trait StartupScanIdGenerator {
-    fn next_failure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_terminal_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    fn next_tool_closure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId {
+    fn next_failure_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_terminal_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
+    fn next_tool_closure_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId {
         /* provided */
     }
-    fn next_tool_closure_frontier_id(&mut self) -> context_frontier::ContextFrontierId {
+    fn next_tool_closure_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId {
         /* provided */
     }
     fn next_reclassified_turn_id(
@@ -27,8 +27,8 @@ pub trait StartupScanIdGenerator {
 pub struct UuidV7StartupScanIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl StartupScanIdGenerator for UuidV7StartupScanIdGenerator {
-    fn next_failure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_terminal_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_failure_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_terminal_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
     fn next_reclassified_turn_id(
         &mut self,
         _accepted_input: signalbox_domain::AcceptedInputId,
@@ -41,13 +41,13 @@ impl StartupScanIdGenerator for UuidV7StartupScanIdGenerator {
 ```rust
 pub enum StartupScanSessionOutcome {
     NoActiveTurn,
-    Recovered(boxed::Box<turn_eligibility::FailedAcceptedInputTurn>),
-    RecoveredModelCall(boxed::Box<model_execution::ModelCallTerminalOutcome>),
+    Recovered(boxed::Box<signalbox_domain::FailedAcceptedInputTurn>),
+    RecoveredModelCall(boxed::Box<signalbox_domain::ModelCallTerminalOutcome>),
     RecoveredContextCompaction {
         call: signalbox_domain::ModelCallId,
-        disposition: model_call::ModelCallDisposition,
+        disposition: signalbox_domain::ModelCallDisposition,
     },
-    RecoveredToolAttempt(boxed::Box<tool_attempt::ToolAttemptCrashOutcome>),
+    RecoveredToolAttempt(boxed::Box<signalbox_domain::ToolAttemptCrashOutcome>),
     ResumableToolBatch {
         turn: signalbox_domain::TurnId,
     },
@@ -77,7 +77,7 @@ pub trait StartupScanRepository {
     fn recover<Generator>(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnFailureIdentities,
+        identities: signalbox_domain::AcceptedInputTurnFailureIdentities,
         ids: &mut Generator,
     ) -> impl future::Future<
         Output = result::Result<StartupScanSessionOutcome, <Self as StartupScanRepository>::Error>,

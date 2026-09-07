@@ -19,60 +19,6 @@ pub const APPROVAL_JUDGE_EVAL_CASE_CATEGORIES: [&str; 9];
 ```rust
 pub struct ApprovalJudgeEvalRunId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge_eval::ApprovalJudgeEvalRunId
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for approval_judge_eval::ApprovalJudgeEvalRunId
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for approval_judge_eval::ApprovalJudgeEvalRunId {}
-impl<T> parse_display::IntoResult<T> for approval_judge_eval::ApprovalJudgeEvalRunId {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for approval_judge_eval::ApprovalJudgeEvalRunId
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for approval_judge_eval::ApprovalJudgeEvalRunId {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge_eval::ApprovalJudgeEvalRunId {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for approval_judge_eval::ApprovalJudgeEvalRunId
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for approval_judge_eval::ApprovalJudgeEvalRunId
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for approval_judge_eval::ApprovalJudgeEvalRunId
-where
-    T: ?marker::Sized,
-{
-}
 impl approval_judge_eval::ApprovalJudgeEvalRunId {
     #[must_use]
     pub const fn from_uuid(id: uuid::Uuid) -> Self;
@@ -86,8 +32,8 @@ impl approval_judge_eval::ApprovalJudgeEvalRunId {
 ```rust
 pub struct ApprovalJudgeEvalRunRecord {
     pub run: approval_judge_eval::ApprovalJudgeEvalRunId,
-    pub selection: configuration::DirectModelSelection,
-    pub target: model_call::ResolvedProviderTarget,
+    pub selection: signalbox_domain::DirectModelSelection,
+    pub target: signalbox_domain::ResolvedProviderTarget,
     pub provider_model: string::String,
     pub credential_reference: string::String,
     pub usage_input_includes_cache_tokens: bool,
@@ -98,60 +44,6 @@ pub struct ApprovalJudgeEvalRunRecord {
     pub scorecard: value::Value,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge_eval::ApprovalJudgeEvalRunRecord
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for approval_judge_eval::ApprovalJudgeEvalRunRecord
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for approval_judge_eval::ApprovalJudgeEvalRunRecord {}
-impl<T> parse_display::IntoResult<T> for approval_judge_eval::ApprovalJudgeEvalRunRecord {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for approval_judge_eval::ApprovalJudgeEvalRunRecord
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for approval_judge_eval::ApprovalJudgeEvalRunRecord {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge_eval::ApprovalJudgeEvalRunRecord {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for approval_judge_eval::ApprovalJudgeEvalRunRecord
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for approval_judge_eval::ApprovalJudgeEvalRunRecord
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for approval_judge_eval::ApprovalJudgeEvalRunRecord
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ApprovalJudgeEvalCallRecord
@@ -160,65 +52,11 @@ where
 pub struct ApprovalJudgeEvalCallRecord {
     pub case_name: string::String,
     pub repeat_ordinal: u32,
-    pub recommendation: policy::DelegateApprovalRecommendation,
+    pub recommendation: signalbox_domain::DelegateApprovalRecommendation,
     pub rationale: string::String,
-    pub usage: model_execution::ProviderReportedTokenUsage,
+    pub usage: signalbox_domain::ProviderReportedTokenUsage,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for approval_judge_eval::ApprovalJudgeEvalCallRecord
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for approval_judge_eval::ApprovalJudgeEvalCallRecord
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for approval_judge_eval::ApprovalJudgeEvalCallRecord {}
-impl<T> parse_display::IntoResult<T> for approval_judge_eval::ApprovalJudgeEvalCallRecord {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for approval_judge_eval::ApprovalJudgeEvalCallRecord
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for approval_judge_eval::ApprovalJudgeEvalCallRecord {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge_eval::ApprovalJudgeEvalCallRecord {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for approval_judge_eval::ApprovalJudgeEvalCallRecord
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for approval_judge_eval::ApprovalJudgeEvalCallRecord
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for approval_judge_eval::ApprovalJudgeEvalCallRecord
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ApprovalJudgeEvalRecordingSchema
@@ -226,60 +64,6 @@ where
 ```rust
 pub struct ApprovalJudgeEvalRecordingSchema {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for approval_judge_eval::ApprovalJudgeEvalRecordingSchema
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for approval_judge_eval::ApprovalJudgeEvalRecordingSchema
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for approval_judge_eval::ApprovalJudgeEvalRecordingSchema {}
-impl<T> parse_display::IntoResult<T> for approval_judge_eval::ApprovalJudgeEvalRecordingSchema {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for approval_judge_eval::ApprovalJudgeEvalRecordingSchema
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for approval_judge_eval::ApprovalJudgeEvalRecordingSchema {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge_eval::ApprovalJudgeEvalRecordingSchema {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for approval_judge_eval::ApprovalJudgeEvalRecordingSchema
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for approval_judge_eval::ApprovalJudgeEvalRecordingSchema
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for approval_judge_eval::ApprovalJudgeEvalRecordingSchema
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## verify_recording_schema
@@ -330,48 +114,6 @@ pub enum ApprovalJudgeEvalRecordingError {
     },
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for approval_judge_eval::ApprovalJudgeEvalRecordingError {}
-impl<T> parse_display::IntoResult<T> for approval_judge_eval::ApprovalJudgeEvalRecordingError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for approval_judge_eval::ApprovalJudgeEvalRecordingError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for approval_judge_eval::ApprovalJudgeEvalRecordingError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for approval_judge_eval::ApprovalJudgeEvalRecordingError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for approval_judge_eval::ApprovalJudgeEvalRecordingError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for approval_judge_eval::ApprovalJudgeEvalRecordingError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for approval_judge_eval::ApprovalJudgeEvalRecordingError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for approval_judge_eval::ApprovalJudgeEvalRecordingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

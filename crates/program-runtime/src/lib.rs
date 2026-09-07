@@ -225,6 +225,10 @@ impl ProgramHost {
         Self { journal }
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "The host retains its replay fault inline."
+    )]
     pub async fn execute(
         &self,
         run: ProgramRunId,
@@ -240,6 +244,10 @@ impl ProgramHost {
             .await
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "The host retains its replay fault inline."
+    )]
     async fn execute_loaded(
         &self,
         run: ProgramRunId,
@@ -392,6 +400,10 @@ impl ProgramHost {
         }
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "The host retains its replay fault inline."
+    )]
     async fn accept_request(
         &self,
         run: ProgramRunId,
@@ -430,6 +442,10 @@ impl ProgramHost {
         Ok(())
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "The host retains its replay fault inline."
+    )]
     async fn persist_divergence(
         &self,
         divergence: NondeterminismError,
@@ -449,6 +465,10 @@ impl ProgramHost {
         })
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "The host retains its replay fault inline."
+    )]
     async fn deliver_live(
         &self,
         run: ProgramRunId,

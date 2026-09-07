@@ -315,7 +315,7 @@ pub struct TimelineTextExcerpt {
 
 ```rust
 pub struct TimelineBlobReference {
-    pub blob_id: blob::BlobDigest,
+    pub blob_id: signalbox_domain::BlobDigest,
     pub length_bytes: u64,
     pub media_type: option::Option<string::String>,
 }
@@ -382,11 +382,11 @@ pub enum SessionTimelineDetailBody {
         turn_id: signalbox_domain::TurnId,
         model_call_id: signalbox_domain::ModelCallId,
         state: TimelineModelCallState,
-        model_identity_id: model_call::ProviderModelIdentity,
+        model_identity_id: signalbox_domain::ProviderModelIdentity,
         request_context_items: u64,
         response: option::Option<TimelineTextExcerpt>,
         usage: TimelineModelUsage,
-        provider_failure_cause: option::Option<model_execution::ProviderModelCallFailureCause>,
+        provider_failure_cause: option::Option<signalbox_domain::ProviderModelCallFailureCause>,
     },
     TurnLifecycle {
         turn_id: signalbox_domain::TurnId,

@@ -7,12 +7,6 @@
 ```rust
 pub struct CredentialReference(/* private */);
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, hash::Hash
-impl<T> dyn_clone::DynClone for CredentialReference
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl CredentialReference {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;
@@ -27,12 +21,6 @@ impl fmt::Display for CredentialReference {
 ```rust
 pub struct CredentialValue(/* private */);
 // derives: clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for CredentialValue
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl CredentialValue {
     pub fn new(value: impl convert::Into<vec::Vec<u8>>) -> Self;
     pub fn expose_bytes(&self) -> &[u8];
@@ -51,12 +39,6 @@ pub enum CredentialAccessFailure {
     Unreadable,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for CredentialAccessFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CredentialAccessError
@@ -67,12 +49,6 @@ pub struct CredentialAccessError {
     pub failure: CredentialAccessFailure,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for CredentialAccessError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl CredentialAccessError {
     pub fn new(reference: CredentialReference, failure: CredentialAccessFailure) -> Self;
 }

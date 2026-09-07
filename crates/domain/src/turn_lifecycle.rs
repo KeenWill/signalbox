@@ -87,7 +87,7 @@ pub enum IssuedOperationRef {
 /// A canonical nonempty set of exact issued-operation references.
 ///
 /// Empty or duplicate input is rejected by [`Self::try_from_operations`].
-/// S04 / S06: the private field also prevents
+/// the private field also prevents
 /// bypassing that boundary:
 ///
 /// ```compile_fail
@@ -159,7 +159,7 @@ pub enum NonEmptyIssuedOperationRefsError {
 /// Authority from one applied exact-set user decision to stop for
 /// reconciliation.
 ///
-/// S06: raw command and turn identities cannot construct
+/// raw command and turn identities cannot construct
 /// this proof:
 ///
 /// ```compile_fail
@@ -230,7 +230,7 @@ pub enum ReconciliationReason {
 
 /// Complete immutable evidence named by a reconciliation-required turn.
 ///
-/// S04 / S06 / S07: fields remain
+/// fields remain
 /// private because only the later aggregate can validate that the set is exact
 /// and unacknowledged and that the reason matches its durable evidence:
 ///
@@ -314,7 +314,7 @@ pub(crate) fn test_reconciliation_marker(
 /// One active phase; every value retains the session's progressing-turn slot.
 ///
 /// Variant fields make a running phase own exactly one current attempt and
-/// each wait own its exact subject with no optional attempt. S04 / S06 /
+/// each wait own its exact subject with no optional attempt.
 /// a current attempt cannot be omitted from `Running`:
 ///
 /// ```compile_fail
@@ -322,7 +322,7 @@ pub(crate) fn test_reconciliation_marker(
 /// let _ = ActiveTurnPhase::Running;
 /// ```
 ///
-/// S10: nor can an approval wait carry an
+/// nor can an approval wait carry an
 /// independent attempt:
 ///
 /// ```compile_fail
@@ -379,7 +379,7 @@ impl ActiveTurnPhase {
 
 /// The immutable terminal classification carried by a turn.
 ///
-/// S07: cancellation cannot omit its purpose-specific
+/// cancellation cannot omit its purpose-specific
 /// proof:
 ///
 /// ```compile_fail
@@ -387,7 +387,7 @@ impl ActiveTurnPhase {
 /// let _ = TurnDisposition::Cancelled;
 /// ```
 ///
-/// S04 / S06 / S07: reconciliation
+/// reconciliation
 /// likewise cannot omit its complete marker:
 ///
 /// ```compile_fail
@@ -537,7 +537,7 @@ mod tests {
         assert_ne!(model, tool);
     }
 
-    /// S04 / S06: empty and duplicate caller
+    /// empty and duplicate caller
     /// collections cannot construct the canonical ambiguity set.
     #[test]
     fn ambiguity_set_rejects_empty_and_duplicate_input() {
@@ -553,7 +553,7 @@ mod tests {
         );
     }
 
-    /// S04 / S06: valid reorderings construct
+    /// valid reorderings construct
     /// equal canonical sets and preserve every exact reference.
     #[test]
     fn ambiguity_set_is_canonical_and_exact() {
@@ -582,7 +582,7 @@ mod tests {
         );
     }
 
-    /// S01 / S07 / S09: starting lineage remains a closed typed
+    /// starting lineage remains a closed typed
     /// algebra independently of frontier construction authority.
     #[test]
     fn starting_lineage_distinguishes_first_and_exact_predecessor() {
@@ -606,11 +606,11 @@ mod tests {
         ));
     }
 
-    /// S01 / S09: the opaque start value retains the exact lineage/frontier
+    /// the opaque start value retains the exact lineage/frontier
     /// pair, but its module-private construction does not claim the later
     /// eligibility transition is implemented.
     #[test]
-    fn s01_s09_turn_start_shape_couples_lineage_and_exact_frontier() {
+    fn turn_start_shape_couples_lineage_and_exact_frontier() {
         let snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
             session_id(1),
             context_frontier_id(1),
@@ -637,7 +637,7 @@ mod tests {
         assert_eq!(start.frontier(), snapshot.frontier());
     }
 
-    /// S04 / S06 / S10: every active phase
+    /// every active phase
     /// retains the slot and structurally carries exactly its required subject.
     #[test]
     fn active_phases_retain_slot_with_exact_subjects() {
@@ -685,7 +685,7 @@ mod tests {
         ));
     }
 
-    /// S04 / S06 / S07: every marker
+    /// every marker
     /// reason retains the exact canonical ambiguity set and typed authority.
     #[test]
     fn reconciliation_markers_preserve_exact_sets_and_reasons() {
@@ -727,7 +727,7 @@ mod tests {
         assert_eq!(marker.reason(), &reason);
     }
 
-    /// S07: cancellation and reconciliation terminal
+    /// cancellation and reconciliation terminal
     /// values retain their exact proof-bearing payloads.
     #[test]
     fn terminal_dispositions_preserve_exact_payloads() {

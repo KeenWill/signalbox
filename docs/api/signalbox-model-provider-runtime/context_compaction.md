@@ -8,19 +8,13 @@
 pub struct ContextCompactionModelRequest {
     pub call: signalbox_domain::ModelCallId,
     pub session: signalbox_domain::SessionId,
-    pub selection: configuration::DirectModelSelection,
-    pub target: model_call::ResolvedProviderTarget,
+    pub selection: signalbox_domain::DirectModelSelection,
+    pub target: signalbox_domain::ResolvedProviderTarget,
     pub credential_reference: string::String,
     pub system_prompt: string::String,
     pub rendered_range: string::String,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ContextCompactionModelRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ContextCompactionModelResult
@@ -28,15 +22,9 @@ where
 ```rust
 pub struct ContextCompactionModelResult {
     pub summary: string::String,
-    pub usage: usage::TokenUsage,
+    pub usage: signalbox_model_runtime::TokenUsage,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ContextCompactionModelResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ContextCompactionModel
@@ -84,22 +72,16 @@ where
 ```rust
 pub struct RuntimeContextCompactionModel<R> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for RuntimeContextCompactionModel<R>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<R> RuntimeContextCompactionModel<R> {
     pub const fn new(runtime: R, models: RuntimeModelCatalog) -> Self;
 }
 impl<R> ContextCompactionModel for RuntimeContextCompactionModel<R>
 where
-    R: runtime::ModelRuntime<signalbox_domain::ModelCallId>
+    R: signalbox_model_runtime::ModelRuntime<signalbox_domain::ModelCallId>
         + fmt::Debug
         + marker::Send
         + marker::Sync,
-    <R as runtime::ModelRuntime>::Prepared: marker::Send,
+    <R as signalbox_model_runtime::ModelRuntime>::Prepared: marker::Send,
 {
     fn execute<'a>(
         &'a self,
@@ -138,12 +120,6 @@ pub enum ContextCompactionModelError {
     InvalidSummary,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ContextCompactionModelError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for ContextCompactionModelError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

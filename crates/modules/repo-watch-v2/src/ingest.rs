@@ -7,7 +7,8 @@ use serde_json::Value;
 use signalbox_ownership_seam::{
     BranchName, CommitSha, OffsetDateTime, RepoWatchEventIdentityFrontierEntryV1,
     RepoWatchEventIdentityFrontierV1, RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation,
-    RepoWatchPullRequestLifecycle, RepositorySlug, UuidV7RepoWatchEventIdGenerator,
+    RepoWatchPullRequestLifecycle, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+    RepositorySlug, UuidV7RepoWatchEventIdGenerator,
     derive_repo_watch_events_with_merged_baselines,
 };
 use tokio::{
@@ -39,6 +40,19 @@ pub struct IngestBaseline {
     pub frontier: RepoWatchEventIdentityFrontierV1,
 }
 
+#[derive(sqlx::FromRow)]
+struct IngestRepositoryRow {
+    frontier_generation: Decimal,
+    comparison_baseline: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct IngestFrontierRow {
+    stream_identity: Vec<u8>,
+    sequence: Decimal,
+    pull_request_number: Option<Decimal>,
+}
+
 impl RepoWatchStore {
     /// Loads the baseline and complete frontier from one consistent database snapshot.
     pub async fn ingest_baseline(
@@ -49,14 +63,14 @@ impl RepoWatchStore {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *transaction)
             .await?;
-        let row: Option<(Decimal, String)> = sqlx::query_as(
-            "SELECT frontier_generation, comparison_baseline::text
+        let row: Option<IngestRepositoryRow> = sqlx::query_as(
+            "SELECT frontier_generation, comparison_baseline::text AS comparison_baseline
                FROM repository_state WHERE repository = $1",
         )
         .bind(repository.as_str())
         .fetch_optional(&mut *transaction)
         .await?;
-        let entries: Vec<(Vec<u8>, Decimal, Option<Decimal>)> = sqlx::query_as(
+        let entries: Vec<IngestFrontierRow> = sqlx::query_as(
             "SELECT stream_identity, sequence, pull_request_number
                FROM frontier WHERE repository = $1 ORDER BY stream_identity",
         )
@@ -65,11 +79,11 @@ impl RepoWatchStore {
         .await?;
         transaction.commit().await?;
         let (generation, observation, merged_baselines) = match row {
-            Some((generation, observation)) => {
-                let value: Value = serde_json::from_str(&observation)
+            Some(row) => {
+                let value: Value = serde_json::from_str(&row.comparison_baseline)
                     .map_err(|_| StoreError::InvalidComparisonBaseline)?;
                 (
-                    generation
+                    row.frontier_generation
                         .to_u64()
                         .ok_or(StoreError::InvalidFrontierGeneration)?,
                     Some(
@@ -84,15 +98,17 @@ impl RepoWatchStore {
         };
         let frontier = entries
             .into_iter()
-            .map(|(identity, sequence, number)| {
-                let identity = identity
+            .map(|row| {
+                let identity = row
+                    .stream_identity
                     .try_into()
                     .map_err(|_| StoreError::InvalidComparisonBaseline)?;
-                let sequence = sequence
+                let sequence = row
+                    .sequence
                     .to_u64()
                     .and_then(std::num::NonZeroU64::new)
                     .ok_or(StoreError::InvalidComparisonBaseline)?;
-                Ok(match number {
+                Ok(match row.pull_request_number {
                     Some(number) => RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
                         identity,
                         sequence,
@@ -154,6 +170,25 @@ impl RepoWatchStore {
                 .map_err(|_| StoreError::InvalidComparisonBaseline)
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
+        let state = observed.observation.state();
+        let ordinary_observation = RepoWatchObservation::new(
+            observed.observation.signal_reviewers().to_vec(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests: state
+                    .pull_requests()
+                    .iter()
+                    .filter(|pull_request| {
+                        !merged_baselines
+                            .iter()
+                            .any(|retained| retained.number() == pull_request.context().number())
+                    })
+                    .cloned()
+                    .collect(),
+                workflow_runs: state.workflow_runs().to_vec(),
+                branch_heads: state.branch_heads().to_vec(),
+            })
+            .map_err(|_| StoreError::InvalidComparisonBaseline)?,
+        );
         let projection = RepositoryProjection {
             repository: RepositoryState {
                 repository: &observed.repository,
@@ -161,8 +196,7 @@ impl RepoWatchStore {
                 default_head: &observed.default_head,
                 observed_at: observed.observed_at,
             },
-            pull_requests: observed
-                .observation
+            pull_requests: ordinary_observation
                 .state()
                 .pull_requests()
                 .iter()
@@ -188,7 +222,7 @@ impl RepoWatchStore {
                     }
                 })
                 .collect(),
-            comparison_baseline: &observed.observation,
+            comparison_baseline: &ordinary_observation,
             merged_baselines: &merged_baselines,
         };
         let events = occurrences

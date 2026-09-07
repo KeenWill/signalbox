@@ -152,6 +152,18 @@ async fn generated_svg_validates() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn unused_namespace_declarations_within_the_attribute_budget_validate()
+-> Result<(), Box<dyn Error>> {
+    const UNUSED_PREFIX_COUNT: usize = 128;
+    let source = SvgFixture::unused_namespace_declarations(UNUSED_PREFIX_COUNT).into_source()?;
+
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
 async fn generated_svg_extracts_text() -> Result<(), Box<dyn Error>> {
     let fixture = SvgFixture::ordinary();
     let expected_text = fixture.expected_text();

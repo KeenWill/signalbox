@@ -1378,6 +1378,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "expectable"
+version = "0.1.0"
+source = "git+https://github.com/KeenWill/expectable-rs?tag=v0.1.0#3b62ed364f05e128555577298b4e56ce084de939"
+dependencies = [
+ "serde",
+ "unicode-width",
+]
+
+[[package]]
 name = "extended"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1527,9 +1536,9 @@ checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
 name = "futures-executor"
-version = "0.3.32"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
+checksum = "031b47cf1a3c6cc8bc2fc76cd437f521619387907d469316e7c0bc278f1f5432"
 dependencies = [
  "futures-core",
  "futures-task",
@@ -3224,7 +3233,7 @@ dependencies = [
  "proc-macro-error-attr3",
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3360,9 +3369,9 @@ checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
 name = "quick-xml"
-version = "0.41.0"
+version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
 dependencies = [
  "memchr",
 ]
@@ -4393,6 +4402,7 @@ dependencies = [
  "bstr",
  "divan",
  "expect-test",
+ "expectable",
  "gix-validate",
  "gungraun",
  "hex",
@@ -4402,7 +4412,6 @@ dependencies = [
  "serde_json",
  "serde_stacker",
  "sha2 0.11.0",
- "signalbox-expect-table",
  "url",
  "uuid",
 ]
@@ -4416,13 +4425,6 @@ dependencies = [
  "reqwest",
  "rustls",
  "tokio",
-]
-
-[[package]]
-name = "signalbox-expect-table"
-version = "0.0.0"
-dependencies = [
- "expect-test",
 ]
 
 [[package]]
@@ -4578,11 +4580,12 @@ name = "signalbox-model-provider-runtime"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "expectable",
+ "serde",
  "serde_json",
  "signalbox-application",
  "signalbox-derive",
  "signalbox-domain",
- "signalbox-expect-table",
  "signalbox-model-runtime",
  "tokio",
  "tracing",
@@ -4607,6 +4610,7 @@ version = "0.0.0"
 dependencies = [
  "eventsource-stream",
  "expect-test",
+ "expectable",
  "futures-channel",
  "futures-util",
  "httpdate",
@@ -4614,7 +4618,6 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "signalbox-expect-table",
  "tokio",
 ]
 
@@ -4623,13 +4626,13 @@ name = "signalbox-model-runtime-anthropic"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "expectable",
  "futures-util",
  "reqwest",
  "rustls",
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "signalbox-expect-table",
  "signalbox-model-runtime",
  "tokio",
 ]
@@ -4669,12 +4672,12 @@ name = "signalbox-model-runtime-openai"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "expectable",
  "futures-util",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
- "signalbox-expect-table",
  "signalbox-model-runtime",
  "tokio",
 ]
@@ -4715,6 +4718,7 @@ name = "signalbox-persistence"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "expectable",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -4724,7 +4728,6 @@ dependencies = [
  "signalbox-conversation-import-codex",
  "signalbox-derive",
  "signalbox-domain",
- "signalbox-expect-table",
  "signalbox-newtype",
  "signalbox-tools-plan",
  "sqlx",
@@ -5716,7 +5719,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -5817,22 +5820,22 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.18"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.18"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -6285,6 +6288,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
 
 [[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
 name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6356,9 +6365,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.25.0"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",

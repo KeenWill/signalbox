@@ -10,12 +10,6 @@ pub struct Script {
     pub terminal: TerminalEvidence,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for Script
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl Script {
     pub fn delivering(terminal: TerminalEvidence) -> Self;
     #[must_use]
@@ -28,12 +22,6 @@ impl Script {
 ```rust
 pub struct ScriptedModel<C> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for ScriptedModel<C>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<C> ScriptedModel<C> {
     pub fn following(scripts: impl collect::IntoIterator<Item = Script>) -> Self;
     pub fn single(script: Script) -> Self;

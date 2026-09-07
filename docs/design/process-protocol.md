@@ -95,9 +95,9 @@ traversal each one continues belongs to
 exactly the closed daemon-actionable set the runner wire carries, member for
 member, so every retained failure is serializable. The daemon bounds the detail
 and retains the runner's text unchanged, following the `operation_failed`
-contract in [runner-protocol.md](../spec/runner-protocol.md). The detail is
-untrusted runner-authored text, so the status projection is a transformed view
-of that retained record: it applies the diagnostic-evidence redaction in
+contract in [runner-protocol.md](runner-protocol.md). The detail is untrusted
+runner-authored text, so the status projection is a transformed view of that
+retained record: it applies the diagnostic-evidence redaction in
 [process-protocol.md](../spec/process-protocol.md), removing host and credential
 paths, before exposing it. The event notifies a follower of each live runner
 transition above its snapshot cursor; the snapshot's runner projection carries

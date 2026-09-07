@@ -253,11 +253,11 @@ pub enum SearchResultSource {
         source_turn: signalbox_domain::TurnId,
     },
     TurnTranscriptEntry {
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         turn: signalbox_domain::TurnId,
     },
     SessionTranscriptEntry {
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
     },
     ToolRequest {
         request: signalbox_domain::ToolRequestId,

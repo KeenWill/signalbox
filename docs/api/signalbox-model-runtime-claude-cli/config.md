@@ -6,11 +6,11 @@
 
 ```rust
 pub struct ClaudeCliConfig {
-    pub model_capabilities: capability::ModelCapabilityCatalog,
+    pub model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
     pub executable: path::PathBuf,
     pub mcp_bridge_executable: path::PathBuf,
     pub working_directory: path::PathBuf,
-    pub credential_reference: credential::CredentialReference,
+    pub credential_reference: signalbox_model_runtime::CredentialReference,
     pub exchange_timeout: option::Option<time::Duration>,
     pub interrupt_grace: time::Duration,
     pub post_kill_reap_bound: option::Option<time::Duration>,
@@ -19,18 +19,12 @@ pub struct ClaudeCliConfig {
     pub native_message_limit: option::Option<usize>,
 }
 // derives: fmt::Debug, clone::Clone
-impl<T> dyn_clone::DynClone for ClaudeCliConfig
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ClaudeCliConfig {
     pub fn new(
         executable: impl convert::Into<path::PathBuf>,
         mcp_bridge_executable: impl convert::Into<path::PathBuf>,
         working_directory: impl convert::Into<path::PathBuf>,
-        credential_reference: credential::CredentialReference,
+        credential_reference: signalbox_model_runtime::CredentialReference,
         post_kill_reap_bound: option::Option<time::Duration>,
         native_message_limit: option::Option<usize>,
     ) -> Self;

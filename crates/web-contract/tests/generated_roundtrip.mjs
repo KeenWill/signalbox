@@ -3086,3 +3086,9 @@ test("generated window decoder requires both continuation fields", () => {
     /continuation_after must be present/,
   );
 });
+
+test("rates retain the disposition of a session closed with a live goal", async () => {
+  const { decodeWebSessionRates } = await import("../../../clients/web/src/generated/web-contract.mjs");
+  const fixture = JSON.parse(await readFile(new URL("./fixtures/session-closed-rates.json", import.meta.url), "utf8"));
+  assert.equal(decodeWebSessionRates(fixture).sessions[0].goal_disposition, "session_closed");
+});

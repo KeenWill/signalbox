@@ -352,7 +352,8 @@ async fn create_fixture_session(socket: PathBuf) -> Result<String, Box<dyn Error
     Ok(session_id)
 }
 
-/// Installs one complete metadata snapshot through the process request, which no terminal verb exposes.
+/// Installs one complete metadata snapshot through the process request, which no terminal verb
+/// exposes.
 async fn replace_fixture_metadata(
     socket: &Path,
     session_id: &str,
@@ -421,9 +422,9 @@ fn required_canonical_uuid_environment(name: &'static str) -> Result<Uuid, Box<d
     Ok(uuid)
 }
 
-/// the shipped client lists daemon-owned templates, creates from one
-/// resolved startup snapshot, and a catalog edit plus daemon reload changes
-/// only later sessions while both copies retain exact provenance.
+/// the shipped client lists daemon-owned templates, creates from one resolved startup snapshot, and
+/// a catalog edit plus daemon reload changes only later sessions while both copies retain exact
+/// provenance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_template_create_is_copy_on_create_across_daemon_reload()
@@ -605,9 +606,8 @@ dangerous_tool_auto_approval = false
     Ok(())
 }
 
-/// the terminal search verb lists only the sessions that satisfy every
-/// named filter, excluding one that fails the title query and one that fails
-/// the required tag.
+/// the terminal search verb lists only the sessions that satisfy every named filter, excluding one
+/// that fails the title query and one that fails the required tag.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_search_lists_only_sessions_matching_every_filter()
@@ -683,8 +683,8 @@ async fn terminal_client_search_lists_only_sessions_matching_every_filter()
     runtime.stop().await
 }
 
-/// archiving removes a session from the default search view, and the
-/// explicit switch restores it while naming its archive state.
+/// archiving removes a session from the default search view, and the explicit switch restores it
+/// while naming its archive state.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_search_lists_an_archived_session_only_when_requested()
@@ -1047,8 +1047,8 @@ async fn terminal_client_conversations_imported_row_feeds_continue() -> Result<(
     runtime.stop().await
 }
 
-/// the shipped terminal verb reads one named file and exposes
-/// first insertion separately from exact-snapshot reimport.
+/// the shipped terminal verb reads one named file and exposes first insertion separately from
+/// exact-snapshot reimport.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result<(), Box<dyn Error>>
@@ -1160,9 +1160,8 @@ impl ImportedInspectionFixture {
     }
 }
 
-/// the shipped terminal exposes an imported conversation's selectable
-/// positions with their previews and total, so the position `continue`
-/// consumes never has to be guessed.
+/// the shipped terminal exposes an imported conversation's selectable positions with their previews
+/// and total, so the position `continue` consumes never has to be guessed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_completes_an_offline_imported_inspection() -> Result<(), Box<dyn Error>> {
@@ -1236,9 +1235,9 @@ async fn terminal_client_completes_an_offline_imported_inspection() -> Result<()
     Ok(())
 }
 
-/// `latest` resolves to the imported conversation's final position,
-/// prints that concrete ordinal, and seeds the created session through it, so
-/// the user never has to know the count to continue from the end.
+/// `latest` resolves to the imported conversation's final position, prints that concrete ordinal,
+/// and seeds the created session through it, so the user never has to know the count to continue
+/// from the end.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_completes_an_offline_latest_position_continuation()
@@ -1350,8 +1349,7 @@ async fn import_inspection_source(
     Ok(identity)
 }
 
-/// scan mode selects recursive matching regular files and
-/// reports them in deterministic path order.
+/// scan mode selects recursive matching regular files and reports them in deterministic path order.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_scan_selects_recursive_files_in_sorted_path_order()
@@ -1447,8 +1445,8 @@ async fn terminal_client_scan_selects_recursive_files_in_sorted_path_order()
     Ok(())
 }
 
-/// scan mode routes a source larger than one frame to the
-/// process transport instead of rejecting or truncating it locally.
+/// scan mode routes a source larger than one frame to the process transport instead of rejecting or
+/// truncating it locally.
 #[tokio::test]
 async fn terminal_client_scan_routes_multiframe_source_to_transport() -> Result<(), Box<dyn Error>>
 {
@@ -1488,8 +1486,7 @@ async fn terminal_client_scan_routes_multiframe_source_to_transport() -> Result<
     Ok(())
 }
 
-/// exact scan replay reports the durable digest match as
-/// already imported for that file.
+/// exact scan replay reports the durable digest match as already imported for that file.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_scan_replays_as_already_imported() -> Result<(), Box<dyn Error>> {
@@ -1582,8 +1579,8 @@ fn scan_imported_identity(line: &str, path: &Path) -> Result<String, Box<dyn Err
     Ok(identity.to_owned())
 }
 
-/// the terminal model verb observes the complete current
-/// defaults facts before sending one recoverable replacement command.
+/// the terminal model verb observes the complete current defaults facts before sending one
+/// recoverable replacement command.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_installs_a_forward_only_model_defaults_epoch() -> Result<(), Box<dyn Error>>
@@ -1702,9 +1699,8 @@ impl ImportedContinuationFixture {
     }
 }
 
-/// a synthetic imported prefix seeds a
-/// live session whose next real turn follows the imported entries in the
-/// authoritative terminal transcript.
+/// a synthetic imported prefix seeds a live session whose next real turn follows the imported
+/// entries in the authoritative terminal transcript.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_completes_an_offline_imported_continuation() -> Result<(), Box<dyn Error>>
@@ -1967,10 +1963,9 @@ context_window_tokens = 200000
     Ok(())
 }
 
-/// the daily terminal binary drives the real
-/// process server, durable outbox, scheduler, model-execution bridge, and
-/// authoritative reply reread without network access. A one-step provider
-/// proves that hidden physical retry would fail.
+/// the daily terminal binary drives the real process server, durable outbox, scheduler,
+/// model-execution bridge, and authoritative reply reread without network access. A one-step
+/// provider proves that hidden physical retry would fail.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<(), Box<dyn Error>>
@@ -2226,8 +2221,8 @@ context_window_tokens = 200000
     drop(container);
     Ok(())
 }
-/// the terminal and real daemon drive an external target through one
-/// session-backed read-only pass, atomically bind a finding, and read it back.
+/// the terminal and real daemon drive an external target through one session-backed read-only pass,
+/// atomically bind a finding, and read it back.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_drives_review_target_to_finding() -> Result<(), Box<dyn Error>> {
@@ -2737,10 +2732,9 @@ async fn wait_for_pending_approval(
     .map_err(|_| io::Error::other("the fixture turn never parked on its approval wait"))?
 }
 
-/// while one client's `send` keeps waiting on the approval
-/// wait, a second client reads the pending request from the transcript and
-/// approves it; the tool executes, the continuation round completes, and the
-/// waiting `send` prints the final scripted reply.
+/// while one client's `send` keeps waiting on the approval wait, a second client reads the pending
+/// request from the transcript and approves it; the tool executes, the continuation round
+/// completes, and the waiting `send` prints the final scripted reply.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_approval_from_a_second_client_completes_a_waiting_send()
@@ -2971,10 +2965,9 @@ context_window_tokens = 200000
     Ok(())
 }
 
-/// an explicitly opted-in smoke test drives the same
-/// terminal and process boundary through the production Anthropic runtime
-/// adapter. It requires a reviewed model catalog, a credential file, and a
-/// direct selection identity supplied by the operator.
+/// an explicitly opted-in smoke test drives the same terminal and process boundary through the
+/// production Anthropic runtime adapter. It requires a reviewed model catalog, a credential file,
+/// and a direct selection identity supplied by the operator.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires PostgreSQL, a local socket, and an explicitly configured real Anthropic call"]
 async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<dyn Error>> {
@@ -3105,9 +3098,8 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
     Ok(())
 }
 
-/// the terminal client creates a prompted
-/// session from a file, copies the exact prompt forward through a model-only
-/// replacement, and clears it explicitly, with the immutable epoch rows
+/// the terminal client creates a prompted session from a file, copies the exact prompt forward
+/// through a model-only replacement, and clears it explicitly, with the immutable epoch rows
 /// holding the exact text throughout.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]

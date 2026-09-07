@@ -186,8 +186,8 @@ fn imported_command(
     )
 }
 
-/// first handling commits the exact imported prefix,
-/// seed, command result, session, and outbox event atomically.
+/// first handling commits the exact imported prefix, seed, command result, session, and outbox
+/// event atomically.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn first_imported_frontier_creation_commits_exact_seed_atomically()
@@ -248,8 +248,8 @@ async fn first_imported_frontier_creation_commits_exact_seed_atomically()
     Ok(())
 }
 
-/// an imported-creation command predating settings
-/// cannot replay with an explicit settings document.
+/// an imported-creation command predating settings cannot replay with an explicit settings
+/// document.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn legacy_imported_creation_rejects_explicit_model_settings() -> Result<(), Box<dyn Error>> {
@@ -319,8 +319,7 @@ async fn legacy_imported_creation_rejects_explicit_model_settings() -> Result<()
     Ok(())
 }
 
-/// equal replay returns the recorded result without
-/// consuming any fresh semantic identity.
+/// equal replay returns the recorded result without consuming any fresh semantic identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn equal_replay_requires_its_placement_effect_without_generation()
@@ -405,8 +404,8 @@ async fn equal_replay_requires_its_placement_effect_without_generation()
     Ok(())
 }
 
-/// imported creation replay rejects a placement head
-/// behind its append-only event history before generating fresh identities.
+/// imported creation replay rejects a placement head behind its append-only event history before
+/// generating fresh identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn imported_creation_replay_rejects_a_lagging_placement_head() -> Result<(), Box<dyn Error>> {
@@ -483,9 +482,8 @@ async fn imported_creation_replay_rejects_a_lagging_placement_head() -> Result<(
     Ok(())
 }
 
-/// the purpose-specific command
-/// load reconstitutes the complete stored command, defaults, result, semantic
-/// prefix, and seed.
+/// the purpose-specific command load reconstitutes the complete stored command, defaults, result,
+/// semantic prefix, and seed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn command_load_reconstitutes_complete_checked_seed() -> Result<(), Box<dyn Error>> {
@@ -556,8 +554,8 @@ async fn command_load_reconstitutes_complete_checked_seed() -> Result<(), Box<dy
     Ok(())
 }
 
-/// ordinary current-session loading returns the
-/// imported ancestry after validating the bounded one-to-one seed proof.
+/// ordinary current-session loading returns the imported ancestry after validating the bounded
+/// one-to-one seed proof.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn current_session_load_reconstitutes_imported_ancestry() -> Result<(), Box<dyn Error>> {
@@ -610,8 +608,8 @@ async fn current_session_load_reconstitutes_imported_ancestry() -> Result<(), Bo
     Ok(())
 }
 
-/// a changed canonical payload under a claimed
-/// command identity returns typed conflicting reuse without generating entries.
+/// a changed canonical payload under a claimed command identity returns typed conflicting reuse
+/// without generating entries.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn conflicting_reuse_is_typed_and_generation_free() -> Result<(), Box<dyn Error>> {
@@ -667,8 +665,8 @@ async fn conflicting_reuse_is_typed_and_generation_free() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// a missing imported conversation is a pre-claim
-/// typed outcome and generates no semantic identities.
+/// a missing imported conversation is a pre-claim typed outcome and generates no semantic
+/// identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn missing_conversation_remains_unclaimed_and_generation_free() -> Result<(), Box<dyn Error>>
@@ -699,8 +697,7 @@ async fn missing_conversation_remains_unclaimed_and_generation_free() -> Result<
     Ok(())
 }
 
-/// a missing imported frontier is a pre-claim typed
-/// outcome and generates no semantic identities.
+/// a missing imported frontier is a pre-claim typed outcome and generates no semantic identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn missing_frontier_remains_unclaimed_and_generation_free() -> Result<(), Box<dyn Error>> {
@@ -736,9 +733,8 @@ async fn missing_frontier_remains_unclaimed_and_generation_free() -> Result<(), 
     Ok(())
 }
 
-/// concurrent equal first handling
-/// converges on one committed seed, and only the command-claim winner consumes
-/// semantic identities.
+/// concurrent equal first handling converges on one committed seed, and only the command-claim
+/// winner consumes semantic identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn concurrent_equal_creation_has_one_identity_consuming_winner() -> Result<(), Box<dyn Error>>
@@ -830,8 +826,7 @@ async fn concurrent_equal_creation_has_one_identity_consuming_winner() -> Result
     Ok(())
 }
 
-/// a generated session identity collision is typed
-/// and rolls back the command claim.
+/// a generated session identity collision is typed and rolls back the command claim.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn generated_session_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
@@ -879,8 +874,7 @@ async fn generated_session_identity_collision_is_typed() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// a generated semantic-entry identity collision is
-/// typed and rolls back the command claim.
+/// a generated semantic-entry identity collision is typed and rolls back the command claim.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn generated_semantic_entry_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
@@ -928,8 +922,7 @@ async fn generated_semantic_entry_identity_collision_is_typed() -> Result<(), Bo
     Ok(())
 }
 
-/// a generated seed-frontier identity collision is
-/// typed and rolls back the command claim.
+/// a generated seed-frontier identity collision is typed and rolls back the command claim.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn generated_seed_frontier_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
@@ -977,8 +970,7 @@ async fn generated_seed_frontier_identity_collision_is_typed() -> Result<(), Box
     Ok(())
 }
 
-/// purpose loading rejects a stored sentinel command UUID
-/// before reconstructing a domain command.
+/// purpose loading rejects a stored sentinel command UUID before reconstructing a domain command.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn command_load_rejects_stored_sentinel_command_identity() -> Result<(), Box<dyn Error>> {
@@ -1029,8 +1021,8 @@ async fn command_load_rejects_stored_sentinel_command_identity() -> Result<(), B
     Ok(())
 }
 
-/// imported ancestry carrying template provenance
-/// fails closed at the ordinary current-session load boundary.
+/// imported ancestry carrying template provenance fails closed at the ordinary current-session load
+/// boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn current_load_rejects_imported_template_provenance() -> Result<(), Box<dyn Error>> {
@@ -1079,8 +1071,8 @@ async fn current_load_rejects_imported_template_provenance() -> Result<(), Box<d
     Ok(())
 }
 
-/// an imported session whose one-to-one seed is absent fails
-/// closed at the ordinary current-session load boundary.
+/// an imported session whose one-to-one seed is absent fails closed at the ordinary current-session
+/// load boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn current_load_rejects_missing_imported_seed() -> Result<(), Box<dyn Error>> {
@@ -1127,8 +1119,8 @@ async fn current_load_rejects_missing_imported_seed() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// the constant-size current-session proof rejects a
-/// seed header whose declared member count differs from the imported boundary.
+/// the constant-size current-session proof rejects a seed header whose declared member count
+/// differs from the imported boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn current_load_rejects_cross_wired_seed_header_count() -> Result<(), Box<dyn Error>> {

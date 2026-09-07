@@ -7,11 +7,4 @@
 ```rust
 pub struct GitPushArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for GitPushArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for GitPushArguments where T: for<'de> de::Deserialize<'de> {}
 ```

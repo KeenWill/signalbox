@@ -544,8 +544,8 @@ mod tests {
         assert_uuid_v7_candidate(second_attempt_uuid);
     }
 
-    /// orchestration forwards one exact session and
-    /// identity set to the atomic port without selecting a target turn.
+    /// orchestration forwards one exact session and identity set to the atomic port without
+    /// selecting a target turn.
     #[test]
     fn forwards_one_exact_session_and_identity_set() {
         let session = session_id(1);
@@ -577,8 +577,8 @@ mod tests {
         assert_eq!(transaction.observed, vec![(session, identities)]);
     }
 
-    /// the committed activated-turn view returned by the
-    /// transaction passes through without application reconstruction.
+    /// the committed activated-turn view returned by the transaction passes through without
+    /// application reconstruction.
     #[test]
     fn activated_outcome_passes_through_unchanged() {
         let activated = activated_turn();
@@ -595,8 +595,8 @@ mod tests {
         assert_eq!(service.into_parts().1.observed.len(), 1);
     }
 
-    /// a transaction failure remains nonterminal after one
-    /// call; orchestration does not retry or fabricate an eligibility result.
+    /// a transaction failure remains nonterminal after one call; orchestration does not retry or
+    /// fabricate an eligibility result.
     #[test]
     fn transaction_failure_is_returned_without_retry() {
         let mut service = StartEligibleTurnService::new(

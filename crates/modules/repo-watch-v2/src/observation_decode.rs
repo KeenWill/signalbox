@@ -199,6 +199,7 @@ pub(crate) fn merged_baselines(
     };
     array(&value["merged_pull_requests"], |v| {
         RepoWatchMergedPullRequestBaselineV1::try_new(RepoWatchMergedPullRequestBaselineInputV1 {
+            head_repository: RepositorySlug::try_new(text(&v["head_repository"])?).ok()?,
             number: PullRequestNumber::new(positive(&v["number"])?),
             head_sha: CommitSha::try_new(text(&v["head_sha"])?).ok()?,
             signal_reviewers: array(&v["signal_reviewers"], |v| {

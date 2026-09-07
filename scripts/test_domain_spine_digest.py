@@ -392,12 +392,12 @@ pub fn sample::ToolArgumentValidator::validate(&self)
 
     def test_split_page_links_cover_current_and_removed_types(self) -> None:
         document = {'root': 0, 'paths': {}, 'index': {
-            '0': {'id': 0, 'crate_id': 0, 'name': 'sample',
+            '0': {'id': 0, 'crate_id': 0, 'name': 'sample', 'attrs': [],
                   'inner': {'module': {'items': [1, 2]}}},
-            '1': {'id': 1, 'crate_id': 0, 'name': 'Record', 'visibility': 'public',
+            '1': {'id': 1, 'crate_id': 0, 'name': 'Record', 'visibility': 'public', 'attrs': [],
                   'span': {'filename': 'src/example.rs', 'begin': [1, 1]},
                   'inner': {'struct': {}}},
-            '2': {'id': 2, 'crate_id': 0, 'name': 'Removed', 'visibility': 'public',
+            '2': {'id': 2, 'crate_id': 0, 'name': 'Removed', 'visibility': 'public', 'attrs': [],
                   'span': {'filename': 'src/example.rs', 'begin': [2, 1]},
                   'inner': {'struct': {}}},
         }}

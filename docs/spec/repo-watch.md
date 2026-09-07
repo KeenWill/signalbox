@@ -124,10 +124,10 @@ The module's repository task serializes polling and webhook wakes. Poll
 intervals are start-to-start; a wake received during an attempt waits for that
 attempt to finish and does not postpone the periodic poll deadline. Each attempt
 reloads its committed comparison baseline and frontier, including compacted
-merged pull requests, fetches a complete observation, and commits the differ's
-facts with their poll or webhook lineage. Failed observations leave the prior
-committed state intact. The daemon does not start these tasks, a webhook
-listener, or a command worker.
+merged pull requests and their head repository identities, fetches a complete
+observation, and commits the differ's facts with their poll or webhook lineage.
+Failed observations leave the prior committed state intact. The daemon does not
+start these tasks, a webhook listener, or a command worker.
 
 Lifecycle reactions accept only `session_terminal` or `goal_changed` inputs and
 only `release_start` or sticky-stop lifecycle commands. These are the command
