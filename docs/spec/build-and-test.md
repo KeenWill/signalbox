@@ -18,7 +18,10 @@ The checker job runs its eight Python suites through Bazel with declared Python
 and Rustfmt toolchains. Suites using host Git or shell utilities always execute.
 Markdown formatting uses a Bazel test with declared files, formatter packages,
 and configuration. Web-contract and model-projection generation run as native
-Bazel actions with declared output trees and snapshot-comparison tests.
+Bazel actions with declared output trees and snapshot-comparison tests. The
+contract check builds and renders API declarations through Bazel with the pinned
+nightly Rustdoc toolchain. The optional historical API digest retains Cargo in a
+separate job.
 
 Native Bazel actions track Rust sources, dependencies, and test executables for
 content-based reuse within a compatible native environment.

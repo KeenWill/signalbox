@@ -653,6 +653,8 @@ impl AmbiguousModelCallTurn {
 /// Why a guarded terminal candidate could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelCallClosureError {
+    /// A reasoning completion contains compaction without retained-iteration usage.
+    UnexpectedProviderCompaction,
     /// Candidate identities do not match the observed disposition.
     IdentityShapeMismatch,
     /// The call cannot take the requested terminal transition.

@@ -164,6 +164,7 @@ fn collect_assistant_parts(parts: &[AssistantPart], material: &mut Vec<String>) 
             }
             AssistantPart::RedactedThinking { data } => material.push(data.clone()),
             AssistantPart::ProviderCompaction { block_json } => material.push(block_json.clone()),
+            AssistantPart::ProviderReasoning { item_json } => material.push(item_json.clone()),
             AssistantPart::ToolCall(proposal) => collect_tool_proposal(proposal, material),
             AssistantPart::SuppressedToolCall(name) => {
                 material.push(name.as_str().to_string());
@@ -4888,6 +4889,7 @@ fn tool_ids(content: &[AssistantPart]) -> Vec<&str> {
             | AssistantPart::Thinking { .. }
             | AssistantPart::RedactedThinking { .. }
             | AssistantPart::ProviderCompaction { .. }
+            | AssistantPart::ProviderReasoning { .. }
             | AssistantPart::SuppressedToolCall(_) => None,
         })
         .collect()

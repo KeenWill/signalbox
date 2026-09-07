@@ -33,6 +33,25 @@ pub struct ProviderCompactionBlockError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
+## ProviderReasoningItem
+
+```rust
+pub struct ProviderReasoningItem(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ProviderReasoningItem {
+    pub fn try_new(value: string::String) -> result::Result<Self, ProviderReasoningItemError>;
+    pub fn as_json(&self) -> &str;
+    pub fn into_json(self) -> string::String;
+}
+```
+
+## ProviderReasoningItemError
+
+```rust
+pub struct ProviderReasoningItemError;
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## SemanticTranscriptEntryPayload
 
 ```rust
@@ -91,6 +110,10 @@ pub enum SemanticTranscriptEntryPayload {
     ProviderCompaction {
         producing_call: ModelCallId,
         block: ProviderCompactionBlock,
+    },
+    ProviderReasoning {
+        producing_call: ModelCallId,
+        item: ProviderReasoningItem,
     },
     AssistantToolUse {
         producing_call: ModelCallId,

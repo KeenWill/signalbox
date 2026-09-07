@@ -36,12 +36,20 @@ observation and the terminal evidence.
 
 `ConversationMessage` is the closed typed history of text, tool calls and
 results, thinking with an optional signature, redacted thinking, and opaque
-provider-compaction blocks. Completed terminal evidence uses the same ordered
-response-part vocabulary for text, thinking, redacted thinking, tool proposals,
-suppressed tool calls, and provider compaction. A provider-compaction part
-carries one complete raw JSON content block unchanged across the runtime and
-bridge; adapters that cannot replay that provider-qualified part reject the
-operation before send.
+provider-compaction blocks and provider-reasoning items. Completed terminal
+evidence uses the same ordered response-part vocabulary for text, thinking,
+redacted thinking, tool proposals, suppressed tool calls, provider compaction,
+and provider reasoning. A provider-compaction part carries one complete raw JSON
+content block unchanged across the runtime and bridge; adapters that cannot
+replay that provider-qualified part reject the operation before send. A
+provider-reasoning part carries a complete raw reasoning item with encrypted
+content; its JSON bytes remain unchanged through the runtime and bridge. Replay
+carries the producing call's durable effective target and pinned credential
+reference. A missing producing-target mapping fails input estimation and request
+preparation before provider interaction. Streaming takes those bytes from the
+completed output item. Terminal reasoning may omit encrypted content; when
+present, it must match the completed item's encrypted content. A credential in
+the item rejects the whole evidence with `credential_in_provider_reasoning`.
 
 `ModelRuntime` has two stages. `prepare` does all work that needs no provider
 traffic and returns an opaque one-shot capability or a typed failure.
@@ -165,10 +173,13 @@ else.
 Idle-connection reuse is disabled so every send opens a fresh connection; this
 removes stale-connection replay and lets a connect failure claim proven-unsent.
 
-The OpenAI adapter maps `stop` to end of turn only when the request declared no
-stop sequences, because the provider uses one token for a natural stop and a
-stop-sequence hit. It leaves `length` unrecognized because that token cannot
-prove the output ceiling, and collapsing either would invent evidence.
+The OpenAI adapter sends `POST /v1/responses` with `store: false` and no
+stored-state chaining. It rejects non-empty stop sequences during settings
+validation and before send as `UnsupportedOperation`. Configuration validation
+and preparation require `max_output_tokens` to be at least 16. A completed
+response maps to end of turn or tool use according to its output;
+`incomplete_details.reason` maps `max_output_tokens` to the output ceiling and
+`content_filter` to refusal, while other reasons remain unrecognized.
 
 The Codex CLI adapter neither resumes nor persists a Codex thread; each call is
 a fresh invocation given the complete conversation frontier, so provider session
@@ -351,12 +362,20 @@ examined the material that could open a tool call, whether or not it accepted
 that material. A tool call an earlier record already established outranks the
 withholding in every adapter.
 
-Under the OpenAI adapter streamed chunks must agree on identity: a missing or
-conflicting completion id, or a conflicting reported model, is a terminal
-protocol violation, and a conflict stays one on a mid-stream error record. An
-error record that reports no completion id is definitive provider-error
-evidence. Claude Code CLI events stay bound to the initialized exchange: the
-first assistant event may name the provider-resolved model and every later
+OpenAI response events other than failed terminals must carry a consistent
+response id and reported model, and indexed item events must carry consistent
+item ids. Completed output items reject subsequent deltas. Completed content
+must preserve its observed text/refusal type and match its accumulated delta
+bytes; repeated completed snapshots must agree. Content-level done events supply
+completed snapshots. Completed function calls retain their call id, name, and
+status across snapshots. Content-part events require their part payload.
+Reported model and recognized terminal finish are retained before usage
+decoding. A terminal response supplies completion content and its response id
+becomes the provider message id. A bare `error` event or an HTTP-200 response
+with `status: failed` supplies definitive provider-error evidence without
+non-acceptance proof. Failed status and error are classified before ancillary
+response fields. Claude Code CLI events stay bound to the initialized exchange:
+the first assistant event may name the provider-resolved model and every later
 assistant event must repeat that value, and a result carrying a different
 session id, or an assistant event carrying a different first message id, is a
 protocol violation.
@@ -365,12 +384,13 @@ Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
 zero, a total-only report records nothing because no adapter distributes a
 total, and no cache-creation count is fabricated. The Codex CLI's cache-write
-and cached-input counts map to cache-creation and cache-read usage, and OpenAI's
-cached prompt tokens map to cache-read usage. A later usage report replaces the
-fields it carries and preserves the fields it omits. OpenAI streamed success
-requires the assistant role, a reported finish reason and the final usage chunk
-before the stream ends, and Anthropic requires input usage at message start and
-final output usage before message stop.
+and cached-input counts map to cache-creation and cache-read usage. OpenAI's
+`input_tokens_details.cache_write_tokens` and `cached_tokens` map to
+cache-creation and cache-read usage. A later usage report replaces the fields it
+carries and preserves the fields it omits. OpenAI streamed success requires
+reported usage and a terminal response event with matching terminal status;
+message output must carry the assistant role. Anthropic requires input usage at
+message start and final output usage before message stop.
 
 The shared framer bounds every line and each record's retained content, makes a
 framing failure terminal for the stream, and distinguishes a truncated final
@@ -422,12 +442,13 @@ included; unknown fields stay tolerated for additive provider evolution under
 the same byte and nesting limits as known ones. The Anthropic and Codex CLI
 decoders also tolerate an unknown event name and discard its bounded payload
 without typed parsing, while the OpenAI decoder parses every record's payload
-whatever its event name; the Claude Code CLI decoder rejects an unrecognized
-top-level event type as a stream protocol violation. Malformed or over-depth
-JSON in a success body is unintelligible-response boundary loss. In the HTTP and
-Claude Code CLI decoders, over-depth streamed material and malformed known-event
-JSON are stream protocol violations; the Codex CLI decoder fails both closed as
-an unrecognized provider error. Both CLI decoders reject a syntactically valid
+whatever its event name and dispatches on the payload's `type`, rejecting an
+unrecognized type; the Claude Code CLI decoder rejects an unrecognized top-level
+event type as a stream protocol violation. Malformed or over-depth JSON in a
+success body is unintelligible-response boundary loss. In the HTTP and Claude
+Code CLI decoders, over-depth streamed material and malformed known-event JSON
+are stream protocol violations; the Codex CLI decoder fails both closed as an
+unrecognized provider error. Both CLI decoders reject a syntactically valid
 record that repeats an object member, at any nesting depth, as a stream protocol
 violation. A malformed or over-depth body attached to a definitive error status
 cannot erase that exchange: the adapter falls back to status classification with

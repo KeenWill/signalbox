@@ -1,42 +1,68 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_unit_test")
 
-exports_files(["Cargo.toml"])
+CRATE_COMPILE_DATA = [
+    "//:config/session-templates.example.toml",
+    "//:config/signalboxd.example.toml",
+    "//crates/convergence:examples/repository.toml",
+]
 
-cargo_toml_env_vars(
-    name = "cargo_environment",
-    src = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
+CRATE_FEATURES = ["test-support"]
 
-extract_cargo_lints(
-    name = "cargo_lints",
-    manifest = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
+CRATE_PROC_MACRO_DEPS = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"]
+
+CRATE_DEPS = [
+    ":signalboxd_lib",
+    "//crates/application:signalbox_application",
+    "//crates/blob-store:signalbox_blob_store",
+    "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
+    "//crates/blob-store-s3:signalbox_blob_store_s3",
+    "//crates/convergence:signalbox_convergence",
+    "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
+    "//crates/conversation-import-codex:signalbox_conversation_import_codex",
+    "//crates/domain:signalbox_domain",
+    "//crates/model-provider-runtime:signalbox_model_provider_runtime",
+    "//crates/model-runtime:signalbox_model_runtime",
+    "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
+    "//crates/model-runtime-claude-cli:signalbox_model_runtime_claude_cli",
+    "//crates/model-runtime-codex-cli:signalbox_model_runtime_codex_cli",
+    "//crates/model-runtime-openai:signalbox_model_runtime_openai",
+    "//crates/modules/repo-watch-v2:signalbox_module_repo_watch_v2",
+    "//crates/ownership-seam:signalbox_ownership_seam",
+    "//crates/persistence:signalbox_persistence",
+    "//crates/process-protocol:signalbox_process_protocol",
+    "//crates/runner-wire:signalbox_runner_wire",
+    "//crates/tool-contract:signalbox_tool_contract",
+    "//crates/tools-basic:signalbox_tools_basic",
+    "//crates/tools-code-host:signalbox_tools_code_host",
+    "//crates/tools-conversations:signalbox_tools_conversations",
+    "//crates/tools-exec:signalbox_tools_exec",
+    "//crates/tools-git:signalbox_tools_git",
+    "//crates/tools-github:signalbox_tools_github",
+    "//crates/tools-plan:signalbox_tools_plan",
+    "//crates/tools-sessions:signalbox_tools_sessions",
+    "//crates/tools-web:signalbox_tools_web",
+    "//crates/tools-workspace:signalbox_tools_workspace",
+    "//crates/web-contract:signalbox_web_contract",
+]
+
+TEST_DEPS = [
+    "//crates/application:signalbox_application",
+    "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
+    "//crates/persistence:signalbox_persistence",
+    "//crates/test-bin:signalbox_test_bin",
+]
+
+rust_package()
 
 rust_library(
     name = "signalboxd_lib",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
-    compile_data = [
-        "//:config/session-templates.example.toml",
-        "//:config/signalboxd.example.toml",
-        "//crates/convergence:examples/repository.toml",
-    ],
-    crate_features = ["test-support"],
+    compile_data = CRATE_COMPILE_DATA,
+    crate_features = CRATE_FEATURES,
     crate_name = "signalboxd",
     crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     deps = [
         "//crates/application:signalbox_application",
         "//crates/blob-store:signalbox_blob_store",
@@ -69,188 +95,41 @@ rust_library(
         "//crates/tools-web:signalbox_tools_web",
         "//crates/tools-workspace:signalbox_tools_workspace",
         "//crates/web-contract:signalbox_web_contract",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_binary(
     name = "approval-judge-eval",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
-    compile_data = [
-        "//:config/session-templates.example.toml",
-        "//:config/signalboxd.example.toml",
-        "//crates/convergence:examples/repository.toml",
-    ],
-    crate_features = ["test-support"],
+    compile_data = CRATE_COMPILE_DATA,
+    crate_features = CRATE_FEATURES,
     crate_root = "src/bin/approval-judge-eval.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
-    deps = [
-        ":signalboxd_lib",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
-        "//crates/blob-store-s3:signalbox_blob_store_s3",
-        "//crates/convergence:signalbox_convergence",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/model-provider-runtime:signalbox_model_provider_runtime",
-        "//crates/model-runtime:signalbox_model_runtime",
-        "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
-        "//crates/model-runtime-claude-cli:signalbox_model_runtime_claude_cli",
-        "//crates/model-runtime-codex-cli:signalbox_model_runtime_codex_cli",
-        "//crates/model-runtime-openai:signalbox_model_runtime_openai",
-        "//crates/modules/repo-watch-v2:signalbox_module_repo_watch_v2",
-        "//crates/ownership-seam:signalbox_ownership_seam",
-        "//crates/persistence:signalbox_persistence",
-        "//crates/process-protocol:signalbox_process_protocol",
-        "//crates/runner-wire:signalbox_runner_wire",
-        "//crates/tool-contract:signalbox_tool_contract",
-        "//crates/tools-basic:signalbox_tools_basic",
-        "//crates/tools-code-host:signalbox_tools_code_host",
-        "//crates/tools-conversations:signalbox_tools_conversations",
-        "//crates/tools-exec:signalbox_tools_exec",
-        "//crates/tools-git:signalbox_tools_git",
-        "//crates/tools-github:signalbox_tools_github",
-        "//crates/tools-plan:signalbox_tools_plan",
-        "//crates/tools-sessions:signalbox_tools_sessions",
-        "//crates/tools-web:signalbox_tools_web",
-        "//crates/tools-workspace:signalbox_tools_workspace",
-        "//crates/web-contract:signalbox_web_contract",
-    ] + all_crate_deps(normal = True),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = CRATE_DEPS,
 )
 
 rust_binary(
     name = "signalbox-debug",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
-    compile_data = [
-        "//:config/session-templates.example.toml",
-        "//:config/signalboxd.example.toml",
-        "//crates/convergence:examples/repository.toml",
-    ],
-    crate_features = ["test-support"],
+    compile_data = CRATE_COMPILE_DATA,
+    crate_features = CRATE_FEATURES,
     crate_root = "src/bin/signalbox-debug.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
-    deps = [
-        ":signalboxd_lib",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
-        "//crates/blob-store-s3:signalbox_blob_store_s3",
-        "//crates/convergence:signalbox_convergence",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/model-provider-runtime:signalbox_model_provider_runtime",
-        "//crates/model-runtime:signalbox_model_runtime",
-        "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
-        "//crates/model-runtime-claude-cli:signalbox_model_runtime_claude_cli",
-        "//crates/model-runtime-codex-cli:signalbox_model_runtime_codex_cli",
-        "//crates/model-runtime-openai:signalbox_model_runtime_openai",
-        "//crates/modules/repo-watch-v2:signalbox_module_repo_watch_v2",
-        "//crates/ownership-seam:signalbox_ownership_seam",
-        "//crates/persistence:signalbox_persistence",
-        "//crates/process-protocol:signalbox_process_protocol",
-        "//crates/runner-wire:signalbox_runner_wire",
-        "//crates/tool-contract:signalbox_tool_contract",
-        "//crates/tools-basic:signalbox_tools_basic",
-        "//crates/tools-code-host:signalbox_tools_code_host",
-        "//crates/tools-conversations:signalbox_tools_conversations",
-        "//crates/tools-exec:signalbox_tools_exec",
-        "//crates/tools-git:signalbox_tools_git",
-        "//crates/tools-github:signalbox_tools_github",
-        "//crates/tools-plan:signalbox_tools_plan",
-        "//crates/tools-sessions:signalbox_tools_sessions",
-        "//crates/tools-web:signalbox_tools_web",
-        "//crates/tools-workspace:signalbox_tools_workspace",
-        "//crates/web-contract:signalbox_web_contract",
-    ] + all_crate_deps(normal = True),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = CRATE_DEPS,
 )
 
 rust_binary(
     name = "signalboxd",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
-    compile_data = [
-        "//:config/session-templates.example.toml",
-        "//:config/signalboxd.example.toml",
-        "//crates/convergence:examples/repository.toml",
-    ],
-    crate_features = ["test-support"],
+    compile_data = CRATE_COMPILE_DATA,
+    crate_features = CRATE_FEATURES,
     crate_root = "src/main.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
-    deps = [
-        ":signalboxd_lib",
-        "//crates/application:signalbox_application",
-        "//crates/blob-store:signalbox_blob_store",
-        "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
-        "//crates/blob-store-s3:signalbox_blob_store_s3",
-        "//crates/convergence:signalbox_convergence",
-        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
-        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
-        "//crates/domain:signalbox_domain",
-        "//crates/model-provider-runtime:signalbox_model_provider_runtime",
-        "//crates/model-runtime:signalbox_model_runtime",
-        "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
-        "//crates/model-runtime-claude-cli:signalbox_model_runtime_claude_cli",
-        "//crates/model-runtime-codex-cli:signalbox_model_runtime_codex_cli",
-        "//crates/model-runtime-openai:signalbox_model_runtime_openai",
-        "//crates/modules/repo-watch-v2:signalbox_module_repo_watch_v2",
-        "//crates/ownership-seam:signalbox_ownership_seam",
-        "//crates/persistence:signalbox_persistence",
-        "//crates/process-protocol:signalbox_process_protocol",
-        "//crates/runner-wire:signalbox_runner_wire",
-        "//crates/tool-contract:signalbox_tool_contract",
-        "//crates/tools-basic:signalbox_tools_basic",
-        "//crates/tools-code-host:signalbox_tools_code_host",
-        "//crates/tools-conversations:signalbox_tools_conversations",
-        "//crates/tools-exec:signalbox_tools_exec",
-        "//crates/tools-git:signalbox_tools_git",
-        "//crates/tools-github:signalbox_tools_github",
-        "//crates/tools-plan:signalbox_tools_plan",
-        "//crates/tools-sessions:signalbox_tools_sessions",
-        "//crates/tools-web:signalbox_tools_web",
-        "//crates/tools-workspace:signalbox_tools_workspace",
-        "//crates/web-contract:signalbox_web_contract",
-    ] + all_crate_deps(normal = True),
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = CRATE_DEPS,
 )
 
-rust_test(
+rust_unit_test(
     name = "unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     compile_data = ["//crates/process-protocol:src/request.rs"],
     crate = ":signalboxd_lib",
-    crate_features = ["test-support"],
+    crate_features = CRATE_FEATURES,
     data = [
         "Cargo.toml",
         "//:config/session-templates.example.toml",
@@ -263,100 +142,32 @@ rust_test(
         "NEXTEST_BIN_EXE_signalbox_claude_mcp_bridge": "$(rootpath //crates/model-runtime-claude-cli:signalbox-claude-mcp-bridge)",
         "TMPDIR": "/tmp",
     },
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "apps/signalboxd"},
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
     # Socket ownership and host-tool tests need the host's actual UID mapping.
     tags = [
         "external",
         "no-sandbox",
     ],
-    deps = [
-        "//crates/application:signalbox_application",
-        "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
-        "//crates/persistence:signalbox_persistence",
-        "//crates/test-bin:signalbox_test_bin",
-    ] + all_crate_deps(normal_dev = True),
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_unit_test(
     name = "approval_judge_eval_unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":approval-judge-eval",
-    crate_features = ["test-support"],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
-    deps = [
-        "//crates/application:signalbox_application",
-        "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
-        "//crates/persistence:signalbox_persistence",
-        "//crates/test-bin:signalbox_test_bin",
-    ] + all_crate_deps(normal_dev = True),
+    crate_features = CRATE_FEATURES,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_unit_test(
     name = "signalbox_debug_unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":signalbox-debug",
-    crate_features = ["test-support"],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
-    deps = [
-        "//crates/application:signalbox_application",
-        "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
-        "//crates/persistence:signalbox_persistence",
-        "//crates/test-bin:signalbox_test_bin",
-    ] + all_crate_deps(normal_dev = True),
+    crate_features = CRATE_FEATURES,
+    deps = TEST_DEPS,
 )
 
-rust_test(
+rust_unit_test(
     name = "signalboxd_unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":signalboxd",
-    crate_features = ["test-support"],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
-    deps = [
-        "//crates/application:signalbox_application",
-        "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
-        "//crates/persistence:signalbox_persistence",
-        "//crates/test-bin:signalbox_test_bin",
-    ] + all_crate_deps(normal_dev = True),
-)
-
-filegroup(
-    name = "rust_sources",
-    srcs = glob(["**/*.rs"]),
-    visibility = ["//:__pkg__"],
+    crate_features = CRATE_FEATURES,
+    deps = TEST_DEPS,
 )

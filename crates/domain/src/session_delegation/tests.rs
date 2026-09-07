@@ -394,6 +394,18 @@ fn provider_compaction_metadata_does_not_hide_a_delegated_child_result() {
     assert_eq!(outcome.content(), Some(&expected));
 }
 
+#[test]
+fn provider_reasoning_metadata_does_not_hide_a_delegated_child_result() {
+    let expected = content("completed child result");
+    let completed =
+        crate::model_execution::completed_turn_with_provider_reasoning_fixture(expected.as_str());
+
+    let outcome = DelegationOutcome::from_completed_child(&completed);
+
+    assert_eq!(outcome.kind(), DelegationOutcomeKind::ResultReturned);
+    assert_eq!(outcome.content(), Some(&expected));
+}
+
 /// empty live completion is a typed unavailable result.
 #[test]
 fn empty_live_completion_produces_unavailable_outcome() {

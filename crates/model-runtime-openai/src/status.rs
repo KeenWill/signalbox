@@ -2,7 +2,7 @@
 //!
 //! The runtime-substrate spec requires each real adapter to define an
 //! exhaustive, mutually exclusive mapping of its provider-native terminal
-//! statuses and payloads. Chat Completions carries the specific condition in
+//! statuses and payloads. Responses carries the specific condition in
 //! `error.code` or `error.type` while the HTTP status carries the category,
 //! so envelope classification treats HTTP 401 as credential rejection
 //! outright, then consults a recognized code, then a recognized type, then the
@@ -21,7 +21,7 @@ pub(crate) fn classify_error(status: u16, code: Option<&str>) -> ProviderErrorKi
     }
     match code {
         Some("invalid_api_key") => ProviderErrorKind::CredentialRejected,
-        Some("invalid_request_error") => ProviderErrorKind::InvalidRequest,
+        Some("invalid_request_error" | "invalid_prompt") => ProviderErrorKind::InvalidRequest,
         Some("model_not_found") => ProviderErrorKind::TargetNotFound,
         Some("insufficient_quota") => ProviderErrorKind::QuotaExhausted,
         Some("context_length_exceeded") => ProviderErrorKind::RequestTooLarge,
@@ -180,6 +180,7 @@ mod tests {
         let rows = classification_rows(&[
             (401, "invalid_api_key"),
             (0, "invalid_request_error"),
+            (0, "invalid_prompt"),
             (404, "model_not_found"),
             (429, "insufficient_quota"),
             (400, "context_length_exceeded"),
@@ -205,6 +206,7 @@ mod tests {
             ├────────┼─────────────────────────┼────────────────────┤
             │    401 │ invalid_api_key         │ CredentialRejected │
             │      0 │ invalid_request_error   │ InvalidRequest     │
+            │      0 │ invalid_prompt          │ InvalidRequest     │
             │    404 │ model_not_found         │ TargetNotFound     │
             │    429 │ insufficient_quota      │ QuotaExhausted     │
             │    400 │ context_length_exceeded │ RequestTooLarge    │

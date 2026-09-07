@@ -119,7 +119,8 @@ pub(super) fn delegation_content_from_live_completed(
             } => (producing_call, value),
             crate::SemanticTranscriptEntryPayload::ProviderCompaction {
                 producing_call, ..
-            } => {
+            }
+            | crate::SemanticTranscriptEntryPayload::ProviderReasoning { producing_call, .. } => {
                 if entry.source_session() != value.session() || *producing_call != value.call().id()
                 {
                     return None;
