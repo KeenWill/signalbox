@@ -594,7 +594,8 @@ async fn terminal_session_removes_its_checkout_without_following_tracked_symlink
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn startup_scavenges_a_failed_dispatch_checkout_idempotently() -> Result<(), Box<dyn Error>> {
+async fn startup_scavenges_retired_checkouts_without_repository_watch_configuration()
+-> Result<(), Box<dyn Error>> {
     use signalboxd::repo_watch_dispatch::scavenge_checkouts;
     let mut fixture = CheckoutFixture::new().await?;
     fixture.runner.bare = fixture.runner.bare.with_file_name("missing.git");
@@ -602,11 +603,30 @@ async fn startup_scavenges_a_failed_dispatch_checkout_idempotently() -> Result<(
     let root = fixture.root(fixture.session().await);
     assert!(root.is_dir());
     let restarted = RepoWatchStore::new(fixture.module.clone());
-    scavenge_checkouts(&restarted, &fixture.core, &fixture.sink.models)
+    let configuration = HubModelConfiguration::parse(
+        &include_str!("../../../../config/signalboxd.example.toml")
+            .replace(
+                "/usr/local/bin/signalbox-exec-supervisor",
+                std::env::current_exe()?.to_str().expect("test executable"),
+            )
+            .replace(
+                "/srv/signalbox/workspace",
+                fixture
+                    .sink
+                    .models
+                    .daemon_tools()
+                    .expect("tools")
+                    .workspace_root()
+                    .to_str()
+                    .expect("fixture workspace"),
+            ),
+    )?;
+    assert!(configuration.repository_watch().is_none());
+    scavenge_checkouts(&restarted, &fixture.core, &configuration)
         .await
         .expect("startup scavenges retired checkout");
     assert!(!root.exists());
-    scavenge_checkouts(&restarted, &fixture.core, &fixture.sink.models)
+    scavenge_checkouts(&restarted, &fixture.core, &configuration)
         .await
         .expect("repeated startup is idempotent");
     assert!(restarted.checkout_removal_candidates().await?.is_empty());

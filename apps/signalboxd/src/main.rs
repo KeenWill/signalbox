@@ -2091,7 +2091,7 @@ async fn run_hub(
             return Ok(ShutdownOutcome::GuardLost);
         }
     }
-    let repository_watch_runtime = if model_configuration.repository_watch().is_some() {
+    let repository_watch_runtime = {
         let start = async {
             let module_pool = connect_repository_watch_pool(&pool).await?;
             signalboxd::repo_watch_dispatch::scavenge_checkouts(
@@ -2101,6 +2101,10 @@ async fn run_hub(
             )
             .await
             .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
+            if model_configuration.repository_watch().is_none() {
+                module_pool.close().await;
+                return Ok(None);
+            }
             RepositoryWatchRuntime::new(
                 module_pool,
                 model_configuration.repository_watch().cloned(),
@@ -2113,9 +2117,10 @@ async fn run_hub(
                 },
             )
             .await
+            .map(Some)
         };
         match await_while_guarded(&mut database, start).await {
-            GuardedAwait::Completed(Ok(runtime)) => Some(runtime),
+            GuardedAwait::Completed(Ok(runtime)) => runtime,
             GuardedAwait::Completed(Err(_)) => {
                 let failure = erase_startup_cause(
                     RuntimePhase::Configuration,
@@ -2141,8 +2146,6 @@ async fn run_hub(
                 return Ok(ShutdownOutcome::GuardLost);
             }
         }
-    } else {
-        None
     };
     tool_executor = tool_executor.with_blob_executor(blob_executor);
     let process_runtime = ProcessRuntime::new_with_templates(
