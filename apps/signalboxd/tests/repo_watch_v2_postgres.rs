@@ -2813,6 +2813,57 @@ system_prompt = "Inspect repository activity."
     );
     assert_eq!(retained_delivery().fetch_one(&module_pool).await?, retained);
 
+    {
+        // The persisted webhook_body CHECK admits exactly this many bytes.
+        const PERSISTED_BODY_CEILING: usize = 26_214_400;
+        let mut ceiling_body = RUNTIME_WEBHOOK_BODY.to_owned();
+        ceiling_body.extend(std::iter::repeat_n(
+            ' ',
+            PERSISTED_BODY_CEILING - ceiling_body.len(),
+        ));
+        let ceiling_delivery = RuntimeWebhookDelivery {
+            id: Uuid::now_v7(),
+            event: "push",
+            body: &ceiling_body,
+        };
+        assert_eq!(
+            webhook_delivery_status(&hook, b"initial-hook-secret", &ceiling_delivery).await?,
+            reqwest::StatusCode::ACCEPTED,
+            "authenticated bodies at the persistence ceiling are admitted"
+        );
+        let stored_body: Vec<u8> = sqlx::query_scalar(
+            "SELECT body FROM webhook_body WHERE hook_id = $1 AND delivery_id = $2",
+        )
+        .bind(Decimal::from(hook.id))
+        .bind(ceiling_delivery.id)
+        .fetch_one(&module_pool)
+        .await?;
+        assert!(
+            stored_body == ceiling_body.as_bytes(),
+            "the entire ceiling-sized body is retained"
+        );
+
+        ceiling_body.push(' ');
+        let oversized_delivery = RuntimeWebhookDelivery {
+            id: Uuid::now_v7(),
+            event: "push",
+            body: &ceiling_body,
+        };
+        assert_eq!(
+            webhook_delivery_status(&hook, b"initial-hook-secret", &oversized_delivery).await?,
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+            "one byte above the persistence ceiling is rejected"
+        );
+        let oversized_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM webhook_delivery WHERE hook_id = $1 AND delivery_id = $2",
+        )
+        .bind(Decimal::from(hook.id))
+        .bind(oversized_delivery.id)
+        .fetch_one(&module_pool)
+        .await?;
+        assert_eq!(oversized_rows, 0);
+    }
+
     let store = RepoWatchStore::new(module_pool.clone());
     let repository = RepositorySlug::try_new(String::from("runtime/project"))?;
     for run in [1, 2] {

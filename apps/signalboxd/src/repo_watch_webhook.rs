@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
 use axum::{
     Router,
     body::Bytes,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, Method, StatusCode, Uri},
 };
 use ring::hmac;
@@ -25,6 +25,9 @@ use uuid::Uuid;
 use crate::{
     FileCredentialAccess, RepositoryWatchConfiguration, configuration::RepositoryWatchWebhookMode,
 };
+
+// Matches the webhook_body CHECK in 202609050102_repo_watch_v2_ingest.sql.
+const MAX_WEBHOOK_BODY_BYTES: usize = 26_214_400;
 
 struct Hook {
     store: RepoWatchStore,
@@ -152,6 +155,7 @@ impl WebhookListener {
             SocketState::Reserved(socket) => {
                 let router = Router::new()
                     .fallback(delivery)
+                    .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES))
                     .with_state(self.routing.clone());
                 let (shutdown, stopped) = oneshot::channel();
                 self.servers.spawn(async move {
