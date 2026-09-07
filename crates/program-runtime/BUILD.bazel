@@ -20,7 +20,7 @@ rust_library(
     name = "signalbox_program_runtime",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
-    compile_data = [],
+    compile_data = glob(["src/**/*.js"]),
     crate_features = [
         "default",
         "postgres-integration",
