@@ -350,6 +350,11 @@ fn visible_process_entry(
             content,
             ..
         }
+        | ProcessTranscriptEntry::ToolInadmissible {
+            entry_index,
+            content,
+            ..
+        }
         | ProcessTranscriptEntry::ToolClosed {
             entry_index,
             content,

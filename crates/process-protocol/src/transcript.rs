@@ -906,7 +906,14 @@ pub enum TranscriptEntry {
         /// Exact provider-visible denial content.
         content: String,
     },
-    /// One logical tool request closed because its turn ended.
+    /// One logical tool request resolved before dispatch.
+    ToolInadmissible {
+        /// Exact inadmissible tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact provider-visible inadmissibility content.
+        content: String,
+    },
+    /// The request closed when its turn ended.
     ToolClosed {
         /// Exact closed tool request.
         tool_request_id: CanonicalUuid,

@@ -530,7 +530,7 @@ pub(super) fn decode_transcript_entry(
 
     if matches!(
         payload_kind.as_str(),
-        "tool_denied" | "tool_closed_by_turn_end"
+        "tool_inadmissible" | "tool_denied" | "tool_closed_by_turn_end"
     ) {
         let Some(request) = tool_result_request else {
             return Err(ProcessReadCorruption::Inconsistent("tool result entry shape").into());
@@ -567,6 +567,22 @@ pub(super) fn decode_transcript_entry(
                     }
                 })
                 .to_string(),
+            }
+        } else if payload_kind == "tool_inadmissible" {
+            let reason: Option<String> = row.try_get("transcript_inadmissible_reason")?;
+            if reason.as_deref() != Some("placement_lost") {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("tool inadmissibility reason").into(),
+                );
+            }
+            ProcessTranscriptEntry::ToolInadmissible {
+                entry_index,
+                source_session,
+                entry,
+                request: ToolRequestId::from_uuid(request),
+                content: String::from(
+                    r#"{"error":{"detail":"placement_lost","kind":"execution_failed"}}"#,
+                ),
             }
         } else {
             ProcessTranscriptEntry::ToolClosed {
@@ -819,6 +835,7 @@ pub(super) fn decode_transcript_entry(
             | "assistant_tool_use"
             | "tool_execution_result"
             | "tool_denied"
+            | "tool_inadmissible"
             | "tool_closed_by_turn_end"
             | "turn_failed"
             | "turn_completed"

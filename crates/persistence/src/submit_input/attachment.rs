@@ -217,6 +217,9 @@ pub(super) async fn prospective_attachment_frontier_exceeds_bound(
                                 | InitialSemanticTranscriptEntryPayload::ContextSummary {
                                     ..
                                 }
+                                | InitialSemanticTranscriptEntryPayload::ToolInadmissible {
+                                    ..
+                                }
                                 | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
                                     ..
                                 }
@@ -621,6 +624,7 @@ async fn delegated_parked_attachment_frontier_origins(
                 | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
                 | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
                 | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
+                | InitialSemanticTranscriptEntryPayload::ToolInadmissible { .. }
                 | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
