@@ -2,7 +2,6 @@
 use serde_json::{Value, json};
 use signalbox_convergence::{Evaluation, Verdict};
 
-// numeric-bound: guard - the code-host contract limits result collections to 100 members
 const MAX_CONVERGENCE_REASONS: usize = 100;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
