@@ -26,7 +26,7 @@ mod wire;
 pub use config::CodexCliConfig;
 pub use oauth::{
     OauthCredentialInstaller, OauthCredentialMaterial, OauthCredentialProvider,
-    OauthCredentialRoot, OauthDeliveryFuture,
+    OauthCredentialRoot, OauthDeliveryFuture, OauthDeliveryOutcome,
 };
 pub use runtime::{
     CodexCliConstructionError, CodexCliPreparedRequest, CodexCliRuntime, CodexCliVersionProbeError,

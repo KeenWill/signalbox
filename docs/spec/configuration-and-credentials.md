@@ -712,13 +712,14 @@ Refresh and dispatch compare the stored tuple with the current registration
 under the profile row lock; mismatch quarantines the generation before any token
 is sent. One process-shared refresh per profile and generation marks refresh in
 progress before one POST, with redirects and automatic retries disabled.
-Definitive non-rotation clears the marker. Connection loss after possible
-request bytes, cancellation after send, redirects, indeterminate responses, and
-refresh tokens rejected as expired, reused, or revoked quarantine the
-generation. Refresh replaces returned refresh and identity tokens in one commit,
-retaining either token when omitted; differing account identity quarantines. An
-ambiguous replacement commit is reread: a committed replacement is adopted and
-an uncleared marker quarantines. Access tokens live only in memory and refresh
+Cancellation while waiting for that refresh cancels preparation. Definitive
+non-rotation clears the marker. Connection loss after possible request bytes,
+cancellation after send, redirects, indeterminate responses, and refresh tokens
+rejected as expired, reused, or revoked quarantine the generation. Refresh
+replaces returned refresh and identity tokens in one commit, retaining either
+token when omitted; differing account identity quarantines. An ambiguous
+replacement commit is reread: a committed replacement is adopted and an
+uncleared marker quarantines. Access tokens live only in memory and refresh
 lazily after restart.
 
 Dispatch holds the profile row lock through copying access and identity tokens
@@ -735,9 +736,6 @@ disabled; inability to deliver the home is a typed pre-send failure. An
 access-token rejection during an invocation neither quarantines the profile nor
 permits automatic call retry. Delivery failure evidence and quarantine commit
 atomically and bypass pool trigger policy.
-||||||| 2741cbbef
-checks against every retained co-membership. OAuth configuration admission
-requires dispatch support.
 
 ## Planned
 

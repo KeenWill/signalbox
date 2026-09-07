@@ -846,7 +846,12 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for CodexCliRuntime {
                 .deliver(&reference, &mut installer, cancellation)
                 .await
             {
-                Ok(()) => installer
+                Ok(crate::OauthDeliveryOutcome::Cancelled) => {
+                    return PreparationOutcome::Cancelled {
+                        correlation: prepared.correlation,
+                    };
+                }
+                Ok(crate::OauthDeliveryOutcome::Delivered) => installer
                     .home
                     .ok_or(signalbox_model_runtime::CredentialAccessFailure::OauthCredentialHome),
                 Err(error) => Err(error),

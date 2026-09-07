@@ -6,7 +6,8 @@ use signalbox_model_runtime::{
     CancellationSignal, CredentialAccessFailure as Failure, CredentialReference, CredentialValue,
 };
 use signalbox_model_runtime_codex_cli::{
-    OauthCredentialInstaller, OauthCredentialMaterial, OauthCredentialProvider, OauthDeliveryFuture,
+    OauthCredentialInstaller, OauthCredentialMaterial, OauthCredentialProvider,
+    OauthDeliveryFuture, OauthDeliveryOutcome,
 };
 use signalbox_persistence::oauth_credential::{
     OauthCredentialRepository, OauthDispatchLease, OauthQuarantineCause as Cause,
@@ -82,17 +83,19 @@ impl OauthCredentialService {
         reference: &str,
         installer: &mut dyn OauthCredentialInstaller,
         mut cancellation: CancellationSignal,
-    ) -> Result<(), Failure> {
+    ) -> Result<OauthDeliveryOutcome, Failure> {
         let profile = self.profiles.get(reference).ok_or(Failure::Unmapped)?;
         let (mut state, joined) = match profile.access.try_lock() {
             Ok(state) => (state, false),
-            Err(_) => (
-                cancellation
+            Err(_) => {
+                let Some(state) = cancellation
                     .run_until_cancelled(profile.access.lock())
                     .await
-                    .ok_or(Failure::Unavailable)?,
-                true,
-            ),
+                else {
+                    return Ok(OauthDeliveryOutcome::Cancelled);
+                };
+                (state, true)
+            }
         };
         if joined && let Some(failure) = state.failure {
             return Err(failure);
@@ -108,7 +111,7 @@ impl OauthCredentialService {
             )
             .await;
         state.failure = result.as_ref().err().copied();
-        result
+        result.map(|()| OauthDeliveryOutcome::Delivered)
     }
 
     async fn prepare_locked(
@@ -294,6 +297,46 @@ mod tests {
         fn install(&mut self, _: OauthCredentialMaterial) -> Result<(), Failure> {
             Err(Failure::Unavailable)
         }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_profile_wait_preserves_the_refresh_state() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")
+            .expect("lazy pool");
+        let registration = OauthRegistration {
+            client_id: "fixture-client".into(),
+            token_url: "https://authorization.example/token".into(),
+            device_authorization_url: "https://authorization.example/device".into(),
+            scopes: vec!["openid".into()],
+        };
+        let service = OauthCredentialService::new(pool, vec![("profile".into(), registration)])
+            .expect("service");
+        let mut state = service.profiles["profile"].access.lock().await;
+        state.failure = Some(Failure::OauthRefreshRejected);
+        let mut installer = Installer::default();
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        let waiting = service.prepare(
+            "profile",
+            &mut installer,
+            CancellationSignal::when(async {
+                let _ = cancelled.await;
+            }),
+        );
+        tokio::pin!(waiting);
+        assert!(
+            std::future::poll_fn(|context| {
+                std::task::Poll::Ready(
+                    std::future::Future::poll(waiting.as_mut(), context).is_pending(),
+                )
+            })
+            .await
+        );
+        cancel.send(()).expect("waiting preparation");
+        assert_eq!(waiting.await, Ok(OauthDeliveryOutcome::Cancelled));
+        assert_eq!(state.failure, Some(Failure::OauthRefreshRejected));
+        assert!(state.access.is_none());
+        drop(state);
     }
 
     #[tokio::test]
