@@ -3,7 +3,14 @@ import { useState } from 'react'
 import { invokeCommand } from './commands'
 import type { WebSubmitInputRequest } from './generated/web-contract.mjs'
 import { ProductInputError, ProductRequestError, submitSessionInput } from './product'
-import { actions, selectPendingSessionInput, store, useAppDispatch, useAppSelector } from './state'
+import {
+  actions,
+  selectPendingSessionInput,
+  selectSessionInputCapacityReached,
+  store,
+  useAppDispatch,
+  useAppSelector,
+} from './state'
 
 export function SessionComposer({
   sessionId,
@@ -19,6 +26,10 @@ export function SessionComposer({
   const dispatch = useAppDispatch()
   const pending = useAppSelector((state) => selectPendingSessionInput(state, sessionId))
   const retained = pending?.input ?? null
+  const capacityReached = useAppSelector(selectSessionInputCapacityReached)
+  const capacityNotice =
+    'Pending-message limit reached. Retry a retained message before sending to another session.'
+  const newInputBlocked = retained === null && capacityReached
   const [text, setText] = useState('')
   const [notice, setNotice] = useState('')
   const mutation = useMutation({
@@ -49,13 +60,20 @@ export function SessionComposer({
     },
   })
   const canSend =
-    pending?.phase !== 'sending' && (retained !== null || (activeState === null && text.length > 0))
+    !newInputBlocked &&
+    pending?.phase !== 'sending' &&
+    (retained !== null || (activeState === null && text.length > 0))
   const send = () => {
     if (!canSend) return
     const current = selectPendingSessionInput(store.getState(), sessionId)
     if (current?.phase === 'sending') return
     const input = current?.input ?? { command_id: crypto.randomUUID(), message: text }
     dispatch(actions.sessionInputStarted({ sessionId, input }))
+    if (
+      selectPendingSessionInput(store.getState(), sessionId)?.input.command_id !== input.command_id
+    ) {
+      return
+    }
     setNotice('Sending message…')
     mutation.mutate(input)
   }
@@ -107,11 +125,13 @@ export function SessionComposer({
               : 'Retry message'}
         </button>
         <span role="status">
-          {pending?.phase === 'unconfirmed'
-            ? 'Acceptance is unconfirmed. Retry sends the same command and message.'
-            : pending?.phase === 'sending'
-              ? 'Sending message…'
-              : notice}
+          {newInputBlocked
+            ? capacityNotice
+            : pending?.phase === 'unconfirmed'
+              ? 'Acceptance is unconfirmed. Retry sends the same command and message.'
+              : pending?.phase === 'sending'
+                ? 'Sending message…'
+                : notice}
         </span>
       </div>
     </form>

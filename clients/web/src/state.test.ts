@@ -5,7 +5,13 @@ import {
   MAX_LOGICAL_POSITION_VALUE_BYTES,
   serializeBrowserPreferences,
 } from './preferences'
-import { actions, createAppStore, selectApp } from './state'
+import {
+  actions,
+  createAppStore,
+  MAX_PENDING_SESSION_INPUTS,
+  selectApp,
+  selectSessionInputCapacityReached,
+} from './state'
 
 let testStore = createAppStore()
 
@@ -117,6 +123,57 @@ describe('application state', () => {
     expect(serialized).not.toBeNull()
     expect(new TextEncoder().encode(serialized ?? '').length).toBeLessThanOrEqual(
       MAX_BROWSER_PREFERENCES_BYTES,
+    )
+  })
+})
+
+describe('retained input admission', () => {
+  it('refuses new sessions at capacity, preserves retries, and frees capacity only on confirmation', () => {
+    const store = createAppStore()
+    const requests = Array.from({ length: MAX_PENDING_SESSION_INPUTS + 1 }, (_, index) => ({
+      sessionId: `session-${index}`,
+      input: { command_id: `command-${index}`, message: `Retain message ${index}` },
+    }))
+    for (const request of requests) {
+      store.dispatch(actions.sessionInputStarted(request))
+      store.dispatch(
+        actions.sessionInputSettled({
+          sessionId: request.sessionId,
+          commandId: request.input.command_id,
+          confirmed: false,
+        }),
+      )
+    }
+    const first = requests[0]
+    const extra = requests[MAX_PENDING_SESSION_INPUTS]
+    if (first === undefined || extra === undefined) throw new Error('Missing capacity fixtures')
+    expect(selectSessionInputCapacityReached(store.getState())).toBe(true)
+    expect(store.getState().app.pendingSessionInputs[extra.sessionId]).toBeUndefined()
+    store.dispatch(actions.sessionInputStarted(first))
+    expect(store.getState().app.pendingSessionInputs[first.sessionId]).toEqual({
+      input: first.input,
+      phase: 'sending',
+    })
+    store.dispatch(
+      actions.sessionInputSettled({
+        sessionId: first.sessionId,
+        commandId: first.input.command_id,
+        confirmed: false,
+      }),
+    )
+    expect(selectSessionInputCapacityReached(store.getState())).toBe(true)
+    store.dispatch(
+      actions.sessionInputSettled({
+        sessionId: first.sessionId,
+        commandId: first.input.command_id,
+        confirmed: true,
+      }),
+    )
+    expect(selectSessionInputCapacityReached(store.getState())).toBe(false)
+    store.dispatch(actions.sessionInputStarted(extra))
+    expect(store.getState().app.pendingSessionInputs[extra.sessionId]?.input).toEqual(extra.input)
+    expect(Object.keys(store.getState().app.pendingSessionInputs)).toHaveLength(
+      MAX_PENDING_SESSION_INPUTS,
     )
   })
 })

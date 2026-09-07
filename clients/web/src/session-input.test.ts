@@ -194,3 +194,49 @@ it('reads a full attachment-heavy text page within the derived response ceiling'
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
   expect(await readSessionTranscript(sessionId, '1', '8', null)).toEqual(page)
 })
+
+const inputPage = (count: number, textBytes = 1) => {
+  const items = Array.from({ length: count }, (_, index) => ({
+    address: { event_sequence: String(index + 1) },
+    kind: 'input_accepted',
+    projected_body_bytes: 128 + textBytes,
+    body: {
+      type: 'user_input',
+      turn_id: sessionId,
+      text: {
+        text: 'x'.repeat(textBytes),
+        offset_bytes: '0',
+        total_bytes: String(textBytes),
+        continuation: null,
+      },
+      attachments: [],
+    },
+  }))
+  return {
+    session_id: sessionId,
+    items,
+    projected_body_bytes: count * (128 + textBytes),
+    continuation: null,
+  }
+}
+
+it('rejects a contract-valid transcript page exceeding the selected item count', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(inputPage(9))))
+  await expect(readSessionTranscript(sessionId, '1', '9', null)).rejects.toThrow(
+    'selected page limits',
+  )
+})
+
+it('rejects a transcript page exceeding the selected byte ceiling', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(inputPage(8, 8200))))
+  await expect(readSessionTranscript(sessionId, '1', '8', null)).rejects.toThrow('65536')
+})
+
+it('rejects contradictory transcript byte accounting through the generated decoder', async () => {
+  const page = inputPage(1)
+  page.projected_body_bytes += 1
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(page)))
+  await expect(readSessionTranscript(sessionId, '1', '1', null)).rejects.toThrow(
+    'computed 129 bytes',
+  )
+})

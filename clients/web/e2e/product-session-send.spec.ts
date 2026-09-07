@@ -13,14 +13,14 @@ const excerpt = (text: string) => ({
   continuation: null,
 })
 
-async function sessionApi(page: Page, busy = false) {
+async function sessionApi(page: Page, busy = false, selectedSessionId = sessionId) {
   const state = { grown: false, submissions: [] as Array<{ command_id: string; message: string }> }
   let releaseFollow = () => {}
   const followReady = new Promise<void>((resolve) => {
     releaseFollow = resolve
   })
   const snapshot = () => ({
-    session_id: sessionId,
+    session_id: selectedSessionId,
     observed_through: state.grown ? '44' : '43',
     active: busy ? { turn_id: turnId, state: { kind: 'running', model_call_id: null } } : null,
     queued_turn_count: '0',
@@ -38,7 +38,7 @@ async function sessionApi(page: Page, busy = false) {
       body: `${JSON.stringify({ kind: 'snapshot', snapshot: { cursor: '0', summaries: [], continuation_after_session_id: null } })}\n`,
     }),
   )
-  await page.route(`**/api/sessions/${sessionId}**`, async (route) => {
+  await page.route(`**/api/sessions/${selectedSessionId}**`, async (route) => {
     const url = new URL(route.request().url())
     if (url.pathname.endsWith('/input')) {
       state.submissions.push(route.request().postDataJSON())
@@ -85,7 +85,7 @@ async function sessionApi(page: Page, busy = false) {
         })
       return route.fulfill({
         json: {
-          session_id: sessionId,
+          session_id: selectedSessionId,
           projected_body_bytes: items.reduce((sum, item) => sum + item.projected_body_bytes, 0),
           items,
           continuation: null,
@@ -96,7 +96,7 @@ async function sessionApi(page: Page, busy = false) {
     if (url.pathname.endsWith('/timeline'))
       return route.fulfill({
         json: {
-          session_id: sessionId,
+          session_id: selectedSessionId,
           items: [
             {
               address: { event_sequence: '41' },
@@ -125,7 +125,7 @@ async function sessionApi(page: Page, busy = false) {
       })
     return route.fulfill({
       json: {
-        session_id: sessionId,
+        session_id: selectedSessionId,
         sizes: {
           item_count: state.grown ? '3' : '2',
           projected_text_bytes: String(
@@ -336,4 +336,60 @@ test('keeps header-only history when transcript detail is not advertised', async
   api.grow()
   await expect(page.getByRole('option')).toHaveCount(3)
   expect(detailRequests).toEqual([])
+})
+
+test('refuses new session input at the retained-command limit while allowing exact retries', async ({
+  page,
+}) => {
+  const ids = [
+    sessionId,
+    '00000000-0000-0000-0000-000000000993',
+    '00000000-0000-0000-0000-000000000994',
+    '00000000-0000-0000-0000-000000000995',
+    '00000000-0000-0000-0000-000000000996',
+  ] as const
+  const apis = []
+  const attempts: Array<{ command_id: string; message: string }> = []
+  for (const id of ids) apis.push(await sessionApi(page, false, id))
+  await page.route('**/api/sessions/*/input', (route) => {
+    attempts.push(route.request().postDataJSON())
+    return route.abort()
+  })
+  await openSession(page)
+  const open = async (id: string) => {
+    await page.getByRole('textbox', { name: 'Exact session ID' }).fill(id)
+    await page.getByRole('button', { name: 'Open workspace', exact: true }).click()
+  }
+  for (const id of ids.slice(0, 4)) {
+    await open(id)
+    await page.getByRole('textbox', { name: 'Message to session' }).fill('Retain this command.')
+    await page.getByRole('button', { name: 'Send message', exact: true }).click()
+    await expect(
+      page.getByText('Acceptance is unconfirmed. Retry sends the same command and message.'),
+    ).toBeVisible()
+  }
+  const last = ids[4]
+  await open(last)
+  await page.getByRole('textbox', { name: 'Message to session' }).fill('Wait for capacity.')
+  await expect(
+    page.getByText(
+      'Pending-message limit reached. Retry a retained message before sending to another session.',
+    ),
+  ).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
+  expect(attempts).toHaveLength(4)
+  await page.route(`**/api/sessions/${sessionId}/input`, (route) => {
+    attempts.push(route.request().postDataJSON())
+    return route.fulfill({ status: 204 })
+  })
+  await open(sessionId)
+  await page.getByRole('button', { name: 'Retry message' }).click()
+  await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
+  expect(attempts[4]).toEqual(attempts[0])
+  await open(last)
+  await page
+    .getByRole('textbox', { name: 'Message to session' })
+    .fill('Capacity is available again.')
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeEnabled()
+  for (const api of apis) api.grow()
 })

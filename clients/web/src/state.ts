@@ -32,6 +32,9 @@ export interface SessionSyncState {
   cursor: string | null
 }
 
+// Hard safety ceiling: unresolved identities cannot be evicted to admit new messages.
+export const MAX_PENDING_SESSION_INPUTS = 4
+
 export interface PendingSessionInput {
   input: WebSubmitInputRequest
   phase: 'sending' | 'unconfirmed'
@@ -94,7 +97,6 @@ const appSlice = createSlice({
       state.sessionSync.attempt += 1
       state.sessionSync.phase = 'connecting'
       state.sessionSync.snapshot = null
-      state.sessionSync.cursor = null
     },
     sessionFollowUpdated(state, action: { payload: SessionSyncState }) {
       if (
@@ -116,6 +118,11 @@ const appSlice = createSlice({
       state,
       action: { payload: { sessionId: string; input: WebSubmitInputRequest } },
     ) {
+      if (
+        state.pendingSessionInputs[action.payload.sessionId] === undefined &&
+        Object.keys(state.pendingSessionInputs).length >= MAX_PENDING_SESSION_INPUTS
+      )
+        return
       state.pendingSessionInputs[action.payload.sessionId] = {
         input: action.payload.input,
         phase: 'sending',
@@ -286,3 +293,6 @@ export const useAppSelector = useSelector.withTypes<RootState>()
 export const selectSessionSync = (state: RootState) => state.app.sessionSync
 export const selectPendingSessionInput = (state: RootState, sessionId: string) =>
   state.app.pendingSessionInputs[sessionId]
+
+export const selectSessionInputCapacityReached = (state: RootState) =>
+  Object.keys(state.app.pendingSessionInputs).length >= MAX_PENDING_SESSION_INPUTS

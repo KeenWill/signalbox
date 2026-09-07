@@ -100,11 +100,13 @@ starting only when no turn is active. A 204 response acknowledges durable
 acceptance; typed errors report rejection, and an unconfirmed outcome is retried
 with the same command ID and text. Browser submissions use the session model and
 inherit all per-input model settings; replay requires those same choices.
-Accepted browser input nudges the daemon's eligibility work source. Unconfirmed
-commands remain in browser application state by session across navigation until
-acknowledged or rejected. A bounded rates read reports lifecycle state, turn
-outcome counts, the latest failed turn and its provider cause, and goal
-disposition for up to 32 listed sessions.
+Accepted browser input and its equal replay nudge the daemon's eligibility work
+source. Unconfirmed commands remain in browser application state by session
+across navigation until acknowledged or rejected. At most four sessions may
+retain unresolved input; new submissions at that limit are refused with a
+visible reason, while retries remain available. A bounded rates read reports
+lifecycle state, turn outcome counts, the latest failed turn and its provider
+cause, and goal disposition for up to 32 listed sessions.
 
 ## Design decisions
 
@@ -482,9 +484,10 @@ resumes durable history above its cursor without reloading the historical
 transcript. The browser permits one immediate resynchronization, then waits one
 second before each subsequent resynchronization; leaving the session cancels the
 wait. The session synchronization service owns the selected stream and publishes
-its phase, cursor, and live projection to application state. Transcript text
-reads require the bounded timeline-detail capability and replace pages of at
-most eight items; the response bound includes their attachment references.
+its phase, monotonic cursor, and live projection to application state.
+Transcript text reads require the bounded timeline-detail capability and replace
+pages of at most eight items and 65,536 projected bytes, with exact byte
+accounting; the response bound includes their attachment references.
 
 The session timeline descriptor reports the first and latest addresses, the item
 and projected-size facts, the active and queued turn counts, and the observation

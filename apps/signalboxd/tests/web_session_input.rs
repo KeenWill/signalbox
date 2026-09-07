@@ -7,7 +7,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use signalbox_application::EligibilityWorkSource as _;
+use signalbox_application::{EligibilityNudge as _, EligibilityWorkSource as _};
 use signalbox_domain::{
     CreateSession, DeliveryRequest, DirectModelSelection, DurableCommandId, FastModeOverlay,
     ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay,
@@ -137,7 +137,16 @@ async fn web_input_uses_operator_identity_and_retries_one_durable_acceptance()
         .handle(creation)
         .await?;
     let (eligibility_nudge, mut work_source) =
-        signalbox_application::InProcessEligibilityWorkSource::with_options(EmptySweep, None, None);
+        signalbox_application::InProcessEligibilityWorkSource::with_options(
+            EmptySweep,
+            None,
+            std::num::NonZeroUsize::new(1),
+        );
+    let occupied_hint = SessionId::from_uuid(Uuid::from_u128(100));
+    assert_eq!(
+        eligibility_nudge.nudge(occupied_hint),
+        signalbox_application::EligibilityNudgeOutcome::Enqueued,
+    );
     let router = signalboxd::web_http::production_router(
         None,
         Some(pool.clone()),
@@ -148,7 +157,7 @@ async fn web_input_uses_operator_identity_and_retries_one_durable_acceptance()
         Some(eligibility_nudge),
     );
     let command = Uuid::from_u128(30);
-    for _ in 0..2 {
+    for expected_hint in [occupied_hint, session] {
         let response = router
             .clone()
             .oneshot(submission(session, command, "Read the synthetic fixture"))
@@ -156,12 +165,12 @@ async fn web_input_uses_operator_identity_and_retries_one_durable_acceptance()
         let status = response.status();
         let body = to_bytes(response.into_body(), 65536).await?;
         assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), work_source.next()).await??,
+            expected_hint,
+            "the replay re-nudges after capacity dropped the original handoff",
+        );
     }
-    assert_eq!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), work_source.next()).await??,
-        session,
-        "accepted web input nudges the work source without a reconciliation sweep",
-    );
     let accepted: i64 =
         sqlx::query_scalar("SELECT count(*) FROM accepted_input WHERE session_id = $1")
             .bind(session.into_uuid())

@@ -4,7 +4,7 @@ import type {
   WebSessionLiveSnapshot,
   WebSessionLiveStreamEvent,
 } from './generated/web-contract.mjs'
-import { followSession } from './product'
+import { followSession, readSessionLive } from './product'
 import { startSessionSynchronization } from './session-sync'
 import { actions, createAppStore, selectSessionSync } from './state'
 
@@ -85,5 +85,52 @@ it('records explicit reconnects as a new session synchronization attempt', async
   await vi.waitFor(() => expect(followSession).toHaveBeenCalledTimes(2))
   expect(selectSessionSync(store.getState()).attempt).toBe(attempt + 1)
   stop()
+  queries.clear()
+})
+
+it('retains the newer live cursor when a buffered event is followed by a failed live read', async () => {
+  const sessionId = '00000000-0000-0000-0000-000000000991'
+  vi.mocked(followSession).mockImplementation(async function* () {
+    yield { kind: 'snapshot', snapshot: snapshot(sessionId) }
+    for (const cursor of ['42', '43'])
+      yield {
+        kind: 'durable',
+        cursor,
+        address: { event_sequence: cursor },
+        event_kind: 'input_accepted',
+      }
+  })
+  vi.mocked(readSessionLive)
+    .mockResolvedValueOnce({ ...snapshot(sessionId), observed_through: '50' })
+    .mockRejectedValueOnce(new Error('fixture live read failed'))
+  const store = createAppStore()
+  const queries = new QueryClient()
+  const cursors: string[] = []
+  const unsubscribe = store.subscribe(() => {
+    const cursor = selectSessionSync(store.getState()).cursor
+    if (cursor !== null) cursors.push(cursor)
+  })
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(sessionId))
+  await vi.waitFor(() => expect(selectSessionSync(store.getState()).phase).toBe('failed'))
+  expect(selectSessionSync(store.getState())).toMatchObject({
+    cursor: '50',
+    snapshot: { observed_through: '50' },
+  })
+  expect(cursors).not.toContain('43')
+  vi.mocked(followSession).mockImplementation(async function* () {
+    yield { kind: 'snapshot', snapshot: snapshot(sessionId) }
+    throw new Error('fixture reconnect failed')
+  })
+  store.dispatch(actions.sessionFollowReconnectRequested())
+  await vi.waitFor(() => expect(selectSessionSync(store.getState()).phase).toBe('failed'))
+  expect(selectSessionSync(store.getState()).cursor).toBe('50')
+  expect(
+    cursors.every(
+      (cursor, index) => index === 0 || BigInt(cursor) >= BigInt(cursors[index - 1] ?? '0'),
+    ),
+  ).toBe(true)
+  stop()
+  unsubscribe()
   queries.clear()
 })

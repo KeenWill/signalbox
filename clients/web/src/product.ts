@@ -1119,6 +1119,10 @@ export async function* followSession(
   }
 }
 
+// Selected page limits keep mounted transcript text and its attachment metadata bounded.
+const SESSION_TRANSCRIPT_MAX_ITEMS = 8
+const SESSION_TRANSCRIPT_MAX_BYTES = 65536
+
 export async function readSessionTranscript(
   sessionId: string,
   first: string,
@@ -1126,7 +1130,12 @@ export async function readSessionTranscript(
   continuation: WebTimelineDetailContinuation | null,
   signal?: AbortSignal,
 ) {
-  const query = new URLSearchParams({ first, through, max_items: '8', max_bytes: '65536' })
+  const query = new URLSearchParams({
+    first,
+    through,
+    max_items: String(SESSION_TRANSCRIPT_MAX_ITEMS),
+    max_bytes: String(SESSION_TRANSCRIPT_MAX_BYTES),
+  })
   if (continuation?.type === 'more_at')
     query.set('cursor_address', continuation.address.event_sequence)
   if (continuation?.type === 'more_body') {
@@ -1143,10 +1152,18 @@ export async function readSessionTranscript(
   // a 71-byte blob ID, a 20-digit length, and 255 visible ASCII media-type
   // bytes (at most doubled by JSON escaping), plus JSON keys and punctuation.
   // The remaining budget covers escaped text and non-attachment envelopes.
-  const payload = await readBoundedJson(response, MAX_PRODUCT_JSON_BYTES * 7 + 8 * 256 * 1024)
+  const payload = await readBoundedJson(
+    response,
+    SESSION_TRANSCRIPT_MAX_BYTES * 7 + SESSION_TRANSCRIPT_MAX_ITEMS * 256 * 1024,
+  )
   if (!response.ok)
     throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
   const page = decodeWebSessionTimelineDetailPage(payload)
+  if (
+    page.items.length > SESSION_TRANSCRIPT_MAX_ITEMS ||
+    page.projected_body_bytes > SESSION_TRANSCRIPT_MAX_BYTES
+  )
+    throw new TypeError('Transcript detail exceeds the selected page limits')
   if (
     page.session_id !== sessionId ||
     page.items.some(

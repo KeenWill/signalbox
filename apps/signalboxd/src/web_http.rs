@@ -1088,7 +1088,8 @@ async fn session_submit_input(
     request: Request,
 ) -> Response {
     use signalbox_application::{
-        SubmitInputOutcome, SubmitInputRequest, SubmitInputService, UuidV7SubmitInputIdGenerator,
+        EligibilityNudge as _, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+        UuidV7SubmitInputIdGenerator,
     };
     use signalbox_domain::{
         DeliveryRequest, DurableCommandId, ModelSelectionOverride, PerInputConfigurationChoices,
@@ -1157,6 +1158,14 @@ async fn session_submit_input(
                 )
             {
                 return web_input_conflict();
+            }
+            if matches!(
+                recorded.result(),
+                signalbox_domain::SubmitInputResult::Applied(
+                    signalbox_domain::SubmitInputAppliedResult::TurnOrigin(_)
+                )
+            ) {
+                let _ = eligibility_nudge.nudge(session);
             }
             return web_input_result(recorded.result());
         }

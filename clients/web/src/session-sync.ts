@@ -24,6 +24,13 @@ export function startSessionSynchronization(
     let projection: SessionSyncState = requested
     const publish = (update: Partial<SessionSyncState>) => {
       if (controller.signal.aborted) return
+      if (
+        update.cursor !== undefined &&
+        update.cursor !== null &&
+        projection.cursor !== null &&
+        BigInt(update.cursor) < BigInt(projection.cursor)
+      )
+        return
       projection = { ...projection, ...update }
       store.dispatch(actions.sessionFollowUpdated(projection))
     }
