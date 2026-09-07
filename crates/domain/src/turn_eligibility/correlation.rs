@@ -285,6 +285,7 @@ pub(super) fn validate_start(
     origin_by_turn: &BTreeMap<TurnId, SemanticTranscriptEntryRef>,
     model_identity_entry: Option<SemanticTranscriptEntryRef>,
     compaction_chain: &[&crate::ContextCompaction],
+    placement_frontiers: &[ContextFrontierId],
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
     referenced_snapshots: &mut BTreeSet<ContextFrontierId>,
 ) -> Result<AcceptedInputTurnStart, AcceptedInputSchedulingReconstitutionFailure> {
@@ -352,7 +353,15 @@ pub(super) fn validate_start(
                 && snapshot.has_semantic_prefix_and_suffix(result, suffix.iter().copied())
         })
     });
-    if !membership_matches {
+    let placement_matches = placement_frontiers
+        .iter()
+        .filter_map(|frontier| snapshots.get(frontier))
+        .rfind(|boundary| boundary.is_semantic_prefix_of(snapshot))
+        .is_some_and(|boundary| {
+            prefix.is_none_or(|prefix| prefix.is_semantic_prefix_of(boundary))
+                && snapshot.has_semantic_prefix_and_suffix(boundary, suffix.iter().copied())
+        });
+    if !membership_matches && !placement_matches {
         return Err(
             AcceptedInputSchedulingReconstitutionFailure::StartingFrontierMismatch { turn },
         );

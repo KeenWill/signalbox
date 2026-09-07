@@ -874,6 +874,11 @@ pub(super) fn transcript_entry_reference(
             entry,
             ..
         }
+        | ProcessTranscriptEntry::RunnerPlacementChanged {
+            source_session,
+            entry,
+            ..
+        }
         | ProcessTranscriptEntry::TurnFailed {
             source_session,
             entry,
@@ -1136,6 +1141,14 @@ pub(super) async fn context_compaction_entry_value(
             "type": "tool_denied",
             "tool_request_id": request.into_uuid().hyphenated().to_string(),
             "content": content,
+        }),
+        ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index,
+            placement_revision,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1, "source_session_id": source_session_id, "entry_id": entry_id,
+            "type": "runner_placement_changed", "placement_revision": placement_revision.get().to_string(),
         }),
         ProcessTranscriptEntry::ToolClosed {
             entry_index,

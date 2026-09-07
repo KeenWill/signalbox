@@ -892,6 +892,17 @@ pub enum ProcessToolExecutionResultDisposition {
 /// One ordered member of the latest authoritative semantic frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTranscriptEntry {
+    /// Reference-only successor placement boundary.
+    RunnerPlacementChanged {
+        /// Zero-based frontier position.
+        entry_index: u64,
+        /// Session owning the placement record.
+        source_session: SessionId,
+        /// Semantic boundary identity.
+        entry: SemanticTranscriptEntryId,
+        /// Exact successor placement revision.
+        placement_revision: signalbox_domain::RunnerGeneration,
+    },
     /// Exact delegated task that opened one child session.
     DelegatedTask {
         /// Zero-based position in the projected frontier.
@@ -1485,7 +1496,31 @@ async fn advance_through_latest_compaction(
     .bind(session_id_to_uuid(session))
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some(latest) = latest.map(ContextFrontierId::from_uuid) else {
+    let current = later_transcript_frontier(
+        transaction,
+        session,
+        current,
+        latest.map(ContextFrontierId::from_uuid),
+    )
+    .await?;
+    let placement: Option<Uuid> = sqlx::query_scalar("SELECT boundary.context_frontier_id FROM runner_session_placement_frontier AS head JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) WHERE head.session_id = $1")
+        .bind(session_id_to_uuid(session)).fetch_optional(&mut **transaction).await?;
+    later_transcript_frontier(
+        transaction,
+        session,
+        current,
+        placement.map(ContextFrontierId::from_uuid),
+    )
+    .await
+}
+
+async fn later_transcript_frontier(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+    current: Option<ContextFrontierId>,
+    latest: Option<ContextFrontierId>,
+) -> Result<Option<ContextFrontierId>, ProcessReadError> {
+    let Some(latest) = latest else {
         return Ok(current);
     };
     let Some(current) = current else {
@@ -1524,7 +1559,7 @@ async fn advance_through_latest_compaction(
         (true, false) => Ok(Some(latest)),
         (false, true) => Ok(Some(current)),
         _ => {
-            Err(ProcessReadCorruption::Inconsistent("turn and compaction frontier lineage").into())
+            Err(ProcessReadCorruption::Inconsistent("transcript boundary frontier lineage").into())
         }
     }
 }
@@ -1843,6 +1878,7 @@ impl ProcessReadRepository {
                 selected.source_session_id,
                 selected.semantic_entry_id,
                 entry.payload_kind,
+                entry.runner_placement_revision,
                 entry.origin_accepted_input_id,
                 entry.steering_source_turn_id,
                 entry.failed_turn_id,
@@ -4406,6 +4442,7 @@ async fn open_transcript_entry_cursor(
             member.source_session_id,
             member.semantic_entry_id,
             entry.payload_kind,
+            entry.runner_placement_revision,
             entry.origin_accepted_input_id,
             entry.steering_source_turn_id,
             entry.failed_turn_id,
@@ -4606,6 +4643,21 @@ fn decode_transcript_entry(
     let source_session = session_id_from_uuid(required(row, "source_session_id")?);
     let entry = SemanticTranscriptEntryId::from_uuid(required(row, "semantic_entry_id")?);
     let payload_kind: String = required(row, "payload_kind")?;
+    if payload_kind == "runner_placement_changed" {
+        let revision: Decimal = required(row, "runner_placement_revision")?;
+        let placement_revision = u64::try_from(revision)
+            .ok()
+            .and_then(signalbox_domain::RunnerGeneration::try_from_u64)
+            .ok_or(ProcessReadCorruption::Inconsistent(
+                "placement boundary revision",
+            ))?;
+        return Ok(ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index,
+            source_session,
+            entry,
+            placement_revision,
+        });
+    }
     let origin: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
     let steering_source_turn: Option<Uuid> = row.try_get("steering_source_turn_id")?;
     let failed_turn: Option<Uuid> = row.try_get("failed_turn_id")?;

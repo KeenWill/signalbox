@@ -1013,6 +1013,7 @@ impl ContinuationRoundReconstitutionInput {
 /// collections needed by any stored start or failed-terminal frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedInputSchedulingReconstitutionInput {
+    pub(super) runner_placement_frontiers: Vec<ContextFrontierId>,
     pub(super) session: Session,
     pub(super) imported_session: Option<ReconstitutedImportedSession>,
     pub(super) turns: Vec<AcceptedInputTurnSchedulingRecord>,
@@ -1038,6 +1039,11 @@ pub struct AcceptedInputSchedulingReconstitutionInput {
 }
 
 impl AcceptedInputSchedulingReconstitutionInput {
+    /// Supplies every checked placement boundary in placement-revision order.
+    pub fn with_runner_placement_frontiers(mut self, frontiers: Vec<ContextFrontierId>) -> Self {
+        self.runner_placement_frontiers = frontiers;
+        self
+    }
     /// Supplies one complete typed scheduling projection.
     pub fn new(
         session: Session,
@@ -1049,6 +1055,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
         Self {
             session,
             imported_session: None,
+            runner_placement_frontiers: Vec::new(),
             turns,
             semantic_entries,
             snapshots,

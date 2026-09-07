@@ -178,6 +178,15 @@ impl fmt::Debug for ModelAttachmentStub {
 /// preserves the provenance of entries inherited across sessions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelConversationMessage {
+    /// Injected session event resolved from the exact successor placement record.
+    RunnerPlacementChanged {
+        /// Source-qualified placement boundary.
+        source: SemanticTranscriptEntryRef,
+        /// Positive successor placement revision.
+        placement_revision: signalbox_domain::RunnerGeneration,
+        /// Sandbox selected by the referenced placement record.
+        sandbox: signalbox_domain::RunnerSandboxProfile,
+    },
     /// Injected session event declaring the model identity newly in force.
     ModelIdentityChanged {
         /// The source-qualified semantic entry being rendered.
@@ -375,7 +384,28 @@ pub fn render_model_user_content(
     Ok(ModelUserContent { parts })
 }
 
+#[cfg(test)]
 fn render_frontier_messages<'a>(
+    entries: impl IntoIterator<
+        Item = (
+            SemanticTranscriptEntryRef,
+            &'a SemanticTranscriptEntryPayload,
+        ),
+    >,
+    origin_content: impl FnMut(AcceptedInputId) -> Option<UserContent>,
+    attachment_byte_length: impl FnMut(BlobDigest) -> Option<NonZeroU64>,
+    tool_entries: impl IntoIterator<Item = &'a ResolvedToolConversationEntry>,
+) -> Result<Box<[ModelConversationMessage]>, ModelFrontierRenderingError> {
+    render_frontier_messages_with_placements(
+        entries,
+        origin_content,
+        attachment_byte_length,
+        tool_entries,
+        |_, _| None,
+    )
+}
+
+fn render_frontier_messages_with_placements<'a>(
     entries: impl IntoIterator<
         Item = (
             SemanticTranscriptEntryRef,
@@ -385,6 +415,10 @@ fn render_frontier_messages<'a>(
     mut origin_content: impl FnMut(AcceptedInputId) -> Option<UserContent>,
     mut attachment_byte_length: impl FnMut(BlobDigest) -> Option<NonZeroU64>,
     tool_entries: impl IntoIterator<Item = &'a ResolvedToolConversationEntry>,
+    mut runner_placement: impl FnMut(
+        SemanticTranscriptEntryRef,
+        signalbox_domain::RunnerGeneration,
+    ) -> Option<signalbox_domain::RunnerSandboxProfile>,
 ) -> Result<Box<[ModelConversationMessage]>, ModelFrontierRenderingError> {
     let mut resolved_tools = BTreeMap::new();
     for evidence in tool_entries {
@@ -397,6 +431,18 @@ fn render_frontier_messages<'a>(
     let mut messages = Vec::new();
     for (source, payload) in entries {
         match payload {
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision } => {
+                let sandbox = runner_placement(source, *placement_revision).ok_or(
+                    ModelFrontierRenderingError::MissingOrMismatchedPlacementEvidence {
+                        entry: source,
+                    },
+                )?;
+                messages.push(ModelConversationMessage::RunnerPlacementChanged {
+                    source,
+                    placement_revision: *placement_revision,
+                    sandbox,
+                });
+            }
             SemanticTranscriptEntryPayload::Imported {
                 imported_entry,
                 source_speaker: ImportedSourceAttestation::Attested(ImportedSpeaker::User),
@@ -776,7 +822,8 @@ fn projected_frontier_content_bytes<'a>(
             // Identity-only payloads carry no content of their own. Tool
             // payloads name evidence rather than carrying it, and that
             // evidence is summed below.
-            SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+            | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -909,11 +956,12 @@ impl PreparedModelOperation {
                 },
             );
         }
-        let messages = render_frontier_messages(
+        let messages = render_frontier_messages_with_placements(
             projected_entries,
             |accepted_input| request.origin_content(accepted_input).cloned(),
             |digest| request.attachment_byte_length(digest),
             projected_tool_entries,
+            |source, revision| request.runner_placement_sandbox(source, revision),
         )?;
         Ok(Self {
             request,
@@ -970,6 +1018,12 @@ impl PreparedModelOperation {
 /// A checked frontier could not be projected into the current text-only input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelFrontierRenderingError {
+    #[error("model frontier placement evidence is missing or mismatched")]
+    /// The placement reference lacks its exact checked successor record.
+    MissingOrMismatchedPlacementEvidence {
+        /// Source-qualified placement entry.
+        entry: SemanticTranscriptEntryRef,
+    },
     #[error("model frontier origin content is missing")]
     /// A frontier origin was missing its reconstituted accepted-input content.
     MissingOriginContent {
@@ -6366,7 +6420,8 @@ mod tests {
                     content.as_str().len()
                 }
                 // An identity change carries fixed-width facts only.
-                ModelConversationMessage::ModelIdentityChanged { .. } => 0,
+                ModelConversationMessage::ModelIdentityChanged { .. }
+                | ModelConversationMessage::RunnerPlacementChanged { .. } => 0,
             };
             total + bytes
         })

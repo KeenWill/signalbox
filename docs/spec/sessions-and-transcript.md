@@ -242,8 +242,7 @@ An owned session waits for an operator when it is parked, blocked on a goal that
 no automatic resumption will lift, or held in an exhausted recovery wait, when
 an ambiguous model call has exhausted its automatic reconciliation budget and
 the operator has not reconciled the turn, or when a turn awaits runner recovery;
-a pending tool-approval decision is the separate waiting state. The replacement
-and abandonment commands that leave the lost state are planned, and an ambiguous
+a pending tool-approval decision is the separate waiting state. An ambiguous
 external-effect tool attempt whose budget is exhausted stays an exhausted
 recovery wait, flagged for the operator, with no releasing command until the
 deferred tool-recovery surface exists. A module that parks something wrapping a
@@ -658,6 +657,14 @@ correlates the entry as the logical result of its still-open await request. The
 immutable child result stays keyed by the spawning request, and a detached child
 may return after the parent has stopped or cancelled.
 
+`RunnerPlacementChanged` references the exact successor placement revision and
+copies no advertisement, workspace path, credential fact, or tool output. An
+idle pinned replacement appends one entry after the authoritative frontier, or
+establishes a one-entry root, and advances the session placement-frontier
+pointer. The next accepted-input origin extends that boundary. Missing,
+same-revision, cross-session, non-prefix, or duplicate boundary authority fails
+closed.
+
 ## Planned
 
 - Instruction-aware defaults replacement, rejecting a model selection whose
@@ -671,7 +678,7 @@ may return after the parent has stopped or cancelled.
   length ([design](../design/sessions-and-transcript.md)).
 - Search publication through the typed projection-writer port
   ([design](../design/sessions-and-transcript.md)).
-- Session relocation boundary entry referencing the successor placement record
+- Active-turn relocation boundaries and healthy-session moves
   ([design](../design/sessions-and-transcript.md)).
 - Durable terminal-result reconstitution consumed by delegation result sealing
   ([design](../design/sessions-and-transcript.md)).

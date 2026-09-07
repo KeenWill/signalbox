@@ -38,6 +38,30 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
+    /// Recover the named session on its pending successor runner.
+    ReplaceLostRunner {
+        /// User-global mutation identity.
+        command_id: CommandId,
+        /// Session whose runner is lost.
+        session_id: CanonicalUuid,
+        /// Full lowercase SHA-1 or SHA-256 checkout revision, or retained recovery facts.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        revision: Option<String>,
+    },
+    /// Retire a lost placement after the session's active turn has ended.
+    AbandonLostRunner {
+        /// User-global mutation identity.
+        command_id: CommandId,
+        /// Session whose runner is lost.
+        session_id: CanonicalUuid,
+    },
+    /// Activate one pending runner without moving any session.
+    PromotePendingRunner {
+        /// User-global mutation identity.
+        command_id: CommandId,
+        /// Exact runner-created pending enrollment request.
+        enrollment_request_id: CanonicalUuid,
+    },
     /// Create a user-initiated session.
     CreateSession {
         /// Durable mutation identity.
@@ -658,6 +682,13 @@ pub enum ToolDecision {
 impl ClientRequest {
     pub(crate) fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
+            Self::ReplaceLostRunner { revision, .. } => {
+                if let Some(revision) = revision {
+                    signalbox_domain::WorkspaceRevision::try_new(revision.clone())
+                        .map_err(|_| FrameValidationError::PlacementShape)?;
+                }
+            }
+            Self::AbandonLostRunner { .. } | Self::PromotePendingRunner { .. } => {}
             Self::AttachGoal { statement, .. }
             | Self::SupersedeGoal { statement, .. }
             | Self::CommissionSession { statement, .. } => {

@@ -37,6 +37,9 @@ pub struct ProviderCompactionBlockError;
 
 ```rust
 pub enum SemanticTranscriptEntryPayload {
+    RunnerPlacementChanged {
+        placement_revision: RunnerGeneration,
+    },
     Imported {
         imported_entry: ImportedTranscriptEntryId,
         source_speaker: ImportedSourceAttestation<ImportedSpeaker>,

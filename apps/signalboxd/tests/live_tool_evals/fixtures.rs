@@ -1715,6 +1715,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::TurnCancelled { .. }
                 | ProcessTranscriptEntry::ImportedText { .. }
                 | ProcessTranscriptEntry::Imported { .. } => None,
+                ProcessTranscriptEntry::RunnerPlacementChanged { .. } => None,
             })
             .collect::<BTreeSet<_>>();
         let requests = transcript
@@ -1758,6 +1759,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::TurnCancelled { .. }
                 | ProcessTranscriptEntry::ImportedText { .. }
                 | ProcessTranscriptEntry::Imported { .. } => None,
+                ProcessTranscriptEntry::RunnerPlacementChanged { .. } => None,
             })
             .collect();
         let model_calls = i64::try_from(

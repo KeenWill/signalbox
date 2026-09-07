@@ -462,6 +462,15 @@ impl<'a> Output<'a> {
                 entry.source_session_id,
                 entry.entry_id
             ),
+            SnapshotEntryKind::Marker(TranscriptEntry::RunnerPlacementChanged {
+                placement_revision,
+            }) => writeln!(
+                self.stdout,
+                "runner_placement_changed revision={} source={} entry={}",
+                placement_revision.value(),
+                entry.source_session_id,
+                entry.entry_id
+            ),
             SnapshotEntryKind::Marker(TranscriptEntry::ToolClosed {
                 tool_request_id,
                 content,

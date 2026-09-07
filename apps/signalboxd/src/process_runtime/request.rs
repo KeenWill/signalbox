@@ -46,6 +46,14 @@ where
         return write_bulk_ingest_rejection(writer, version, request_id, active_kind).await;
     }
     match request {
+        request @ (ClientRequest::ReplaceLostRunner { .. }
+        | ClientRequest::AbandonLostRunner { .. }
+        | ClientRequest::PromotePendingRunner { .. }) => {
+            runner_recovery::handle_runner_recovery(
+                writer, version, request_id, request, services, shutdown,
+            )
+            .await
+        }
         ClientRequest::CreateSession {
             command_id,
             initial_model_selection,

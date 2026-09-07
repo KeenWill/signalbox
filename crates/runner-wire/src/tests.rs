@@ -595,6 +595,7 @@ fn manifest_rejects_abbreviated_revision() {
 fn ready_frame_rejects_manifest_digest_disagreement() {
     let invalid = Message::WorkspaceReady(WorkspaceReady {
         correlation: provision_correlation(),
+        working_directory: "/workspace/ready".to_owned(),
         ready: ReadyManifest {
             manifest: manifest(),
             manifest_digest: digest(EXPECTED_ADVERTISEMENT_DIGEST),
@@ -613,6 +614,7 @@ fn ready_frame_rejects_nondeterministic_relative_path() {
         .unwrap_or_else(|error| panic!("changed manifest digests: {error}"));
     let invalid = Message::WorkspaceReady(WorkspaceReady {
         correlation: provision_correlation(),
+        working_directory: "/workspace/ready".to_owned(),
         ready: ReadyManifest {
             manifest: ready_manifest,
             manifest_digest,
@@ -703,6 +705,7 @@ fn ready_frame_rejects_manifest_correlation_disagreement() {
         .unwrap_or_else(|error| panic!("changed manifest digests: {error}"));
     let invalid = Message::WorkspaceReady(WorkspaceReady {
         correlation: provision_correlation(),
+        working_directory: "/workspace/ready".to_owned(),
         ready: ReadyManifest {
             manifest: ready_manifest,
             manifest_digest: digest,

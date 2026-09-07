@@ -53,6 +53,7 @@ pub(crate) enum SendDeliveryArgument {
 
 #[derive(Debug)]
 pub(crate) enum Command {
+    Runner(RunnerCommand),
     Create {
         selection: Option<ModelSelection>,
         template: Option<String>,
@@ -411,6 +412,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Recover a lost runner placement or promote its pending successor.
+    Runner(RunnerArguments),
     /// Create a session.
     Create(CreateArguments),
     /// Append an explicit immutable placement update.
@@ -463,6 +466,46 @@ enum CliCommand {
     Approve(DecideArguments),
     /// Deny one pending tool request with an explicit reason.
     Deny(DenyArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+struct RunnerArguments {
+    #[command(subcommand)]
+    command: RunnerCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RunnerCommand {
+    /// Replace the lost runner of one session.
+    Replace {
+        /// Session whose runner is lost.
+        #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+        session: CanonicalUuid,
+        /// Full lowercase SHA-1 or SHA-256 checkout revision; omission retains recovery facts.
+        #[arg(long, value_name = "SHA")]
+        revision: Option<String>,
+        /// Durable command identity; omission generates and prints one for retry.
+        #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
+    /// Retire a lost placement after its active turn ends.
+    Abandon {
+        /// Session whose runner is lost.
+        #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+        session: CanonicalUuid,
+        /// Durable command identity; omission generates and prints one for retry.
+        #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
+    /// Promote one pending runner without moving any session.
+    Promote {
+        /// Exact pending enrollment request to activate.
+        #[arg(value_name = "ENROLLMENT_REQUEST_ID", value_parser = canonical_uuid)]
+        enrollment_request: CanonicalUuid,
+        /// Durable command identity; omission generates and prints one for retry.
+        #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
 }
 
 #[derive(Debug, ClapArgs)]
@@ -1810,6 +1853,7 @@ pub(crate) fn parse(
         Err(error) => return Err(UsageError(error)),
     };
     let command = match parsed.command {
+        CliCommand::Runner(arguments) => Command::Runner(arguments.command),
         CliCommand::Create(arguments) => Command::Create {
             selection: match (arguments.model, arguments.alias) {
                 (Some(selection_id), None) => Some(ModelSelection::Direct { selection_id }),

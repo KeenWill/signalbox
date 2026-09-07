@@ -48,6 +48,33 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
+    /// Durable replacement receipt.
+    RunnerReplacementReceipt {
+        /// Command whose terminal result committed.
+        command_id: crate::CommandId,
+        /// Session the request named.
+        session_id: CanonicalUuid,
+        /// Committed installation or refusal.
+        outcome: crate::RunnerReplacementOutcome,
+    },
+    /// Durable abandonment receipt.
+    RunnerAbandonmentReceipt {
+        /// Command whose terminal result committed.
+        command_id: crate::CommandId,
+        /// Session the request named.
+        session_id: CanonicalUuid,
+        /// Committed retirement or refusal.
+        outcome: crate::RunnerAbandonmentOutcome,
+    },
+    /// Durable pending-enrollment promotion receipt.
+    RunnerPromotionReceipt {
+        /// Command whose terminal result committed.
+        command_id: crate::CommandId,
+        /// Exact pending enrollment request the command named.
+        enrollment_request_id: CanonicalUuid,
+        /// Committed promotion or refusal.
+        outcome: crate::RunnerPromotionOutcome,
+    },
     /// Session creation receipt.
     SessionCreated {
         /// Created session.

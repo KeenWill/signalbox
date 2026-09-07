@@ -137,7 +137,10 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
         | ServerMessage::ReviewOrchestration { .. }
-        | ServerMessage::DeploymentLimits { .. } => ConversationImportResponse::Unexpected,
+        | ServerMessage::DeploymentLimits { .. }
+        | ServerMessage::RunnerReplacementReceipt { .. }
+        | ServerMessage::RunnerAbandonmentReceipt { .. }
+        | ServerMessage::RunnerPromotionReceipt { .. } => ConversationImportResponse::Unexpected,
     }
 }
 

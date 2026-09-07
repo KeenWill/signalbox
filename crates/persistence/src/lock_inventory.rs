@@ -812,6 +812,11 @@ pub(crate) const RUNNER_PLACEMENT_HEAD: &str = "SELECT record.*
               WHERE current_placement.session_id = $1
               FOR UPDATE OF current_placement";
 
+pub(crate) const RUNNER_RECOVERY_ENROLLMENTS: &str = "SELECT enrollment_id
+    FROM runner_enrollment WHERE enrollment_id = ANY($1) ORDER BY enrollment_id FOR UPDATE";
+
+pub(crate) const RUNNER_RECOVERY_LOSS_IDENTITY: &str = "SELECT lock_runner_loss_identity($1)";
+
 pub(crate) const RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER: &str = "SELECT enrollment_id
                FROM runner_enrollment
               WHERE runner_id = $1

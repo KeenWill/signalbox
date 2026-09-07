@@ -435,7 +435,8 @@ fn reconstitute_inner(
             }
             InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
-            | InitialSemanticTranscriptEntryPayload::ToolClosed { .. } => {}
+            | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
+            | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. } => {}
             InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
             | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
             | InitialSemanticTranscriptEntryPayload::DelegationResult { .. } => {}
@@ -1498,6 +1499,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -1941,6 +1943,7 @@ fn reconstitute_inner(
                                         | SemanticTranscriptEntryPayload::ToolClosed { .. }
                                         | SemanticTranscriptEntryPayload::TurnCompleted { .. }
                                         | SemanticTranscriptEntryPayload::TurnFailed { .. }
+                                        | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
                                         | SemanticTranscriptEntryPayload::TurnCancelled { .. } => {
                                             false
                                         }
@@ -2023,6 +2026,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -2244,6 +2248,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -2367,6 +2372,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -2537,6 +2543,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -2774,6 +2781,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -2944,6 +2952,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -3015,6 +3024,32 @@ fn reconstitute_inner(
     }
 
     referenced_snapshots.extend(compaction_snapshots);
+    for frontier in &input.runner_placement_frontiers {
+        let boundary = snapshots.get(frontier).ok_or(
+            AcceptedInputSchedulingReconstitutionFailure::UnreferencedSnapshot {
+                snapshot: *frontier,
+            },
+        )?;
+        let valid = boundary
+            .ordered_entries()
+            .next_back()
+            .and_then(|reference| semantic_entries.get(&reference))
+            .is_some_and(|entry| {
+                entry.source_session() == session
+                    && matches!(
+                        entry.payload(),
+                        SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+                    )
+            });
+        if !valid {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::UnreferencedSnapshot {
+                    snapshot: *frontier,
+                },
+            );
+        }
+        referenced_snapshots.insert(*frontier);
+    }
     referenced_snapshots.extend(assistant_call_snapshots);
     if let Some(snapshot) = snapshots
         .keys()
@@ -3062,6 +3097,7 @@ fn reconstitute_inner(
     }
 
     Ok(AcceptedInputSchedulingProjection {
+        runner_placement_frontier: input.runner_placement_frontiers.last().copied(),
         session: input.session.clone(),
         initial_seed_frontier,
         latest_compaction_result,

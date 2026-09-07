@@ -793,6 +793,11 @@ impl ImportedTextPreview {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptEntry {
+    /// A reference-only successor placement boundary.
+    RunnerPlacementChanged {
+        /// Exact positive successor placement revision.
+        placement_revision: PositiveCanonicalU64,
+    },
     /// Exact delegated task that opened one child session.
     DelegatedTask {
         /// Tool request that spawned the child.
