@@ -210,8 +210,9 @@ impl ConfigurationReload {
                     .map_err(|_| {
                         ReloadRepositoryError::Corruption("startup rule activation failed")
                     })?;
-                self.reconcile(&catalogs).await?;
+                let restored = self.reconcile(&catalogs).await?;
                 watch.install_reload(prepared).await;
+                watch.nudge_restored(restored).await;
             }
         } else {
             for (request, intent) in pending {
@@ -274,7 +275,7 @@ impl ConfigurationReload {
     async fn reconcile(
         &self,
         catalogs: &ConfigurationCatalogs,
-    ) -> Result<(), ReloadRepositoryError> {
+    ) -> Result<Vec<signalbox_domain::SessionId>, ReloadRepositoryError> {
         let targets = catalogs
             .models
             .repository_watch()
@@ -288,17 +289,12 @@ impl ConfigurationReload {
                     .map(|number| (repository.repository().clone(), *number))
             })
             .collect::<Vec<_>>();
-        let restored = self
-            .convergence
+        self.convergence
             .reconcile_configured_targets(&targets)
             .await
             .map_err(|_| {
                 ReloadRepositoryError::Corruption("reload convergence reconciliation failed")
-            })?;
-        if let Some(watch) = &self.watch {
-            watch.nudge_restored(restored).await;
-        }
-        Ok(())
+            })
     }
 
     async fn deliver(
@@ -363,17 +359,18 @@ impl ConfigurationReload {
                 let prepared = watch.prepare_reload(prior.clone()).await.map_err(|_| {
                     ReloadRepositoryError::Corruption("prior reload worker preparation failed")
                 })?;
-                self.reconcile(&prior).await?;
+                let restored = self.reconcile(&prior).await?;
                 *self
                     .current
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = prior;
                 watch.install_reload(prepared).await;
+                watch.nudge_restored(restored).await;
                 self.repository.finish(request, &refusal).await?;
                 return Ok(ReloadLookup::Recorded(refusal));
             }
-            self.reconcile(&replacement).await?;
-            Some((watch, prepared))
+            let restored = self.reconcile(&replacement).await?;
+            Some((watch, prepared, restored))
         } else {
             None
         };
@@ -381,8 +378,9 @@ impl ConfigurationReload {
             .current
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = replacement;
-        if let Some((watch, prepared)) = prepared_watch {
+        if let Some((watch, prepared, restored)) = prepared_watch {
             watch.install_reload(prepared).await;
+            watch.nudge_restored(restored).await;
         }
         self.repository
             .finish(request, &ReloadResult::Reloaded)
