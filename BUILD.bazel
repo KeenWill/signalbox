@@ -1,3 +1,5 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
 exports_files([
     "Cargo.lock",
     "Cargo.toml",
@@ -6,8 +8,48 @@ exports_files([
     "config/signalbox-runner.example.toml",
     "tooling/codex-cli/package.json",
     "tooling/postgres_test_image.rs",
+    "tooling/requirements-mdformat.txt",
     "config/signalboxd.example.toml",
 ])
+
+filegroup(
+    name = "postgres_workflow_fixtures",
+    srcs = [
+        ".github/postgres-integration-suites.toml",
+        ".github/workflows/rust.yml",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
+py_test(
+    name = "test_supervise_lifecycle",
+    size = "small",
+    srcs = ["tooling/test_supervise_lifecycle.py"],
+    data = ["tooling/supervise-lifecycle.sh"],
+    main = "tooling/test_supervise_lifecycle.py",
+    tags = ["external"],
+)
+
+py_test(
+    name = "test_sweep_test_containers",
+    size = "medium",
+    srcs = ["tooling/test_sweep_test_containers.py"],
+    data = [
+        "tooling/sweep-test-containers.sh",
+        "//crates/persistence:src/lib.rs",
+    ],
+    main = "tooling/test_sweep_test_containers.py",
+    tags = ["external"],
+)
+
+test_suite(
+    name = "python_checker_tests",
+    tests = [
+        ":test_supervise_lifecycle",
+        ":test_sweep_test_containers",
+        "//scripts:checker_tests",
+    ],
+)
 
 filegroup(
     name = "web_contract_fixtures",

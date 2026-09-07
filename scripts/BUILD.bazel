@@ -1,0 +1,91 @@
+load("@python_deps//:requirements.bzl", "requirement")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+
+[
+    py_library(
+        name = checker,
+        srcs = [checker + ".py"],
+        imports = ["."],
+    )
+    for checker in [
+        "check_migration_versions",
+        "check_ownership_seam",
+    ]
+]
+
+py_library(
+    name = "domain_spine",
+    srcs = [
+        "domain_spine_digest.py",
+        "render_domain_spine.py",
+    ],
+    imports = ["."],
+)
+
+py_library(
+    name = "postgres_integration_suites",
+    srcs = ["postgres_integration_suites.py"],
+    imports = ["."],
+    deps = [requirement("PyYAML")],
+)
+
+py_library(
+    name = "check_docs_consistency",
+    srcs = ["check_docs_consistency.py"],
+    imports = ["."],
+    deps = [
+        ":postgres_integration_suites",
+        requirement("markdown-it-py"),
+    ],
+)
+
+[
+    py_test(
+        name = "test_" + checker,
+        size = "small",
+        srcs = ["test_" + checker + ".py"],
+        deps = [":" + checker],
+    )
+    for checker in [
+        "check_migration_versions",
+        "check_ownership_seam",
+    ]
+]
+
+py_test(
+    name = "test_domain_spine_digest",
+    size = "small",
+    srcs = ["test_domain_spine_digest.py"],
+    deps = [":domain_spine"],
+)
+
+py_test(
+    name = "test_render_domain_spine",
+    size = "small",
+    srcs = ["test_render_domain_spine.py"],
+    data = ["@rules_rust//rust/toolchain:current_rustfmt_toolchain"],
+    env = {"RUSTFMT": "$(rootpath @rules_rust//rust/toolchain:current_rustfmt_toolchain)"},
+    deps = [":domain_spine"],
+)
+
+py_test(
+    name = "test_check_docs_consistency",
+    size = "small",
+    srcs = ["test_check_docs_consistency.py"],
+    # These fixtures execute the host's Git.
+    tags = ["external"],
+    deps = [":check_docs_consistency"],
+)
+
+py_test(
+    name = "test_postgres_integration_suites",
+    size = "small",
+    srcs = ["test_postgres_integration_suites.py"],
+    data = ["//:postgres_workflow_fixtures"],
+    deps = [":postgres_integration_suites"],
+)
+
+test_suite(
+    name = "checker_tests",
+    visibility = ["//visibility:public"],
+)

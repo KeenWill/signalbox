@@ -21,6 +21,9 @@ def _native_runtime_impl(ctx):
         "\n".join([
             "#!/bin/bash",
             "set -euo pipefail",
+            # Script launchers already select their declared interpreter.
+            'IFS= read -r -n 4 magic < "$1" || true',
+            'if [[ "$magic" != $\'\\x7fELF\' ]]; then exec "$@"; fi',
             "patch_binary() {",
             '  "${RUNFILES_DIR:?}/%s" --set-interpreter "${RUNFILES_DIR}/%s" --set-rpath "%s" --output "$2" "$1"' % (
                 _runfile_path(ctx.file.patchelf),
