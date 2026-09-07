@@ -1,10 +1,10 @@
 //! Compatibility smoke against the real, pinned Codex CLI.
 //!
-//! Ignored by default: it spawns the installed executable, spends one real
-//! model exchange, and therefore needs credentials the ordinary Rust workflow
-//! never has. `.github/workflows/codex-smoke.yml` is the only automated caller:
-//! its unprivileged gate rejects changed fork pull requests before the
-//! environment-backed smoke job can start.
+//! Ignored by default: the adapter smoke and temporary app-server probe each
+//! spend one real model exchange. They need credentials the ordinary Rust
+//! workflow never has. Their only automated caller is
+//! `.github/workflows/codex-smoke.yml`: its unprivileged gate rejects changed
+//! fork pull requests before the environment-backed smoke job can start.
 //!
 //! What it proves is protocol compatibility, which is what a CLI version bump
 //! actually breaks: the `codex exec --json` event stream still starts a thread,
