@@ -265,6 +265,8 @@ pub(super) async fn require_live_execution_with_targets(
     let attachment_blob_facts = load_attachment_blob_facts(connection, &origin_contents).await?;
     let tool_result_correlations =
         load_tool_result_correlations(connection, &frontier_entries).await?;
+    let tool_inadmissible_correlations =
+        load_tool_inadmissible_correlations(connection, &frontier_entries).await?;
     let tool_denial_correlations =
         load_tool_denial_correlations(connection, &frontier_entries).await?;
     let recovered_targets;
@@ -306,7 +308,8 @@ pub(super) async fn require_live_execution_with_targets(
     )
     .with_attachment_blob_facts(attachment_blob_facts)
     .with_tool_result_correlations(tool_result_correlations)
-    .with_tool_denial_correlations(tool_denial_correlations);
+    .with_tool_denial_correlations(tool_denial_correlations)
+    .with_tool_inadmissible_correlations(tool_inadmissible_correlations);
     if availability_successor {
         input = input.with_availability_successor();
     }
@@ -947,6 +950,24 @@ async fn load_delegated_consumed_steering(
             ))
         })
         .collect()
+}
+
+pub(super) async fn load_tool_inadmissible_correlations(
+    connection: &mut PgConnection,
+    entries: &[SemanticTranscriptEntry],
+) -> Result<Vec<signalbox_domain::ToolRequest>, ModelCallRepositoryError> {
+    let requests = entries
+        .iter()
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::ToolInadmissible { request } => Some(*request),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    Ok(crate::tool_loop::load_requests_by_id(connection, &requests)
+        .await
+        .map_err(map_tool_evidence_error)?
+        .into_values()
+        .collect())
 }
 
 pub(super) async fn load_tool_denial_correlations(

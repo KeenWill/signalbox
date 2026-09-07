@@ -69,6 +69,11 @@ pub struct ProviderReasoningProvenance {
 
 ```rust
 pub enum ModelConversationMessage {
+    RunnerPlacementChanged {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        placement_revision: signalbox_domain::RunnerGeneration,
+        sandbox: signalbox_domain::RunnerSandboxProfile,
+    },
     ModelIdentityChanged {
         source: signalbox_domain::SemanticTranscriptEntryRef,
         defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
@@ -204,6 +209,9 @@ impl PreparedModelOperation {
 
 ```rust
 pub enum ModelFrontierRenderingError {
+    MissingOrMismatchedPlacementEvidence {
+        entry: signalbox_domain::SemanticTranscriptEntryRef,
+    },
     MissingOrMismatchedReasoningProvenance {
         entry: signalbox_domain::SemanticTranscriptEntryRef,
     },

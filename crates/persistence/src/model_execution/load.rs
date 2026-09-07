@@ -50,6 +50,7 @@ pub(super) async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
@@ -57,6 +58,7 @@ pub(super) async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
             | SemanticTranscriptEntryPayload::ToolClosed { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | SemanticTranscriptEntryPayload::Imported { .. } => None,

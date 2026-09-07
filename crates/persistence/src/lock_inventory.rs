@@ -28,6 +28,8 @@
 //! row first.
 //!
 //! Additional row-lock protocols:
+//! - `tool_loop::placement_loss::close_lost_runner_requests_after_observation`: after the
+//!   session scheduler, `tool_request FOR UPDATE` in proposal order.
 //! - `review_workflow::append_finding_event`: ordinary events lock every `review_finding` for the
 //!   target `FOR NO KEY UPDATE`, by `finding_id`; publication reconciliation takes the external
 //!   link before its finding.
@@ -811,6 +813,11 @@ pub(crate) const RUNNER_PLACEMENT_HEAD: &str = "SELECT record.*
                 AND record.event_ordinal = current_placement.event_ordinal
               WHERE current_placement.session_id = $1
               FOR UPDATE OF current_placement";
+
+pub(crate) const RUNNER_RECOVERY_ENROLLMENTS: &str = "SELECT enrollment_id
+    FROM runner_enrollment WHERE enrollment_id = ANY($1) ORDER BY enrollment_id FOR UPDATE";
+
+pub(crate) const RUNNER_RECOVERY_LOSS_IDENTITY: &str = "SELECT lock_runner_loss_identity($1)";
 
 pub(crate) const RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER: &str = "SELECT enrollment_id
                FROM runner_enrollment

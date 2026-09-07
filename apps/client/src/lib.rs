@@ -58,6 +58,7 @@ mod chat;
 mod connection;
 mod error;
 mod presentation;
+mod runner;
 mod transcript;
 
 const MAX_INPUT_CONTENT_FRAME_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
@@ -282,6 +283,7 @@ async fn execute(
         | Command::BlobRead { .. }
         | Command::Create { .. }
         | Command::Place { .. }
+        | Command::Runner(_)
         | Command::Continue { .. }
         | Command::Compact { .. }
         | Command::Session(_)
@@ -309,6 +311,7 @@ async fn execute(
         Command::BlobUpload { source } => Some(open_blob_source(source)?),
         Command::Create { .. }
         | Command::Place { .. }
+        | Command::Runner(_)
         | Command::Continue { .. }
         | Command::Compact { .. }
         | Command::Session(_)
@@ -346,6 +349,7 @@ async fn execute(
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
         | Command::Place { .. }
+        | Command::Runner(_)
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
@@ -396,6 +400,7 @@ async fn execute(
     }
 
     match arguments.command {
+        Command::Runner(command) => runner::run(&mut client, &mut output, command).await,
         Command::Create {
             selection,
             template,

@@ -104,10 +104,13 @@ impl SessionPlacementRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
-                | CommandKind::DeleteOauthCredential
-                | CommandKind::SessionLifecycle,
+                | CommandKind::DeleteOauthCredential,
             ) => {
                 transaction.rollback().await?;
                 return Ok(SessionPlacementRepositoryOutcome::ConflictingReuse { command_id });
@@ -161,10 +164,13 @@ impl SessionPlacementRepository {
                     | CommandKind::RegisterWorkspace
                     | CommandKind::MintGitRemote
                     | CommandKind::WithdrawGitRemote
+                    | CommandKind::SessionLifecycle
+                    | CommandKind::ReplaceLostRunner
+                    | CommandKind::AbandonLostRunner
+                    | CommandKind::PromotePendingRunner
                     | CommandKind::ProvisionOauthCredential
                     | CommandKind::ReprovisionOauthCredential
-                    | CommandKind::DeleteOauthCredential
-                    | CommandKind::SessionLifecycle,
+                    | CommandKind::DeleteOauthCredential,
                 ) => SessionPlacementRepositoryOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(SessionPlacementRepositoryError::Corruption(

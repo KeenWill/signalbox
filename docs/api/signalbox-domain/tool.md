@@ -693,6 +693,7 @@ impl ToolUsingAssistantResponseError {
 pub struct ToolRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl ToolRequest {
+    pub const fn inadmissible_reason(&self) -> option::Option<ToolInadmissibleReason>;
     pub const fn id(&self) -> ToolRequestId;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
@@ -720,6 +721,10 @@ impl ToolRequestReconstitutionInput {
         arguments: NormalizedToolArguments,
     ) -> Self;
     pub const fn with_approval_posture(self, posture: ToolApprovalPosture) -> Self;
+    pub const fn with_inadmissible_reason(
+        self,
+        reason: option::Option<ToolInadmissibleReason>,
+    ) -> Self;
     pub fn into_request(self) -> ToolRequest;
 }
 ```
@@ -773,7 +778,20 @@ impl ToolResultTextError {
 pub enum ToolRequestResolution {
     Executed { attempt: ToolAttemptId },
     Denied { request: ToolRequestId },
+    ClosedInadmissible { request: ToolRequestId },
     ClosedByTurnEnd { request: ToolRequestId },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## ToolInadmissibleReason
+
+```rust
+pub enum ToolInadmissibleReason {
+    PlacementLost,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ToolInadmissibleReason {
+    pub fn execution_error(self) -> ToolExecutionError;
+}
 ```

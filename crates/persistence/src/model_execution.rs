@@ -23,8 +23,8 @@ pub(crate) use live_turn::load_delegated_runner_recovery_for_interrupt;
 pub(crate) use live_turn::lock_session;
 pub(crate) use live_turn::require_live_execution_for_restart;
 use live_turn::{
-    load_tool_denial_correlations, load_tool_result_correlations, require_live_execution,
-    require_live_execution_with_targets,
+    load_tool_denial_correlations, load_tool_inadmissible_correlations,
+    load_tool_result_correlations, require_live_execution, require_live_execution_with_targets,
 };
 pub(crate) use reread::attach_interrupt_reclassification_candidates;
 pub(crate) use reread::attach_interrupt_reclassification_candidates_for_activated;
@@ -1295,6 +1295,8 @@ impl PostgresModelCallRepository {
             load_attachment_blob_facts(&mut transaction, &origin_contents).await?;
         let tool_result_correlations =
             load_tool_result_correlations(&mut transaction, &frontier_entries).await?;
+        let tool_inadmissible_correlations =
+            load_tool_inadmissible_correlations(&mut transaction, &frontier_entries).await?;
         let tool_denial_correlations =
             load_tool_denial_correlations(&mut transaction, &frontier_entries).await?;
         // The canonical projection the renderer sends. A preview never commits
@@ -1328,6 +1330,7 @@ impl PostgresModelCallRepository {
         .with_attachment_blob_facts(attachment_blob_facts)
         .with_tool_result_correlations(tool_result_correlations)
         .with_tool_denial_correlations(tool_denial_correlations)
+        .with_tool_inadmissible_correlations(tool_inadmissible_correlations)
         .reconstitute()
         .map_err(|error| {
             let (_, failure) = error.into_parts();
@@ -1337,7 +1340,7 @@ impl PostgresModelCallRepository {
             .clone()
             .prepare_initial_call(call)
             .map_err(|_| ModelCallRepositoryError::InvalidTransition("preview initial call"))?;
-        let request = execution
+        let mut request = execution
             .preview_initial_call(call)
             .map_err(|_| ModelCallRepositoryError::InvalidTransition("preview initial call"))?;
         let system_prompt = load_frozen_epoch_system_prompt(
@@ -1346,6 +1349,7 @@ impl PostgresModelCallRepository {
             preview.turn().configuration().session_defaults_version(),
         )
         .await?;
+        resolve_runner_placement_entries(transaction.as_mut(), &mut request).await?;
         let tool_entries = load_tool_conversation_entries(&mut transaction, &request).await?;
         let reasoning_provenance =
             load_provider_reasoning_provenance(&mut transaction, &request).await?;
@@ -1582,7 +1586,7 @@ impl PostgresModelCallRepository {
                 return match current_call.state() {
                     signalbox_domain::CurrentModelCallState::Prepared => {
                         let current_call_id = current_call.id();
-                        let request = execution.resume_prepared_call().map_err(|_| {
+                        let mut request = execution.resume_prepared_call().map_err(|_| {
                             ModelCallRepositoryError::InvalidTransition(
                                 "Prepared call could not resume",
                             )
@@ -1607,6 +1611,8 @@ impl PostgresModelCallRepository {
                                 .session_defaults_version(),
                         )
                         .await?;
+                        resolve_runner_placement_entries(transaction.as_mut(), &mut request)
+                            .await?;
                         let tool_entries =
                             load_tool_conversation_entries(&mut transaction, &request).await?;
                         let reasoning_provenance =
@@ -3240,6 +3246,17 @@ async fn load_tool_continuation_headroom_evidence(
 
                             UNION ALL
 
+                            SELECT octet_length(request.inadmissible_reason) AS content_bytes
+                              FROM semantic_transcript_entry AS entry
+                              JOIN tool_request AS request ON request.request_id = entry.tool_result_request_id
+                                AND request.session_id = entry.source_session_id
+                             WHERE entry.payload_kind = 'tool_inadmissible'
+                               AND request.producing_model_call_id = model_call.model_call_id
+                               AND request.session_id = model_call.session_id
+                               AND request.turn_id = model_call.turn_id
+
+                            UNION ALL
+
                             -- A returning foreground await renders the child's
                             -- delivered result as this round's tool result, so
                             -- its content joins the round through the awaiting
@@ -3842,6 +3859,38 @@ pub(crate) async fn insert_prepared_call(
     Ok(())
 }
 
+async fn resolve_runner_placement_entries(
+    connection: &mut PgConnection,
+    request: &mut PreparedModelCallRequest,
+) -> Result<(), ModelCallRepositoryError> {
+    let references = request
+        .frontier_entries()
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision } => {
+                Some((entry.reference(), *placement_revision))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (source, revision) in references {
+        let row = sqlx::query(
+            "SELECT record.placement_revision, record.requested_sandbox_profile FROM runner_placement_boundary AS boundary
+             JOIN runner_session_placement_record AS record USING (session_id, event_ordinal)
+             WHERE boundary.session_id = $1 AND boundary.semantic_entry_id = $2 AND boundary.placement_revision = $3
+               AND record.placement_revision = boundary.placement_revision AND record.event_kind = 'runner_replaced'",
+        ).bind(source.source_session().into_uuid()).bind(source.entry().into_uuid()).bind(Decimal::from(revision.get()))
+            .fetch_optional(&mut *connection).await?.ok_or(ModelCallCorruption::Missing("placement boundary record"))?;
+        let sandbox: String = required(&row, "requested_sandbox_profile")?;
+        let sandbox = crate::mapping::runner_sandbox_from_str(&sandbox).ok_or(
+            ModelCallCorruption::Inconsistent("placement boundary sandbox"),
+        )?;
+        request
+            .resolve_runner_placement(source, revision, sandbox)
+            .map_err(|_| ModelCallCorruption::Inconsistent("placement boundary correlation"))?;
+    }
+    Ok(())
+}
+
 async fn load_provider_reasoning_provenance(
     connection: &mut PgConnection,
     request: &PreparedModelCallRequest,
@@ -3922,6 +3971,7 @@ async fn load_tool_conversation_entries(
     for entry in request.frontier_entries() {
         match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantToolUse { request, .. }
+            | SemanticTranscriptEntryPayload::ToolInadmissible { request }
             | SemanticTranscriptEntryPayload::ToolClosed { request } => {
                 request_ids.insert(*request);
             }
@@ -3944,6 +3994,7 @@ async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
         }
@@ -4025,6 +4076,15 @@ async fn load_tool_conversation_entries(
                     approval,
                 });
             }
+            SemanticTranscriptEntryPayload::ToolInadmissible {
+                request: request_id,
+            } => {
+                let request = requests
+                    .get(request_id)
+                    .cloned()
+                    .ok_or(ModelCallCorruption::Missing("closed tool request evidence"))?;
+                resolved.push(ResolvedToolConversationEntry::Inadmissible { source, request });
+            }
             SemanticTranscriptEntryPayload::ToolClosed {
                 request: request_id,
             } => {
@@ -4046,6 +4106,7 @@ async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
         }
@@ -5020,7 +5081,19 @@ async fn persist_tool_round(
         round.requests(),
     )
     .await?;
+    crate::tool_loop::close_lost_runner_requests(connection, round.session(), round.call().id())
+        .await
+        .map_err(map_tool_evidence_error)?;
     for approval in round.automatic_approvals() {
+        let inadmissible: bool = sqlx::query_scalar(
+            "SELECT inadmissible_reason IS NOT NULL FROM tool_request WHERE request_id = $1",
+        )
+        .bind(approval.request().into_uuid())
+        .fetch_one(&mut *connection)
+        .await?;
+        if inadmissible {
+            continue;
+        }
         let (decision_kind, denial_reason) = encode_tool_approval(approval.decision());
         let source = encode_tool_decision_source(approval.source())?;
         let override_denied_request = match (approval.source(), approval.decider()) {
@@ -5147,6 +5220,9 @@ async fn persist_tool_round(
             );
         }
     }
+    crate::tool_loop::resolve_lost_runner_batch(connection, round.session())
+        .await
+        .map_err(map_tool_evidence_error)?;
     outbox::append(
         connection,
         OutboxEvent::ToolBatchTransition {
@@ -7079,8 +7155,10 @@ fn preview_entry_content_bytes(
         | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
         | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
         | SemanticTranscriptEntryPayload::ToolDenied { .. }
+        | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
         | SemanticTranscriptEntryPayload::ToolClosed { .. }
         | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+        | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
         | SemanticTranscriptEntryPayload::TurnCancelled { .. } => 0,
     }
 }

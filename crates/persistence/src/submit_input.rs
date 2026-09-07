@@ -514,6 +514,9 @@ impl SubmitInputRepository {
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner
                 | CommandKind::SessionLifecycle,
             ) => Err(Self::wrong_kind(command_id)),
         }

@@ -2093,12 +2093,14 @@ pub(crate) fn completed_tool_result_entry_indices(
             | ProcessTranscriptEntry::ProviderReasoning { .. }
             | ProcessTranscriptEntry::AssistantToolUse { .. }
             | ProcessTranscriptEntry::ToolDenied { .. }
+            | ProcessTranscriptEntry::ToolInadmissible { .. }
             | ProcessTranscriptEntry::ToolClosed { .. }
             | ProcessTranscriptEntry::TurnFailed { .. }
             | ProcessTranscriptEntry::TurnCompleted { .. }
             | ProcessTranscriptEntry::TurnCancelled { .. }
             | ProcessTranscriptEntry::ImportedText { .. }
             | ProcessTranscriptEntry::Imported { .. } => None,
+            ProcessTranscriptEntry::RunnerPlacementChanged { .. } => None,
         })
         .collect()
 }
