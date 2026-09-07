@@ -13,8 +13,11 @@ use signalbox_persistence::oauth_credential::{
     OauthCredentialRepository, OauthDispatchLease, OauthQuarantineCause as Cause,
     OauthRegistration, OauthStoredAuthorization,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 use tokio::{sync::Mutex, time::Instant};
+
+// Codex proactively refreshes access tokens within five minutes of expiry.
+const CODEX_PROACTIVE_REFRESH_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 struct CachedAccess {
     generation: i64,
@@ -147,9 +150,9 @@ impl OauthCredentialService {
         }
         if let Some(access) = cached.as_ref().filter(|access| {
             access.generation == stored.generation
-                && access
-                    .expires_at
-                    .map_or(joined, |until| until > Instant::now())
+                && access.expires_at.map_or(joined, |until| {
+                    until.saturating_duration_since(Instant::now()) > CODEX_PROACTIVE_REFRESH_WINDOW
+                })
         }) {
             return install(lease, &stored, access.token.clone(), installer).await;
         }
@@ -526,7 +529,14 @@ mod tests {
             assert!(!stored.refresh_in_progress);
             assert!(stored.quarantine.is_none());
             assert_eq!(stored.authorization.refresh_token, "initial-refresh");
+            let generation = stored.generation;
             lease.commit().await?;
+            // A token at Codex's five-minute boundary must be refreshed before installation.
+            state.access = Some(CachedAccess {
+                generation,
+                token: CredentialValue::new(b"near-expiry-access".to_vec()),
+                expires_at: Some(Instant::now() + Duration::from_secs(5 * 60)),
+            });
         }
         let mut first = Installer::default();
         let mut second = Installer::default();
