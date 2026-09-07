@@ -61,6 +61,8 @@ pub struct ConfigurationReload {
     template_path: PathBuf,
     home: Option<PathBuf>,
     startup: toml::Table,
+    runtime_factory: Option<crate::model_catalog_runtime::ModelRuntimeFactory>,
+    github_tool_credential: Option<PathBuf>,
 }
 
 impl ConfigurationReload {
@@ -85,7 +87,58 @@ impl ConfigurationReload {
             template_path,
             home,
             startup,
+            runtime_factory: None,
+            github_tool_credential: None,
         })
+    }
+
+    /// Validates execution composition before admitting a replacement catalog.
+    pub fn with_runtime_factory(
+        mut self,
+        factory: crate::model_catalog_runtime::ModelRuntimeFactory,
+    ) -> Self {
+        self.runtime_factory = Some(factory);
+        self
+    }
+
+    pub(crate) fn compaction_model(
+        &self,
+        models: Arc<HubModelConfiguration>,
+    ) -> Option<Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel>> {
+        self.runtime_factory.map(|factory| {
+            Arc::new(
+                crate::model_catalog_runtime::CatalogContextCompactionModel::new(models, factory),
+            ) as _
+        })
+    }
+
+    pub fn with_github_tool_credential(mut self, path: PathBuf) -> Self {
+        self.github_tool_credential = Some(path);
+        self
+    }
+
+    fn validate_runtime(&self, catalogs: &ConfigurationCatalogs) -> Result<(), ReloadResult> {
+        if let Some(tool_credential) = &self.github_tool_credential
+            && catalogs.models.repository_watch().is_some_and(|watch| {
+                watch.repositories().iter().any(|repository| {
+                    crate::repo_watch_credentials::credential_files_conflict(
+                        tool_credential,
+                        repository.credential_file(),
+                    )
+                })
+            })
+        {
+            return Err(failure(
+                ReloadPhase::Validate,
+                "repository-watch credential conflicts with GitHub tool credential",
+            ));
+        }
+        if let Some(factory) = self.runtime_factory {
+            factory
+                .build(&catalogs.models)
+                .map_err(|_| failure(ReloadPhase::Validate, "model runtime composition failed"))?;
+        }
+        Ok(())
     }
 
     /// Clones the complete pair under one short read lock.
@@ -218,10 +271,12 @@ impl ConfigurationReload {
                 ));
             }
         }
-        Ok(ConfigurationCatalogs {
+        let catalogs = ConfigurationCatalogs {
             models: Arc::new(models),
             templates: Arc::new(templates),
-        })
+        };
+        self.validate_runtime(&catalogs)?;
+        Ok(catalogs)
     }
 }
 

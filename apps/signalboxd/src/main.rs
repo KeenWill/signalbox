@@ -7,6 +7,7 @@
 //! deployment configuration, and migration policy at this executable
 //! boundary.
 
+use signalboxd::credential_files_conflict;
 use signalboxd::repo_watch_runtime::{
     RepositoryWatchRuntime, RepositoryWatchRuntimeError, RepositoryWatchServices,
     connect_repository_watch_pool,
@@ -19,7 +20,7 @@ use std::{
     fmt, fs,
     future::Future,
     num::NonZeroUsize,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
     time::Duration,
@@ -40,11 +41,11 @@ use signalbox_model_provider_runtime::{
     RuntimeContextCompactionModel, RuntimeModelCallProvider,
 };
 use signalbox_model_runtime::CredentialReference;
-use signalbox_model_runtime_anthropic::{
-    AnthropicConfig, AnthropicConstructionError, AnthropicRuntime,
-};
+#[cfg(test)]
+use signalbox_model_runtime_anthropic::AnthropicConstructionError;
 use signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version;
-use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
+#[cfg(test)]
+use signalbox_model_runtime_openai::OpenAiConstructionError;
 use signalbox_persistence::{
     automatic_reconciliation::RETRY_LADDER_ARITY, blob::BlobCatalogRepository,
     convergence_sweep::PostgresConvergenceSweepStore, hub_fence::FENCED_POOL_MAX_CONNECTIONS,
@@ -66,13 +67,12 @@ use signalboxd::{
     FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
     GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError,
     LifecycleDeadlineRuntime, LifecycleMetricsRuntime, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
+    MappedDaemonCredentialInputs, OtlpRuntime, PostgresGoalPassDisposition,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
     ReportedUsageCompaction, SessionTemplateConfiguration, SessionTemplateConfigurationError,
     SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
     TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
     TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
-    model_adapter::ConfiguredModelRuntime,
     reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
@@ -375,88 +375,6 @@ fn socket_artifacts_conflict(process_path: &Path, runner_path: &Path) -> bool {
         .any(|process| runner_artifacts.iter().any(|runner| runner == process))
 }
 
-fn credential_files_conflict(left: &Path, right: &Path) -> bool {
-    let left = resolved_file_reference(left);
-    let right = resolved_file_reference(right);
-    left == right || same_file_identity(&left, &right)
-}
-
-#[cfg(unix)]
-fn same_file_identity(left: &Path, right: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
-        return false;
-    };
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file_identity(_left: &Path, _right: &Path) -> bool {
-    false
-}
-
-fn resolved_file_reference(path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        env::current_dir()
-            .map(|current| current.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-    let mut resolved = normalize_file_reference(&absolute);
-    for _ in 0..40 {
-        let mut prefix = PathBuf::new();
-        let mut components = resolved.components();
-        let mut replacement = None;
-        while let Some(component) = components.next() {
-            prefix.push(component.as_os_str());
-            let Ok(metadata) = fs::symlink_metadata(&prefix) else {
-                return resolved;
-            };
-            if !metadata.file_type().is_symlink() {
-                continue;
-            }
-            let Ok(target) = fs::read_link(&prefix) else {
-                return resolved;
-            };
-            let mut target = if target.is_absolute() {
-                target
-            } else {
-                prefix
-                    .parent()
-                    .map_or(target.clone(), |parent| parent.join(target))
-            };
-            target.extend(components.map(|remaining| remaining.as_os_str()));
-            replacement = Some(normalize_file_reference(&target));
-            break;
-        }
-        let Some(replacement) = replacement else {
-            return fs::canonicalize(&resolved).unwrap_or(resolved);
-        };
-        resolved = replacement;
-    }
-    resolved
-}
-
-fn normalize_file_reference(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() && !path.is_absolute() {
-                    normalized.push(component.as_os_str());
-                }
-            }
-        }
-    }
-    normalized
-}
-
 fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
     let file_name = path.file_name().filter(|name| !name.is_empty())?;
     let parent = path.parent()?;
@@ -520,6 +438,7 @@ fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) ->
 ///
 /// The adapter's dynamic parser/client detail is deliberately excluded because
 /// an adapter-owned string is not admitted to operator telemetry.
+#[cfg(test)]
 const fn anthropic_construction_cause(error: &AnthropicConstructionError) -> &'static str {
     match error {
         AnthropicConstructionError::InvalidBaseUrl { .. } => "anthropic_invalid_base_url",
@@ -534,6 +453,7 @@ const fn anthropic_construction_cause(error: &AnthropicConstructionError) -> &'s
 ///
 /// The adapter's dynamic parser/client detail is deliberately excluded because
 /// an adapter-owned string is not admitted to operator telemetry.
+#[cfg(test)]
 const fn openai_construction_cause(error: &OpenAiConstructionError) -> &'static str {
     match error {
         OpenAiConstructionError::InvalidBaseUrl { .. } => "openai_invalid_base_url",
@@ -1501,22 +1421,17 @@ async fn run_hub(
                 )
             })?;
     }
-    let anthropic_model_credentials = FileCredentialAccess::from_files(
-        model_configuration
-            .file_credential_profiles(ModelAdapter::Anthropic)
-            .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
+    let runtime_factory = signalboxd::model_catalog_runtime::ModelRuntimeFactory::new(
+        model_exchange_timeout,
+        post_kill_reap_bound,
+        native_message_limit,
     );
-    let openai_model_credentials = FileCredentialAccess::from_files(
-        model_configuration
-            .file_credential_profiles(ModelAdapter::OpenAi)
-            .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
-    );
-    let anthropic_credential_access = model_configuration
-        .uses_anthropic_adapter()
-        .then(|| anthropic_model_credentials.clone());
-    let openai_credential_access = model_configuration
-        .uses_openai_adapter()
-        .then(|| openai_model_credentials.clone());
+    runtime_factory.build(&model_configuration).map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("model_runtime_composition_failed"),
+        )
+    })?;
     let credential_reference =
         ModelCallCredentialReference::new(model_configuration.fallback_credential_profile());
     let code_host_credentials = FileCredentialAccess::new(
@@ -1527,66 +1442,6 @@ async fn run_hub(
         configuration.brave_api_key_file(),
         CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
     );
-    let compaction_anthropic = anthropic_credential_access
-        .clone()
-        .map(|credential_access| {
-            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
-            adapter_configuration.exchange_timeout = model_exchange_timeout;
-            AnthropicRuntime::new(adapter_configuration, credential_access)
-        })
-        .transpose()
-        .map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
-            )
-        })?;
-    let compaction_openai = openai_credential_access
-        .clone()
-        .map(|credential_access| {
-            let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
-            adapter_configuration.exchange_timeout = model_exchange_timeout;
-            OpenAiRuntime::new(adapter_configuration, credential_access)
-        })
-        .transpose()
-        .map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(openai_construction_cause(&error)),
-            )
-        })?;
-    let anthropic_model_capabilities = model_configuration.runtime_model_capability_catalog();
-    let openai_model_capabilities = model_configuration.runtime_model_capability_catalog();
-    let anthropic = model_configuration
-        .uses_anthropic_adapter()
-        .then(|| anthropic_model_credentials.clone())
-        .map(|credential_access| {
-            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
-            adapter_configuration.exchange_timeout = model_exchange_timeout;
-            adapter_configuration.model_capabilities = anthropic_model_capabilities;
-            AnthropicRuntime::new(adapter_configuration, credential_access)
-        })
-        .transpose()
-        .map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
-            )
-        })?;
-    let openai = openai_credential_access
-        .map(|credential_access| {
-            let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
-            adapter_configuration.exchange_timeout = model_exchange_timeout;
-            adapter_configuration.model_capabilities = openai_model_capabilities;
-            OpenAiRuntime::new(adapter_configuration, credential_access)
-        })
-        .transpose()
-        .map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(openai_construction_cause(&error)),
-            )
-        })?;
     let code_host_transport = GitHubCodeHostTransport::try_new(code_host_numeric_bounds)
         .map_err(|_| {
             erase_startup_cause(
@@ -1595,47 +1450,6 @@ async fn run_hub(
             )
         })?
         .with_convergence_policy(model_configuration.convergence().cloned());
-    let runtime_models = model_configuration.runtime_model_catalog();
-    let compaction_runtime = ConfiguredModelRuntime::new(
-        compaction_anthropic,
-        compaction_openai,
-        &model_configuration,
-        model_exchange_timeout,
-        post_kill_reap_bound,
-        native_message_limit,
-    )
-    .map_err(|error| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static(error.cause_code()),
-        )
-    })?;
-    let runtime = ConfiguredModelRuntime::new(
-        anthropic,
-        openai,
-        &model_configuration,
-        model_exchange_timeout,
-        post_kill_reap_bound,
-        native_message_limit,
-    )
-    .map_err(|error| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static(error.cause_code()),
-        )
-    })?;
-    let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
-        RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
-    );
-    let approval_judge_model: Arc<dyn ApprovalJudgeModel> = Arc::new(
-        RuntimeApprovalJudgeModel::new(runtime.clone(), runtime_models.clone()),
-    );
-    let provider = RuntimeModelCallProvider::new(
-        runtime,
-        runtime_models.clone(),
-        diagnostic_model_identity_limit,
-    );
-    let model_targets = model_configuration.target_catalog();
     let mut database = FencedHubDatabase::connect_production(
         configuration.database_url(),
         fenced_pool_min_connections,
@@ -2152,6 +1966,15 @@ async fn run_hub(
             SanitizedStartupCause::Static("configuration_reload_composition_failed"),
         )
     })?;
+    let configuration_reload = configuration_reload
+        .with_runtime_factory(runtime_factory)
+        .with_github_tool_credential(configuration.github_token_file());
+    let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
+        signalboxd::model_catalog_runtime::CatalogContextCompactionModel::new(
+            configuration_reload.catalogs().models,
+            runtime_factory,
+        ),
+    );
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),
@@ -2160,7 +1983,7 @@ async fn run_hub(
         model_configuration.clone(),
         template_configuration,
     )
-    .with_configuration_reload(configuration_reload)
+    .with_configuration_reload(configuration_reload.clone())
     .with_context_compaction_model(Arc::clone(&context_compaction_model))
     .with_snapshot_reader_budget(snapshot_reader_budget);
     let process_runtime = match prometheus_runtime.as_ref() {
@@ -2171,77 +1994,114 @@ async fn run_hub(
         Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
         None => process_runtime,
     };
-    let web_http_runtime =
-        web_http_listener.into_runtime(process_runtime.monitor(), eligibility_nudge.clone());
+    let web_http_runtime = web_http_listener
+        .into_runtime(process_runtime.monitor(), eligibility_nudge.clone())
+        .with_configuration_reload(configuration_reload.clone());
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
-    let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
-    let counter = AttachmentPreparingModelCallProvider::for_counting(
-        provider.clone(),
-        scheduler_pool.clone(),
-        blob_store_registry.clone(),
-        model_configuration.provider_input_count_targets(),
-    );
-    let model_repository = PostgresModelCallRepository::new(
-        scheduler_pool.clone(),
-        model_targets,
-        credential_reference,
-    )
-    .with_session_credentials(model_configuration.credential_family_catalog())
-    .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
-    .with_same_credential_attempt_bound(same_credential_attempt_bound)
-    .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
-    .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
-    let provider = AttachmentPreparingModelCallProvider::new(
-        UsageLimitedModelCallProvider::new(provider, &model_configuration),
-        scheduler_pool.clone(),
-        blob_store_registry.clone(),
-    );
-    let reported_usage_compaction = ReportedUsageCompaction::new(
-        StartEligibleTurnRepository::new(scheduler_pool.clone()),
-        model_repository.clone(),
-        tool_catalog.clone(),
-        runtime_models.clone(),
-        model_configuration.clone(),
-        Arc::clone(&context_compaction_model),
-    );
+    let text_deltas = process_runtime.provider_text_delta_sink();
     let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
-    let (execution, fatal_execution) = FatalExecutionSupervisor::new(
-        PostgresProviderModelExecution::new(
+    let (execution_supervisor, fatal_execution) = FatalExecutionSupervisor::new(());
+    let process_runtime =
+        process_runtime.with_recovery_reporter(execution_supervisor.recovery_reporter());
+    let pass_pool = scheduler_pool.clone();
+    let pass_nudge = eligibility_nudge.clone();
+    let pass_blobs = blob_store_registry.clone();
+    let compose_pass = move |model_configuration: &HubModelConfiguration| {
+        let runtime_models = model_configuration.runtime_model_catalog();
+        let runtime = runtime_factory.build(model_configuration)?;
+        let compaction: Arc<dyn ContextCompactionModel> = Arc::new(
+            RuntimeContextCompactionModel::new(runtime.clone(), runtime_models.clone()),
+        );
+        let approval_judge: Arc<dyn ApprovalJudgeModel> = Arc::new(RuntimeApprovalJudgeModel::new(
+            runtime.clone(),
+            runtime_models.clone(),
+        ));
+        let provider = RuntimeModelCallProvider::new(
+            runtime,
+            runtime_models.clone(),
+            diagnostic_model_identity_limit,
+        )
+        .with_text_delta_sink(text_deltas.clone());
+        let counter = AttachmentPreparingModelCallProvider::for_counting(
+            provider.clone(),
+            pass_pool.clone(),
+            pass_blobs.clone(),
+            model_configuration.provider_input_count_targets(),
+        );
+        let model_repository = PostgresModelCallRepository::new(
+            pass_pool.clone(),
+            model_configuration.target_catalog(),
+            credential_reference.clone(),
+        )
+        .with_session_credentials(model_configuration.credential_family_catalog())
+        .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
+        .with_same_credential_attempt_bound(same_credential_attempt_bound)
+        .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
+        .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
+        let provider = AttachmentPreparingModelCallProvider::new(
+            UsageLimitedModelCallProvider::new(provider, model_configuration),
+            pass_pool.clone(),
+            pass_blobs.clone(),
+        );
+        let reported_usage_compaction = ReportedUsageCompaction::new(
+            StartEligibleTurnRepository::new(pass_pool.clone()),
             model_repository.clone(),
-            InProcessAttemptDispatchGate::default(),
-            provider,
-            automatic_tool_round_limit,
-        )
-        .with_tool_loop(tool_dispatch_gate, tool_catalog.clone(), tool_executor)
-        .with_workspace_instructions(workspace_instruction_runtime.clone())
-        .with_approval_judge(
-            approval_judge_model,
-            model_configuration.configured_approval_judge_selection(),
+            tool_catalog.clone(),
+            runtime_models.clone(),
             model_configuration.clone(),
+            compaction.clone(),
+        );
+        let execution = execution_supervisor.with_execution(
+            PostgresProviderModelExecution::new(
+                model_repository.clone(),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                automatic_tool_round_limit,
+            )
+            .with_tool_loop(
+                tool_dispatch_gate.clone(),
+                tool_catalog.clone(),
+                tool_executor.clone(),
+            )
+            .with_workspace_instructions(workspace_instruction_runtime.clone())
+            .with_approval_judge(
+                approval_judge,
+                model_configuration.configured_approval_judge_selection(),
+                model_configuration.clone(),
+            )
+            .with_shutdown_checkpoint(turn_execution_shutdown_receiver.clone()),
+        );
+        Ok::<_, signalboxd::model_catalog_runtime::ModelRuntimeBuildError>(
+            ContextGuardedTurnPass::new(
+                StartEligibleTurnRepository::new(pass_pool.clone()),
+                model_repository,
+                counter,
+                tool_catalog.clone(),
+                runtime_models,
+                model_configuration.clone(),
+                compaction,
+                execution,
+            )
+            .with_reported_usage_compaction(reported_usage_compaction)
+            .with_workspace_instructions(workspace_instruction_runtime.clone())
+            .with_occupancy_recovery(
+                pass_pool.clone(),
+                pass_nudge.clone(),
+                expired_pass_recovery_policy,
+                turn_liveness_persistence_bounds,
+            ),
         )
-        .with_shutdown_checkpoint(turn_execution_shutdown_receiver),
-    );
-    // The connection runtime has no execution role, so it reaches the same
-    // fatal recovery signal through this handle rather than ending an
-    // undecidable durable outcome at the client response.
-    let process_runtime = process_runtime.with_recovery_reporter(execution.recovery_reporter());
-    let activated_pass = ContextGuardedTurnPass::new(
-        StartEligibleTurnRepository::new(scheduler_pool.clone()),
-        model_repository,
-        counter,
-        tool_catalog,
-        runtime_models,
-        model_configuration.clone(),
-        Arc::clone(&context_compaction_model),
-        execution,
-    )
-    .with_reported_usage_compaction(reported_usage_compaction)
-    .with_workspace_instructions(workspace_instruction_runtime)
-    .with_occupancy_recovery(
-        scheduler_pool.clone(),
-        eligibility_nudge.clone(),
-        expired_pass_recovery_policy,
-        turn_liveness_persistence_bounds,
+    };
+    let baseline_pass = compose_pass(&model_configuration).map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("model_runtime_composition_failed"),
+        )
+    })?;
+    let activated_pass = signalboxd::model_catalog_runtime::CatalogEligibilityPass::new(
+        configuration_reload.clone(),
+        compose_pass,
+        baseline_pass,
     );
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),
@@ -2262,7 +2122,8 @@ async fn run_hub(
         model_configuration.clone(),
         eligibility_nudge,
         goal_mode_numeric_bounds,
-    );
+    )
+    .with_configuration_reload(configuration_reload.clone());
     let process_runtime = process_runtime.with_goal_resumption(goal_disposition.clone());
     match goal_disposition
         .reconcile_automatic_resumptions_after_restart()

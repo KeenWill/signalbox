@@ -77,6 +77,7 @@ pub enum ReloadClaim {
 
 ```rust
 pub enum ReloadRepositoryError {
+    CommitAmbiguous(error::Error),
     Database(error::Error),
     Corruption(&'static str),
     InvalidCommandId,

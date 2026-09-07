@@ -699,6 +699,8 @@ validation of nonempty reviewer identities after bot-suffix normalization.
 Convergence reads and the sweep require this policy; other code-host operations
 do not use it.
 
+Each request and execution pass uses one immutable catalog snapshot.
+
 ## Planned
 
 - Input-modality declarations on model and serving-target records, and the blob

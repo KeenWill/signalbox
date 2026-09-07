@@ -110,6 +110,9 @@ pub enum ReloadClaim {
 #[derive(Debug, signalbox_derive::OperatorError)]
 /// Database and fail-closed reload record errors.
 pub enum ReloadRepositoryError {
+    #[error("reload commit outcome is ambiguous: {field_0}")]
+    /// PostgreSQL could not confirm whether a command transaction committed.
+    CommitAmbiguous(#[source] sqlx::Error),
     #[error("reload database operation failed: {field_0}")]
     /// The database operation failed.
     Database(#[source] sqlx::Error),
@@ -198,7 +201,9 @@ impl ReloadConfigurationRepository {
                 ReloadClaim::Settled(ReloadLookup::Recorded(result.clone()))
             }
         };
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .map_err(ReloadRepositoryError::CommitAmbiguous)?;
         Ok(outcome)
     }
 
@@ -215,7 +220,9 @@ impl ReloadConfigurationRepository {
                 "conflicting terminal reload result",
             ));
         }
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .map_err(ReloadRepositoryError::CommitAmbiguous)?;
         Ok(())
     }
 

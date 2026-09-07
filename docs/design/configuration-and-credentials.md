@@ -394,14 +394,8 @@ which every origin-minting path shares; it is not a `SubmitInput` feature.
 The runner has no model-provider configuration field and rejects reserved
 model-provider names; runner credential execution adds no such field.
 
-Every catalog reader takes one immutable snapshot, so reload can swap the
-snapshot atomically without a reader observing two documents.
-
 ## Acceptance criteria
 
-- `reload_configuration` re-reads and validates the complete document as startup
-  does, swaps atomically on success, and leaves the running configuration in
-  place on a startup-only difference.
 - A model entry admits non-overlapping dated windows per channel, a cost read
   names the window covering the call's timestamp, and every stored call prices
   as it did under the flat rate.
