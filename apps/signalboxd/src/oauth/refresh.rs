@@ -2,6 +2,7 @@ use super::*;
 use signalbox_model_runtime::{CancellationSignal, CredentialValue};
 
 pub(super) enum RefreshFailure {
+    CancelledBeforeSend,
     NonRotating,
     Ambiguous,
     Rejected,
@@ -32,7 +33,7 @@ impl OauthClient {
     ) -> Result<Refreshed, RefreshFailure> {
         use RefreshFailure::*;
         if cancellation.is_cancelled() {
-            return Err(NonRotating);
+            return Err(CancelledBeforeSend);
         }
         let body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "refresh_token")

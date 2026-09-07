@@ -88,7 +88,7 @@ async fn oauth_refresh_rejects_redirect_revocation_and_changed_identity()
 }
 
 #[tokio::test]
-async fn oauth_refresh_cancellation_before_send_is_non_rotating() {
+async fn oauth_refresh_cancellation_before_send_is_cancelled() {
     let client = OauthClient::new().unwrap_or_else(|_| panic!("client"));
     let registration = OauthRegistration {
         client_id: "local-client".into(),
@@ -109,7 +109,7 @@ async fn oauth_refresh_cancellation_before_send_is_non_rotating() {
                 &mut signalbox_model_runtime::CancellationSignal::already_cancelled()
             )
             .await,
-        Err(super::refresh::RefreshFailure::NonRotating)
+        Err(super::refresh::RefreshFailure::CancelledBeforeSend)
     ));
 }
 

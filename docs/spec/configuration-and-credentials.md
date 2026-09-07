@@ -713,14 +713,15 @@ Refresh and dispatch compare the stored tuple with the current registration
 under the profile row lock; mismatch quarantines the generation before any token
 is sent. One process-shared refresh per profile and generation marks refresh in
 progress before one POST, with redirects and automatic retries disabled.
-Cancellation while waiting for initial profile locks cancels preparation.
-Definitive non-rotation clears the marker. Connection loss after possible
-request bytes, cancellation after send, redirects, indeterminate responses, and
-refresh tokens rejected as expired, reused, or revoked quarantine the
-generation. Refresh replaces returned refresh and identity tokens in one commit,
-retaining either token when omitted; differing account identity quarantines. An
-ambiguous replacement commit is reread: a committed replacement is adopted and
-an uncleared marker quarantines. Access tokens live only in memory and refresh
+Cancellation while waiting for initial profile locks or before refresh is sent
+cancels preparation; an unsent refresh clears its marker. Definitive
+non-rotation clears the marker. Connection loss after possible request bytes,
+cancellation after send, redirects, indeterminate responses, and refresh tokens
+rejected as expired, reused, or revoked quarantine the generation. Refresh
+replaces returned refresh and identity tokens in one commit, retaining either
+token when omitted; differing account identity quarantines. An ambiguous
+replacement commit is reread: a committed replacement is adopted and an
+uncleared marker quarantines. Access tokens live only in memory and refresh
 lazily after restart.
 
 Dispatch holds the profile row lock through copying access and identity tokens
