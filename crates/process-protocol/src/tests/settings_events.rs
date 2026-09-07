@@ -4,6 +4,7 @@ use crate::{CanonicalValueError, SessionPlacement};
 
 mod tests {
     use super::super::support::*;
+    use crate::settings::validate_adjustments;
     use crate::*;
 
     #[test]
