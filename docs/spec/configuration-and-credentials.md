@@ -690,11 +690,12 @@ validation of nonempty reviewer identities after bot-suffix normalization.
 Convergence reads and the sweep require this policy; other code-host operations
 do not use it.
 
-OAuth provisioning runs the configured device exchange, retains refresh and
-identity tokens with the canonical configuration tuple and generation, and
-stores no authorization when the response lacks an identity token. Authorization
-commits and pool-policy membership insertion serialize account-independence
-checks against every retained co-membership.
+Startup installs the OAuth registration catalog after database migrations. OAuth
+provisioning runs the configured device exchange, retains refresh and identity
+tokens with the canonical configuration tuple and generation, and stores no
+authorization when the response lacks an identity token. Authorization commits
+and pool-policy membership insertion serialize account-independence checks
+against every retained co-membership.
 
 `oauth` is spelled `delivery = "oauth"` with exactly four required fields:
 `client_id`, `token_url`, `device_authorization_url`, and the string array
