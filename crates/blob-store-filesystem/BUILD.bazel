@@ -1,7 +1,6 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_integration_test", "rust_unit_test")
 
 CRATE_FEATURES = [
     "default",
@@ -20,53 +19,24 @@ rust_library(
     ],
 )
 
-rust_test(
+rust_unit_test(
     name = "unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":signalbox_blob_store_filesystem",
     crate_features = [
         "default",
         "test-support",
     ],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
-    deps = ["//crates/blob-store:signalbox_blob_store"] + all_crate_deps(normal_dev = True),
+    deps = ["//crates/blob-store:signalbox_blob_store"],
 )
 
-rust_test(
+rust_integration_test(
     name = "conformance",
     size = "small",
-    srcs = ["tests/conformance.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate_features = [
         "default",
         "test-support",
     ],
     crate_root = "tests/conformance.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
     tags = [
         "external",
         "no-sandbox",
@@ -75,21 +45,11 @@ rust_test(
         ":signalbox_blob_store_filesystem",
         "//crates/blob-store:signalbox_blob_store",
         "//crates/domain:signalbox_domain",
-    ] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    ],
 )
 
-rust_doc(
+rust_api_json(
     name = "api_json",
     crate = ":signalbox_blob_store_filesystem",
     crate_features = CRATE_FEATURES,
-    rustdoc_flags = [
-        "-Z",
-        "unstable-options",
-        "--output-format",
-        "json",
-    ],
-    visibility = ["//:__pkg__"],
 )

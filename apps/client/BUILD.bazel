@@ -1,7 +1,6 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_unit_test")
 
 rust_package()
 
@@ -20,22 +19,9 @@ rust_binary(
     ],
 )
 
-rust_test(
+rust_unit_test(
     name = "unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":signalbox_client",
-    crate_features = [],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
     deps = [
         "//apps/signalboxd:signalboxd_lib",
         "//crates/application:signalbox_application",
@@ -45,25 +31,12 @@ rust_test(
         "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
         "//crates/persistence:signalbox_persistence",
         "//crates/test-bin:signalbox_test_bin",
-    ] + all_crate_deps(normal_dev = True),
+    ],
 )
 
-rust_test(
+rust_unit_test(
     name = "signalbox_unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":signalbox",
-    crate_features = [],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
     deps = [
         "//apps/signalboxd:signalboxd_lib",
         "//crates/application:signalbox_application",
@@ -73,5 +46,5 @@ rust_test(
         "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
         "//crates/persistence:signalbox_persistence",
         "//crates/test-bin:signalbox_test_bin",
-    ] + all_crate_deps(normal_dev = True),
+    ],
 )

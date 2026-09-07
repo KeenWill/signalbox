@@ -1,7 +1,6 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_proc_macro")
+load("//tooling/bazel:testing.bzl", "rust_integration_test", "rust_unit_test")
 
 rust_package()
 
@@ -10,50 +9,16 @@ rust_proc_macro(
     crate_root = "src/lib.rs",
 )
 
-rust_test(
+rust_unit_test(
     name = "unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":signalbox_tool_schema_derive",
-    crate_features = [],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
-    ],
-    deps = ["//crates/tool-contract:signalbox_tool_contract"] + all_crate_deps(normal_dev = True),
+    deps = ["//crates/tool-contract:signalbox_tool_contract"],
 )
 
-rust_test(
+rust_integration_test(
     name = "derive",
     size = "small",
-    srcs = ["tests/derive.rs"],
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
-    crate_features = [],
     crate_root = "tests/derive.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [":signalbox_tool_schema_derive"] + all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    tags = [],
-    deps = ["//crates/tool-contract:signalbox_tool_contract"] + all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ),
+    proc_macro_deps = [":signalbox_tool_schema_derive"],
+    deps = ["//crates/tool-contract:signalbox_tool_contract"],
 )

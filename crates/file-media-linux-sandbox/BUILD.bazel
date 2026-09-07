@@ -1,7 +1,6 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
 
 rust_package()
 
@@ -11,30 +10,13 @@ rust_library(
     rustc_flags = ["--deny=warnings"],
 )
 
-rust_test(
+rust_unit_test(
     name = "unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
     crate = ":signalbox_file_media_linux_sandbox",
-    crate_features = [],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
     rustc_flags = ["--deny=warnings"],
-    deps = [] + all_crate_deps(normal_dev = True),
 )
 
-rust_doc(
+rust_api_json(
     name = "api_json",
     crate = ":signalbox_file_media_linux_sandbox",
-    rustdoc_flags = [
-        "-Z",
-        "unstable-options",
-        "--output-format",
-        "json",
-    ],
-    visibility = ["//:__pkg__"],
 )
