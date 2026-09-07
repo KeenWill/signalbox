@@ -37,6 +37,7 @@ that has neither an offered lease nor executor dispatch, including earlier
 approved requests when a later request parks the batch. It retires any existing
 approval and records the same retryable `closed_inadmissible` resolution and
 projection without creating an attempt row, then resumes batch evaluation.
+
 If a dedicated approval-judge call is in flight for such a request, the loss
 transition waits for that call's observation boundary and terminalizes its
 result before retiring any resulting approval and closing the request. Batch
