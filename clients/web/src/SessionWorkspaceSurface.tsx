@@ -237,7 +237,7 @@ export function SessionWorkspaceSurface({
   )
   const timelineIds = useMemo(() => items.map((item) => item.address.event_sequence), [items])
   const loadWindow = useCallback(
-    async (anchor: 'first' | 'latest') => {
+    async (anchor: 'first' | 'latest', control?: HTMLButtonElement) => {
       const request = ++boundaryRequest.current
       manualAnchorRef.current = { kind: anchor }
       const result = await refetchSession()
@@ -249,7 +249,7 @@ export function SessionWorkspaceSurface({
           boundarySessionItemId(result.data.window.items, store.getState().app.detail, anchor),
         ),
       )
-      timelineRef.current?.focus()
+      if (control === undefined) timelineRef.current?.focus()
     },
     [dispatch, refetchSession, timelineRef],
   )
@@ -400,6 +400,7 @@ export function SessionWorkspaceSurface({
       | 'selection.first'
       | 'selection.last'
       | 'selection.toggleExpansion',
+    control?: HTMLButtonElement,
   ) =>
     invokeCommand(command, {
       dispatch,
@@ -409,7 +410,7 @@ export function SessionWorkspaceSurface({
       artifactOriginalIds: [],
       timelineWindowAvailable: displayedSession !== undefined,
       focusTimeline: () => timelineRef.current?.focus(),
-      loadTimelineWindow: loadWindow,
+      loadTimelineWindow: (anchor) => loadWindow(anchor, control),
       toggleTimelineExpansion: toggleSelectedExpansion,
     })
   const handleTimelineKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -436,8 +437,13 @@ export function SessionWorkspaceSurface({
     event.preventDefault()
     invokeTimelineCommand(command)
   }
-  const invokeBoundaryCommand = (command: 'selection.first' | 'selection.last') =>
-    invokeTimelineCommand(command)
+  const invokeBoundaryCommand = (
+    command: 'selection.first' | 'selection.last',
+    control: HTMLButtonElement,
+  ) => {
+    control.focus()
+    invokeTimelineCommand(command, control)
+  }
 
   return (
     <div className="surface-body session-workspace-surface">
@@ -448,7 +454,7 @@ export function SessionWorkspaceSurface({
             aria-label="Exact session ID"
             placeholder="00000000-0000-0000-0000-000000000000"
             value={draftId}
-            onChange={(event) => setDraftId(event.target.value)}
+            onChange={(event) => setDraftId(event.target.value.trim())}
             pattern={NATIVE_SESSION_ID_PATTERN}
             required
           />
@@ -528,10 +534,16 @@ export function SessionWorkspaceSurface({
             </dl>
           </header>
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
-            <button type="button" onClick={() => invokeBoundaryCommand('selection.first')}>
+            <button
+              type="button"
+              onClick={(event) => invokeBoundaryCommand('selection.first', event.currentTarget)}
+            >
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
             </button>
-            <button type="button" onClick={() => invokeBoundaryCommand('selection.last')}>
+            <button
+              type="button"
+              onClick={(event) => invokeBoundaryCommand('selection.last', event.currentTarget)}
+            >
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
             <button
