@@ -32,13 +32,15 @@ advertisement checked against that enrollment and the daemon's `RunnerCatalog`,
 paired with the daemon's policy for every tool and profile it admits. The
 advertisement carries availability only: capability classes, tool names,
 credential-profile names with their repository entries, and workspace and
-sandbox-profile capabilities. Each tool a runner may advertise has one
-daemon-authoritative `RunnerToolDeclaration` giving its model-facing definition,
-its effect class, and its admissible loci. Every declaration has exactly one
-effect class, pure, idempotent, or side-effecting, with no default; the class
-decides what a lost or repeated execution may do. A tool's admissible loci are
-daemon only, runner only, or either, and a runner locus names one runner
-identity or one capability class.
+sandbox-profile capabilities, and an optional runner-reported absolute default
+directory retained with that registration. The advertisement digest includes the
+optional directory after the repository inventory. Each tool a runner may
+advertise has one daemon-authoritative `RunnerToolDeclaration` giving its
+model-facing definition, its effect class, and its admissible loci. Every
+declaration has exactly one effect class, pure, idempotent, or side-effecting,
+with no default; the class decides what a lost or repeated execution may do. A
+tool's admissible loci are daemon only, runner only, or either, and a runner
+locus names one runner identity or one capability class.
 
 A `SessionRunnerPlacement` is the session's placement aggregate: one
 `SessionRunnerPlacementRequest`, the placement revision, and the lifecycle
@@ -259,22 +261,31 @@ it changes no session placement. The daemon delivers the promoted `enrolled`
 receipt on the candidate connection; the runner fsyncs its exact promotion and
 equal replay changes nothing. `replace_lost_runner` names a lost session and an
 optional checkout revision, promotes a connected pending successor when needed,
-and installs the successor placement and grant lineage. Pre-pin replacement
-provisions nothing and returns to unpinned at the next revision.
-Registration-triggered loss permits replacement on the same runner after its
-current registration satisfies the retained request; other loss sources require
-a different runner.
+and installs the successor placement and grant lineage. Successor selection
+follows the enrollment chain to its current pending or active descendant.
+Pre-pin replacement provisions nothing and returns to unpinned at the next
+revision. A replacement requested with an active turn records
+`ExistingControlRequired` before staging. Registration-triggered loss permits
+replacement on the same runner after its current registration satisfies the
+retained request; other loss sources require a different runner.
 
 Pinned replacement requiring a repository or private root retains a single-use
 command authorization and an exactly correlated `workspace_ready` receipt,
-including its absolute working directory. Installation consumes that receipt,
-promotes the pending candidate, installs the placement and grant, appends the
-reference-only placement boundary, and records the terminal result atomically
-when no turn is active. Provisioning refusal or candidate loss records a typed
-terminal rejection and leaves the candidate pending. A rejected command's ready
-workspace is released only through its exact manifest correlation on the
-connected candidate's retained connection epoch; loss does not transfer cleanup
-authority.
+including its absolute working directory. Provisioning retains a repository key
+and checkout revision together or neither; a mismatched pair is rejected before
+staging. Installation consumes that receipt, promotes the pending candidate,
+installs the placement and grant, appends the reference-only placement boundary,
+and records the terminal result atomically when no turn is active. Provisioning
+refusal or candidate loss records a typed terminal rejection and leaves the
+candidate pending. A terminal delegated runtime does not count as an active turn
+for recovery commands. Replacement rejects a candidate lacking the requested
+sandbox or repository workspace capability before staging provisioning. Ambient
+default-directory replacement requires the successor registration's reported
+directory. A rejected command's ready workspace, including a correlated receipt
+arriving after abandonment, is released only through its exact manifest
+correlation on the candidate's retained connection epoch. Suspicion retains that
+cleanup authority; loss does not transfer it. Release acknowledgement uses the
+same current-epoch fence as release dispatch.
 
 ## Planned
 

@@ -710,6 +710,7 @@ impl ClientRequest {
                 }
             }
             Self::AbandonLostRunner { .. } | Self::PromotePendingRunner { .. } => {}
+
             Self::ProvisionOauthCredential { profile, .. }
             | Self::ReprovisionOauthCredential { profile, .. }
             | Self::DeleteOauthCredential { profile, .. } => {

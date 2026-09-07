@@ -7,11 +7,12 @@ use super::decode::{
     require_applied_runner_recovery_interrupt, require_current_attempt_row,
     require_stored_inherited_configuration, require_stored_origin_configuration,
 };
+use super::prepare::require_recorded_batch;
 use super::write::{decode_starting_lineage, load_active_acceptance_tail};
 use super::{
     StoredSchedulingInventoryCounts, SubmitInputCorruption, SubmitInputRepositoryError,
     decode_frozen_model, decode_model_call_disposition, decode_optional_token_count,
-    decode_position, require_recorded_batch, required,
+    decode_position, required,
 };
 use crate::mapping::{
     accepted_input_id_from_uuid, defaults_version_from_numeric, durable_command_id_from_uuid,
@@ -23,7 +24,7 @@ use crate::tool_loop::{
     load_steering_continuation_round_evidence, load_terminal_result_attempts,
     load_terminal_result_denials,
 };
-use rust_decimal::{Decimal, prelude::ToPrimitive};
+use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionInput,
@@ -2425,29 +2426,14 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
         let source_session = session_id_from_uuid(source_session_uuid);
         let entry = SemanticTranscriptEntryId::from_uuid(entry_uuid);
         let payload_kind: String = required(&row, "payload_kind")?;
-        if payload_kind == "runner_placement_changed" {
-            let revision: Decimal = required(&row, "runner_placement_revision")?;
-            let revision = revision
-                .to_u64()
-                .and_then(signalbox_domain::RunnerGeneration::try_from_u64)
-                .ok_or(SubmitInputCorruption::Inconsistent(
-                    "placement boundary revision",
-                ))?;
-            let matches: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runner_placement_boundary AS boundary JOIN runner_session_placement_record AS record USING (session_id, event_ordinal) WHERE boundary.session_id = $1 AND boundary.semantic_entry_id = $2 AND boundary.placement_revision = $3 AND record.placement_revision = boundary.placement_revision AND record.event_kind = 'runner_replaced')")
-                .bind(source_session_uuid).bind(entry_uuid).bind(Decimal::from(revision.get())).fetch_one(&mut *connection).await?;
-            if !matches {
-                return Err(
-                    SubmitInputCorruption::Inconsistent("placement boundary record").into(),
-                );
-            }
-            semantic_entries.push(SemanticTranscriptEntryReconstitutionInput::new(
-                entry,
-                source_session,
-                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
-                    placement_revision: revision,
-                },
-            ));
-            continue;
+        if payload_kind != "runner_placement_changed"
+            && row
+                .try_get::<Option<Decimal>, _>("runner_placement_revision")?
+                .is_some()
+        {
+            return Err(
+                SubmitInputCorruption::Inconsistent("non-placement semantic entry fields").into(),
+            );
         }
         let origin: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
         let steering_source_turn: Option<Uuid> = row.try_get("steering_source_turn_id")?;
@@ -2542,6 +2528,41 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
             || summary_first_entry.is_some()
             || summary_through_session.is_some()
             || summary_through_entry.is_some();
+        if payload_kind == "runner_placement_changed" {
+            if legacy_payload_present
+                || tool_result_request.is_some()
+                || delegated_task_spawning_request.is_some()
+                || delegation_message.is_some()
+                || delegation_result_awaiting_request.is_some()
+                || delegation_result_spawning_request.is_some()
+            {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("placement boundary entry shape").into(),
+                );
+            }
+            let revision: Decimal = required(&row, "runner_placement_revision")?;
+            let revision = positive_u64_from_numeric(revision)
+                .ok()
+                .and_then(signalbox_domain::RunnerGeneration::try_from_u64)
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "placement boundary revision",
+                ))?;
+            let matches: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runner_placement_boundary AS boundary JOIN runner_session_placement_record AS record USING (session_id, event_ordinal) WHERE boundary.session_id = $1 AND boundary.semantic_entry_id = $2 AND boundary.placement_revision = $3 AND record.placement_revision = boundary.placement_revision AND record.event_kind = 'runner_replaced')")
+                .bind(source_session_uuid).bind(entry_uuid).bind(Decimal::from(revision.get())).fetch_one(&mut *connection).await?;
+            if !matches {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("placement boundary record").into(),
+                );
+            }
+            semantic_entries.push(SemanticTranscriptEntryReconstitutionInput::new(
+                entry,
+                source_session,
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ));
+            continue;
+        }
         if payload_kind == "delegated_task" {
             let (Some(spawning_request), Some(parent_session), Some(parent_turn), Some(content)) = (
                 delegated_task_spawning_request,

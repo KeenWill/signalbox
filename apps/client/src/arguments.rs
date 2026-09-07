@@ -54,6 +54,7 @@ pub(crate) enum SendDeliveryArgument {
 #[derive(Debug)]
 pub(crate) enum Command {
     Runner(RunnerCommand),
+
     Credential(CredentialCommand),
     Create {
         selection: Option<ModelSelection>,
@@ -442,6 +443,7 @@ pub(crate) struct CredentialTarget {
 enum CliCommand {
     /// Recover a lost runner placement or promote its pending successor.
     Runner(RunnerArguments),
+
     /// Provision, replace, or delete an OAuth credential.
     Credential(CredentialArguments),
     /// Create a session.

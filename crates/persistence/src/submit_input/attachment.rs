@@ -163,44 +163,39 @@ pub(super) async fn prospective_attachment_frontier_exceeds_bound(
         Err(ModelCallRepositoryError::NoLiveExecution) => {
             if let Some(active) = scheduling.active_turn_execution() {
                 let mut distinct = BTreeSet::new();
-                let mut origins =
-                    if matches!(
-                        active.phase(),
-                        signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
-                    ) {
-                        let snapshot = load_runner_recovery_source_snapshot(
-                            connection,
-                            session,
-                            active.turn(),
-                        )
-                        .await
-                        .map_err(map_tool_loop_error)?
-                        .ok_or(SubmitInputCorruption::Inconsistent(
-                            "runner recovery prospective attachment frontier missing",
-                        ))?;
-                        let complete_entries = snapshot
-                            .ordered_entries()
-                            .map(|reference| scheduling.semantic_entry(reference).cloned())
-                            .collect::<Option<Vec<_>>>()
+                let mut origins = if matches!(
+                    active.phase(),
+                    signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+                ) {
+                    let snapshot =
+                        load_runner_recovery_source_snapshot(connection, session, active.turn())
+                            .await
+                            .map_err(map_tool_loop_error)?
                             .ok_or(SubmitInputCorruption::Inconsistent(
-                                "runner recovery prospective attachment frontier entry missing",
+                                "runner recovery prospective attachment frontier missing",
                             ))?;
-                        let projection = ContextFrontierProjection::from_complete_entries(
-                            &complete_entries,
-                        )
-                        .map_err(|_| {
-                            SubmitInputCorruption::Inconsistent(
-                                "runner recovery prospective attachment frontier projection",
-                            )
-                        })?;
-                        let entries_by_reference = complete_entries
-                            .iter()
-                            .map(|entry| (entry.reference(), entry))
-                            .collect::<BTreeMap<_, _>>();
-                        projection
-                            .ordered_entries()
-                            .filter_map(|reference| {
-                                match entries_by_reference[&reference].payload() {
+                    let complete_entries = snapshot
+                        .ordered_entries()
+                        .map(|reference| scheduling.semantic_entry(reference).cloned())
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or(SubmitInputCorruption::Inconsistent(
+                            "runner recovery prospective attachment frontier entry missing",
+                        ))?;
+                    let projection =
+                        ContextFrontierProjection::from_complete_entries(&complete_entries)
+                            .map_err(|_| {
+                                SubmitInputCorruption::Inconsistent(
+                                    "runner recovery prospective attachment frontier projection",
+                                )
+                            })?;
+                    let entries_by_reference = complete_entries
+                        .iter()
+                        .map(|entry| (entry.reference(), entry))
+                        .collect::<BTreeMap<_, _>>();
+                    projection
+                        .ordered_entries()
+                        .filter_map(
+                            |reference| match entries_by_reference[&reference].payload() {
                                 InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
                                     accepted_input,
                                 }
@@ -210,31 +205,49 @@ pub(super) async fn prospective_attachment_frontier_exceeds_bound(
                                 } => distinct.insert(*accepted_input).then_some(*accepted_input),
                                 InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
                                 | InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
-                                | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
-                                | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
-                                | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
-                                | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
-                | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+                                | InitialSemanticTranscriptEntryPayload::DelegationMessage {
+                                    ..
+                                }
+                                | InitialSemanticTranscriptEntryPayload::DelegationResult {
+                                    ..
+                                }
+                                | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged {
+                                    ..
+                                }
+                                | InitialSemanticTranscriptEntryPayload::ContextSummary {
+                                    ..
+                                }
+                                | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                                    ..
+                                }
                                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
-                                | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
-                                | InitialSemanticTranscriptEntryPayload::ProviderReasoning { .. }
-                                | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
-                                | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                                | InitialSemanticTranscriptEntryPayload::ProviderCompaction {
+                                    ..
+                                }
+                                | InitialSemanticTranscriptEntryPayload::ProviderReasoning {
+                                    ..
+                                }
+                                | InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                                    ..
+                                }
+                                | InitialSemanticTranscriptEntryPayload::ToolExecutionResult {
+                                    ..
+                                }
                                 | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
                                 | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. }
                                 | InitialSemanticTranscriptEntryPayload::Imported { .. } => None,
-                            }
-                            })
-                            .collect::<Vec<_>>()
-                    } else {
-                        scheduling.active_rendered_frontier_origins().ok_or(
-                            SubmitInputCorruption::Inconsistent(
-                                "active prospective attachment frontier missing",
-                            ),
-                        )?
-                    };
+                            },
+                        )
+                        .collect::<Vec<_>>()
+                } else {
+                    scheduling.active_rendered_frontier_origins().ok_or(
+                        SubmitInputCorruption::Inconsistent(
+                            "active prospective attachment frontier missing",
+                        ),
+                    )?
+                };
                 distinct.extend(origins.iter().copied());
                 origins.extend(
                     active

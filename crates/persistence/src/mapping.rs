@@ -1875,6 +1875,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::ReplaceLostRunner => "replace_lost_runner",
         DurableCommandKind::AbandonLostRunner => "abandon_lost_runner",
         DurableCommandKind::PromotePendingRunner => "promote_pending_runner",
+
         DurableCommandKind::ProvisionOauthCredential => "provision_oauth_credential",
         DurableCommandKind::ReprovisionOauthCredential => "reprovision_oauth_credential",
         DurableCommandKind::DeleteOauthCredential => "delete_oauth_credential",
@@ -1905,6 +1906,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "replace_lost_runner" => Some(DurableCommandKind::ReplaceLostRunner),
         "abandon_lost_runner" => Some(DurableCommandKind::AbandonLostRunner),
         "promote_pending_runner" => Some(DurableCommandKind::PromotePendingRunner),
+
         "provision_oauth_credential" => Some(DurableCommandKind::ProvisionOauthCredential),
         "reprovision_oauth_credential" => Some(DurableCommandKind::ReprovisionOauthCredential),
         "delete_oauth_credential" => Some(DurableCommandKind::DeleteOauthCredential),

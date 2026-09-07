@@ -236,17 +236,7 @@ impl RunnerProtocolStore {
                 .fetch_one(&mut **transaction)
                 .await?;
         let candidate = runner_enrollment_id(stage.decode_column("successor_enrollment_id")?);
-        lock_recovery_identities(transaction, &[predecessor, candidate.into_uuid()]).await?;
-        sqlx::query(crate::lock_inventory::RUNNER_RECOVERY_ENROLLMENTS)
-            .bind(vec![predecessor, candidate.into_uuid()])
-            .fetch_all(&mut **transaction)
-            .await?;
-        for enrollment in [runner_enrollment_id(predecessor), candidate] {
-            sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
-                .bind(enrollment.into_uuid())
-                .fetch_optional(&mut **transaction)
-                .await?;
-        }
+        lock_replacement_enrollments(transaction, predecessor, candidate.into_uuid()).await?;
         let connection = load_connection_head_in(transaction.as_mut(), candidate).await?;
         let mut enrollment = load_enrollment_in(transaction.as_mut(), candidate)
             .await?
@@ -281,7 +271,7 @@ impl RunnerProtocolStore {
                 .promote_pending_in_place()
                 .map_err(RunnerProtocolStoreError::Domain)?;
         }
-        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active')")
+        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active' AND NOT delegation_runtime_terminal)")
             .bind(session.into_uuid()).fetch_one(&mut **transaction).await?;
         if active {
             return Ok(None);
@@ -313,7 +303,11 @@ impl RunnerProtocolStore {
                 workspace.working_directory.clone()
             }
             (WorkingDirectorySelection::RunnerDefault, None) => {
-                lost.pinned().working_directory.clone()
+                let Some(directory) = registration.registration().default_working_directory()
+                else {
+                    return Ok(rejected(RunnerRecoveryRejection::PlacementUnavailable));
+                };
+                directory.clone()
             }
         };
         let ordinal = stored
@@ -384,6 +378,26 @@ impl RunnerProtocolStore {
         .execute(&mut **transaction)
         .await?;
         append_placement_boundary(transaction, command, ordinal, &replacement).await?;
+        let directory = lost_runner_working_directory(&replacement.placement);
+        let state = if row.decode_column::<Option<Uuid>>("lost_runner_id")?
+            == Some(enrollment.runner().into_uuid())
+            && row
+                .decode_column::<Option<String>>("requested_working_directory")?
+                .as_deref()
+                != directory.as_ref().map(RunnerWorkingDirectory::as_str)
+        {
+            DispatchedRunnerState::WorkingDirectoryChanged
+        } else {
+            DispatchedRunnerState::Replaced
+        };
+        append_recovery_placement_event(
+            transaction,
+            &replacement.placement,
+            enrollment.runner(),
+            ordinal,
+            state,
+        )
+        .await?;
         if let Some(authorization) = authorization {
             sqlx::query("INSERT INTO runner_replacement_workspace_consumption (authorization_id, command_id) VALUES ($1, $2)")
                 .bind(authorization.authorization.into_uuid()).bind(command.into_uuid()).execute(&mut **transaction).await?;
@@ -506,6 +520,11 @@ impl RunnerProtocolStore {
             ),
             _ => return Ok(rejected(Rejection::PlacementNotLost)),
         };
+        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active' AND NOT delegation_runtime_terminal)")
+            .bind(command.session.into_uuid()).fetch_one(&mut **transaction).await?;
+        if active {
+            return Ok(rejected(Rejection::ExistingControlRequired));
+        }
         let staging: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM runner_replacement_stage WHERE session_id = $1)",
         )
@@ -521,12 +540,23 @@ impl RunnerProtocolStore {
             return Ok(rejected(Rejection::RevisionWithoutRepository));
         }
         let candidate = sqlx::query(
-            "SELECT successor.enrollment_id, successor.runner_id, receipt.request_id
-             FROM runner_enrollment AS predecessor
-             JOIN runner_pending_predecessor AS pending ON pending.predecessor_enrollment_id = predecessor.enrollment_id
-             JOIN runner_enrollment AS successor ON successor.enrollment_id = pending.enrollment_id
-             JOIN runner_enrollment_request_receipt AS receipt ON receipt.enrollment_id = successor.enrollment_id
-             WHERE NOT $2 AND predecessor.runner_id = $1 AND successor.state_kind IN ('pending', 'active')
+            "WITH RECURSIVE successors(enrollment_id) AS (
+                 SELECT pending.enrollment_id
+                 FROM runner_pending_predecessor AS pending
+                 JOIN runner_enrollment AS predecessor ON predecessor.enrollment_id = pending.predecessor_enrollment_id
+                 WHERE NOT $2 AND predecessor.runner_id = $1
+                 UNION
+                 SELECT pending.enrollment_id FROM runner_pending_predecessor AS pending
+                 JOIN successors ON successors.enrollment_id = pending.predecessor_enrollment_id
+             )
+             SELECT successor.enrollment_id, successor.runner_id, receipt.request_id
+             FROM successors JOIN runner_enrollment AS successor USING (enrollment_id)
+             JOIN runner_enrollment_request_receipt AS receipt USING (enrollment_id)
+             WHERE successor.state_kind IN ('pending', 'active') AND NOT EXISTS (
+                 SELECT 1 FROM runner_pending_predecessor AS pending
+                 JOIN runner_enrollment AS descendant ON descendant.enrollment_id = pending.enrollment_id
+                 WHERE pending.predecessor_enrollment_id = successor.enrollment_id
+                   AND descendant.state_kind IN ('pending', 'active'))
              UNION ALL
              SELECT enrollment.enrollment_id, enrollment.runner_id, receipt.request_id
              FROM runner_enrollment AS enrollment JOIN runner_enrollment_request_receipt AS receipt USING (enrollment_id)
@@ -544,15 +574,7 @@ impl RunnerProtocolStore {
                 .bind(lost_runner.into_uuid())
                 .fetch_one(&mut **transaction)
                 .await?;
-        lock_recovery_identities(transaction, &[predecessor_id, candidate_id.into_uuid()]).await?;
-        sqlx::query(crate::lock_inventory::RUNNER_RECOVERY_ENROLLMENTS)
-            .bind(vec![predecessor_id, candidate_id.into_uuid()])
-            .fetch_all(&mut **transaction)
-            .await?;
-        sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
-            .bind(candidate_id.into_uuid())
-            .fetch_optional(&mut **transaction)
-            .await?;
+        lock_replacement_enrollments(transaction, predecessor_id, candidate_id.into_uuid()).await?;
         let connection = load_connection_head_in(transaction.as_mut(), candidate_id).await?;
         if !connection
             .is_some_and(|connection| connection.state() == RunnerConnectionState::Connected)
@@ -620,38 +642,58 @@ impl RunnerProtocolStore {
             .await?;
             sqlx::query("UPDATE runner_current_session_placement SET event_ordinal = $2 WHERE session_id = $1")
                 .bind(command.session.into_uuid()).bind(Decimal::from(ordinal)).execute(&mut **transaction).await?;
+            append_recovery_placement_event(
+                transaction,
+                &replacement.placement,
+                enrollment.runner(),
+                ordinal,
+                DispatchedRunnerState::Replaced,
+            )
+            .await?;
             return Ok(Some(ReplaceLostRunnerResult::Replaced {
                 runner: enrollment.runner(),
                 placement_revision: replacement.placement.revision(),
             }));
         }
-        sqlx::query("INSERT INTO runner_replacement_stage (command_id, session_id, source_event_ordinal, successor_enrollment_id, successor_registration_revision) VALUES ($1, $2, $3, $4, $5)")
-            .bind(command.command_id.into_uuid()).bind(command.session.into_uuid())
-            .bind(Decimal::from(stored.event_ordinal())).bind(candidate_id.into_uuid())
-            .bind(Decimal::from(registration.revision().get())).execute(&mut **transaction).await?;
+        if !registration
+            .registration()
+            .supports_sandbox(request.sandbox)
+            || matches!(&request.workspace, WorkspaceRequirement::RepositoryWorktree { repository }
+                if !registration.registration().supports_workspace(WorkspaceCapability::WorktreePerSession)
+                    || registration.registration().repository(repository).is_none())
+        {
+            return Ok(rejected(Rejection::PlacementUnavailable));
+        }
         let repository = match &request.workspace {
             WorkspaceRequirement::RepositoryWorktree { repository } => Some(repository.as_str()),
             WorkspaceRequirement::None => None,
         };
+        let recovery = command
+            .revision
+            .clone()
+            .map(|revision| WorkspaceRecovery::Commit { revision })
+            .or_else(|| match stored.placement().state() {
+                SessionRunnerPlacementState::RunnerLost(lost) => lost
+                    .pinned()
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| workspace.recovery.clone()),
+                _ => None,
+            });
+        let (_, branch, revision) = recovery
+            .as_ref()
+            .map(encode_workspace_recovery)
+            .unwrap_or((None, None, None));
+        if repository.is_some() != revision.is_some() {
+            return Ok(rejected(Rejection::PlacementUnavailable));
+        }
+        sqlx::query("INSERT INTO runner_replacement_stage (command_id, session_id, source_event_ordinal, successor_enrollment_id, successor_registration_revision) VALUES ($1, $2, $3, $4, $5)")
+            .bind(command.command_id.into_uuid()).bind(command.session.into_uuid())
+            .bind(Decimal::from(stored.event_ordinal())).bind(candidate_id.into_uuid())
+            .bind(Decimal::from(registration.revision().get())).execute(&mut **transaction).await?;
         let private_root = request.sandbox == RunnerSandboxProfile::WorkspaceRestricted
             && request.working_directory == WorkingDirectorySelection::RunnerDefault;
         if repository.is_some() || private_root {
-            let recovery = command
-                .revision
-                .clone()
-                .map(|revision| WorkspaceRecovery::Commit { revision })
-                .or_else(|| match stored.placement().state() {
-                    SessionRunnerPlacementState::RunnerLost(lost) => lost
-                        .pinned()
-                        .workspace
-                        .as_ref()
-                        .and_then(|workspace| workspace.recovery.clone()),
-                    _ => None,
-                });
-            let (_, branch, revision) = recovery
-                .as_ref()
-                .map(encode_workspace_recovery)
-                .unwrap_or((None, None, None));
             let successor_revision = stored
                 .placement()
                 .revision()
@@ -760,7 +802,7 @@ impl RunnerProtocolStore {
                 RunnerRecoveryRejection::SessionNotFound,
             ));
         }
-        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active')")
+        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active' AND NOT delegation_runtime_terminal)")
             .bind(session.into_uuid()).fetch_one(&mut **transaction).await?;
         if active {
             return Ok(AbandonLostRunnerResult::Rejected(
@@ -828,6 +870,15 @@ impl RunnerProtocolStore {
         .bind(session.into_uuid())
         .bind(Decimal::from(ordinal))
         .execute(&mut **transaction)
+        .await?;
+        append_recovery_placement_event(
+            transaction,
+            &placement,
+            placement_loss_fence_runner(&placement)
+                .ok_or(RunnerProtocolCorruption::CrossWiredReference)?,
+            ordinal,
+            DispatchedRunnerState::Abandoned,
+        )
         .await?;
         Ok(AbandonLostRunnerResult::Abandoned)
     }
@@ -936,12 +987,7 @@ impl RunnerProtocolStore {
         let old = load_connection_head_in(transaction.as_mut(), predecessor.enrollment()).await?;
         let new = load_connection_head_in(transaction.as_mut(), candidate.enrollment()).await?;
         if predecessor.state() != RunnerEnrollmentState::Active
-            || !old.is_some_and(|connection| {
-                matches!(
-                    connection.state(),
-                    RunnerConnectionState::Lost | RunnerConnectionState::Shutdown
-                )
-            })
+            || !old.is_some_and(|connection| connection.state() == RunnerConnectionState::Lost)
             || !new.is_some_and(|connection| connection.state() == RunnerConnectionState::Connected)
         {
             return Ok(PromotePendingRunnerResult::Rejected(
@@ -958,6 +1004,61 @@ impl RunnerProtocolStore {
             runner: candidate.runner(),
         })
     }
+}
+
+async fn append_recovery_placement_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    placement: &SessionRunnerPlacement,
+    runner: RunnerId,
+    ordinal: u64,
+    state: DispatchedRunnerState,
+) -> Result<(), RunnerProtocolStoreError> {
+    outbox::append(
+        transaction,
+        OutboxEvent::RunnerStateTransition(RunnerStateOutboxEvent {
+            session: placement.session(),
+            runner,
+            placement_revision: placement.revision(),
+            sandbox: placement.request().sandbox,
+            working_directory: lost_runner_working_directory(placement),
+            state,
+            source: RunnerStateOutboxSource {
+                placement_event_ordinal: ordinal,
+                connection: None,
+            },
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn lock_replacement_enrollments(
+    transaction: &mut Transaction<'_, Postgres>,
+    lost: Uuid,
+    candidate: Uuid,
+) -> Result<(), RunnerProtocolStoreError> {
+    let predecessor: Option<Uuid> = sqlx::query_scalar(
+        "SELECT predecessor_enrollment_id FROM runner_pending_predecessor WHERE enrollment_id = $1",
+    )
+    .bind(candidate)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let mut enrollments = vec![lost, candidate];
+    enrollments.extend(predecessor);
+    enrollments.sort_unstable();
+    enrollments.dedup();
+    lock_recovery_identities(transaction, &enrollments).await?;
+    sqlx::query(crate::lock_inventory::RUNNER_RECOVERY_ENROLLMENTS)
+        .bind(&enrollments)
+        .fetch_all(&mut **transaction)
+        .await?;
+    for enrollment in enrollments {
+        sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+            .bind(enrollment)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn lock_recovery_identities(
@@ -992,10 +1093,11 @@ async fn append_placement_boundary(
     let session = replacement.placement.session();
     let frontiers: Vec<Uuid> = sqlx::query_scalar(
         "(SELECT turn_lifecycle_effective_terminal_frontier(session_id, turn_id)
-            FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'terminal'
-              AND terminal_frontier_id IS NOT NULL ORDER BY acceptance_position DESC LIMIT 1)
+            FROM turn_lifecycle WHERE session_id = $1
+              AND turn_lifecycle_effective_terminal_frontier(session_id, turn_id) IS NOT NULL ORDER BY acceptance_position DESC LIMIT 1)
          UNION SELECT boundary.context_frontier_id FROM runner_session_placement_frontier AS head
             JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) WHERE head.session_id = $1
+         UNION SELECT seed_context_frontier_id FROM imported_session_seed WHERE session_id = $1
          UNION SELECT compaction.result_frontier_id FROM context_compaction AS compaction
             WHERE compaction.session_id = $1 AND NOT EXISTS (SELECT 1 FROM context_compaction AS successor WHERE successor.predecessor_compaction_id = compaction.context_compaction_id)",
     ).bind(session.into_uuid()).fetch_all(&mut **transaction).await?;
@@ -1074,15 +1176,8 @@ pub(super) async fn insert_replacement_result(
         .bind(command.into_uuid()).bind(if rejection.is_some() { "rejected" } else { "applied" })
         .bind(rejection).bind(runner).bind(revision).execute(&mut **transaction).await?;
     if rejection.is_some() {
-        sqlx::query("INSERT INTO runner_replacement_workspace_release (authorization_id, connection_epoch)
-            SELECT operation.authorization_id, head.connection_epoch
-            FROM runner_replacement_provisioning_authorization AS operation
-            JOIN runner_replacement_workspace_ready USING (authorization_id)
-            JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
-            JOIN runner_connection_event AS event ON event.enrollment_id = head.enrollment_id
-                AND event.connection_epoch = head.connection_epoch AND event.event_ordinal = head.connection_event_ordinal
-            WHERE operation.command_id = $1 AND event.state_kind = 'connected'")
-            .bind(command.into_uuid()).execute(&mut **transaction).await?;
+        super::provisioning::release_rejected_replacement_workspace(transaction.as_mut(), command)
+            .await?;
     }
     sqlx::query("SELECT pg_notify('runner_recovery', '')")
         .execute(&mut **transaction)
