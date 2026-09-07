@@ -234,8 +234,13 @@ impl PostgresRunnerRegistrationService {
                         .store
                         .propagate_connection_loss_session(loss, *session)
                         .await?;
-                    if let Some(nudge) = &self.eligibility_nudge {
-                        let _ = nudge.nudge(*session);
+                    if let Some(nudge) = &self.eligibility_nudge
+                        && nudge.nudge(*session)
+                            == signalbox_application::EligibilityNudgeOutcome::DroppedAtCapacity
+                    {
+                        let nudge = nudge.clone();
+                        let session = *session;
+                        tokio::spawn(async move { nudge.nudge_when_ready(session).await });
                     }
                     tracing::info!(
                         enrollment_id = %loss.enrollment().into_uuid(),
@@ -3509,6 +3514,16 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn terminal_connection_loss_nudges_placed_sessions_without_periodic_reconciliation() {
+        assert_terminal_connection_loss_nudge(false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn terminal_connection_loss_retains_hints_when_the_nudge_channel_is_full() {
+        assert_terminal_connection_loss_nudge(true).await;
+    }
+
+    async fn assert_terminal_connection_loss_nudge(saturated: bool) {
         let (_container, database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
         let RunnerEnrollmentResponse::Active(enrolled) = service
@@ -3528,8 +3543,10 @@ mod tests {
         create_runner_placed_session(&pool, &store, session, runner).await;
 
         use signalbox_application::{EligibilityWorkSource as _, InProcessEligibilityWorkSource};
-        let (nudge, mut work_source) = InProcessEligibilityWorkSource::new(
+        let (nudge, mut work_source) = InProcessEligibilityWorkSource::with_options(
             signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+            None,
+            Some(std::num::NonZeroUsize::MIN),
         );
         const EMPTY_SWEEP_OBSERVATION_WINDOW: Duration = Duration::from_millis(100);
         const NUDGE_DEADLINE: Duration = Duration::from_secs(5);
@@ -3538,6 +3555,13 @@ mod tests {
                 .await
                 .is_err()
         );
+        let earlier_hint = SessionId::from_uuid(uuid::Uuid::now_v7());
+        if saturated {
+            assert_eq!(
+                nudge.nudge(earlier_hint),
+                signalbox_application::EligibilityNudgeOutcome::Enqueued
+            );
+        }
         let service = service.with_eligibility_nudge(nudge);
         service
             .transition_connection(
@@ -3547,6 +3571,15 @@ mod tests {
             )
             .await
             .expect("the terminal transition propagates its durable loss cursor");
+        if saturated {
+            assert_eq!(
+                timeout(NUDGE_DEADLINE, work_source.next())
+                    .await
+                    .expect("queued hint drains")
+                    .expect("the work source stays open"),
+                earlier_hint
+            );
+        }
         assert_eq!(
             timeout(NUDGE_DEADLINE, work_source.next())
                 .await

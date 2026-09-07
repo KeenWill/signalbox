@@ -81,19 +81,19 @@ request and survives restart.
 
 A runner-locus request whose placement is lost before a lease offer or executor
 dispatch records `closed_inadmissible` with reason `placement_lost`. Pre-pin
-closure uses the registration retained by the connection loss. The loss
-transaction closes every such unresolved request in the batch, including earlier
-approved requests in a parked batch, retires existing approvals, and resumes
-batch evaluation without creating an attempt or result entry. An existing
-`Prepared` attempt first terminalizes `KnownFailed` with `execution_failed` and
-detail `placement_lost`; a `Prepared` approval judge retires without
-authorization. An in-flight judge reaches its observation boundary before its
-resulting approval retires and the request closes in that same transaction.
-Continuation projects one reference-only `ToolInadmissible { request }` in
-proposal order, rendered as `execution_failed` with detail `placement_lost`; it
-counts toward batch completion and survives interrupt, crash-loss, and
-reconciliation materialization. Placement loss never rewrites or cancels
-dispatched work.
+closure uses the registration retained by the connection loss, or the current
+registration when that loss epoch has no retained revision. The loss transaction
+closes every such unresolved request in the batch, including earlier approved
+requests in a parked batch, retires existing approvals, and resumes batch
+evaluation without creating an attempt or result entry. An existing `Prepared`
+attempt first terminalizes `KnownFailed` with `execution_failed` and detail
+`placement_lost`; a `Prepared` approval judge retires without authorization. An
+in-flight judge reaches its observation boundary before its resulting approval
+retires and the request closes in that same transaction. Continuation projects
+one reference-only `ToolInadmissible { request }` in proposal order, rendered as
+`execution_failed` with detail `placement_lost`; it counts toward batch
+completion and survives interrupt, crash-loss, and reconciliation
+materialization. Placement loss never rewrites or cancels dispatched work.
 
 ## Design decisions
 

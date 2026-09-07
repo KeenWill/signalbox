@@ -841,3 +841,49 @@ async fn placement_loss_accepts_preparation_failure_after_retiring_the_prepared_
     assert_eq!(disposition, "cancelled");
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn placement_loss_uses_current_registration_for_an_epoch_without_retained_revision()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = parked_batch(&pool).await?;
+    fixture
+        .store
+        .transition_connection(
+            enrollment().enrollment(),
+            fixture.connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = fixture
+        .store
+        .load_current_connection_loss(enrollment().enrollment())
+        .await?
+        .expect("the loss epoch exists");
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql("ALTER TABLE runner_connection_loss_epoch DISABLE TRIGGER ALL;")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("UPDATE runner_connection_loss_epoch SET registration_revision = NULL WHERE enrollment_id = $1 AND loss_epoch = $2")
+        .bind(loss.enrollment().into_uuid()).bind(Decimal::from(loss.loss_epoch().get())).execute(&mut *transaction).await?;
+    sqlx::raw_sql("ALTER TABLE runner_connection_loss_epoch ENABLE TRIGGER ALL;")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    fixture
+        .store
+        .propagate_connection_loss_session(loss, fixture.session)
+        .await?;
+    let batch = model_repository(&pool)
+        .tool_loop_repository()
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the reopened batch is readable");
+    assert!(batch.awaiting_approval().is_none());
+    assert_eq!(
+        batch.requests()[0].inadmissible_reason(),
+        Some(signalbox_domain::ToolInadmissibleReason::PlacementLost)
+    );
+    Ok(())
+}
