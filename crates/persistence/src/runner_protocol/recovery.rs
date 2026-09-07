@@ -281,7 +281,7 @@ impl RunnerProtocolStore {
                 .promote_pending_in_place()
                 .map_err(RunnerProtocolStoreError::Domain)?;
         }
-        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active')")
+        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active' AND NOT delegation_runtime_terminal)")
             .bind(session.into_uuid()).fetch_one(&mut **transaction).await?;
         if active {
             return Ok(None);
@@ -510,7 +510,7 @@ impl RunnerProtocolStore {
             ),
             _ => return Ok(rejected(Rejection::PlacementNotLost)),
         };
-        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active')")
+        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active' AND NOT delegation_runtime_terminal)")
             .bind(command.session.into_uuid()).fetch_one(&mut **transaction).await?;
         if active {
             return Ok(rejected(Rejection::ExistingControlRequired));
@@ -778,7 +778,7 @@ impl RunnerProtocolStore {
                 RunnerRecoveryRejection::SessionNotFound,
             ));
         }
-        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active')")
+        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active' AND NOT delegation_runtime_terminal)")
             .bind(session.into_uuid()).fetch_one(&mut **transaction).await?;
         if active {
             return Ok(AbandonLostRunnerResult::Rejected(

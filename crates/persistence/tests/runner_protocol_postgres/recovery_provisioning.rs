@@ -479,17 +479,27 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_rejected_staging_releases_only_its_exact_ready_workspace()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false).await
+    rejected_staging_releases_ready_workspace(false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_abandonment_releases_a_late_correlated_workspace_receipt()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(true).await
+    rejected_staging_releases_ready_workspace(true, false).await
 }
 
-async fn rejected_staging_releases_ready_workspace(late_ready: bool) -> Result<(), Box<dyn Error>> {
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_release_receipt_cannot_cross_the_retained_cleanup_epoch()
+-> Result<(), Box<dyn Error>> {
+    rejected_staging_releases_ready_workspace(false, true).await
+}
+
+async fn rejected_staging_releases_ready_workspace(
+    late_ready: bool,
+    successor_epoch: bool,
+) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -627,6 +637,40 @@ async fn rejected_staging_releases_ready_workspace(late_ready: bool) -> Result<(
             .await?,
         vec![ready.clone()]
     );
+    if successor_epoch {
+        store
+            .transition_connection(
+                candidate.identities().enrollment(),
+                candidate_connection.epoch(),
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await?;
+        let successor = store
+            .open_connection(candidate.identities().enrollment())
+            .await?;
+        assert_ne!(successor.epoch(), candidate_connection.epoch());
+        assert!(
+            store
+                .replacement_workspace_releases(candidate.identities().enrollment())
+                .await?
+                .is_empty()
+        );
+        assert!(
+            store
+                .record_replacement_workspace_released(
+                    candidate.identities().enrollment(),
+                    session,
+                    ready.placement_revision,
+                    ready.runner,
+                    ready.manifest_id
+                )
+                .await
+                .is_err()
+        );
+        let released: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_released WHERE authorization_id = $1").bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(released, 0);
+        return Ok(());
+    }
     assert!(
         store
             .record_replacement_workspace_released(

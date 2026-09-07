@@ -48,14 +48,25 @@ impl RunnerProtocolStore {
             .bind(session.into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
+        sqlx::query(RUNNER_ENROLLMENT)
+            .bind(enrollment.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+            .bind(enrollment.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
         let authorization: Option<Uuid> = sqlx::query_scalar("SELECT operation.authorization_id
             FROM runner_replacement_provisioning_authorization AS operation
             JOIN replace_lost_runner_result AS result USING (command_id)
             JOIN runner_replacement_workspace_ready AS ready USING (authorization_id)
             JOIN runner_replacement_workspace_release AS cleanup USING (authorization_id)
+            JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
             WHERE operation.registration_enrollment_id = $1 AND operation.session_id = $2
               AND operation.placement_revision = $3 AND operation.runner_id = $4
               AND ready.manifest_id = $5 AND result.result_kind = 'rejected'
+              AND cleanup.connection_epoch = head.connection_epoch
+              AND (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < cleanup.connection_epoch)
               AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_consumption AS consumption WHERE consumption.authorization_id = operation.authorization_id)")
             .bind(enrollment.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get()))
             .bind(runner.into_uuid()).bind(manifest.into_uuid()).fetch_optional(&mut *transaction).await?;
