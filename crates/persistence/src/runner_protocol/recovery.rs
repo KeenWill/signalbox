@@ -314,7 +314,9 @@ impl RunnerProtocolStore {
         let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active' AND NOT delegation_runtime_terminal
             AND NOT (active_phase_kind = 'awaiting_model_call_recovery' AND active_tool_round_call_id IS NULL))")
             .bind(session.into_uuid()).fetch_one(&mut **transaction).await?;
-        if active && boundary.is_none() {
+        let compacting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM context_compaction_model_call WHERE session_id = $1 AND state_kind <> 'terminal')")
+            .bind(session.into_uuid()).fetch_one(&mut **transaction).await?;
+        if compacting || (active && boundary.is_none()) {
             return Ok(None);
         }
         let mut request = stored.placement().request().clone();

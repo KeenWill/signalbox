@@ -339,21 +339,21 @@ async fn recovery_abandonment_terminalizes_the_lost_pre_pin_placement() -> Resul
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_pinned_installation_commits_one_reference_boundary_and_replays()
 -> Result<(), Box<dyn Error>> {
-    pinned_installation_preserves_seed(false, false).await
+    pinned_installation_preserves_seed(PinnedInstallationCase::Ordinary).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_pinned_installation_preserves_the_imported_seed_before_the_first_turn()
 -> Result<(), Box<dyn Error>> {
-    pinned_installation_preserves_seed(true, false).await
+    pinned_installation_preserves_seed(PinnedInstallationCase::Imported).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_replaces_a_delegated_session_after_its_runtime_terminal_boundary()
 -> Result<(), Box<dyn Error>> {
-    pinned_installation_preserves_seed(false, true).await
+    pinned_installation_preserves_seed(PinnedInstallationCase::Delegated).await
 }
 
 #[tokio::test]
@@ -424,10 +424,28 @@ async fn same_runner_default_directory_transition(changed: bool) -> Result<(), B
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn staged_replacement_waits_for_explicit_compaction_observation() -> Result<(), Box<dyn Error>>
+{
+    pinned_installation_preserves_seed(PinnedInstallationCase::Compaction).await
+}
+
+enum PinnedInstallationCase {
+    Ordinary,
+    Imported,
+    Delegated,
+    Compaction,
+}
+
 async fn pinned_installation_preserves_seed(
-    imported: bool,
-    runtime_terminal: bool,
+    case: PinnedInstallationCase,
 ) -> Result<(), Box<dyn Error>> {
+    let imported = matches!(
+        case,
+        PinnedInstallationCase::Imported | PinnedInstallationCase::Compaction
+    );
+    let runtime_terminal = matches!(case, PinnedInstallationCase::Delegated);
     let (_container, pool) = migrated_postgres().await?;
     let seed = ContextFrontierId::from_uuid(Uuid::now_v7());
     let (store, predecessor, _, pin) = if imported {
@@ -522,6 +540,40 @@ async fn pinned_installation_preserves_seed(
         session: pin.placement.session(),
         revision: None,
     };
+    if matches!(case, PinnedInstallationCase::Compaction) {
+        let compactions =
+            signalbox_persistence::context_compaction::ContextCompactionRepository::new(
+                pool.clone(),
+            );
+        let prepared = prepare_imported_compaction(&pool, command.session).await?;
+        assert_eq!(
+            store.replace_lost_runner(command.clone()).await?,
+            RunnerRecoveryOutcome::Pending
+        );
+        compactions.authorize(&prepared).await?;
+        assert_eq!(
+            store.resume_runner_replacement(command.command_id).await?,
+            RunnerRecoveryOutcome::Pending
+        );
+        let entries: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_placement_boundary WHERE session_id = $1",
+        )
+        .bind(command.session.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(entries, 0);
+        let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
+        listener.listen("runner_recovery").await?;
+        compactions
+            .complete(
+                &prepared,
+                "Imported conversation summary",
+                signalbox_domain::ContextCompactionTokenUsage::unreported(),
+            )
+            .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), listener.recv()).await??;
+        store.resume_runner_replacements().await?;
+    }
     let result = store.replace_lost_runner(command.clone()).await?;
 
     assert_eq!(
@@ -545,7 +597,9 @@ async fn pinned_installation_preserves_seed(
     let member_count: Decimal = sqlx::query_scalar("SELECT frontier.member_count FROM runner_session_placement_frontier AS head JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) JOIN context_frontier AS frontier ON frontier.owning_session_id = boundary.session_id AND frontier.context_frontier_id = boundary.context_frontier_id WHERE head.session_id = $1").bind(command.session.into_uuid()).fetch_one(&pool).await?;
     assert_eq!(
         member_count,
-        Decimal::from(if imported {
+        Decimal::from(if matches!(case, PinnedInstallationCase::Compaction) {
+            4
+        } else if imported {
             3
         } else if runtime_terminal {
             2
@@ -585,21 +639,22 @@ async fn pinned_installation_preserves_seed(
         DispatchedRunnerState::Replaced,
     )
     .await?;
-    if imported {
+    if matches!(case, PinnedInstallationCase::Compaction) {
+        let suffix: Vec<String> = sqlx::query_scalar("SELECT entry.payload_kind FROM runner_session_placement_frontier AS head JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) CROSS JOIN LATERAL resolve_context_frontier_members(head.session_id, boundary.context_frontier_id) AS member JOIN semantic_transcript_entry AS entry ON entry.source_session_id = member.source_session_id AND entry.semantic_entry_id = member.semantic_entry_id WHERE head.session_id = $1 ORDER BY member.member_position DESC LIMIT 2")
+            .bind(command.session.into_uuid()).fetch_all(&pool).await?;
+        assert_eq!(suffix, ["runner_placement_changed", "context_summary"]);
+    } else if imported {
         compact_replaced_imported_session(&pool, command.session).await?;
         reject_malformed_placement_entries(&pool, command.session).await?;
     }
     Ok(())
 }
 
-async fn compact_replaced_imported_session(
+async fn prepare_imported_compaction(
     pool: &PgPool,
     session: SessionId,
-) -> Result<(), Box<dyn Error>> {
-    use signalbox_domain::{
-        ContextCompactionId, ContextCompactionTokenUsage, ProviderModelIdentity,
-        ResolvedProviderTarget,
-    };
+) -> Result<signalbox_persistence::context_compaction::PreparedContextCompaction, Box<dyn Error>> {
+    use signalbox_domain::{ContextCompactionId, ProviderModelIdentity, ResolvedProviderTarget};
     use signalbox_persistence::context_compaction::{
         ContextCompactionRepository, PrepareContextCompactionOutcome,
         PrepareContextCompactionRequest,
@@ -623,8 +678,19 @@ async fn compact_replaced_imported_session(
         })
         .await?
     else {
-        panic!("the imported prefix can be compacted after replacement")
+        panic!("the imported prefix can be compacted")
     };
+    Ok(*prepared)
+}
+
+async fn compact_replaced_imported_session(
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::ContextCompactionTokenUsage;
+    use signalbox_persistence::context_compaction::ContextCompactionRepository;
+    let repository = ContextCompactionRepository::new(pool.clone());
+    let prepared = prepare_imported_compaction(pool, session).await?;
     repository.authorize(&prepared).await?;
     repository
         .complete(
