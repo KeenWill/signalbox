@@ -199,7 +199,10 @@ Goal commissioning or resumption releases the dispatched session's held start
 gate. Goal achievement or a user-stopped goal issues a parent-only sticky stop.
 Closing or merging a pull request issues a parent-only sticky stop for its live
 dispatched session, with `pull_request_closed` or `pull_request_merged` retained
-as the ledger reason; an already terminal session is left alone. Reactions
+as the ledger reason; an already terminal session is left alone. Reactions check
+durable core terminal facts before recording retirement or submitting its stop,
+including facts still pending at the module cursor; a queued retirement whose
+session has ended is rejected locally as `session_already_terminal`. Reactions
 retain their original rule and action even after configuration removes the rule.
 The module commits lifecycle effects before advancing its application cursor;
 the daemon acknowledges the corresponding seam event afterward.

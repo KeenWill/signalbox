@@ -547,6 +547,8 @@ impl WebhookDisposition {
 /// Module-local storage failure.
 #[derive(Debug)]
 pub enum StoreError {
+    /// Core terminal facts could not be read through the ownership seam.
+    Lifecycle(signalbox_ownership_seam::OutboxDispatchError),
     /// Persisted poll transport state is malformed or belongs to another reviewer set.
     InvalidPollCache,
     /// A retained reload activation cannot be encoded.
@@ -584,6 +586,7 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::Lifecycle(_) => "repository-watch core terminal lookup failed",
             Self::InvalidPollCache => "repository-watch poll cache is invalid",
             Self::InvalidReloadIntent => "repository-watch reload intent is invalid",
             Self::InvalidComparisonBaseline => "repository-watch comparison baseline is invalid",
@@ -621,6 +624,7 @@ impl fmt::Display for StoreError {
 impl Error for StoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Lifecycle(error) => Some(error),
             Self::InvalidPollCache
             | Self::InvalidReloadIntent
             | Self::InvalidComparisonBaseline

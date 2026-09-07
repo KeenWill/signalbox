@@ -278,6 +278,14 @@ impl LifecycleEventSource {
         }
     }
 
+    /// Checks whether a session has a durable terminal fact, including unread events.
+    pub async fn has_session_terminal_fact(
+        &self,
+        session: SessionId,
+    ) -> Result<bool, OutboxDispatchError> {
+        self.reader.has_session_terminal_fact(session).await
+    }
+
     /// Reads the next module-visible event without advancing its cursor.
     ///
     /// Core-only event families are acknowledged internally and skipped. A

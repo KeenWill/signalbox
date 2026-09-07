@@ -3,6 +3,65 @@ use signalbox_ownership_seam::{
     LifecycleActor, LifecycleEventKind, SessionStateKind, SessionTerminal, SessionTerminalOutcome,
 };
 
+async fn persist_creation(
+    pool: &PgPool,
+    command: &SessionCommand,
+) -> Result<SessionId, Box<dyn Error>> {
+    let SessionCommandPayload::CreateSession(command) = command.clone().into_payload() else {
+        panic!("creation command");
+    };
+    let models = signalboxd::HubModelConfiguration::parse(
+        &include_str!("../../../../config/signalboxd.example.toml").replace(
+            "/usr/local/bin/signalbox-exec-supervisor",
+            std::env::current_exe()?.to_string_lossy().as_ref(),
+        ),
+    )?;
+    let session = SessionId::from_uuid(Uuid::now_v7());
+    let repository = signalbox_persistence::create_session::CreateSessionRepository::new(
+        pool.clone(),
+        models.session_credential_pin(),
+    )
+    .with_principal(signalbox_domain::CommandPrincipal::Module {
+        module: signalbox_domain::DispatchingModule::RepositoryWatch,
+    });
+    repository
+        .handle(command.prepare(session).expect("prepared fixture session"))
+        .await?;
+    Ok(session)
+}
+
+async fn close_in_core(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn Error>> {
+    signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository::new(
+        pool.clone(),
+    )
+    .handle(
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            session,
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Sticky,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        ),
+        signalbox_domain::CommandPrincipal::Operator,
+    )
+    .await?;
+    Ok(())
+}
+
+struct NoSubmission;
+
+impl signalbox_module_repo_watch_v2::dispatch::SessionCommandSink for NoSubmission {
+    type Error = std::convert::Infallible;
+
+    async fn submit(
+        &mut self,
+        _: SessionCommand,
+    ) -> Result<signalbox_module_repo_watch_v2::dispatch::CommandSubmission, Self::Error> {
+        panic!("a retirement for a terminal session must not reach the core command sink")
+    }
+}
+
 fn pull_observation(
     repository: &RepositorySlug,
     lifecycle: RepoWatchPullRequestLifecycle,
@@ -59,6 +118,7 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
 -> Result<(), Box<dyn Error>> {
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
+    let source = signalbox_ownership_seam::LifecycleEventSource::new(core_pool.clone());
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
         .execute(&core_pool)
         .await?;
@@ -131,7 +191,7 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
             .iter()
             .find(|p| p.repository() == &repository)
             .expect("create command");
-        let terminal_session = SessionId::from_uuid(Uuid::now_v7());
+        let terminal_session = persist_creation(&core_pool, creation.command()).await?;
         store
             .react_to_lifecycle(
                 &LifecycleEvent::session_created_for_test(
@@ -149,28 +209,49 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
                 ),
                 &mut factory,
                 &mut codec,
+                &source,
             )
             .await?;
-        store
-            .react_to_lifecycle(
-                &LifecycleEvent::for_test(
-                    2,
-                    now,
-                    Some(terminal_session),
-                    LifecycleEventKind::SessionTerminal(SessionTerminal {
-                        prior: SessionStateKind::Created,
-                        outcome: SessionTerminalOutcome::Stopped {
-                            sticky: StopStickiness::Sticky,
-                        },
-                        standing: None,
-                        actor: LifecycleActor::Operator,
-                    }),
-                ),
-                &mut factory,
-                &mut codec,
-            )
-            .await?;
-        let session = SessionId::from_uuid(Uuid::now_v7());
+        close_in_core(&core_pool, terminal_session).await?;
+        assert!(source.has_session_terminal_fact(terminal_session).await?);
+        if lifecycle == RepoWatchPullRequestLifecycle::Closed {
+            store
+                .react_to_lifecycle(
+                    &LifecycleEvent::for_test(
+                        2,
+                        now,
+                        Some(terminal_session),
+                        LifecycleEventKind::SessionTerminal(SessionTerminal {
+                            prior: SessionStateKind::Created,
+                            outcome: SessionTerminalOutcome::Stopped {
+                                sticky: StopStickiness::Sticky,
+                            },
+                            standing: None,
+                            actor: LifecycleActor::Operator,
+                        }),
+                    ),
+                    &mut factory,
+                    &mut codec,
+                    &source,
+                )
+                .await?;
+        }
+        let known_terminal: bool = sqlx::query_scalar(
+            "SELECT session_terminal_at IS NOT NULL FROM dispatch_ledger WHERE created_session_id = $1",
+        )
+        .bind(terminal_session.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            known_terminal,
+            lifecycle == RepoWatchPullRequestLifecycle::Closed
+        );
+        let second_creation = pending
+            .iter()
+            .filter(|p| p.repository() == &repository)
+            .nth(1)
+            .expect("second creation");
+        let session = persist_creation(&core_pool, second_creation.command()).await?;
         let created = LifecycleEvent::session_created_for_test(
             3,
             now,
@@ -197,12 +278,12 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
             .reconcile_rules(&[RepositoryRuleSet::new(&repository, &[])], now)
             .await?;
         store
-            .react_to_pull_request_lifecycle(&mut factory, &mut codec)
+            .react_to_pull_request_lifecycle(&mut factory, &mut codec, &source)
             .await?;
         let before: i64 = sqlx::query_scalar("SELECT count(*) FROM dispatch_ledger WHERE repository = $1 AND retirement_reason IS NOT NULL").bind(name).fetch_one(&pool).await?;
         assert_eq!(before, 0, "unsettled creation is left pending");
         store
-            .react_to_lifecycle(&created, &mut factory, &mut codec)
+            .react_to_lifecycle(&created, &mut factory, &mut codec, &source)
             .await?;
         let restarted = RepoWatchStore::new(pool.clone());
         let commands = restarted.recover_pending_commands(&mut codec).await?;
@@ -224,10 +305,10 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
             }
         );
         restarted
-            .react_to_pull_request_lifecycle(&mut factory, &mut codec)
+            .react_to_pull_request_lifecycle(&mut factory, &mut codec, &source)
             .await?;
         restarted
-            .react_to_lifecycle(&created, &mut factory, &mut codec)
+            .react_to_lifecycle(&created, &mut factory, &mut codec, &source)
             .await?;
         let rows: Vec<(Uuid, String)> = sqlx::query_as("SELECT command_id, retirement_reason FROM dispatch_ledger WHERE repository = $1 AND retirement_event_id IS NOT NULL").bind(name).fetch_all(&pool).await?;
         assert_eq!(
@@ -235,6 +316,24 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
             vec![(command_id.into_uuid(), reason.to_owned())],
             "restart and replay retain one exact stop and reason after rule removal"
         );
+        close_in_core(&core_pool, session).await?;
+        assert!(source.has_session_terminal_fact(session).await?);
+        restarted
+            .submit_pending(&mut codec, &mut NoSubmission, &source)
+            .await
+            .expect("terminal retirement is discarded before submission");
+        assert!(
+            restarted
+                .recover_pending_commands(&mut codec)
+                .await?
+                .is_empty()
+        );
+        let rejection: String =
+            sqlx::query_scalar("SELECT rejection_kind FROM dispatch_ledger WHERE command_id = $1")
+                .bind(command_id.into_uuid())
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(rejection, "session_already_terminal");
     }
     pool.close().await;
     core_pool.close().await;

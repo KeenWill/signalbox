@@ -8,10 +8,10 @@ use crate::{
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_ownership_seam::{
     CreateSessionOutcome, DescendantTerminationScope, DurableCommandId, GoalEventKind,
-    LifecycleEvent, LifecycleEventKind, OffsetDateTime, RepoWatchEvent, RepoWatchEventId,
-    RepoWatchEventTarget, RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchRule,
-    RepoWatchSingletonScope, RepositorySlug, SessionCommand, SessionId, SessionLifecycleCommand,
-    SessionLifecycleOperation, SessionTerminalOutcome, StopStickiness,
+    LifecycleEvent, LifecycleEventKind, LifecycleEventSource, OffsetDateTime, RepoWatchEvent,
+    RepoWatchEventId, RepoWatchEventTarget, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+    RepoWatchRule, RepoWatchSingletonScope, RepositorySlug, SessionCommand, SessionId,
+    SessionLifecycleCommand, SessionLifecycleOperation, SessionTerminalOutcome, StopStickiness,
 };
 use std::{collections::BTreeSet, future::Future};
 use uuid::Uuid;
@@ -154,6 +154,7 @@ impl RepoWatchStore {
         event: &LifecycleEvent,
         factory: &mut Factory,
         codec: &mut Codec,
+        source: &LifecycleEventSource,
     ) -> Result<(), StoreError> {
         self.apply_lifecycle_event(event).await?;
         if matches!(event.kind(), LifecycleEventKind::SessionTerminal(_)) {
@@ -200,7 +201,8 @@ impl RepoWatchStore {
                 }
             }
         }
-        self.react_to_pull_request_lifecycle(factory, codec).await?;
+        self.react_to_pull_request_lifecycle(factory, codec, source)
+            .await?;
         let prior: Decimal =
             sqlx::query_scalar("SELECT applied_through FROM core_event_cursor WHERE singleton")
                 .fetch_one(&self.pool)
@@ -223,6 +225,7 @@ impl RepoWatchStore {
         &self,
         factory: &mut Factory,
         codec: &mut Codec,
+        source: &LifecycleEventSource,
     ) -> Result<(), StoreError> {
         #[derive(sqlx::FromRow)]
         struct Retirement {
@@ -259,6 +262,13 @@ impl RepoWatchStore {
         .fetch_all(&mut *transaction)
         .await?;
         for retirement in retirements {
+            if source
+                .has_session_terminal_fact(SessionId::from_uuid(retirement.created_session_id))
+                .await
+                .map_err(StoreError::Lifecycle)?
+            {
+                continue;
+            }
             let command = SessionCommand::lifecycle(factory.lifecycle(
                 SessionId::from_uuid(retirement.created_session_id),
                 SessionLifecycleOperation::Stop {
@@ -292,6 +302,7 @@ impl RepoWatchStore {
         &self,
         codec: &mut Codec,
         sink: &mut Sink,
+        source: &LifecycleEventSource,
     ) -> Result<(), SubmissionError<Sink::Error>> {
         for planned in self
             .recover_pending_commands(codec)
@@ -299,6 +310,34 @@ impl RepoWatchStore {
             .map_err(SubmissionError::Store)?
         {
             let id = planned.command().command_id();
+            let retirement_session: Option<Uuid> = sqlx::query_scalar(
+                "SELECT origin.created_session_id FROM dispatch_ledger reaction
+                 JOIN dispatch_ledger origin ON origin.dispatch_ref = reaction.dispatch_ref
+                     AND origin.action_ordinal = reaction.action_ordinal
+                     AND origin.created_session_id IS NOT NULL
+                 WHERE reaction.command_id = $1 AND reaction.retirement_event_id IS NOT NULL",
+            )
+            .bind(id.into_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::from)
+            .map_err(SubmissionError::Store)?;
+            if let Some(session) = retirement_session
+                && source
+                    .has_session_terminal_fact(SessionId::from_uuid(session))
+                    .await
+                    .map_err(StoreError::Lifecycle)
+                    .map_err(SubmissionError::Store)?
+            {
+                sqlx::query("UPDATE dispatch_ledger SET status = 'rejected', rejection_kind = 'session_already_terminal',
+                    settled_at = $2, submission_pending = false WHERE command_id = $1 AND status = 'pending'")
+                    .bind(id.into_uuid()).bind(OffsetDateTime::now_utc())
+                    .execute(&self.pool).await.map_err(StoreError::from).map_err(SubmissionError::Store)?;
+                self.set_submission_pending(id, false)
+                    .await
+                    .map_err(SubmissionError::Store)?;
+                continue;
+            }
             self.set_submission_pending(id, true)
                 .await
                 .map_err(SubmissionError::Store)?;
