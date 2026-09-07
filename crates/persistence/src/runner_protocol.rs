@@ -1310,12 +1310,8 @@ impl RunnerProtocolStore {
             .fetch_one(&mut *transaction)
             .await?;
             if pending_exists
-                || !connection.is_some_and(|connection| {
-                    matches!(
-                        connection.state(),
-                        RunnerConnectionState::Lost | RunnerConnectionState::Shutdown
-                    )
-                })
+                || !connection
+                    .is_some_and(|connection| connection.state() == RunnerConnectionState::Lost)
             {
                 return Err(RunnerEnrollmentRequestFailure::ActiveEnrollmentExists {
                     request,
