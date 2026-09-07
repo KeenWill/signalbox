@@ -275,10 +275,15 @@ async fn read_entry_window(
 }
 
 async fn continue_import(
-    State(state): State<WebImportState>,
+    State(mut state): State<WebImportState>,
+    reload: Option<axum::Extension<crate::configuration_reload::ConfigurationReload>>,
     Path(conversation): Path<String>,
     request: axum::extract::Request,
 ) -> Response {
+    if let Some(axum::Extension(reload)) = reload {
+        state.model_configuration = (*reload.catalogs().models).clone();
+    }
+
     let conversation = match imported_conversation_id(&conversation) {
         Ok(conversation) => conversation,
         Err(message) => return invalid_request(message),

@@ -735,6 +735,7 @@ impl SubmitInputRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ReloadConfiguration
                 | CommandKind::SessionLifecycle,
             ) => Err(Self::wrong_kind(command_id)),
         }
@@ -846,6 +847,7 @@ where
             | CommandKind::RegisterWorkspace
             | CommandKind::MintGitRemote
             | CommandKind::WithdrawGitRemote
+            | CommandKind::ReloadConfiguration
             | CommandKind::SessionLifecycle,
         ) => {
             return Ok(TransactionDecision::Rollback(
@@ -894,6 +896,7 @@ where
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ReloadConfiguration
                 | CommandKind::SessionLifecycle,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },

@@ -6,6 +6,9 @@
 
 ```rust
 pub enum ClientRequest {
+    ReloadConfiguration {
+        command_id: CommandId,
+    },
     CreateSession {
         command_id: CommandId,
         initial_model_selection: ModelSelection,

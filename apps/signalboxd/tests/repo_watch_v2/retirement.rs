@@ -39,6 +39,17 @@ fn pull_observation(
         })
         .expect("observation"),
     );
+    if lifecycle == RepoWatchPullRequestLifecycle::Merged {
+        observed.merged_at.insert(
+            observed.observation.state().pull_requests()[0]
+                .context()
+                .number(),
+            observed
+                .observed_at
+                .replace_nanosecond(0)
+                .expect("second precision"),
+        );
+    }
     observed
 }
 
@@ -108,6 +119,7 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
                 &store.ingest_baseline(&repository).await?,
                 &pull_observation(&repository, RepoWatchPullRequestLifecycle::Open),
                 EventProducer::Poll,
+                MERGED_RETENTION,
             )
             .await?;
         store
@@ -178,6 +190,7 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
                 &store.ingest_baseline(&repository).await?,
                 &pull_observation(&repository, lifecycle),
                 EventProducer::Poll,
+                MERGED_RETENTION,
             )
             .await?;
         store

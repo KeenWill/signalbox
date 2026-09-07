@@ -211,6 +211,7 @@ template = "watch"
             .ingest_observation(
                 &store.ingest_baseline(repository).await?,
                 &signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+                    merged_at: std::collections::BTreeMap::new(),
                     repository: repository.clone(),
                     default_branch: BranchName::try_new(String::from("main"))?,
                     default_head: head.clone(),
@@ -218,6 +219,7 @@ template = "watch"
                     observation,
                 },
                 EventProducer::Poll,
+                MERGED_RETENTION,
             )
             .await?;
         let template_path = files.path().join("templates.toml");

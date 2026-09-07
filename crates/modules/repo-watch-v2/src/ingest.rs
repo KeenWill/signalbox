@@ -1,15 +1,15 @@
 //! Serialized repository observation and generation-fenced ingest.
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::Value;
 use signalbox_ownership_seam::{
-    BranchName, CommitSha, OffsetDateTime, RepoWatchEventIdentityFrontierEntryV1,
-    RepoWatchEventIdentityFrontierV1, RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation,
-    RepoWatchPullRequestLifecycle, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    RepositorySlug, UuidV7RepoWatchEventIdGenerator,
-    derive_repo_watch_events_with_merged_baselines,
+    BranchName, CommitSha, OffsetDateTime, PullRequestNumber,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierV1,
+    RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepositorySlug,
+    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events_with_merged_baselines,
 };
 use tokio::{
     sync::{Notify, watch},
@@ -28,7 +28,15 @@ pub struct RepositoryObservation {
     pub default_branch: BranchName,
     pub default_head: CommitSha,
     pub observation: RepoWatchObservation,
+    pub merged_at: BTreeMap<PullRequestNumber, OffsetDateTime>,
     pub observed_at: OffsetDateTime,
+}
+
+/// A compact comparison baseline and the provider's merge time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MergedPullRequestBaseline {
+    pub state: RepoWatchMergedPullRequestBaselineV1,
+    pub merged_at: OffsetDateTime,
 }
 
 /// Durable comparison input loaded before one repository fetch.
@@ -36,7 +44,7 @@ pub struct RepositoryObservation {
 pub struct IngestBaseline {
     pub generation: u64,
     pub observation: Option<RepoWatchObservation>,
-    pub merged_baselines: Vec<RepoWatchMergedPullRequestBaselineV1>,
+    pub merged_baselines: Vec<MergedPullRequestBaseline>,
     pub frontier: RepoWatchEventIdentityFrontierV1,
 }
 
@@ -138,38 +146,44 @@ impl RepoWatchStore {
         baseline: &IngestBaseline,
         observed: &RepositoryObservation,
         producer: EventProducer,
+        retention: Duration,
     ) -> Result<FrontierEventAdmission, StoreError> {
         let mut frontier = baseline.frontier.clone();
+        let previous_merged = baseline
+            .merged_baselines
+            .iter()
+            .map(|entry| entry.state.clone())
+            .collect::<Vec<_>>();
         let occurrences = derive_repo_watch_events_with_merged_baselines(
             &observed.repository,
             baseline.observation.as_ref(),
-            &baseline.merged_baselines,
+            &previous_merged,
             &observed.observation,
             &mut frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .map_err(|_| StoreError::InvalidComparisonBaseline)?;
-        let merged_baselines = baseline
-            .merged_baselines
-            .iter()
-            .map(|retained| {
-                let Some(current) = observed
-                    .observation
-                    .state()
-                    .pull_requests()
-                    .iter()
-                    .find(|p| p.context().number() == retained.number())
-                else {
-                    return Ok(retained.clone());
-                };
-                RepoWatchMergedPullRequestBaselineV1::from_merged_state(
-                    current,
-                    observed.observation.signal_reviewers(),
-                )
-                .map(|updated| updated.unwrap_or_else(|| retained.clone()))
-                .map_err(|_| StoreError::InvalidComparisonBaseline)
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
+        let mut merged_baselines = baseline.merged_baselines.clone();
+        for current in observed.observation.state().pull_requests() {
+            merged_baselines
+                .retain(|retained| retained.state.number() != current.context().number());
+            if let Some(compacted) = RepoWatchMergedPullRequestBaselineV1::from_merged_state(
+                current,
+                observed.observation.signal_reviewers(),
+            )
+            .map_err(|_| StoreError::InvalidComparisonBaseline)?
+            {
+                let merged_at = *observed
+                    .merged_at
+                    .get(&current.context().number())
+                    .ok_or(StoreError::InvalidComparisonBaseline)?;
+                merged_baselines.push(MergedPullRequestBaseline {
+                    state: compacted,
+                    merged_at,
+                });
+            }
+        }
+        merged_baselines.retain(|entry| observed.observed_at - entry.merged_at < retention);
         let state = observed.observation.state();
         let ordinary_observation = RepoWatchObservation::new(
             observed.observation.signal_reviewers().to_vec(),
@@ -178,9 +192,7 @@ impl RepoWatchStore {
                     .pull_requests()
                     .iter()
                     .filter(|pull_request| {
-                        !merged_baselines
-                            .iter()
-                            .any(|retained| retained.number() == pull_request.context().number())
+                        pull_request.lifecycle() == RepoWatchPullRequestLifecycle::Open
                     })
                     .cloned()
                     .collect(),

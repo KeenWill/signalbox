@@ -6,19 +6,18 @@ This design is not built; it extends
 ## Goal
 
 Build the items the identity and command subsystem has committed to but lacks:
-registry kinds and typed records for runner recovery, OAuth administration, and
-configuration reload, production generators for the four identity types that
-lack one, and the optional runner placement the two creation payloads lack.
-`Actor` gains a program arm that submit-input records, and create-session
-adoption stays an explicit maintainer choice, so a program-driven turn is never
-recorded as user-issued.
+registry kinds and typed records for runner recovery and OAuth administration,
+production generators for the four identity types that lack one, and the
+optional runner placement the two creation payloads lack. `Actor` gains a
+program arm that submit-input records, and create-session adoption stays an
+explicit maintainer choice, so a program-driven turn is never recorded as
+user-issued.
 
 ## Design
 
-`provision_oauth_credential`, `reprovision_oauth_credential`,
-`delete_oauth_credential`, and `reload_configuration` each gain a registry kind
-and typed relational request and result record families keyed by command
-identifier. The reload request records retain the checked snapshot;
+`provision_oauth_credential`, `reprovision_oauth_credential`, and
+`delete_oauth_credential` each gain a registry kind and typed relational request
+and result record families keyed by command identifier;
 [process protocol](process-protocol.md) owns the payloads and outcomes.
 
 Three runner recovery command kinds join the registry and its closed kind
@@ -97,10 +96,10 @@ that adds the field states how each earlier version reconstitutes.
 - Imported-creation version 4 and create-session version 5 stay unwritten; no
   writer uses either number and the decoders keep rejecting them.
 - Workspace-provisioning or staged replacement, OAuth provisioning and
-  re-provisioning, and configuration reload may span claim and terminal-result
-  transactions; every other new kind is one claim-and-terminal-result
-  transaction. [Process protocol](process-protocol.md) owns OAuth and reload
-  startup recovery.
+  re-provisioning may span claim and terminal-result transactions; every other
+  new kind is one claim-and-terminal-result transaction.
+  [Process protocol](process-protocol.md) owns OAuth and reload startup
+  recovery.
 
 ## Acceptance criteria
 
