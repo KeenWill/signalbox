@@ -107,7 +107,6 @@ filegroup(
 test_suite(
     name = "rust_unit_tests",
     tests = [
-        "//:bazel_tests",
         "//apps/client:signalbox_unit_tests",
         "//apps/client:unit_tests",
         "//apps/signalbox-runner:signalbox_runner_unit_tests",
@@ -119,6 +118,7 @@ test_suite(
         "//crates/application:unit_tests",
         "//crates/approval-judge-eval:signalbox_approval_judge_eval_unit_tests",
         "//crates/approval-judge-eval:unit_tests",
+        "//crates/blob-store:unit_tests",
         "//crates/blob-store-filesystem:unit_tests",
         "//crates/blob-store-s3:unit_tests",
         "//crates/cargo-bin-resolver:signalbox_cargo_bin_resolver_unit_tests",
@@ -128,6 +128,7 @@ test_suite(
         "//crates/conversation-import-codex:unit_tests",
         "//crates/conversation-import-json:unit_tests",
         "//crates/derive:unit_tests",
+        "//crates/domain:unit_tests",
         "//crates/egress-transport:unit_tests",
         "//crates/file-media-adapter-archives:signalbox_file_media_archives_worker_unit_tests",
         "//crates/file-media-adapter-archives:unit_tests",
@@ -159,6 +160,7 @@ test_suite(
         "//crates/model-runtime-codex-cli:unit_tests",
         "//crates/model-runtime-openai:unit_tests",
         "//crates/modules/repo-watch-v2:unit_tests",
+        "//crates/newtype:unit_tests",
         "//crates/ownership-seam:unit_tests",
         "//crates/persistence:unit_tests",
         "//crates/process-protocol:unit_tests",
