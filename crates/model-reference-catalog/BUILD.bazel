@@ -1,0 +1,93 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+
+exports_files(["Cargo.toml"])
+
+cargo_toml_env_vars(
+    name = "cargo_environment",
+    src = "Cargo.toml",
+    workspace = "//:Cargo.toml",
+)
+
+extract_cargo_lints(
+    name = "cargo_lints",
+    manifest = "Cargo.toml",
+    workspace = "//:Cargo.toml",
+)
+
+rust_library(
+    name = "signalbox_model_reference_catalog",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = ["data/reference-catalog.json"],
+    crate_features = [],
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [] + all_crate_deps(proc_macro = True),
+    rustc_env_files = [":cargo_environment"],
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [] + all_crate_deps(normal = True),
+)
+
+rust_binary(
+    name = "generate-reference-projections",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = ["data/reference-catalog.json"],
+    crate_features = [],
+    crate_root = "src/bin/generate-reference-projections.rs",
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [] + all_crate_deps(proc_macro = True),
+    rustc_env_files = [":cargo_environment"],
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [":signalbox_model_reference_catalog"] + all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "unit_tests",
+    size = "large",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["--test-threads=16"],
+    crate = ":signalbox_model_reference_catalog",
+    crate_features = [],
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
+    rustc_flags = [
+        "--deny=warnings",
+        "--forbid=unsafe_code",
+    ],
+    deps = [] + all_crate_deps(normal_dev = True),
+)
+
+rust_test(
+    name = "generate_reference_projections_unit_tests",
+    size = "large",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["--test-threads=16"],
+    crate = ":generate-reference-projections",
+    crate_features = [],
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
+    rustc_flags = [
+        "--deny=warnings",
+        "--forbid=unsafe_code",
+    ],
+    deps = [] + all_crate_deps(normal_dev = True),
+)

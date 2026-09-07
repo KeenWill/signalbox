@@ -292,22 +292,11 @@ per-turn provenance. The following extensions remain undecided:
   session between adapter kinds stays an explicit defaults replacement. Whether
   mixed pools are ever admitted, and what would reconcile two adapters'
   authentication shapes if they were, remains open.
-- **Provider headroom observation.** Selecting a profile by remaining capacity
-  requires an observation surface no adapter currently captures: the Anthropic
-  HTTP adapter reads only a request identifier from response headers, and the
-  Codex CLI adapter's documented percentage headers are not established as
-  reachable through its process boundary. What a deployment may configure where
-  no adapter supplies headroom is decided and no longer open: startup rejects
-  `headroom_reserve_percent`, `tie_break = "least_used"`, and any
-  `on_headroom_low` action other than `stay`, under the fail-closed admission
-  rule in
-  [credential pools and selection](spec/configuration-and-credentials.md#design-decisions),
-  because a protection that silently never fires reads as one the deployment
-  has. What remains undecided is which adapters can supply headroom at all and
-  the normalized quantity, observation lifetime, and deterministic secondary
-  tie-break a later contract must define before `least_used` is admitted, and
-  whether a free probe exists that does not consume the quota it reports. Blocks
-  capacity-aware selection, not availability failover.
+- **Provider headroom observation outside Codex.** The capacity quantity,
+  observation lifetime, and secondary tie-break for other adapters, and whether
+  a free probe exists that does not consume the quota it reports, remain open.
+  Codex capacity policy is defined in
+  [credential pools and selection](spec/configuration-and-credentials.md#design-decisions).
 - **Zero-cost liveness probes.** Operator clear and probe recovery belong to the
   planned credential-exclusion lifecycle in
   [the configuration and credentials design](design/configuration-and-credentials.md),

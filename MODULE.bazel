@@ -32,6 +32,21 @@ host_tools.host_tools(
 use_repo(host_tools, "signalbox_rust_host_tools")
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+
+v8 = use_extension("//tooling/bazel:v8.bzl", "v8")
+use_repo(v8, "rusty_v8_archive")
+
+crate.annotation(
+    build_script_data = ["@rusty_v8_archive//file"],
+    build_script_env = {
+        "RUSTY_V8_ARCHIVE": "$(execpath @rusty_v8_archive//file)",
+        "RUSTY_V8_SRC_BINDING_PATH": "../gen/src_binding_simdutf_release_x86_64-unknown-linux-gnu.rs",
+    },
+    crate = "v8",
+    label_injections = {"@rusty_v8_archive": "@rusty_v8_archive"},
+    patch_args = ["-p1"],
+    patches = ["//tooling/bazel:patches/v8-build-output.patch"],
+)
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",
@@ -42,6 +57,13 @@ crate.from_cargo(
 use_repo(crate, "crates")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "patchelf",
+    build_file_content = 'exports_files(["bin/patchelf"])',
+    sha256 = "ce84f2447fb7a8679e58bc54a20dc2b01b37b5802e12c57eece772a6f14bf3f0",
+    urls = ["https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz"],
+)
 
 http_archive(
     name = "linux_test_runtime",

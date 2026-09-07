@@ -55,10 +55,17 @@ impl GitHubClient {
             .get(format!("{API_ROOT}{path}"))
             .send()
             .await
-            .map_err(GitHubClientError::Request)?;
+            .map_err(|source| GitHubClientError::Request {
+                path: path.to_owned(),
+                status: None,
+                source,
+            })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(GitHubClientError::Rejected(status));
+            return Err(GitHubClientError::Rejected {
+                path: path.to_owned(),
+                status,
+            });
         }
         let has_next = response.headers().get_all(LINK).iter().any(|value| {
             value.to_str().is_ok_and(|links| {
@@ -71,11 +78,16 @@ impl GitHubClient {
             .bytes()
             .await
             .map(|body| (body.to_vec(), has_next))
-            .map_err(GitHubClientError::Request)
+            .map_err(|source| GitHubClientError::Request {
+                path: path.to_owned(),
+                status: Some(status),
+                source,
+            })
     }
 
     /// Submits the module's encoded GraphQL observation query to GitHub.
     pub async fn graphql(&self, body: Vec<u8>) -> Result<Vec<u8>, GitHubClientError> {
+        let path = "/graphql";
         let response = self
             .client
             .post(format!("{API_ROOT}/graphql"))
@@ -83,15 +95,27 @@ impl GitHubClient {
             .body(body)
             .send()
             .await
-            .map_err(GitHubClientError::Request)?;
-        if !response.status().is_success() {
-            return Err(GitHubClientError::Rejected(response.status()));
+            .map_err(|source| GitHubClientError::Request {
+                path: path.to_owned(),
+                status: None,
+                source,
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(GitHubClientError::Rejected {
+                path: path.to_owned(),
+                status,
+            });
         }
         response
             .bytes()
             .await
             .map(|body| body.to_vec())
-            .map_err(GitHubClientError::Request)
+            .map_err(|source| GitHubClientError::Request {
+                path: path.to_owned(),
+                status: Some(status),
+                source,
+            })
     }
 }
 
@@ -115,32 +139,53 @@ pub enum GitHubClientError {
     /// The HTTP client could not be built.
     Build(reqwest::Error),
     /// The request or response body transport failed.
-    Request(reqwest::Error),
+    Request {
+        path: String,
+        status: Option<StatusCode>,
+        source: reqwest::Error,
+    },
     /// GitHub returned a non-success status.
-    Rejected(StatusCode),
+    Rejected { path: String, status: StatusCode },
 }
 
 impl fmt::Display for GitHubClientError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidCredential => "GitHub credential is not an admitted HTTP header",
-            Self::InvalidUserAgent => "GitHub user-agent is not an admitted HTTP header",
-            Self::InvalidPath => "GitHub API path is not relative to the configured origin",
-            Self::Build(_) => "GitHub HTTP client construction failed",
-            Self::Request(_) => "GitHub HTTP request failed",
-            Self::Rejected(_) => "GitHub rejected the HTTP request",
-        })
+        match self {
+            Self::Request {
+                path,
+                status,
+                source,
+            } => write!(
+                formatter,
+                "GitHub request {path} (HTTP {status:?}) failed: {source}"
+            ),
+            Self::Rejected { path, status } => {
+                write!(formatter, "GitHub request {path} rejected: HTTP {status}")
+            }
+            Self::InvalidCredential => {
+                formatter.write_str("GitHub credential is not an admitted HTTP header")
+            }
+            Self::InvalidUserAgent => {
+                formatter.write_str("GitHub user-agent is not an admitted HTTP header")
+            }
+            Self::InvalidPath => {
+                formatter.write_str("GitHub API path is not relative to the configured origin")
+            }
+            Self::Build(error) => {
+                write!(formatter, "GitHub HTTP client construction failed: {error}")
+            }
+        }
     }
 }
 
 impl Error for GitHubClientError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Build(error) | Self::Request(error) => Some(error),
+            Self::Build(error) | Self::Request { source: error, .. } => Some(error),
             Self::InvalidCredential
             | Self::InvalidUserAgent
             | Self::InvalidPath
-            | Self::Rejected(_) => None,
+            | Self::Rejected { .. } => None,
         }
     }
 }
@@ -148,6 +193,20 @@ impl Error for GitHubClientError {
 #[cfg(test)]
 mod tests {
     use super::{GitHubClientError, validate_path};
+
+    #[test]
+    fn rejected_request_reports_path_page_and_status() {
+        let path = "/repos/example/project/actions/runs?per_page=100&page=2";
+        let error = GitHubClientError::Rejected {
+            path: path.to_owned(),
+            status: reqwest::StatusCode::FORBIDDEN,
+        };
+        assert_eq!(
+            error.to_string(),
+            format!("GitHub request {path} rejected: HTTP 403 Forbidden")
+        );
+        assert!(format!("{error:?}").contains(path));
+    }
 
     #[test]
     fn github_client_rejects_an_origin_replacing_path() {

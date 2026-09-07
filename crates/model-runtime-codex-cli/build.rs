@@ -10,7 +10,7 @@ const PIN_MANIFEST: &str = "../../tooling/codex-cli/release.json";
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={PIN_MANIFEST}");
 
-    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(PIN_MANIFEST);
+    let manifest_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join(PIN_MANIFEST);
     let manifest = std::fs::read_to_string(&manifest_path).map_err(|error| {
         std::io::Error::other(format!("{} is readable: {error}", manifest_path.display()))
     })?;
