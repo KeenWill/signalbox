@@ -2,90 +2,6 @@
 
 # model_execution
 
-## ModelCallExecutionService
-
-```rust
-pub struct ModelCallExecutionService<
-    Ids,
-    Prepare,
-    Failure,
-    Authorization,
-    Observation,
-    Provider,
-    Gate,
-> {/* private */}
-impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
-    ModelCallExecutionService<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
-{
-    pub fn new(
-        ids: Ids,
-        prepare: Prepare,
-        failure: Failure,
-        authorization: Authorization,
-        observation: Observation,
-        provider: Provider,
-        gate: Gate,
-        max_automatic_tool_rounds_per_turn: option::Option<usize>,
-    ) -> Self;
-    pub fn with_tool_catalog(self, catalog: impl ToolCatalog + 'static) -> Self;
-    pub fn from_parts(
-        ids: Ids,
-        prepare: Prepare,
-        failure: Failure,
-        authorization: Authorization,
-        observation: Observation,
-        provider: Provider,
-        gate: Gate,
-        catalog: sync::Arc<dyn ToolCatalog>,
-        retained_state: option::Option<RetainedModelCallExecutionState>,
-        max_automatic_tool_rounds_per_turn: option::Option<usize>,
-    ) -> Self;
-    pub fn into_parts(
-        self,
-    ) -> (
-        Ids,
-        Prepare,
-        Failure,
-        Authorization,
-        Observation,
-        Provider,
-        Gate,
-        sync::Arc<dyn ToolCatalog>,
-        option::Option<RetainedModelCallExecutionState>,
-        option::Option<usize>,
-    );
-    pub const fn retained_state(&self) -> option::Option<&RetainedModelCallExecutionState>;
-    pub fn retained_observation(
-        &self,
-    ) -> option::Option<&signalbox_domain::CorrelatedModelCallTerminalObservation>;
-}
-impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
-    ModelCallExecutionService<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
-where
-    Ids: ModelCallExecutionIdGenerator + marker::Send,
-    Prepare: PrepareModelCallTransaction,
-    Failure: FailPreparedModelCallTransaction,
-    Authorization: AuthorizeModelCallTransaction,
-    Observation: CommitModelCallObservationTransaction,
-    Provider: ModelCallProvider,
-    Gate: AttemptDispatchGate,
-{
-    pub async fn execute(
-        &mut self,
-        session: signalbox_domain::SessionId,
-    ) -> result::Result<
-        ModelCallExecutionOutcome,
-        ModelCallExecutionError<
-            <Prepare as PrepareModelCallTransaction>::Error,
-            <Failure as FailPreparedModelCallTransaction>::Error,
-            <Authorization as AuthorizeModelCallTransaction>::Error,
-            <Provider as ModelCallProvider>::Error,
-            <Observation as CommitModelCallObservationTransaction>::Error,
-        >,
-    >;
-}
-```
-
 ## ModelCallCredentialReference
 
 ```rust
@@ -954,5 +870,89 @@ impl ModelCallProvider for ScriptedModelCallProvider {
     where
         AcceptancePossible: function::FnOnce() + marker::Send,
         Cancellation: future::Future<Output = ()> + marker::Send + 'static;
+}
+```
+
+## ModelCallExecutionService
+
+```rust
+pub struct ModelCallExecutionService<
+    Ids,
+    Prepare,
+    Failure,
+    Authorization,
+    Observation,
+    Provider,
+    Gate,
+> {/* private */}
+impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
+    ModelCallExecutionService<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
+{
+    pub fn new(
+        ids: Ids,
+        prepare: Prepare,
+        failure: Failure,
+        authorization: Authorization,
+        observation: Observation,
+        provider: Provider,
+        gate: Gate,
+        max_automatic_tool_rounds_per_turn: option::Option<usize>,
+    ) -> Self;
+    pub fn with_tool_catalog(self, catalog: impl ToolCatalog + 'static) -> Self;
+    pub fn from_parts(
+        ids: Ids,
+        prepare: Prepare,
+        failure: Failure,
+        authorization: Authorization,
+        observation: Observation,
+        provider: Provider,
+        gate: Gate,
+        catalog: sync::Arc<dyn ToolCatalog>,
+        retained_state: option::Option<RetainedModelCallExecutionState>,
+        max_automatic_tool_rounds_per_turn: option::Option<usize>,
+    ) -> Self;
+    pub fn into_parts(
+        self,
+    ) -> (
+        Ids,
+        Prepare,
+        Failure,
+        Authorization,
+        Observation,
+        Provider,
+        Gate,
+        sync::Arc<dyn ToolCatalog>,
+        option::Option<RetainedModelCallExecutionState>,
+        option::Option<usize>,
+    );
+    pub const fn retained_state(&self) -> option::Option<&RetainedModelCallExecutionState>;
+    pub fn retained_observation(
+        &self,
+    ) -> option::Option<&signalbox_domain::CorrelatedModelCallTerminalObservation>;
+}
+impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
+    ModelCallExecutionService<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
+where
+    Ids: ModelCallExecutionIdGenerator + marker::Send,
+    Prepare: PrepareModelCallTransaction,
+    Failure: FailPreparedModelCallTransaction,
+    Authorization: AuthorizeModelCallTransaction,
+    Observation: CommitModelCallObservationTransaction,
+    Provider: ModelCallProvider,
+    Gate: AttemptDispatchGate,
+{
+    pub async fn execute(
+        &mut self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<
+        ModelCallExecutionOutcome,
+        ModelCallExecutionError<
+            <Prepare as PrepareModelCallTransaction>::Error,
+            <Failure as FailPreparedModelCallTransaction>::Error,
+            <Authorization as AuthorizeModelCallTransaction>::Error,
+            <Provider as ModelCallProvider>::Error,
+            <Observation as CommitModelCallObservationTransaction>::Error,
+        >,
+    >;
 }
 ```
