@@ -2,98 +2,6 @@
 
 # model_execution
 
-## render_model_user_content
-
-```rust
-pub fn render_model_user_content(
-    content: signalbox_domain::UserContent,
-    attachment_byte_length: impl function::FnMut(
-        signalbox_domain::BlobDigest,
-    ) -> option::Option<nonzero::NonZeroU64>,
-) -> result::Result<ModelUserContent, ModelFrontierRenderingError>;
-```
-
-## PreparedModelOperation
-
-```rust
-pub struct PreparedModelOperation {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl PreparedModelOperation {
-    pub fn render(
-        request: signalbox_domain::PreparedModelCallRequest,
-        credential_reference: ModelCallCredentialReference,
-        system_prompt: option::Option<signalbox_domain::SessionSystemPrompt>,
-        tools: boxed::Box<[ToolDefinition]>,
-        tool_entries: &[ResolvedToolConversationEntry],
-        reasoning_provenance: &[ProviderReasoningProvenance],
-    ) -> result::Result<Self, ModelFrontierRenderingError>;
-    pub const fn request(&self) -> &signalbox_domain::PreparedModelCallRequest;
-    pub fn reasoning_provenance(&self) -> &[ProviderReasoningProvenance];
-    pub const fn credential_reference(&self) -> &ModelCallCredentialReference;
-    pub fn system_prompt(&self) -> option::Option<&str>;
-    pub fn messages(&self) -> &[ModelConversationMessage];
-    pub fn tools(&self) -> &[ToolDefinition];
-    pub fn attachment_digests(
-        &self,
-    ) -> impl iterator::Iterator<Item = signalbox_domain::BlobDigest> + '_;
-}
-```
-
-## ModelFrontierRenderingError
-
-```rust
-pub enum ModelFrontierRenderingError {
-    MissingOrMismatchedPlacementEvidence {
-        entry: signalbox_domain::SemanticTranscriptEntryRef,
-    },
-    MissingOrMismatchedReasoningProvenance {
-        entry: signalbox_domain::SemanticTranscriptEntryRef,
-    },
-    MissingOriginContent {
-        entry: signalbox_domain::SemanticTranscriptEntryRef,
-        accepted_input: signalbox_domain::AcceptedInputId,
-    },
-    MissingAttachmentBlobFact {
-        digest: signalbox_domain::BlobDigest,
-    },
-    AttachmentStubSerialization,
-    AttachmentStubBoundExceeded,
-    DuplicateToolEvidence {
-        entry: signalbox_domain::SemanticTranscriptEntryRef,
-    },
-    MissingOrMismatchedToolEvidence {
-        entry: signalbox_domain::SemanticTranscriptEntryRef,
-    },
-    UnrenderableToolResult {
-        entry: signalbox_domain::SemanticTranscriptEntryRef,
-    },
-    UnexpectedToolEvidence {
-        entry: signalbox_domain::SemanticTranscriptEntryRef,
-    },
-    MissingProjectedEntry {
-        entry: signalbox_domain::SemanticTranscriptEntryRef,
-    },
-    InvalidDelegationDelivery {
-        entry: signalbox_domain::SemanticTranscriptEntryRef,
-    },
-    RetainedFrontierContentLimitExceeded {
-        observed_bytes: usize,
-        limit_bytes: usize,
-    },
-    InvalidContextProjection(signalbox_domain::ContextFrontierProjectionFailure),
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for ModelFrontierRenderingError {
-    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for ModelFrontierRenderingError {
-    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
-}
-impl ClassifyOperatorFailure for ModelFrontierRenderingError {
-    fn operator_failure_class(&self) -> OperatorFailureClass;
-}
-```
-
 ## PrepareModelCallOutcome
 
 ```rust
@@ -774,6 +682,32 @@ where
 }
 ```
 
+## PreparedModelOperation
+
+```rust
+pub struct PreparedModelOperation {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl PreparedModelOperation {
+    pub fn render(
+        request: signalbox_domain::PreparedModelCallRequest,
+        credential_reference: ModelCallCredentialReference,
+        system_prompt: option::Option<signalbox_domain::SessionSystemPrompt>,
+        tools: boxed::Box<[ToolDefinition]>,
+        tool_entries: &[ResolvedToolConversationEntry],
+        reasoning_provenance: &[ProviderReasoningProvenance],
+    ) -> result::Result<Self, ModelFrontierRenderingError>;
+    pub const fn request(&self) -> &signalbox_domain::PreparedModelCallRequest;
+    pub fn reasoning_provenance(&self) -> &[ProviderReasoningProvenance];
+    pub const fn credential_reference(&self) -> &ModelCallCredentialReference;
+    pub fn system_prompt(&self) -> option::Option<&str>;
+    pub fn messages(&self) -> &[ModelConversationMessage];
+    pub fn tools(&self) -> &[ToolDefinition];
+    pub fn attachment_digests(
+        &self,
+    ) -> impl iterator::Iterator<Item = signalbox_domain::BlobDigest> + '_;
+}
+```
+
 ## ModelCallProvider
 
 ```rust
@@ -868,6 +802,72 @@ impl AttemptDispatchGate for InProcessAttemptDispatchGate {
 
 ```rust
 pub struct InProcessAttemptDispatchPermit {/* private */}
+```
+
+## render_model_user_content
+
+```rust
+pub fn render_model_user_content(
+    content: signalbox_domain::UserContent,
+    attachment_byte_length: impl function::FnMut(
+        signalbox_domain::BlobDigest,
+    ) -> option::Option<nonzero::NonZeroU64>,
+) -> result::Result<ModelUserContent, ModelFrontierRenderingError>;
+```
+
+## ModelFrontierRenderingError
+
+```rust
+pub enum ModelFrontierRenderingError {
+    MissingOrMismatchedPlacementEvidence {
+        entry: signalbox_domain::SemanticTranscriptEntryRef,
+    },
+    MissingOrMismatchedReasoningProvenance {
+        entry: signalbox_domain::SemanticTranscriptEntryRef,
+    },
+    MissingOriginContent {
+        entry: signalbox_domain::SemanticTranscriptEntryRef,
+        accepted_input: signalbox_domain::AcceptedInputId,
+    },
+    MissingAttachmentBlobFact {
+        digest: signalbox_domain::BlobDigest,
+    },
+    AttachmentStubSerialization,
+    AttachmentStubBoundExceeded,
+    DuplicateToolEvidence {
+        entry: signalbox_domain::SemanticTranscriptEntryRef,
+    },
+    MissingOrMismatchedToolEvidence {
+        entry: signalbox_domain::SemanticTranscriptEntryRef,
+    },
+    UnrenderableToolResult {
+        entry: signalbox_domain::SemanticTranscriptEntryRef,
+    },
+    UnexpectedToolEvidence {
+        entry: signalbox_domain::SemanticTranscriptEntryRef,
+    },
+    MissingProjectedEntry {
+        entry: signalbox_domain::SemanticTranscriptEntryRef,
+    },
+    InvalidDelegationDelivery {
+        entry: signalbox_domain::SemanticTranscriptEntryRef,
+    },
+    RetainedFrontierContentLimitExceeded {
+        observed_bytes: usize,
+        limit_bytes: usize,
+    },
+    InvalidContextProjection(signalbox_domain::ContextFrontierProjectionFailure),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl fmt::Display for ModelFrontierRenderingError {
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for ModelFrontierRenderingError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+impl ClassifyOperatorFailure for ModelFrontierRenderingError {
+    fn operator_failure_class(&self) -> OperatorFailureClass;
+}
 ```
 
 ## ScriptedModelCallStep
