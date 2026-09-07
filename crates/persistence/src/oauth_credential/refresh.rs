@@ -168,14 +168,144 @@ pub(crate) async fn quarantined_profiles(
     connection: &mut PgConnection,
     policy: &crate::model_execution::CredentialPoolRuntimePolicy,
 ) -> Result<Vec<String>, sqlx::Error> {
-    provisioning::lock_pool_members(connection, policy).await?;
-    let profiles = policy
+    let members = policy
         .members()
         .iter()
         .map(|member| member.credential_reference())
         .collect::<Vec<_>>();
+    provisioning::read_catalog(connection).await?;
+    let profiles: Vec<String> = sqlx::query_scalar(
+        "SELECT p.profile FROM oauth_credential_profile p
+         JOIN oauth_credential_registration r USING (profile)
+         WHERE p.profile = ANY($1) ORDER BY p.profile COLLATE \"C\"
+         FOR UPDATE OF p",
+    )
+    .bind(members)
+    .fetch_all(&mut *connection)
+    .await?;
+    if profiles.is_empty() {
+        return Ok(Vec::new());
+    }
     sqlx::query_scalar("SELECT profile FROM oauth_credential_authorization WHERE quarantined AND profile = ANY($1)")
         .bind(profiles)
         .fetch_all(connection)
         .await
+}
+
+#[cfg(all(test, feature = "postgres-integration"))]
+mod tests {
+    use super::*;
+    use crate::model_execution::{
+        CredentialPoolRuntimeAction, CredentialPoolRuntimeExhaustion, CredentialPoolRuntimeMember,
+        CredentialPoolRuntimePolicy,
+    };
+    use std::num::NonZeroU32;
+    use testcontainers_modules::{
+        postgres::Postgres,
+        testcontainers::{ImageExt, runners::AsyncRunner},
+    };
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn quarantine_reads_lock_only_registered_oauth_pool_members()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let container = Postgres::default()
+            // Same PostgreSQL image as tests/postgres_integration/main.rs.
+            .with_tag("18.4-alpine3.23")
+            .with_cmd(crate::disposable_postgres_server_args())
+            .with_mount(crate::disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(crate::disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?,
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(crate::local_test_connection_options(&url)?)
+            .await?;
+        crate::migrate(&pool).await?;
+        let repository = OauthCredentialRepository::new(pool.clone());
+        let registration = OauthRegistration {
+            client_id: "fixture-client".into(),
+            token_url: "https://authorization.example/token".into(),
+            device_authorization_url: "https://authorization.example/device".into(),
+            scopes: vec!["openid".into()],
+        };
+        repository
+            .replace_registrations(&[("oauth".into(), registration.clone())])
+            .await?;
+        let command = OauthCredentialCommand {
+            command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            operation: OauthCredentialOperation::Provision,
+            profile: "oauth".into(),
+        };
+        let OauthStartOutcome::Started(exchange) = repository
+            .begin_exchange(&command, Ok(&registration))
+            .await?
+        else {
+            panic!("initial exchange");
+        };
+        repository
+            .complete_exchange(
+                &exchange,
+                Ok(&OauthAuthorization {
+                    refresh_token: "fixture-refresh".into(),
+                    identity_token: "fixture-identity".into(),
+                    account_identity: serde_json::json!({"subject":"fixture-account"}),
+                }),
+            )
+            .await?;
+        repository
+            .lock_dispatch("oauth")
+            .await?
+            .expect("registered profile")
+            .quarantine(OauthQuarantineCause::RefreshRejected)
+            .await?;
+        // A retained pool lock row does not establish current OAuth membership.
+        sqlx::query("INSERT INTO oauth_credential_profile (profile) VALUES ('ambient')")
+            .execute(&pool)
+            .await?;
+        let mut blocked_ambient = pool.begin().await?;
+        sqlx::query(
+            "SELECT profile FROM oauth_credential_profile WHERE profile = 'ambient' FOR UPDATE",
+        )
+        .execute(&mut *blocked_ambient)
+        .await?;
+        for (members, expected) in [
+            (vec!["ambient", "api-key"], vec![]),
+            (vec!["ambient", "api-key", "oauth"], vec!["oauth"]),
+        ] {
+            let policy = CredentialPoolRuntimePolicy::new(
+                "fixture-pool",
+                members
+                    .into_iter()
+                    .map(|profile| CredentialPoolRuntimeMember::new(profile, NonZeroU32::MIN))
+                    .collect::<Vec<_>>(),
+                CredentialPoolRuntimeExhaustion::Fail,
+                CredentialPoolRuntimeAction::Stay,
+                CredentialPoolRuntimeAction::Stay,
+                CredentialPoolRuntimeAction::Stay,
+                CredentialPoolRuntimeAction::Stay,
+            );
+            let mut selection = pool.begin().await?;
+            let quarantined = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                quarantined_profiles(&mut selection, &policy),
+            )
+            .await??;
+            assert_eq!(quarantined, expected);
+            selection.commit().await?;
+        }
+        let retained: Vec<String> = sqlx::query_scalar(
+            "SELECT profile FROM oauth_credential_profile ORDER BY profile COLLATE \"C\"",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(retained, ["ambient", "oauth"]);
+        blocked_ambient.rollback().await?;
+        Ok(())
+    }
 }
