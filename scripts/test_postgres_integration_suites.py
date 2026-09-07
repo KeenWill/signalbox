@@ -216,35 +216,6 @@ class ManifestParsingTests(unittest.TestCase):
         self.assertIn("both includes and excludes", str(raised.exception))
 
 
-class FiltersetTests(unittest.TestCase):
-    def test_no_skips_selects_everything(self) -> None:
-        self.assertEqual(suite().filterset(), "all()")
-
-    def test_one_skip_negates_one_substring(self) -> None:
-        self.assertEqual(suite(skip=("alpha",)).filterset(), "not test(alpha)")
-
-    def test_several_skips_conjoin(self) -> None:
-        self.assertEqual(
-            suite(skip=("alpha", "beta")).filterset(),
-            "not test(alpha) and not test(beta)",
-        )
-
-    def test_one_included_binary_selects_only_that_target(self) -> None:
-        self.assertEqual(
-            suite(include_binaries=("runner_protocol_postgres",)).filterset(),
-            "(binary(runner_protocol_postgres))",
-        )
-
-    def test_binary_partition_composes_with_test_skips(self) -> None:
-        self.assertEqual(
-            suite(
-                exclude_binaries=("runner_protocol_postgres",),
-                skip=("alpha",),
-            ).filterset(),
-            "not binary(runner_protocol_postgres) and not test(alpha)",
-        )
-
-
 class RunMatrixTests(unittest.TestCase):
     def test_each_suite_runs_once_with_bazel_responsible_for_shards(self):
         self.assertEqual(run_matrix((suite(name="alpha", shards=6), suite(name="terminal-client"))),

@@ -85,19 +85,38 @@ def _test_selection_impl(ctx):
     return [
         DefaultInfo(
             executable = executable,
-            runfiles = ctx.attr.test[DefaultInfo].default_runfiles,
+            runfiles = ctx.attr.test[0][DefaultInfo].default_runfiles,
         ),
         RunEnvironmentInfo(
-            environment = dict(ctx.attr.test[RunEnvironmentInfo].environment, **ctx.attr.env),
-            inherited_environment = ctx.attr.test[RunEnvironmentInfo].inherited_environment,
+            environment = dict(ctx.attr.test[0][RunEnvironmentInfo].environment, **ctx.attr.env),
+            inherited_environment = ctx.attr.test[0][RunEnvironmentInfo].inherited_environment,
         ),
     ]
+
+def _json_feature_impl(ctx):
+    return []
+
+json_preserve_order = rule(
+    implementation = _json_feature_impl,
+    build_setting = config.bool(flag = True),
+)
+
+def _cargo_json_transition_impl(settings, attr):
+    return {"//tooling/bazel:json_preserve_order": attr.json_preserve_order}
+
+_cargo_json_transition = transition(
+    implementation = _cargo_json_transition_impl,
+    inputs = [],
+    outputs = ["//tooling/bazel:json_preserve_order"],
+)
 
 rust_selection_test = rule(
     implementation = _test_selection_impl,
     test = True,
     attrs = {
-        "test": attr.label(executable = True, cfg = "target", mandatory = True),
+        "test": attr.label(executable = True, cfg = _cargo_json_transition, mandatory = True),
+        "json_preserve_order": attr.bool(default = True),
+        "_allowlist_function_transition": attr.label(default = "@bazel_tools//tools/allowlists/function_transition_allowlist"),
         "env": attr.string_dict(),
     },
     doc = "Run another selection of a compiled libtest binary using the target's args.",
@@ -130,12 +149,13 @@ def rust_api_json(name = "api_json", **kwargs):
     kwargs.setdefault("visibility", ["//:__pkg__"])
     _rust_doc(name = name, **kwargs)
 
-def rust_postgres_suite(name, binaries):
+def rust_postgres_suite(name, binaries, json_preserve_order = True):
     """Select ignored tests and shards from the shared suite manifest.
 
     Args:
         name: Manifest suite name.
         binaries: Compiled Bazel test labels mapped to Cargo test binary names.
+        json_preserve_order: Whether the Cargo suite enables serde_json/preserve_order.
     """
     suite = SUITES[name]
     selected = []
@@ -148,6 +168,7 @@ def rust_postgres_suite(name, binaries):
         rust_selection_test(
             name = target,
             test = test,
+            json_preserve_order = json_preserve_order,
             args = ["--ignored"] + _TEST_ARGS + [arg for skip in suite["skip"] for arg in ["--skip", skip]],
             env = {"RUST_MIN_STACK": "8388608"},
             shard_count = suite["shards"],

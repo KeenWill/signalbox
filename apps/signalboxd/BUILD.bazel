@@ -314,6 +314,7 @@ rust_integration_test(
         ":approval-judge-eval",
         ":signalbox-debug",
         ":signalboxd",
+        "//crates/convergence:fixtures",
     ],
     env = {
         "TMPDIR": "/tmp",
@@ -353,6 +354,7 @@ rust_integration_test(
         ":approval-judge-eval",
         ":signalbox-debug",
         ":signalboxd",
+        "//:config/session-templates.example.toml",
     ],
     env = {
         "TMPDIR": "/tmp",

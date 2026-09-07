@@ -79,6 +79,10 @@ bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.soc
 bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //:postgres_program_runtime
 ```
 
+Daemon PostgreSQL targets use Cargo's sorted JSON map feature selection; the
+workspace dependency graph also serves the program host's insertion-ordered JSON
+requirements.
+
 The shared image digest, migrations, and example configuration are declared
 compilation inputs. PostgreSQL targets are manual and external: compilation is
 cacheable, tests always execute. The runtime partitions libtest's ignored-test

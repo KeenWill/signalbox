@@ -76,28 +76,6 @@ class Suite:
     include_binaries: tuple[str, ...]
     exclude_binaries: tuple[str, ...]
 
-    def filterset(self) -> str:
-        """Render this suite's nextest filterset expression.
-
-        Binary predicates partition same-package test targets before
-        `not test(<substring>)` reproduces libtest's `--skip <substring>`:
-        nextest's `test()` predicate matches a substring of the test path by
-        default, which is exactly what libtest matched. With nothing skipped
-        the expression is `all()`, so the run job always passes a `-E` and
-        needs no conditional.
-        """
-        terms: list[str] = []
-        if self.include_binaries:
-            included = " or ".join(
-                f"binary({binary})" for binary in self.include_binaries
-            )
-            terms.append(f"({included})")
-        terms.extend(
-            f"not binary({binary})" for binary in self.exclude_binaries
-        )
-        terms.extend(f"not test({skipped})" for skipped in self.skip)
-        return " and ".join(terms) if terms else "all()"
-
 
 def manifest_line(text: str, name: str) -> int:
     """Return the manifest line declaring one suite, for diagnostics."""
@@ -820,7 +798,9 @@ def main() -> int:
         features = ",".join(suite.features) or "(none)"
         print(
             f"{suite.name}: -p {suite.package} --features {features} "
-            f"across {suite.shards} shard(s), filter {suite.filterset()}"
+            f"across {suite.shards} shard(s), skip {list(suite.skip)}, "
+            f"include binaries {list(suite.include_binaries)}, "
+            f"exclude binaries {list(suite.exclude_binaries)}"
         )
     print(f"{len(suites)} suites over {shards} shards")
     return 0
