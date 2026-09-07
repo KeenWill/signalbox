@@ -174,13 +174,13 @@ pub(crate) struct ErrorNotification {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UsageBreakdown {
-    pub(crate) input_tokens: i64,
-    pub(crate) cached_input_tokens: i64,
+    pub(crate) input_tokens: Option<i64>,
+    pub(crate) cached_input_tokens: Option<i64>,
     #[serde(default)]
     pub(crate) cache_write_input_tokens: Option<i64>,
-    pub(crate) output_tokens: i64,
-    pub(crate) reasoning_output_tokens: i64,
-    pub(crate) total_tokens: i64,
+    pub(crate) output_tokens: Option<i64>,
+    pub(crate) reasoning_output_tokens: Option<i64>,
+    pub(crate) total_tokens: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

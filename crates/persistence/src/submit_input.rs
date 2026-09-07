@@ -511,6 +511,9 @@ impl SubmitInputRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential
                 | CommandKind::SessionLifecycle,
             ) => Err(Self::wrong_kind(command_id)),
         }

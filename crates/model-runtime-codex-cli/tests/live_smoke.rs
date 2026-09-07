@@ -7,8 +7,8 @@
 //! fork pull requests before the environment-backed smoke job can start.
 //!
 //! What it proves is protocol compatibility, which is what a CLI version bump
-//! actually breaks: the `codex exec --json` event stream still starts a thread,
-//! still reports usage on `turn.completed`, still accepts every flag the
+//! actually breaks: the `codex app-server` conversation still starts an ephemeral thread,
+//! still reports usage on `thread/tokenUsage/updated`, still accepts every flag the
 //! adapter passes, and its final response envelope still decodes as a completed
 //! or refused terminal outcome. It deliberately asserts nothing about answer
 //! quality.
@@ -379,13 +379,13 @@ async fn the_pinned_codex_cli_completes_one_exchange() {
     let decoded = require_decoded_response(report.evidence);
     assert!(
         decoded.exchange.provider_request_id.is_some(),
-        "no thread id reached the exchange facts, so `thread.started` no longer \
+        "no thread id reached the exchange facts, so `thread/start` no longer \
          parses for model {model}"
     );
     assert!(
         decoded.usage.input_tokens.is_some_and(|tokens| tokens > 0)
             && decoded.usage.output_tokens.is_some(),
-        "`turn.completed` no longer reports the usage counters the adapter reads"
+        "`thread/tokenUsage/updated` no longer reports the usage counters the adapter reads"
     );
 }
 
