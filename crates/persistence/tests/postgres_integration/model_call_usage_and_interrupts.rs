@@ -421,12 +421,11 @@ async fn steered_refusal_commits_ordered_provider_compaction_suffix() -> Result<
     Ok(())
 }
 
-/// Base and mapped-fast serving targets can have different compaction support.
-/// Retained counts therefore remain scoped to the effective mode that produced
-/// them even though both calls carry the same durable selected target.
+/// The historical mode label does not disqualify usage evidence when both
+/// modes resolve to the same effective serving target.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn latest_reported_usage_does_not_cross_effective_fast_mode_targets()
+async fn latest_reported_usage_crosses_fast_modes_for_the_same_effective_target()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x6d79;
@@ -484,8 +483,8 @@ async fn latest_reported_usage_does_not_cross_effective_fast_mode_targets()
                 terminal_frontier,
             )
             .await?
-            .is_none(),
-        "the fast-target fallback must not reuse base-target retained counts"
+            .is_some(),
+        "the historical fast-mode spelling cannot hide same-target usage evidence"
     );
     let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()

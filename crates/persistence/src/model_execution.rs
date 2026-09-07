@@ -715,17 +715,13 @@ impl PostgresModelCallRepository {
                        headroom.projected_result_content_bytes AS
                            proven_unreported_content_bytes
                   FROM model_call
-                  JOIN turn_model_settings_resolved AS settings
-                    ON settings.session_id = model_call.session_id
-                   AND settings.turn_id = model_call.turn_id
                   LEFT JOIN tool_continuation_context_headroom AS headroom
                     ON headroom.session_id = model_call.session_id
                    AND headroom.producing_model_call_id = model_call.model_call_id
                  WHERE model_call.session_id = $1
-                   AND model_call.effective_provider_model_identity_id = $7
+                   AND model_call.effective_provider_model_identity_id = $6
                    AND model_call.state_kind = 'terminal'
                    AND model_call.usage_input_tokens IS NOT NULL
-                   AND settings.resolved_model_settings #>> '{effective,fast_mode}' = $5
                    AND NOT EXISTS (
                        SELECT 1
                          FROM latest_compaction AS latest
@@ -767,7 +763,7 @@ impl PostgresModelCallRepository {
                        false AS has_provider_compaction,
                        NULL::numeric AS proven_unreported_content_bytes
                   FROM latest_compaction AS latest
-                 WHERE latest.resolved_provider_model_identity_id = $7
+                 WHERE latest.resolved_provider_model_identity_id = $6
                    AND latest.state_kind = 'terminal'
                    AND latest.terminal_disposition_kind = 'completed'
                    AND latest.usage_input_tokens IS NOT NULL
@@ -876,7 +872,7 @@ impl PostgresModelCallRepository {
                                     WHEN 'assistant_text' THEN
                                         COALESCE(octet_length(entry.assistant_text_value), 0)
                                     WHEN 'provider_compaction' THEN
-                                        CASE WHEN $6::boolean THEN
+                                        CASE WHEN $5::boolean THEN
                                             COALESCE(octet_length(entry.assistant_text_value), 0)
                                         ELSE 0 END
                                     WHEN 'assistant_tool_use' THEN
@@ -961,10 +957,6 @@ impl PostgresModelCallRepository {
         .bind(&member_sessions)
         .bind(&member_entries)
         .bind(Decimal::from(uncommitted_content_bytes))
-        .bind(match fast_mode {
-            FastMode::Disabled => "disabled",
-            FastMode::Enabled => "enabled",
-        })
         .bind(replays_provider_compaction)
         .bind(effective_target.identity().into_uuid())
         .fetch_optional(&self.pool)
