@@ -47,3 +47,9 @@ rust_test(
     rustc_flags = ["--deny=warnings"],
     deps = [] + all_crate_deps(normal_dev = True),
 )
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
+)

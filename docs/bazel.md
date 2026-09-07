@@ -75,3 +75,7 @@ The checker job runs its eight Python suites with
 `tooling/requirements-mdformat.txt`, and the shared Rustfmt toolchain. The Git
 fixture suite and two shell-script suites carry `external` because they execute
 host utilities; their results always run. The other five results are cacheable.
+
+The sweep's container-label check scans the declared workspace Rust source
+manifest inside test runfiles. Direct Python invocation continues to select
+tracked sources with Git.

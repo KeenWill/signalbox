@@ -109,3 +109,9 @@ test_suite(
     tags = ["manual"],
     tests = [":program_host_postgres"],
 )
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
+)
