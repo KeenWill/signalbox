@@ -128,6 +128,7 @@ struct CheckoutFixture {
     runner: LocalGitRunner,
     command: DurableCommandId,
     head: CommitSha,
+    catalog: String,
 }
 
 impl CheckoutFixture {
@@ -178,7 +179,7 @@ impl CheckoutFixture {
                 "/srv/signalbox/workspace",
                 root.to_str().expect("fixture root"),
             );
-        let models = HubModelConfiguration::parse(&format!(
+        let catalog = format!(
             r#"{catalog}
 [repository_watch]
 version = 1
@@ -200,7 +201,8 @@ kind = "dispatch_session"
 template = "watch"
 "#,
             credential.display()
-        ))?;
+        );
+        let models = HubModelConfiguration::parse(&catalog)?;
         let configuration = models
             .repository_watch()
             .expect("repository watch configuration");
@@ -316,6 +318,7 @@ system_prompt = "Inspect repository activity."
             },
             command,
             head,
+            catalog,
         })
     }
 
@@ -387,6 +390,94 @@ system_prompt = "Inspect repository activity."
             .await
             .expect("stop session");
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn recovery_terminalizes_an_unconfigured_repository_without_a_sticky_stop()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = CheckoutFixture::new().await?;
+    let original_models = fixture.sink.models.clone();
+    fixture.sink.models = Arc::new(HubModelConfiguration::parse(
+        &fixture.catalog.replace("checkout/project", "other/project"),
+    )?);
+    let configuration = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("configuration");
+    fixture
+        .store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                configuration.repositories()[0].repository(),
+                configuration.rules(),
+            )],
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+    std::fs::remove_file(fixture._files.path().join("poll-token"))?;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let disposition: (String, String, String, bool, Uuid) = sqlx::query_as(
+        "SELECT repository, status, checkout_retired_reason, submission_pending, checkout_stop_command_id
+         FROM dispatch_ledger WHERE command_id = $1",
+    ).bind(fixture.command.into_uuid()).fetch_one(&fixture.module).await?;
+    assert_eq!(disposition.0, "checkout/project");
+    assert_eq!(disposition.1, "applied");
+    assert_eq!(disposition.2, "repository_unconfigured");
+    assert!(!disposition.3);
+    let state: (String, String, bool, bool) = sqlx::query_as(
+        "SELECT state_kind, terminal_outcome_kind, terminal_stop_sticky, start_gate_held
+         FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(
+        state,
+        (
+            String::from("terminal"),
+            String::from("stopped"),
+            false,
+            true
+        )
+    );
+    assert!(fixture.runner.steps.lock().expect("steps").is_empty());
+    assert!(
+        fixture
+            .store
+            .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+            .await?
+            .is_empty()
+    );
+
+    // Replay a submission follow-up after configuration reintroduces the repository.
+    // The retained terminal reason must still select the original non-sticky command.
+    sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
+    fixture.sink.models = original_models;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.dispatch().await;
+    assert_eq!(fixture.session().await, session);
+    let stop: (Uuid, String) = sqlx::query_as(
+        "SELECT checkout_stop_command_id, checkout_retired_reason FROM dispatch_ledger WHERE command_id = $1",
+    ).bind(fixture.command.into_uuid()).fetch_one(&fixture.module).await?;
+    assert_eq!(
+        stop,
+        (disposition.4, String::from("repository_unconfigured"))
+    );
+    let stops: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM session_lifecycle_command WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&fixture.core)
+            .await?;
+    assert_eq!(stops, 1);
+    assert!(fixture.runner.steps.lock().expect("steps").is_empty());
+    Ok(())
 }
 
 #[tokio::test]

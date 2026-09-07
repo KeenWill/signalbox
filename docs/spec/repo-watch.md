@@ -176,7 +176,10 @@ idempotent only when all retained command metadata agrees. One dispatch
 reference names exactly one rule revision and event evaluation, including its
 complete ordered action batch. Pending ledger rows remain recoverable without
 the removed or inactive rule, and newly resolved template or configuration
-values cannot replace the committed payload.
+values cannot replace the committed payload. Checkout recovery resolves the
+credential from configuration using the retained repository identity. An
+unconfigured repository terminalizes the dispatch as `repository_unconfigured`
+and closes its held session through a parent-only nonsticky lifecycle stop.
 
 Rule evaluation starts after the active revision's activation tail and resumes
 from its durable cursor. Matching facts acquire the configured singleton before
