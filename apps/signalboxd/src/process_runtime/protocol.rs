@@ -86,6 +86,7 @@ pub(super) enum InternalDiagnostic {
     OperatorStatusCorruption,
     GoalRepositoryCorruption,
     SessionLifecycleCommandCorruption,
+    OauthCredentialCorruption,
 }
 
 impl InternalDiagnostic {
@@ -156,7 +157,8 @@ impl InternalDiagnostic {
             | Self::ProcessReadCorruption
             | Self::OperatorStatusCorruption
             | Self::GoalRepositoryCorruption
-            | Self::SessionLifecycleCommandCorruption => OperatorFailureClass::FailClosedCorruption,
+            | Self::SessionLifecycleCommandCorruption
+            | Self::OauthCredentialCorruption => OperatorFailureClass::FailClosedCorruption,
         }
     }
 
@@ -236,6 +238,7 @@ impl InternalDiagnostic {
             Self::OperatorStatusCorruption => "operator_status_corruption",
             Self::GoalRepositoryCorruption => "goal_repository_corruption",
             Self::SessionLifecycleCommandCorruption => "session_lifecycle_command_corruption",
+            Self::OauthCredentialCorruption => "oauth_credential_corruption",
         }
     }
 }

@@ -140,7 +140,9 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::DeploymentLimits { .. }
         | ServerMessage::RunnerReplacementReceipt { .. }
         | ServerMessage::RunnerAbandonmentReceipt { .. }
-        | ServerMessage::RunnerPromotionReceipt { .. } => ConversationImportResponse::Unexpected,
+        | ServerMessage::RunnerPromotionReceipt { .. }
+        | ServerMessage::OauthCredentialAuthorization { .. }
+        | ServerMessage::OauthCredentialReceipt { .. } => ConversationImportResponse::Unexpected,
     }
 }
 

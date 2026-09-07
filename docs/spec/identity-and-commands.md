@@ -197,10 +197,15 @@ transaction, and installs its exact retained receipt and terminal result
 together. Equal pending replay joins the retained operation; startup resumes
 unterminated replacement commands before admitting process clients.
 
+OAuth provisioning, re-provisioning, and deletion have distinct registry kinds
+and typed relational request and result families keyed by command identifier.
+The deferred typed-record trigger requires each claim's request, both record
+families are append-only, and structural replay equality compares the operation
+and profile while excluding the command identifier. A no-exchange rejection
+claims and commits its terminal receipt in one transaction.
+
 ## Planned
 
-- Registry kinds and typed request/result records for OAuth provisioning,
-  re-provisioning, and deletion: [design](../design/identity-and-commands.md).
 - Registry kind and typed request/result records for configuration reload:
   [design](../design/identity-and-commands.md).
 - A production generator for `ProviderTargetEvidenceId`:
