@@ -730,6 +730,7 @@ async fn dispatch_provisions_the_retained_head_at_the_git_tools_root() -> Result
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+#[cfg(target_os = "linux")]
 async fn checkout_keeps_the_composed_runner_after_supervisor_removal() -> Result<(), Box<dyn Error>>
 {
     assert_checkout_keeps_composed_runner(SupervisorChange::Removed).await
@@ -737,16 +738,19 @@ async fn checkout_keeps_the_composed_runner_after_supervisor_removal() -> Result
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+#[cfg(target_os = "linux")]
 async fn checkout_keeps_the_composed_runner_after_supervisor_replacement()
 -> Result<(), Box<dyn Error>> {
     assert_checkout_keeps_composed_runner(SupervisorChange::Replaced).await
 }
 
+#[cfg(target_os = "linux")]
 enum SupervisorChange {
     Removed,
     Replaced,
 }
 
+#[cfg(target_os = "linux")]
 async fn assert_checkout_keeps_composed_runner(
     change: SupervisorChange,
 ) -> Result<(), Box<dyn Error>> {

@@ -451,7 +451,8 @@ where
         })
     }
 
-    /// Shares the process runner pinned during workspace tool composition.
+    /// Shares the process runner created during workspace tool composition.
+    /// The production runner pins the executable on Linux; macOS retains only its canonical pathname.
     pub fn process_runner(&self) -> Option<ExecRunner> {
         self.executor
             .workspace_bound
