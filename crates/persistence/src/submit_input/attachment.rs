@@ -1,8 +1,6 @@
 use super::decode::map_tool_loop_error;
-use super::{
-    SubmitInputCorruption, SubmitInputRepositoryError,
-    load_scheduling_projection_with_semantic_frontiers, required,
-};
+use super::scheduling_projection::load_scheduling_projection_with_semantic_frontiers;
+use super::{SubmitInputCorruption, SubmitInputRepositoryError, required};
 use crate::mapping::{
     ActiveTurnPhaseStorageKind, accepted_input_id_from_uuid, active_turn_phase_from_str,
     durable_command_id_to_uuid, positive_u64_from_numeric, session_id_to_uuid, turn_id_from_uuid,
