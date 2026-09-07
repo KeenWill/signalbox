@@ -152,30 +152,39 @@ impl OauthCredentialService {
         if joined && let Some(failure) = state.failure {
             return Err(failure);
         }
-        let result = self
-            .prepare_locked(
-                reference,
-                profile,
-                &mut state.access,
-                joined,
-                installer,
-                cancellation,
-            )
-            .await;
+        let Some(lease) = cancellation
+            .run_until_cancelled(self.lease(reference))
+            .await
+        else {
+            return Ok(OauthDeliveryOutcome::Cancelled);
+        };
+        let result = match lease {
+            Ok(lease) => {
+                self.prepare_locked(
+                    (reference, profile),
+                    lease,
+                    &mut state.access,
+                    joined,
+                    installer,
+                    cancellation,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         state.failure = result.as_ref().err().copied();
         result.map(|()| OauthDeliveryOutcome::Delivered)
     }
 
     async fn prepare_locked(
         &self,
-        reference: &str,
-        profile: &Profile,
+        (reference, profile): (&str, &Profile),
+        lease: OauthDispatchLease,
         cached: &mut Option<CachedAccess>,
         joined: bool,
         installer: &mut dyn OauthCredentialInstaller,
         mut cancellation: CancellationSignal,
     ) -> Result<(), Failure> {
-        let lease = self.lease(reference).await?;
         let stored = lease.authorization().cloned().ok_or(Failure::Unavailable)?;
         if let Some(cause) = stored.quarantine {
             return Err(failure(cause));
@@ -389,6 +398,89 @@ mod tests {
         assert_eq!(state.failure, Some(Failure::OauthRefreshRejected));
         assert!(state.access.is_none());
         drop(state);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn cancelling_a_database_profile_wait_returns_before_the_lock_is_released()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let container = Postgres::default()
+            // Same PostgreSQL image as tests/process_protocol_runtime/fixtures.rs.
+            .with_tag("18.4-alpine3.23")
+            .with_cmd(signalbox_persistence::disposable_postgres_server_args())
+            .with_mount(signalbox_persistence::disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(signalbox_persistence::disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?,
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(signalbox_persistence::local_test_connection_options(&url)?)
+            .await?;
+        signalbox_persistence::migrate(&pool).await?;
+        let registration = OauthRegistration {
+            client_id: "fixture-client".into(),
+            token_url: "https://authorization.example/token".into(),
+            device_authorization_url: "https://authorization.example/device".into(),
+            scopes: vec!["openid".into()],
+        };
+        let repository = OauthCredentialRepository::new(pool.clone());
+        repository
+            .replace_registrations(&[("profile".into(), registration.clone())])
+            .await?;
+        let held = repository
+            .lock_dispatch("profile")
+            .await?
+            .expect("registered profile");
+        let service =
+            OauthCredentialService::new(pool.clone(), vec![("profile".into(), registration)])
+                .map_err(|_| "service")?;
+        let mut installer = Installer::default();
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        {
+            let waiting = service.prepare(
+                "profile",
+                &mut installer,
+                CancellationSignal::when(async {
+                    let _ = cancelled.await;
+                }),
+            );
+            tokio::pin!(waiting);
+            let blocked = async {
+                loop {
+                    let blocked: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                         WHERE datname = current_database() AND wait_event_type = 'Lock'
+                         AND query LIKE '%oauth_credential_profile%')",
+                    )
+                    .fetch_one(&pool)
+                    .await?;
+                    if blocked {
+                        return Ok::<(), sqlx::Error>(());
+                    }
+                    tokio::task::yield_now().await;
+                }
+            };
+            tokio::select! {
+                result = &mut waiting => panic!("preparation bypassed held row lock: {result:?}"),
+                result = tokio::time::timeout(std::time::Duration::from_secs(10), blocked) => result??,
+            }
+            cancel.send(()).expect("waiting preparation");
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(10), waiting).await?,
+                Ok(OauthDeliveryOutcome::Cancelled),
+            );
+        }
+        assert!(installer.0.is_none());
+        let state = service.profiles["profile"].access.lock().await;
+        assert!(state.failure.is_none());
+        assert!(state.access.is_none());
+        held.commit().await?;
+        Ok(())
     }
 
     #[tokio::test]
