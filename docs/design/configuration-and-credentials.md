@@ -34,9 +34,9 @@ sweep admission and stops and joins active sweep attempts before re-running
 convergence configured-target reconciliation inside the reload boundary; sweep
 admission resumes under the replacement snapshot on success or the prior
 snapshot on rule-revision rejection, as [reload recovery](process-protocol.md)
-requires. Enabling convergence composes the sweep task; disabling it terminates
-the task. A running sweep reads the new targets, template, interval, and
-credential path at its next attempt.
+requires. Enabling convergence while repository watch is enabled composes the
+sweep task; disabling either terminates the task. A running sweep reads the new
+targets, template, interval, and credential path at its next attempt.
 
 A model entry carries zero or more `[[models.rate_windows]]` entries, each one
 dated price window over that entry's own `provider_model`. A window names the

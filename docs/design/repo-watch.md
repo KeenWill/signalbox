@@ -15,15 +15,20 @@ webhook listener and repository polling tasks.
 
 ## Design
 
-On reload, the repository-watch runtime starts a polling task for each added
+Reload reconciles `repository_watch.enabled`: disabling stops and joins the
+pollers, webhook listener, command worker, and convergence sweep; enabling
+composes them from the current configuration where configured. While disabled,
+the effective worker inventory is empty.
+
+While enabled, the repository-watch runtime starts a polling task for each added
 repository, stops each removed repository's task, and replaces a repository's
 task when its poll interval, polling credential file, or
 `repository_watch.signal_reviewers` changes. A signal-reviewer change stops and
 joins the old pollers, then invalidates persisted poll validators and accepted
 snapshots before starting replacement pollers.
 
-Adding `[repository_watch.webhook]` on reload composes the listener; removing it
-stops the listener.
+While enabled, adding `[repository_watch.webhook]` on reload composes the
+listener; removing it stops the listener.
 
 Webhook listener: the module runtime composes the listener; a reload that keeps
 the bind address swaps the running listener's path and hook map atomically. Only
