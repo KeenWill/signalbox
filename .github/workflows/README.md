@@ -14,6 +14,9 @@ file in the same pull request.
 
 Both self-hosted scale sets are managed outside of this repo.
 
+`bazel.yml` runs the migrated Rust targets on `signalbox` using the routing
+expression below. Cargo's required checks still cover the full workspace.
+
 ## The routing rule
 
 Self-hosted-eligible Linux jobs — merge-gating or report-only — use one

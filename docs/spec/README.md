@@ -75,6 +75,7 @@ anchor, unless the anchor is a heading on the linking page.
 
 ## Pages
 
+- [Build and test](build-and-test.md)
 - [Sessions and the transcript](sessions-and-transcript.md)
 - [Session lifecycle](session-lifecycle.md)
 - [Turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md)
