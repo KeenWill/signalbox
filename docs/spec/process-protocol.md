@@ -380,13 +380,14 @@ OAuth administration has three requests, `provision_oauth_credential`,
 absolute HTTPS URI without user information or fragment, at most 4,096 UTF-8
 bytes. The terminal receipt is
 `oauth_credential_receipt { command_id, profile, outcome }`; its closed outcome
-and failure vocabulary live in `crates/process-protocol/src/response.rs`. An
-undeclared profile records `failed { reason: unknown_profile }`; a declared
-non-OAuth profile records `failed { reason: non_oauth_profile }`. Neither starts
-an exchange or mutates credential state. An equal command replays its stored
-receipt before current registration is evaluated, and conflicting reuse is
-rejected. The terminal client verifies the command and profile correlations and
-prints authorization details before the receipt.
+and failure vocabulary live in `crates/process-protocol/src/response.rs`. For
+provisioning and re-provisioning, an undeclared profile records
+`failed { reason: unknown_profile }`; a declared non-OAuth profile records
+`failed { reason: non_oauth_profile }`. Neither starts an exchange or mutates
+credential state. An equal command replays its stored receipt before current
+registration is evaluated, and conflicting reuse is rejected. The terminal
+client verifies the command and profile correlations and prints authorization
+details before the receipt.
 
 OAuth exchange claims retain validated authorization instructions before
 emission; invalid progress fields yield `device_endpoint_rejected`. Equal
@@ -399,10 +400,18 @@ registrations yield `failed { reason: registration_changed }`. Initial
 provisioning with stored authorization returns `already_provisioned` without an
 exchange; re-provisioning without authorization returns `not_provisioned`.
 
+Deletion uses retained profile identity even without a current OAuth
+declaration; without retained identity it records the same unknown-profile or
+non-OAuth failure. A new deletion holds the dispatch profile lock, advances the
+generation, removes authorization and cached access, and returns `deleted` or
+`already_deleted` when no authorization was stored; equal replay changes
+nothing. Current registration and referenced history remain, and a child already
+holding a copied token finishes. Successful re-provisioning replaces
+authorization and clears every OAuth delivery-origin quarantine and cached
+access; failed re-provisioning clears none.
+
 ## Planned
 
-- OAuth credential provisioning, re-provisioning after rejected refresh, and
-  deletion: [design](../design/process-protocol.md).
 - Credential-exclusion administration, a listing read and a clear mutation over
   active exclusions: [design](../design/process-protocol.md).
 - Configuration reload request: [design](../design/process-protocol.md).

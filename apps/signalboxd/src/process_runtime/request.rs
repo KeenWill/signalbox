@@ -11,7 +11,7 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
 ) -> Result<(), ProcessConnectionError> {
     use signalbox_persistence::oauth_credential::{
         OauthCredentialCommand, OauthCredentialFailure, OauthCredentialHandlingOutcome,
-        OauthCredentialOutcome, OauthCredentialRepository,
+        OauthCredentialRepository,
     };
     let command = OauthCredentialCommand {
         command_id: DurableCommandId::from_uuid(command_id.into_uuid()),
@@ -32,15 +32,14 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
     let result = if operation
         == signalbox_persistence::oauth_credential::OauthCredentialOperation::Delete
     {
-        repository
-            .record(&command, || {
-                OauthCredentialOutcome::Failed(
-                    registration
-                        .err()
-                        .unwrap_or(OauthCredentialFailure::NonOauthProfile),
-                )
-            })
-            .await
+        let failure = registration
+            .err()
+            .unwrap_or(OauthCredentialFailure::UnknownProfile);
+        if let Some(service) = &services.oauth_service {
+            service.delete(&command, failure).await
+        } else {
+            repository.delete(&command, failure, || {}).await
+        }
     } else {
         match repository
             .begin_exchange(&command, registration.as_ref().map_err(|reason| *reason))
@@ -100,16 +99,14 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
                         }
                     },
                 };
-                recover_failed_oauth_exchange(
-                    repository
-                        .complete_exchange(
-                            &exchange,
-                            authorization.as_ref().map_err(|reason| *reason),
-                        )
-                        .await,
-                    services.recovery_reporter.as_ref(),
-                )
-                .map(OauthCredentialHandlingOutcome::Recorded)
+                let authorization = authorization.as_ref().map_err(|reason| *reason);
+                let outcome = if let Some(service) = &services.oauth_service {
+                    service.complete_exchange(&exchange, authorization).await
+                } else {
+                    repository.complete_exchange(&exchange, authorization).await
+                };
+                recover_failed_oauth_exchange(outcome, services.recovery_reporter.as_ref())
+                    .map(OauthCredentialHandlingOutcome::Recorded)
             }
             Ok(signalbox_persistence::oauth_credential::OauthStartOutcome::Existing(outcome)) => {
                 if outcome == OauthCredentialHandlingOutcome::Pending {

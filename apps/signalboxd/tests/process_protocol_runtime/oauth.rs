@@ -5,6 +5,52 @@ use signalbox_process_protocol::{OauthCredentialFailure, OauthCredentialOutcome}
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn oauth_delete_uses_retained_identity_without_a_current_declaration()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::oauth_credential::{OauthCredentialRepository, OauthRegistration};
+    let runtime = RunningRuntime::start().await?;
+    let repository = OauthCredentialRepository::new(runtime.pool.clone());
+    repository
+        .replace_registrations(&[(
+            "retired-oauth".into(),
+            OauthRegistration {
+                client_id: "fixture-client".into(),
+                token_url: "https://authorization.example/token".into(),
+                device_authorization_url: "https://authorization.example/device".into(),
+                scopes: vec!["openid".into()],
+            },
+        )])
+        .await?;
+    repository.replace_registrations(&[]).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
+    let request = ClientRequest::DeleteOauthCredential {
+        command_id,
+        profile: "retired-oauth".into(),
+    };
+    for _ in 0..2 {
+        connection.request(1, request.clone()).await?;
+        assert_eq!(
+            response_within(&mut connection).await?.message(),
+            &ServerMessage::OauthCredentialReceipt {
+                command_id,
+                profile: "retired-oauth".into(),
+                outcome: OauthCredentialOutcome::AlreadyDeleted {}
+            }
+        );
+    }
+    let generation: i64 = sqlx::query_scalar(
+        "SELECT generation FROM oauth_credential_profile WHERE profile = 'retired-oauth'",
+    )
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(generation, 1);
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn oauth_admin_rejects_profiles_and_replays_after_registration_changes()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;

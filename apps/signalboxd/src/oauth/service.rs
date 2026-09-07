@@ -12,7 +12,7 @@ use signalbox_persistence::oauth_credential::{
     OauthCredentialRepository, OauthDispatchLease, OauthQuarantineCause as Cause,
     OauthRegistration, OauthStoredAuthorization,
 };
-use std::{collections::HashMap, future::Future, pin::Pin};
+use std::collections::HashMap;
 use tokio::{sync::Mutex, time::Instant};
 
 struct CachedAccess {
@@ -46,6 +46,58 @@ impl std::fmt::Debug for OauthCredentialService {
 }
 
 impl OauthCredentialService {
+    /// Removes retained authorization and cached access under the dispatch lock order.
+    pub async fn delete(
+        &self,
+        command: &signalbox_persistence::oauth_credential::OauthCredentialCommand,
+        unretained_failure: signalbox_persistence::oauth_credential::OauthCredentialFailure,
+    ) -> Result<
+        signalbox_persistence::oauth_credential::OauthCredentialHandlingOutcome,
+        signalbox_persistence::oauth_credential::OauthCredentialRepositoryError,
+    > {
+        let mut state = match self.profiles.get(&command.profile) {
+            Some(profile) => Some(profile.access.lock().await),
+            None => None,
+        };
+        self.repository
+            .delete(command, unretained_failure, || {
+                if let Some(state) = &mut state {
+                    **state = RefreshState::default();
+                }
+            })
+            .await
+    }
+
+    /// Publishes successful provisioning while excluding cached-token preparations.
+    pub async fn complete_exchange(
+        &self,
+        exchange: &signalbox_persistence::oauth_credential::OauthExchange,
+        authorization: Result<
+            &signalbox_persistence::oauth_credential::OauthAuthorization,
+            signalbox_persistence::oauth_credential::OauthCredentialFailure,
+        >,
+    ) -> Result<
+        signalbox_persistence::oauth_credential::OauthCredentialOutcome,
+        signalbox_persistence::oauth_credential::OauthCredentialRepositoryError,
+    > {
+        let mut state = match self.profiles.get(exchange.profile()) {
+            Some(profile) => Some(profile.access.lock().await),
+            None => None,
+        };
+        let outcome = self
+            .repository
+            .complete_exchange(exchange, authorization)
+            .await?;
+        if matches!(
+            outcome,
+            signalbox_persistence::oauth_credential::OauthCredentialOutcome::Provisioned
+                | signalbox_persistence::oauth_credential::OauthCredentialOutcome::Reprovisioned
+        ) && let Some(state) = &mut state
+        {
+            **state = RefreshState::default();
+        }
+        Ok(outcome)
+    }
     /// Creates one shared refresh cache from the validated registration catalog.
     pub fn new(
         pool: sqlx::PgPool,
@@ -268,17 +320,6 @@ impl OauthCredentialProvider for OauthCredentialService {
     ) -> OauthDeliveryFuture<'a> {
         Box::pin(self.prepare(reference.as_str(), installer, cancellation))
     }
-
-    fn invalidate<'a>(
-        &'a self,
-        reference: &'a str,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            if let Some(profile) = self.profiles.get(reference) {
-                *profile.access.lock().await = RefreshState::default();
-            }
-        })
-    }
 }
 
 #[cfg(test)]
@@ -309,7 +350,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL and local HTTPS"]
-    async fn oauth_service_singleflight_reuses_access_and_restart_marker_quarantines()
+    async fn oauth_service_serializes_refresh_reprovision_delete_and_restart_recovery()
     -> Result<(), Box<dyn std::error::Error>> {
         let container = Postgres::default()
             // Same PostgreSQL image as tests/process_protocol_runtime/fixtures.rs.
@@ -329,10 +370,16 @@ mod tests {
             .connect_with(signalbox_persistence::local_test_connection_options(&url)?)
             .await?;
         signalbox_persistence::migrate(&pool).await?;
-        let (client, registration, server) = super::super::tests::https_server(vec![(
-            200,
-            serde_json::json!({"access_token":"shared-access", "refresh_token":"rotated-refresh", "expires_in":3600}),
-        )])?;
+        let (client, registration, server) = super::super::tests::https_server(vec![
+            (
+                200,
+                serde_json::json!({"access_token":"shared-access", "refresh_token":"rotated-refresh", "expires_in":3600}),
+            ),
+            (
+                200,
+                serde_json::json!({"access_token":"replacement-access", "refresh_token":"second-rotation", "expires_in":3600}),
+            ),
+        ])?;
         let repository = OauthCredentialRepository::new(pool.clone());
         repository
             .replace_registrations(&[("profile".into(), registration.clone())])
@@ -380,7 +427,6 @@ mod tests {
             second.0.expect("material").access_token.expose_bytes(),
             b"shared-access"
         );
-        assert_eq!(server.join().map_err(|_| "TLS server panicked")??.len(), 1);
         assert_eq!(
             service
                 .prepare("profile", &mut RejectInstall, CancellationSignal::never())
@@ -393,6 +439,37 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(cause, "credential_home");
+        let rejected = OauthCredentialCommand {
+            command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            operation: OauthCredentialOperation::Reprovision,
+            profile: "profile".into(),
+        };
+        let OauthStartOutcome::Started(exchange) = repository
+            .begin_exchange(&rejected, Ok(&registration))
+            .await?
+        else {
+            panic!("rejected reprovision exchange");
+        };
+        assert_eq!(
+            service
+                .complete_exchange(&exchange, Err(OauthCredentialFailure::AccessDenied))
+                .await?,
+            OauthCredentialOutcome::Failed(OauthCredentialFailure::AccessDenied)
+        );
+        let lease = repository.lock_dispatch("profile").await?.expect("profile");
+        assert_eq!(
+            lease
+                .authorization()
+                .expect("retained authorization")
+                .quarantine,
+            Some(OauthQuarantineCause::CredentialHome)
+        );
+        lease.commit().await?;
+        {
+            let state = service.profiles["profile"].access.lock().await;
+            assert!(state.access.is_some());
+            assert_eq!(state.failure, Some(Failure::OauthCredentialHome));
+        }
         let command = OauthCredentialCommand {
             command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
             operation: OauthCredentialOperation::Reprovision,
@@ -404,7 +481,7 @@ mod tests {
         else {
             panic!("reprovision exchange");
         };
-        repository
+        service
             .complete_exchange(
                 &exchange,
                 Ok(&OauthAuthorization {
@@ -414,7 +491,87 @@ mod tests {
                 }),
             )
             .await?;
-        service.invalidate("profile").await;
+        assert!(
+            service.profiles["profile"]
+                .access
+                .lock()
+                .await
+                .access
+                .is_none()
+        );
+        let mut replacement = Installer::default();
+        service
+            .prepare("profile", &mut replacement, CancellationSignal::never())
+            .await
+            .map_err(|_| "replacement delivery")?;
+        assert_eq!(
+            replacement
+                .0
+                .as_ref()
+                .expect("replacement material")
+                .access_token
+                .expose_bytes(),
+            b"replacement-access"
+        );
+        let deletion = OauthCredentialCommand {
+            command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            operation: OauthCredentialOperation::Delete,
+            profile: "profile".into(),
+        };
+        assert_eq!(
+            service
+                .delete(&deletion, OauthCredentialFailure::UnknownProfile)
+                .await?,
+            OauthCredentialHandlingOutcome::Recorded(OauthCredentialOutcome::Deleted)
+        );
+        assert!(
+            service.profiles["profile"]
+                .access
+                .lock()
+                .await
+                .access
+                .is_none()
+        );
+        assert_eq!(
+            replacement
+                .0
+                .expect("copied material survives deletion")
+                .access_token
+                .expose_bytes(),
+            b"replacement-access"
+        );
+        assert_eq!(
+            service
+                .prepare(
+                    "profile",
+                    &mut Installer::default(),
+                    CancellationSignal::never()
+                )
+                .await,
+            Err(Failure::Unavailable)
+        );
+        assert_eq!(server.join().map_err(|_| "TLS server panicked")??.len(), 2);
+        let command = OauthCredentialCommand {
+            command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            operation: OauthCredentialOperation::Provision,
+            profile: "profile".into(),
+        };
+        let OauthStartOutcome::Started(exchange) = repository
+            .begin_exchange(&command, Ok(&registration))
+            .await?
+        else {
+            panic!("provision after deletion");
+        };
+        service
+            .complete_exchange(
+                &exchange,
+                Ok(&OauthAuthorization {
+                    refresh_token: "restart-refresh".into(),
+                    identity_token: "retained-identity".into(),
+                    account_identity: serde_json::json!({"subject":"subject"}),
+                }),
+            )
+            .await?;
         repository
             .lock_dispatch("profile")
             .await?

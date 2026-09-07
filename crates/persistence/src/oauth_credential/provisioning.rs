@@ -48,6 +48,13 @@ pub struct OauthExchange {
     generation: i64,
 }
 
+impl OauthExchange {
+    /// Retained profile identity whose generation this exchange may replace.
+    pub fn profile(&self) -> &str {
+        &self.command.profile
+    }
+}
+
 /// Admission either owns the exchange or returns an existing disposition.
 #[derive(Clone, Debug)]
 pub enum OauthStartOutcome {
@@ -120,7 +127,7 @@ async fn co_members(
     Ok(profiles)
 }
 
-async fn finish(
+pub(super) async fn finish(
     connection: &mut PgConnection,
     command: &OauthCredentialCommand,
     outcome: &OauthCredentialOutcome,

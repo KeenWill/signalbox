@@ -1,5 +1,6 @@
 //! Durable OAuth administration claims and receipts (docs/spec/identity-and-commands.md).
 
+mod deletion;
 mod provisioning;
 mod refresh;
 pub(crate) use provisioning::lock_pool_members;

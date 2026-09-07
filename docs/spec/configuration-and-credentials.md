@@ -733,7 +733,11 @@ authentication with ambient credentials, keyrings, helpers, and external stores
 disabled; inability to deliver the home is a typed pre-send failure. An
 access-token rejection during an invocation neither quarantines the profile nor
 permits automatic call retry. Delivery failure evidence and quarantine commit
-atomically and bypass pool trigger policy.
+atomically and bypass pool trigger policy. Successful re-provisioning clears
+OAuth delivery-origin quarantine and cached access; failure preserves both.
+Deletion holds the dispatch profile lock while removing authorization and cached
+access, advances the retained generation, and preserves registration and
+history.
 
 ## Planned
 
@@ -753,7 +757,7 @@ atomically and bypass pool trigger policy.
   [design](../design/configuration-and-credentials.md).
 - Pre-activation workspace binding and template instruction selectors:
   [design](../design/configuration-and-credentials.md).
-- Codex CLI `file` delivery and OAuth deletion and database-restore rules:
+- Codex CLI `file` delivery and OAuth database-restore rules:
   [design](../design/configuration-and-credentials.md).
 - Bounded credential-home concurrency and round-robin selection:
   `max_concurrent_invocations` and `round_robin`:

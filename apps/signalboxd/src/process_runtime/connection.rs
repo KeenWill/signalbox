@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) struct ConnectionDependencies {
     pub(super) recovery_reporter: Option<FatalRecoveryReporter>,
+    pub(super) oauth_service: Option<Arc<crate::OauthCredentialService>>,
     pub(super) pool: PgPool,
     pub(super) eligibility_nudge: InProcessEligibilityNudge,
     pub(super) tool_dispatch_gate: InProcessToolDispatchGate,
@@ -51,6 +52,7 @@ pub(super) async fn serve_connections(
     );
     let services = ConnectionServices {
         recovery_reporter: dependencies.recovery_reporter,
+        oauth_service: dependencies.oauth_service,
         pool: dependencies.pool,
         eligibility_nudge: dependencies.eligibility_nudge,
         tool_dispatch_gate: dependencies.tool_dispatch_gate,

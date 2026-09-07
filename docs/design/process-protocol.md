@@ -7,29 +7,15 @@ from the terminal client's existing `spawn_session` half.
 
 ## Goal
 
-Future implementation of these ten surfaces under protocol version 1 must pair
-each daemon handler with its terminal-client consumer in the same change:
-provisioning an `oauth` credential profile, re-provisioning it after a rejected
-daemon-owned refresh, deleting it, credential-exclusion administration,
-configuration reload, program-run cancellation, runner placement facts,
-`spawn_session`, cascade metadata on stop receipts, and the typed projection of
-credential-pool exhaustion and of the credential-availability wait. The terminal
-client already sends `spawn_session` and validates its receipt, so that surface
-needs only its daemon transaction.
+Future implementation of these surfaces under protocol version 1 must pair each
+daemon handler with its terminal-client consumer in the same change:
+credential-exclusion administration, configuration reload, program-run
+cancellation, runner placement facts, `spawn_session`, cascade metadata on stop
+receipts, and the typed projection of credential-pool exhaustion and of the
+credential-availability wait. The terminal client already sends `spawn_session`
+and validates its receipt, so that surface needs only its daemon transaction.
 
 ## Design
-
-OAuth administration uses the requests and receipts on the
-[spec page](../spec/process-protocol.md). Only re-provisioning replaces
-authorization; it clears every OAuth delivery-origin quarantine, including
-refresh and tuple-mismatch quarantines, only on success. Deletion addresses
-retained OAuth state by profile identity even when its declaration is absent or
-its delivery is no longer `oauth`. Deletion acquires the profile row lock that
-dispatch holds through the token-copy step, then ends its OAuth delivery-origin
-quarantine and removes stored authorization and cached access tokens, preventing
-future dispatches while retaining any current registration and referenced
-history; a child already holding a copied token finishes its invocation. Each
-profile retains a generation that every deletion advances.
 
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
@@ -202,10 +188,9 @@ call-free terminal attempt. The endings these shapes project belong to
 daemon decodes `spawn_session` and rejects it without mutation, and no daemon
 path produces `session_spawned`. `runner_state_transition` is an admitted
 version-1 event variant that the daemon projects when the outbox carries a
-runner state transition. The OAuth administration envelopes and progress message
-are admitted version-1 variants. Every other request and message above is
-outside the closed inventories in `crates/process-protocol` until the daemon and
-client implement its surface together.
+runner state transition. Every other request and message above is outside the
+closed inventories in `crates/process-protocol` until the daemon and client
+implement its surface together.
 
 No response code is reserved for an authorization failure, because client
 identity, authentication, authorization, and revocation are undecided.

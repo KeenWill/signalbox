@@ -100,6 +100,139 @@ fn command(operation: OauthCredentialOperation) -> OauthCredentialCommand {
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn oauth_delete_serializes_copy_advances_generation_and_preserves_replay_and_history()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let repository = OauthCredentialRepository::new(pool.clone());
+    let registration = registration();
+    repository
+        .replace_registrations(&[("subscription".into(), registration.clone())])
+        .await?;
+    let OauthStartOutcome::Started(exchange) = repository
+        .begin_exchange(
+            &command(OauthCredentialOperation::Provision),
+            Ok(&registration),
+        )
+        .await?
+    else {
+        panic!("initial exchange");
+    };
+    repository
+        .complete_exchange(&exchange, Ok(&authorization()))
+        .await?;
+    let OauthStartOutcome::Started(pending) = repository
+        .begin_exchange(
+            &command(OauthCredentialOperation::Reprovision),
+            Ok(&registration),
+        )
+        .await?
+    else {
+        panic!("pending replacement");
+    };
+    repository
+        .lock_dispatch("subscription")
+        .await?
+        .expect("profile")
+        .quarantine(OauthQuarantineCause::RefreshRejected)
+        .await?;
+    repository.replace_registrations(&[]).await?;
+    let deletion = command(OauthCredentialOperation::Delete);
+    let copying = repository
+        .lock_dispatch("subscription")
+        .await?
+        .expect("profile");
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            repository.delete(
+                &deletion,
+                OauthCredentialFailure::UnknownProfile,
+                || panic!("copy lock excludes cache removal")
+            )
+        )
+        .await
+        .is_err()
+    );
+    copying.commit().await?;
+    let mut discarded = false;
+    assert_eq!(
+        repository
+            .delete(&deletion, OauthCredentialFailure::UnknownProfile, || {
+                discarded = true
+            })
+            .await?,
+        OauthCredentialHandlingOutcome::Recorded(OauthCredentialOutcome::Deleted)
+    );
+    assert!(discarded);
+    assert_eq!(
+        repository
+            .complete_exchange(&pending, Ok(&authorization()))
+            .await?,
+        OauthCredentialOutcome::Superseded
+    );
+    assert_eq!(
+        repository
+            .delete(
+                &command(OauthCredentialOperation::Delete),
+                OauthCredentialFailure::NonOauthProfile,
+                || {}
+            )
+            .await?,
+        OauthCredentialHandlingOutcome::Recorded(OauthCredentialOutcome::AlreadyDeleted)
+    );
+    let generation: i64 = sqlx::query_scalar(
+        "SELECT generation FROM oauth_credential_profile WHERE profile = 'subscription'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(generation, 3);
+    let history: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM oauth_credential_failure WHERE profile = 'subscription'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(history, 1);
+    repository
+        .replace_registrations(&[("subscription".into(), registration.clone())])
+        .await?;
+    let OauthStartOutcome::Started(exchange) = repository
+        .begin_exchange(
+            &command(OauthCredentialOperation::Provision),
+            Ok(&registration),
+        )
+        .await?
+    else {
+        panic!("new authorization");
+    };
+    repository
+        .complete_exchange(&exchange, Ok(&authorization()))
+        .await?;
+    assert_eq!(
+        repository
+            .delete(
+                &deletion,
+                OauthCredentialFailure::NonOauthProfile,
+                || panic!("replay cannot discard a newer token")
+            )
+            .await?,
+        OauthCredentialHandlingOutcome::Recorded(OauthCredentialOutcome::Deleted)
+    );
+    let lease = repository
+        .lock_dispatch("subscription")
+        .await?
+        .expect("profile");
+    assert_eq!(
+        lease
+            .authorization()
+            .expect("new authorization survives replay")
+            .generation,
+        4
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn oauth_command_registry_replays_receipts_and_rejects_changed_meaning()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool, _) = migrated_postgres().await?;

@@ -1655,7 +1655,7 @@ async fn run_hub(
             ));
         }
     };
-    if !oauth_registrations.is_empty() || retained_root {
+    let oauth_service = if !oauth_registrations.is_empty() || retained_root {
         let root = signalbox_model_runtime_codex_cli::OauthCredentialRoot::open(&root_path)
             .map_err(|_| {
                 erase_startup_cause(
@@ -1684,7 +1684,10 @@ async fn run_hub(
         );
         compaction_runtime = compaction_runtime.with_oauth_delivery(service.clone(), root.clone());
         runtime = runtime.with_oauth_delivery(service.clone(), root);
-    }
+        Some(service)
+    } else {
+        None
+    };
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
         RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
     );
@@ -2253,6 +2256,10 @@ async fn run_hub(
     // fatal recovery signal through this handle rather than ending an
     // undecidable durable outcome at the client response.
     let process_runtime = process_runtime.with_recovery_reporter(execution.recovery_reporter());
+    let process_runtime = match oauth_service {
+        Some(service) => process_runtime.with_oauth_service(service),
+        None => process_runtime,
+    };
     let activated_pass = ContextGuardedTurnPass::new(
         StartEligibleTurnRepository::new(scheduler_pool.clone()),
         model_repository,
