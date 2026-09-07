@@ -4,6 +4,8 @@
 //! only pre-exec registration, descriptor operations, keyring detachment, and
 //! sealed executable-memory operations that require unsafe Linux APIs.
 
+#![cfg(target_os = "linux")]
+
 use std::{
     fs::File,
     io,

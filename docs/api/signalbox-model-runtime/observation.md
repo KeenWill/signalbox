@@ -43,6 +43,9 @@ pub enum ObservationFact {
 ```rust
 pub trait ObservationSink<C> {
     fn observe(&mut self, observation: Observation<C>);
+    fn observe_rate_limits(&mut self, _correlation: C, _snapshot: RateLimitSnapshot) {
+        /* provided */
+    }
 }
 impl<C> ObservationSink<C> for vec::Vec<Observation<C>> {
     fn observe(&mut self, observation: Observation<C>);

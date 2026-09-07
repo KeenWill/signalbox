@@ -2755,6 +2755,10 @@ fn split_stream_fragments<C: Clone>(
 }
 
 impl<C: Clone> ObservationSink<C> for RedactingSink<'_, C> {
+    fn observe_rate_limits(&mut self, correlation: C, snapshot: crate::RateLimitSnapshot) {
+        self.inner.observe_rate_limits(correlation, snapshot);
+    }
+
     fn observe(&mut self, observation: Observation<C>) {
         match observation.fact {
             ObservationFact::TextDelta { index, text } => {

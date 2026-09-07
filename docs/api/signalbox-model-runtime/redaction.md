@@ -14,6 +14,7 @@ impl<'a, C: clone::Clone> CredentialRedactingSink<'a, C> {
     pub fn flush(&mut self);
 }
 impl<C: clone::Clone> ObservationSink<C> for CredentialRedactingSink<'_, C> {
+    fn observe_rate_limits(&mut self, correlation: C, snapshot: RateLimitSnapshot);
     fn observe(&mut self, observation: Observation<C>);
 }
 ```

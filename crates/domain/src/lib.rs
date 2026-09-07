@@ -26,6 +26,7 @@ mod model_settings;
 mod program_journal;
 mod provider_evidence;
 mod queue_order;
+mod rate_limit;
 mod replace_session_defaults;
 mod repo_watch;
 mod review_workflow;
@@ -178,6 +179,7 @@ pub use queue_order::{
     AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
     AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
 };
+pub use rate_limit::{ProviderRateLimitSnapshot, ProviderRateLimitWindow};
 pub use replace_session_defaults::{
     PreparedReplaceSessionDefaults, ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaults,
     ReplaceSessionDefaultsAppliedResult, ReplaceSessionDefaultsCurrentVersionMismatch,
