@@ -572,15 +572,53 @@ fn startup_sections(models: &HubModelConfiguration) -> Result<toml::Table, Reloa
 }
 
 fn failure(phase: ReloadPhase, reason: &str) -> ReloadResult {
+    let mut sanitized = String::new();
+    for character in reason.chars() {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if sanitized.len() + character.len_utf8()
+            > signalbox_process_protocol::MAX_CONFIGURATION_RELOAD_REASON_BYTES
+        {
+            break;
+        }
+        sanitized.push(character);
+    }
+    if sanitized.trim().is_empty() {
+        sanitized = "configuration reload failed".to_owned();
+    }
     ReloadResult::Failed {
         phase,
-        reason: reason.to_owned(),
+        reason: sanitized,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_reasons_are_bounded_utf8_without_control_characters() {
+        let oversized = format!(
+            "\n{}",
+            "é".repeat(signalbox_process_protocol::MAX_CONFIGURATION_RELOAD_REASON_BYTES)
+        );
+        for input in [oversized.as_str(), "", "\n\t\0"] {
+            let ReloadResult::Failed { reason, .. } = failure(ReloadPhase::Validate, input) else {
+                panic!("failure result");
+            };
+            assert!(!reason.trim().is_empty());
+            assert!(
+                reason.len() <= signalbox_process_protocol::MAX_CONFIGURATION_RELOAD_REASON_BYTES
+            );
+            assert!(!reason.chars().any(char::is_control));
+            if input == oversized {
+                assert!(reason.ends_with('é'));
+            }
+        }
+    }
 
     fn fixture() -> (tempfile::TempDir, ConfigurationReload) {
         let directory = tempfile::tempdir().expect("fixture directory");

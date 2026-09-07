@@ -979,6 +979,51 @@ async fn reload_configuration_swaps_request_catalogs_and_replays_without_reading
     .await?;
     assert_eq!(state, "terminal");
     drop(execution_connection);
+    model_source.remove("numeric_bounds");
+    let diagnostic = HubModelConfiguration::parse(&model_source.to_string())
+        .expect_err("numeric bounds are required")
+        .to_string();
+    assert!(diagnostic.len() > signalbox_process_protocol::MAX_CONFIGURATION_RELOAD_REASON_BYTES);
+    fs::write(&model_path, model_source.to_string())?;
+    let rejected_command = command()?;
+    connection
+        .request(
+            4,
+            ClientRequest::ReloadConfiguration {
+                command_id: rejected_command,
+            },
+        )
+        .await?;
+    let refusal = response_within(&mut connection).await?;
+    let ServerMessage::ConfigurationReloadFailed {
+        command_id,
+        phase,
+        reason,
+    } = refusal.message()
+    else {
+        panic!("invalid replacement must return a durable reload failure");
+    };
+    assert_eq!(*command_id, rejected_command);
+    assert_eq!(
+        *phase,
+        signalbox_process_protocol::ConfigurationReloadPhase::Validate
+    );
+    assert!(reason.starts_with("model configuration is missing required numeric bounds:"));
+    assert!(reason.len() <= signalbox_process_protocol::MAX_CONFIGURATION_RELOAD_REASON_BYTES);
+    assert!(!reason.chars().any(char::is_control));
+    fs::remove_file(&model_path)?;
+    connection
+        .request(
+            5,
+            ClientRequest::ReloadConfiguration {
+                command_id: rejected_command,
+            },
+        )
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        refusal.message()
+    );
     drop(connection);
     shutdown.send(true)?;
     task.await??;
