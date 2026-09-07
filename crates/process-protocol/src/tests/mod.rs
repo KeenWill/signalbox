@@ -12,6 +12,7 @@ mod imported_and_delegation_entries;
 mod imported_conversation;
 mod metadata;
 mod metadata_listing_and_conversations;
+mod oauth;
 mod operator_status;
 mod reconciliation_and_delegation_events;
 mod review;

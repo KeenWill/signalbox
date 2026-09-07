@@ -380,6 +380,23 @@ the delegation contracts in
 both the delegation-content ceiling and its complete normalized JSON argument
 envelope.
 
+OAuth administration has three requests, `provision_oauth_credential`,
+`reprovision_oauth_credential`, and `delete_oauth_credential`, each carrying
+`profile` and a user-global `command_id`. The terminal client exposes them as
+`credential provision|reprovision|delete <profile>`. The progress message is
+`oauth_credential_authorization { command_id, profile, user_code, verification_uri }`:
+`user_code` is 1 through 256 printable ASCII bytes and `verification_uri` is an
+absolute HTTPS URI without user information or fragment, at most 4,096 UTF-8
+bytes. The terminal receipt is
+`oauth_credential_receipt { command_id, profile, outcome }`; its closed outcome
+and failure vocabulary live in `crates/process-protocol/src/response.rs`. An
+undeclared profile records `failed { reason: unknown_profile }`; a declared
+non-OAuth profile records `failed { reason: non_oauth_profile }`. Neither starts
+an exchange or mutates credential state. An equal command replays its stored
+receipt before current registration is evaluated, and conflicting reuse is
+rejected. The terminal client verifies the command and profile correlations and
+prints authorization details before the receipt.
+
 ## Planned
 
 - OAuth credential provisioning, re-provisioning after rejected refresh, and

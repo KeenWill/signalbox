@@ -38,6 +38,27 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
+    /// Begin an operator-authorized OAuth device exchange.
+    ProvisionOauthCredential {
+        /// User-global durable command identity.
+        command_id: CommandId,
+        /// Configured credential profile name.
+        profile: String,
+    },
+    /// Replace a stored OAuth authorization.
+    ReprovisionOauthCredential {
+        /// User-global durable command identity.
+        command_id: CommandId,
+        /// Configured credential profile name.
+        profile: String,
+    },
+    /// Delete retained OAuth authorization by profile identity.
+    DeleteOauthCredential {
+        /// User-global durable command identity.
+        command_id: CommandId,
+        /// Credential profile identity, including a retired declaration.
+        profile: String,
+    },
     /// Create a user-initiated session.
     CreateSession {
         /// Durable mutation identity.
@@ -658,6 +679,11 @@ pub enum ToolDecision {
 impl ClientRequest {
     pub(crate) fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
+            Self::ProvisionOauthCredential { profile, .. }
+            | Self::ReprovisionOauthCredential { profile, .. }
+            | Self::DeleteOauthCredential { profile, .. } => {
+                crate::response::validate_oauth_profile(profile)?;
+            }
             Self::AttachGoal { statement, .. }
             | Self::SupersedeGoal { statement, .. }
             | Self::CommissionSession { statement, .. } => {
