@@ -2996,14 +2996,19 @@ system_prompt = "Inspect workflow failures."
             .await?;
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
+                let sessions: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT created_session_id FROM dispatch_ledger
+                     WHERE rule_revision = $1 AND created_session_id IS NOT NULL",
+                )
+                .bind(Decimal::from(hook.rule_version))
+                .fetch_all(&module_pool)
+                .await?;
                 let count: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM session AS session
-                     JOIN mod_repo_watch.dispatch_ledger AS dispatch
-                       ON dispatch.created_session_id = session.session_id
-                     WHERE session.template_name = $1 AND dispatch.rule_revision = $2",
+                    "SELECT count(*) FROM session
+                     WHERE template_name = $1 AND session_id = ANY($2)",
                 )
                 .bind(hook.template)
-                .bind(Decimal::from(hook.rule_version))
+                .bind(sessions)
                 .fetch_one(&core_pool)
                 .await?;
                 if count == 1 {

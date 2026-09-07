@@ -136,11 +136,10 @@ shadow hooks acknowledge without waking it. The runtime's `reload_configuration`
 reconciles rule revisions and replaces listener settings inside the reload.
 Enabled rule templates must resolve before composition or reload. Stale or
 conflicting rule revisions fail reload without replacing the running
-configuration.
-Same-address changes swap the path and hook map atomically; address changes bind
-a replacement before retiring the running listener, and a bind failure preserves
-the running settings. In-flight deliveries retry against the replacement
-configuration.
+configuration. Same-address changes swap the path and hook map atomically;
+address changes bind a replacement before retiring the running listener, and a
+bind failure preserves the running settings. In-flight deliveries retry against
+the replacement configuration.
 
 Lifecycle reactions accept only `session_terminal` or `goal_changed` inputs and
 only `release_start` or sticky-stop lifecycle commands. These are the command
