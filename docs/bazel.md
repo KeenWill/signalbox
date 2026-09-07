@@ -108,3 +108,11 @@ and comparisons use the shared cache. The output trees are available from
 
 The generator CLIs also accept an optional output directory after their existing
 arguments. Omitting it retains their Cargo regeneration behavior.
+
+`bazel test --config=api //:api_documentation_current` builds Rustdoc JSON for
+all 36 configured API crates, renders Markdown into `bazel-bin/api_pages`, and
+compares it with the committed API snapshots. Rustdoc, rendering, and the
+comparison are separate cacheable actions. The API configuration selects the
+pinned nightly toolchain; Renovate groups its Cargo renderer and Bazel pins. The
+required contract check uses this target. The optional baseline API digest runs
+separately and still uses Cargo to document historical revisions.

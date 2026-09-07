@@ -1,6 +1,8 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_library", "rust_test")
+
+CRATE_FEATURES = ["test-support"]
 
 exports_files(["Cargo.toml"])
 
@@ -21,7 +23,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
     compile_data = [],
-    crate_features = ["test-support"],
+    crate_features = CRATE_FEATURES,
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     lint_config = ":cargo_lints",
@@ -96,4 +98,17 @@ rust_test(
         normal = True,
         normal_dev = True,
     ),
+)
+
+rust_doc(
+    name = "api_json",
+    crate = ":signalbox_ownership_seam",
+    crate_features = CRATE_FEATURES,
+    rustdoc_flags = [
+        "-Z",
+        "unstable-options",
+        "--output-format",
+        "json",
+    ],
+    visibility = ["//:__pkg__"],
 )

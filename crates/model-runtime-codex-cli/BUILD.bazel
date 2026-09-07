@@ -1,6 +1,6 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script", "cargo_toml_env_vars", "extract_cargo_lints")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_doc", "rust_library", "rust_test")
 
 exports_files(["Cargo.toml"])
 
@@ -101,5 +101,17 @@ rust_test(
 filegroup(
     name = "rust_sources",
     srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
+)
+
+rust_doc(
+    name = "api_json",
+    crate = ":signalbox_model_runtime_codex_cli",
+    rustdoc_flags = [
+        "-Z",
+        "unstable-options",
+        "--output-format",
+        "json",
+    ],
     visibility = ["//:__pkg__"],
 )

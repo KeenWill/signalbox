@@ -30,11 +30,16 @@ register_toolchains("@gcc_linux_x86_64//:all")
 
 RUST_VERSION = "1.98.1"
 
+RUSTDOC_TOOLCHAIN = "nightly-2026-09-01"
+
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
     rustfmt_version = RUST_VERSION,
-    versions = [RUST_VERSION],
+    versions = [
+        RUST_VERSION,
+        RUSTDOC_TOOLCHAIN.replace("nightly-", "nightly/"),
+    ],
 )
 use_repo(rust, "rust_toolchains")
 
