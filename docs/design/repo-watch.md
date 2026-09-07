@@ -46,9 +46,10 @@ with its HTTP validator and a typed, minimal accepted snapshot sufficient to
 reconstruct that resource's normalized contribution and the identities nested
 fetches need. The store is transport state beside the cursor, not part of the
 event or rule surface. The cache persists the reviewer set used to build its
-snapshots. Before composing startup pollers, the runtime compares that set with
-configured `repository_watch.signal_reviewers` and invalidates both validators
-and accepted snapshots when they differ.
+snapshots. Before every poller composition, including startup and re-enablement,
+the runtime compares that set with configured
+`repository_watch.signal_reviewers` and invalidates both validators and accepted
+snapshots when they differ.
 
 ## Compatibility constraints
 
@@ -68,5 +69,5 @@ After a daemon restart with an unchanged reviewer set, the first complete poll
 sends a conditional request for every resource whose validator was persisted,
 and no persisted snapshot contains raw provider JSON, a credential value, or a
 reaction from an actor outside the signal-reviewer set. A reviewer-set change
-while stopped invalidates validators and snapshots before the first poll, which
-fetches those resources unconditionally under the new set.
+while stopped or disabled invalidates validators and snapshots before the first
+poll, which fetches those resources unconditionally under the new set.

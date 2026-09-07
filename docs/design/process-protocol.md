@@ -37,35 +37,38 @@ Each request ends with
 `device_endpoint_rejected`, `device_endpoint_failed` for transport failure of
 the initial device-authorization request, `access_denied` for operator denial,
 `polling_expired`, `token_endpoint_failed`, `token_response_without_identity`,
-or `account_independence_failed`. A request naming an undeclared profile returns
-`failed { reason: unknown_profile }`; a request naming a profile whose delivery
-is not `oauth` returns `failed { reason: non_oauth_profile }`. Neither starts an
-exchange or mutates credential state. Initial provisioning returns
-`already_provisioned` without starting an exchange when the profile holds
-authorization. Re-provisioning returns `not_provisioned` without starting an
-exchange when no authorization is stored. Only re-provisioning replaces
-authorization; it clears every OAuth delivery-origin quarantine, including
-refresh and tuple-mismatch quarantines, only on success. Deletion acquires the
-profile row lock that dispatch holds through the token-copy step, then ends its
-delivery-origin quarantine and removes stored authorization and cached access
-tokens, preventing future dispatches while retaining the configured registration
-and referenced history; a child already holding a copied token finishes its
-invocation. Each profile retains a generation that every deletion advances.
-Provisioning and re-provisioning commit authorization and advance that
-generation atomically only when their starting generation is current and, for
-re-provisioning, authorization is still stored; otherwise the transaction
-records `superseded` without storing authorization. The final transaction also
-revalidates, serialized with catalog replacement, that the profile exists with
-`oauth` delivery and the exchange's canonical OAuth tuple; otherwise it records
-`failed { reason: registration_changed }` without storing authorization. The
-claim retains authorization details before their first emission and while
-pending. An equal request with the same `command_id` reports busy while pending
-and replays those details when available, or returns its stored receipt without
-repeating the exchange or deletion; conflicting reuse is rejected. Startup
-terminalizes each pending provisioning or re-provisioning claim with an
-`abandoned` receipt; another provisioning attempt requires a new `command_id`.
-The credential mutation and terminal receipt commit atomically under the command
-claim protocol in [identity and commands](../spec/identity-and-commands.md).
+or `account_independence_failed`. Provisioning or re-provisioning an undeclared
+profile returns `failed { reason: unknown_profile }`; either request naming a
+profile whose delivery is not `oauth` returns
+`failed { reason: non_oauth_profile }`. Neither starts an exchange or mutates
+credential state. Initial provisioning returns `already_provisioned` without
+starting an exchange when the profile holds authorization. Re-provisioning
+returns `not_provisioned` without starting an exchange when no authorization is
+stored. Only re-provisioning replaces authorization; it clears every OAuth
+delivery-origin quarantine, including refresh and tuple-mismatch quarantines,
+only on success. Deletion addresses retained OAuth state by profile identity
+even when its declaration is absent or its delivery is no longer `oauth`.
+Deletion acquires the profile row lock that dispatch holds through the
+token-copy step, then ends its OAuth delivery-origin quarantine and removes
+stored authorization and cached access tokens, preventing future dispatches
+while retaining any current registration and referenced history; a child already
+holding a copied token finishes its invocation. Each profile retains a
+generation that every deletion advances. Provisioning and re-provisioning commit
+authorization and advance that generation atomically only when their starting
+generation is current and, for re-provisioning, authorization is still stored;
+otherwise the transaction records `superseded` without storing authorization.
+The final transaction also revalidates, serialized with catalog replacement,
+that the profile exists with `oauth` delivery and the exchange's canonical OAuth
+tuple; otherwise it records `failed { reason: registration_changed }` without
+storing authorization. The claim retains authorization details before their
+first emission and while pending. An equal request with the same `command_id`
+reports busy while pending and replays those details when available, or returns
+its stored receipt without repeating the exchange or deletion; conflicting reuse
+is rejected. Startup terminalizes each pending provisioning or re-provisioning
+claim with an `abandoned` receipt; another provisioning attempt requires a new
+`command_id`. The credential mutation and terminal receipt commit atomically
+under the command claim protocol in
+[identity and commands](../spec/identity-and-commands.md).
 
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
