@@ -475,8 +475,7 @@ mod tests {
         }
     }
 
-    /// sentinel command identities fail before
-    /// canonical command construction and claim nothing.
+    /// sentinel command identities fail before canonical command construction and claim nothing.
     #[test]
     fn request_rejects_reserved_command_identifiers() {
         assert_eq!(
@@ -502,8 +501,8 @@ mod tests {
         );
     }
 
-    /// production session identities are fresh
-    /// RFC-9562 UUIDv7 values, while their timestamp has no domain role.
+    /// production session identities are fresh RFC-9562 UUIDv7 values, while their timestamp has no
+    /// domain role.
     #[test]
     fn production_generator_supplies_fresh_uuid_v7_sessions() {
         let mut generator = UuidV7SessionIdGenerator;
@@ -523,9 +522,8 @@ mod tests {
         assert!(!session.as_uuid().is_max());
     }
 
-    /// orchestration fixes the admitted
-    /// provenance, establishes defaults version one, and calls the atomic port
-    /// exactly once with the sealed candidate.
+    /// orchestration fixes the admitted provenance, establishes defaults version one, and calls the
+    /// atomic port exactly once with the sealed candidate.
     #[test]
     fn orchestrates_one_atomic_creation() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
@@ -572,8 +570,8 @@ mod tests {
         );
     }
 
-    /// equal replay returns the recorded receipt unchanged
-    /// rather than the freshly generated candidate or a loaded Session.
+    /// equal replay returns the recorded receipt unchanged rather than the freshly generated
+    /// candidate or a loaded Session.
     #[test]
     fn equal_replay_returns_original_receipt() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
@@ -606,8 +604,8 @@ mod tests {
         assert_eq!(transaction.observed[1].session().id(), replay_candidate);
     }
 
-    /// reusing one command ID for different canonical defaults
-    /// returns a typed conflict and never substitutes the second candidate.
+    /// reusing one command ID for different canonical defaults returns a typed conflict and never
+    /// substitutes the second candidate.
     #[test]
     fn conflicting_reuse_is_typed() {
         let command = command_id(1);
@@ -656,8 +654,8 @@ mod tests {
         );
     }
 
-    /// application orchestration neither retries transaction
-    /// failure nor fabricates a terminal command result.
+    /// application orchestration neither retries transaction failure nor fabricates a terminal
+    /// command result.
     #[test]
     fn transaction_failure_is_returned_without_retry() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))

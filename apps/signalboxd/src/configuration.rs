@@ -104,7 +104,8 @@ pub const CODEX_CLI_CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
 
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
-// numeric-bound: guard - bounds structured repository-watch rules retained by the shared convergence configuration parser
+// numeric-bound: guard - bounds structured repository-watch rules retained by the shared
+// convergence configuration parser
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
 // numeric-bound: guard - bounds actions decoded for one retained repository-watch rule
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
@@ -486,7 +487,8 @@ pub const MAX_COMPACTION_PROMPT_UTF8_BYTES: usize = 1_048_576;
 /// Default maximum assembled source bytes for one conversation import.
 pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 
-// numeric-bound: guard - bounds independently credentialed repositories available to the shared convergence sweep
+// numeric-bound: guard - bounds independently credentialed repositories available to the shared
+// convergence sweep
 const MAX_WATCHED_REPOSITORIES: usize = 128;
 // numeric-bound: guard - bounds reviewer identities decoded by the retained configuration grammar
 const MAX_SIGNAL_REVIEWERS: usize = 128;
@@ -3062,12 +3064,10 @@ fn resolved_credential_file_reference(path: &Path) -> Result<PathBuf, HubModelCo
 /// value is a bare program name — a value equal to its own final path
 /// component:
 ///
-/// - a bare name is looked up in `search_path`, the daemon's own `PATH`, and
-///   resolves to the first entry holding a regular file of that name this
-///   process can execute;
-/// - any other value is a path, returned verbatim for the caller's
-///   absolute-existing-file rule to judge, so a configured path never resolves
-///   through `PATH` to a different program.
+/// - a bare name is looked up in `search_path`, the daemon's own `PATH`, and resolves to the first
+///   entry holding a regular file of that name this process can execute;
+/// - any other value is a path, returned verbatim for the caller's absolute-existing-file rule to
+///   judge, so a configured path never resolves through `PATH` to a different program.
 ///
 /// Only absolute search entries participate. A relative entry — including the
 /// empty entry POSIX reads as the working directory — is skipped rather than
@@ -9568,8 +9568,8 @@ extra = true"#,
         );
     }
 
-    /// every explicit lower layer is validated even when a
-    /// higher-precedence layer masks it in the effective configuration.
+    /// every explicit lower layer is validated even when a higher-precedence layer masks it in the
+    /// effective configuration.
     #[test]
     fn configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
         let profile_configuration = CONFIGURATION
@@ -9594,8 +9594,8 @@ extra = true"#,
         );
     }
 
-    /// an explicit unsupported selected-profile value is
-    /// rejected even when the global layer is valid.
+    /// an explicit unsupported selected-profile value is rejected even when the global layer is
+    /// valid.
     #[test]
     fn configuration_rejects_an_unsupported_selected_profile_value() {
         let configuration = CONFIGURATION
@@ -9614,8 +9614,8 @@ extra = true"#,
         );
     }
 
-    /// a selected profile cannot combine individually
-    /// supported controls that its adapter cannot enforce together.
+    /// a selected profile cannot combine individually supported controls that its adapter cannot
+    /// enforce together.
     #[test]
     fn configuration_rejects_an_adapter_incompatible_selected_profile() {
         let configuration = CONFIGURATION
@@ -9634,8 +9634,8 @@ extra = true"#,
         );
     }
 
-    /// an adapter-incompatible global combination remains
-    /// invalid when a selected profile masks it with a supported combination.
+    /// an adapter-incompatible global combination remains invalid when a selected profile masks it
+    /// with a supported combination.
     #[test]
     fn configuration_rejects_a_masked_adapter_incompatible_global_layer() {
         let configuration = CONFIGURATION

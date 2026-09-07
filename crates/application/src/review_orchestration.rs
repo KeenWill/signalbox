@@ -1817,8 +1817,9 @@ pub trait ReviewOrchestrationAttemptStore {
         &self,
         attempt: ReviewOrchestrationAttemptId,
     ) -> impl Future<Output = Result<Vec<ReviewConcernClaim>, Self::Error>> + Send;
-    /// Replaces only the current retryable failed claim in one expected slot; historical attempts remain store evidence but are not returned as current claims.
-    /// A distinct successful, blocked, cancelled, or superseded current claim conflicts.
+    /// Replaces only the current retryable failed claim in one expected slot; historical attempts
+    /// remain store evidence but are not returned as current claims. A distinct successful,
+    /// blocked, cancelled, or superseded current claim conflicts.
     fn record_concern_claim(
         &mut self,
         attempt: ReviewOrchestrationAttemptId,

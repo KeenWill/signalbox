@@ -2,9 +2,8 @@
 
 use crate::*;
 
-/// the transactional allocator holds its singleton row through
-/// commit, so a concurrent event cannot obtain the next sequence and commit
-/// ahead of the lower event.
+/// the transactional allocator holds its singleton row through commit, so a concurrent event cannot
+/// obtain the next sequence and commit ahead of the lower event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn outbox_sequences_follow_concurrent_commit_order() -> Result<(), Box<dyn Error>> {
@@ -55,9 +54,8 @@ async fn outbox_sequences_follow_concurrent_commit_order() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// delivery cannot advance to an uncommitted allocation, and a
-/// later concurrent allocation remains a suffix after the committed prefix is
-/// marked delivered.
+/// delivery cannot advance to an uncommitted allocation, and a later concurrent allocation remains
+/// a suffix after the committed prefix is marked delivered.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Error>> {
@@ -155,8 +153,8 @@ async fn outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// one summary page batches distinct placement projections while retaining
-/// stable session-identity order and each selected defaults row.
+/// one summary page batches distinct placement projections while retaining stable session-identity
+/// order and each selected defaults row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_session_summary_page_batches_placement_projection() -> Result<(), Box<dyn Error>> {
@@ -226,8 +224,8 @@ async fn insert_session_summary_page_boundary_fixture(
     Ok(sessions)
 }
 
-/// a summary catalog one row beyond the 64-session safety ceiling
-/// continues onto a second page without skipping or duplicating an identity.
+/// a summary catalog one row beyond the 64-session safety ceiling continues onto a second page
+/// without skipping or duplicating an identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_session_summary_page_continues_after_64_sessions() -> Result<(), Box<dyn Error>> {
@@ -252,9 +250,8 @@ async fn process_session_summary_page_continues_after_64_sessions() -> Result<()
     Ok(())
 }
 
-/// the process transcript read observes the global outbox
-/// cursor, ordered turn state, and latest semantic frontier in one
-/// repeatable-read snapshot.
+/// the process transcript read observes the global outbox cursor, ordered turn state, and latest
+/// semantic frontier in one repeatable-read snapshot.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_transcript_is_one_authoritative_snapshot() -> Result<(), Box<dyn Error>> {
@@ -376,8 +373,7 @@ async fn process_transcript_is_one_authoritative_snapshot() -> Result<(), Box<dy
     Ok(())
 }
 
-/// a settings-aware turn cannot omit its required
-/// resolution event.
+/// a settings-aware turn cannot omit its required resolution event.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_read_rejects_missing_turn_settings_evidence() -> Result<(), Box<dyn Error>> {
@@ -448,9 +444,8 @@ async fn process_read_rejects_missing_turn_settings_evidence() -> Result<(), Box
     Ok(())
 }
 
-/// a process transcript snapshot exposes the exact durable
-/// Prepared, InFlight, or CancellationRequested state of the current model
-/// call.
+/// a process transcript snapshot exposes the exact durable Prepared, InFlight, or
+/// CancellationRequested state of the current model call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_transcript_projects_current_model_call_state() -> Result<(), Box<dyn Error>> {
@@ -487,10 +482,9 @@ async fn process_transcript_projects_current_model_call_state() -> Result<(), Bo
     Ok(())
 }
 
-/// the production dispatcher offers one exact next event before
-/// advancing the locked durable prefix. Consumer retry and an injected deferred
-/// commit failure after the offer both roll the prefix back, so restart offers
-/// the same cursor again before the later committed event.
+/// the production dispatcher offers one exact next event before advancing the locked durable
+/// prefix. Consumer retry and an injected deferred commit failure after the offer both roll the
+/// prefix back, so restart offers the same cursor again before the later committed event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatcher_redelivers_after_cursor_commit_failure_in_order() -> Result<(), Box<dyn Error>>
@@ -633,8 +627,8 @@ async fn dispatcher_redelivers_after_cursor_commit_failure_in_order() -> Result<
     Ok(())
 }
 
-/// each compiled-in outbox consumer advances an independent
-/// prefix while decoding the same commit-ordered typed events.
+/// each compiled-in outbox consumer advances an independent prefix while decoding the same
+/// commit-ordered typed events.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn outbox_consumers_advance_independent_typed_prefixes() -> Result<(), Box<dyn Error>> {
@@ -711,8 +705,8 @@ async fn outbox_consumers_advance_independent_typed_prefixes() -> Result<(), Box
     Ok(())
 }
 
-/// storage independently rejects a restored tool response whose
-/// request inventory exceeds the bounded domain vocabulary.
+/// storage independently rejects a restored tool response whose request inventory exceeds the
+/// bounded domain vocabulary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn tool_round_storage_rejects_more_than_32_requests() -> Result<(), Box<dyn Error>> {
@@ -743,8 +737,8 @@ async fn tool_round_storage_rejects_more_than_32_requests() -> Result<(), Box<dy
     Ok(())
 }
 
-/// an allocator cursor beyond the delivered prefix requires its
-/// exact committed header; dispatcher idle is reserved for equal cursors.
+/// an allocator cursor beyond the delivered prefix requires its exact committed header; dispatcher
+/// idle is reserved for equal cursors.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatcher_reports_a_missing_committed_header() -> Result<(), Box<dyn Error>> {
@@ -795,8 +789,8 @@ async fn dispatcher_reports_a_missing_committed_header() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// a header restored ahead of the allocator cursor is durable
-/// corruption and is never offered to the consumer.
+/// a header restored ahead of the allocator cursor is durable corruption and is never offered to
+/// the consumer.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatcher_rejects_a_header_beyond_the_allocator() -> Result<(), Box<dyn Error>> {
@@ -842,8 +836,8 @@ async fn dispatcher_rejects_a_header_beyond_the_allocator() -> Result<(), Box<dy
     Ok(())
 }
 
-/// a restored header above both the allocator and the exact next
-/// slot is corruption rather than an idle outbox.
+/// a restored header above both the allocator and the exact next slot is corruption rather than an
+/// idle outbox.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatcher_rejects_a_noncontiguous_header_beyond_the_allocator()
@@ -912,8 +906,8 @@ async fn dispatcher_rejects_a_noncontiguous_header_beyond_the_allocator()
     Ok(())
 }
 
-/// exhausted delivery still validates the allocator singleton
-/// rather than silently polling forever on missing durable state.
+/// exhausted delivery still validates the allocator singleton rather than silently polling forever
+/// on missing durable state.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatcher_validates_the_allocator_at_exhaustion() -> Result<(), Box<dyn Error>> {
@@ -969,8 +963,8 @@ async fn dispatcher_validates_the_allocator_at_exhaustion() -> Result<(), Box<dy
     Ok(())
 }
 
-/// independently valid same-session terminal identifiers do not
-/// form a dispatchable event unless they all describe the event's exact turn.
+/// independently valid same-session terminal identifiers do not form a dispatchable event unless
+/// they all describe the event's exact turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatcher_rejects_crosswired_terminal_correlations() -> Result<(), Box<dyn Error>> {
@@ -1127,9 +1121,8 @@ async fn dispatcher_rejects_crosswired_terminal_correlations() -> Result<(), Box
     Ok(())
 }
 
-/// the dispatcher observes the allocator and candidate header in
-/// one statement snapshot, so an uncommitted allocation is idle rather than
-/// false committed-header corruption.
+/// the dispatcher observes the allocator and candidate header in one statement snapshot, so an
+/// uncommitted allocation is idle rather than false committed-header corruption.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatcher_treats_an_uncommitted_allocation_as_idle() -> Result<(), Box<dyn Error>> {
@@ -1159,9 +1152,9 @@ async fn dispatcher_treats_an_uncommitted_allocation_as_idle() -> Result<(), Box
     Ok(())
 }
 
-/// an event-producing transaction cannot mark its own
-/// uncommitted event delivered and thereby make restart recovery skip it.
-/// Both append-before-delivery and delivery-before-append orderings are covered.
+/// an event-producing transaction cannot mark its own uncommitted event delivered and thereby make
+/// restart recovery skip it. Both append-before-delivery and delivery-before-append orderings are
+/// covered.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn outbox_delivery_rejects_event_producing_transaction() -> Result<(), Box<dyn Error>> {
@@ -1317,9 +1310,8 @@ async fn outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// a deferred failure after the production append rolls the
-/// CreateSession state, event, and sequence allocation back together; retry
-/// commits all three together.
+/// a deferred failure after the production append rolls the CreateSession state, event, and
+/// sequence allocation back together; retry commits all three together.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn create_session_and_outbox_commit_or_roll_back_together() -> Result<(), Box<dyn Error>> {
@@ -1423,8 +1415,8 @@ async fn create_session_and_outbox_commit_or_roll_back_together() -> Result<(), 
     Ok(())
 }
 
-/// only first committed handling emits the creation
-/// event; equal replay and conflicting identifier reuse append nothing.
+/// only first committed handling emits the creation event; equal replay and conflicting identifier
+/// reuse append nothing.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn create_session_first_handling_appends_exactly_once() -> Result<(), Box<dyn Error>> {
@@ -1475,9 +1467,8 @@ async fn create_session_first_handling_appends_exactly_once() -> Result<(), Box<
     Ok(())
 }
 
-/// acceptance and activation append their complete
-/// typed process transitions in the same commits, and command replay emits no
-/// duplicate before the dispatcher advances the exact ordered prefix.
+/// acceptance and activation append their complete typed process transitions in the same commits,
+/// and command replay emits no duplicate before the dispatcher advances the exact ordered prefix.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box<dyn Error>> {
@@ -1635,9 +1626,9 @@ async fn scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// an activation remains dispatchable after continuation while
-/// its exact initial attempt and the lifecycle's current or terminal attempt
-/// remain authoritative; cross-wired lifecycle provenance fails closed.
+/// an activation remains dispatchable after continuation while its exact initial attempt and the
+/// lifecycle's current or terminal attempt remain authoritative; cross-wired lifecycle provenance
+/// fails closed.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn turn_activation_dispatch_requires_authoritative_attempt() -> Result<(), Box<dyn Error>> {
@@ -1781,9 +1772,8 @@ async fn turn_activation_dispatch_requires_authoritative_attempt() -> Result<(),
     Ok(())
 }
 
-/// historical Prepared and InFlight transition records remain
-/// dispatchable after advancement, but a terminal record must carry the
-/// authoritative call's exact terminal disposition.
+/// historical Prepared and InFlight transition records remain dispatchable after advancement, but a
+/// terminal record must carry the authoritative call's exact terminal disposition.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_model_call_dispatch_requires_exact_disposition() -> Result<(), Box<dyn Error>> {
@@ -1912,8 +1902,8 @@ async fn terminal_model_call_dispatch_requires_exact_disposition() -> Result<(),
     Ok(())
 }
 
-/// a stored nonterminal model-call transition cannot be ahead
-/// of the authoritative monotonic call state.
+/// a stored nonterminal model-call transition cannot be ahead of the authoritative monotonic call
+/// state.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn model_call_dispatch_rejects_an_unreached_transition() -> Result<(), Box<dyn Error>> {
@@ -1981,8 +1971,8 @@ async fn model_call_dispatch_rejects_an_unreached_transition() -> Result<(), Box
     Ok(())
 }
 
-/// a completed-turn event is dispatchable only while the
-/// lifecycle's terminal attempt retains a completion-compatible disposition.
+/// a completed-turn event is dispatchable only while the lifecycle's terminal attempt retains a
+/// completion-compatible disposition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn completed_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
@@ -2038,8 +2028,8 @@ async fn completed_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<
     Ok(())
 }
 
-/// a refused-turn event is dispatchable only while the
-/// lifecycle's terminal attempt retains a refusal-compatible disposition.
+/// a refused-turn event is dispatchable only while the lifecycle's terminal attempt retains a
+/// refusal-compatible disposition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn refused_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
@@ -2086,9 +2076,8 @@ async fn refused_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dy
     Ok(())
 }
 
-/// a reconciliation-required event is
-/// dispatchable only while its terminal attempt retains exact ambiguity and
-/// interrupt provenance.
+/// a reconciliation-required event is dispatchable only while its terminal attempt retains exact
+/// ambiguity and interrupt provenance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn reconciliation_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
@@ -2153,8 +2142,8 @@ async fn reconciliation_dispatch_requires_exact_terminal_attempt() -> Result<(),
     Ok(())
 }
 
-/// an accepted-input event is dispatchable only when
-/// its content still matches the immutable accepting command.
+/// an accepted-input event is dispatchable only when its content still matches the immutable
+/// accepting command.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatcher_rejects_crosswired_accepted_content() -> Result<(), Box<dyn Error>> {
@@ -2221,8 +2210,8 @@ async fn dispatcher_rejects_crosswired_accepted_content() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// replay of a settings-aware defaults replacement
-/// fails closed when its required settings-change evidence is absent.
+/// replay of a settings-aware defaults replacement fails closed when its required settings-change
+/// evidence is absent.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn replacement_replay_requires_settings_change_evidence() -> Result<(), Box<dyn Error>> {
@@ -2271,8 +2260,8 @@ async fn replacement_replay_requires_settings_change_evidence() -> Result<(), Bo
     Ok(())
 }
 
-/// replay authenticates settings-change evidence
-/// against the immutable command and defaults records.
+/// replay authenticates settings-change evidence against the immutable command and defaults
+/// records.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn replacement_replay_rejects_cross_wired_settings_change_evidence()
@@ -2310,8 +2299,7 @@ async fn replacement_replay_rejects_cross_wired_settings_change_evidence()
     Ok(())
 }
 
-/// one defaults epoch can source exactly one durable
-/// settings-change outbox event.
+/// one defaults epoch can source exactly one durable settings-change outbox event.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn settings_change_outbox_is_unique_per_epoch() -> Result<(), Box<dyn Error>> {
@@ -2435,9 +2423,8 @@ async fn legacy_command_versions_reject_explicit_model_settings() -> Result<(), 
     Ok(())
 }
 
-/// native session creation retains the
-/// caller's settings independently from its effect row, so a cross-wired
-/// defaults snapshot cannot authenticate command replay or current reads.
+/// native session creation retains the caller's settings independently from its effect row, so a
+/// cross-wired defaults snapshot cannot authenticate command replay or current reads.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn native_creation_authenticates_command_settings() -> Result<(), Box<dyn Error>> {
@@ -2489,8 +2476,7 @@ async fn native_creation_authenticates_command_settings() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// the accepted-input settings copy must equal the
-/// independently retained submit-command payload.
+/// the accepted-input settings copy must equal the independently retained submit-command payload.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn accepted_settings_match_submit_command() -> Result<(), Box<dyn Error>> {
@@ -2545,9 +2531,8 @@ async fn accepted_settings_match_submit_command() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// turn-settings dispatch authenticates the retained
-/// per-call overlay against the accepted origin rather than trusting only the
-/// settings event row.
+/// turn-settings dispatch authenticates the retained per-call overlay against the accepted origin
+/// rather than trusting only the settings event row.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatcher_rejects_crosswired_turn_settings_origin() -> Result<(), Box<dyn Error>> {
@@ -2612,8 +2597,8 @@ async fn dispatcher_rejects_crosswired_turn_settings_origin() -> Result<(), Box<
     Ok(())
 }
 
-/// defaults-settings dispatch compares both event
-/// snapshots with their independently retained immutable defaults epochs.
+/// defaults-settings dispatch compares both event snapshots with their independently retained
+/// immutable defaults epochs.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatcher_rejects_crosswired_defaults_settings_event() -> Result<(), Box<dyn Error>> {
@@ -2662,8 +2647,8 @@ async fn dispatcher_rejects_crosswired_defaults_settings_event() -> Result<(), B
     Ok(())
 }
 
-/// defaults-settings dispatch authenticates
-/// caller provenance against the independently retained replacement command.
+/// defaults-settings dispatch authenticates caller provenance against the independently retained
+/// replacement command.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatcher_rejects_crosswired_settings_caller() -> Result<(), Box<dyn Error>> {
@@ -2713,8 +2698,8 @@ async fn dispatcher_rejects_crosswired_settings_caller() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// turn settings retain the exact lower
-/// precedence layers from their referenced immutable defaults epoch.
+/// turn settings retain the exact lower precedence layers from their referenced immutable defaults
+/// epoch.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn turn_settings_authenticate_the_defaults_epoch() -> Result<(), Box<dyn Error>> {
@@ -2807,8 +2792,8 @@ async fn turn_settings_authenticate_the_defaults_epoch() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// the process defaults projection decodes the exact
-/// self-contained settings document stored with the selected epoch.
+/// the process defaults projection decodes the exact self-contained settings document stored with
+/// the selected epoch.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_defaults_read_retains_model_settings_evidence() -> Result<(), Box<dyn Error>> {
@@ -2864,12 +2849,11 @@ async fn process_defaults_read_retains_model_settings_evidence() -> Result<(), B
     Ok(())
 }
 
-/// a session system prompt lives on the
-/// immutable defaults epoch. Creation stores it, the loaded current session
-/// and process defaults read return it, replacement installs a promptless
-/// successor without rewriting the prompted epoch, replay preserves the exact
-/// recorded payloads, and model-call preparation reads the prompt through the
-/// calling turn's frozen epoch rather than the current pointer.
+/// a session system prompt lives on the immutable defaults epoch. Creation stores it, the loaded
+/// current session and process defaults read return it, replacement installs a promptless successor
+/// without rewriting the prompted epoch, replay preserves the exact recorded payloads, and
+/// model-call preparation reads the prompt through the calling turn's frozen epoch rather than the
+/// current pointer.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn system_prompt_rides_the_frozen_defaults_epoch() -> Result<(), Box<dyn Error>> {
@@ -3247,9 +3231,8 @@ async fn system_prompt_rides_the_frozen_defaults_epoch() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// the operation counted before
-/// activation is the exact no-steering Prepared call committed with that
-/// activation; steering accepted afterward remains pending for a later call.
+/// the operation counted before activation is the exact no-steering Prepared call committed with
+/// that activation; steering accepted afterward remains pending for a later call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn counted_activation_checkpoints_exact_call_before_steering() -> Result<(), Box<dyn Error>> {
@@ -3650,10 +3633,9 @@ async fn stale_counted_preview_retains_no_instruction_evidence() -> Result<(), B
     Ok(())
 }
 
-/// deferred compaction evidence accepts successor ranges in
-/// model-visible order when a predecessor compacts only its logical leading
-/// summary and its retained suffix physically precedes that summary, while
-/// reverse correlation rejects an orphan summary.
+/// deferred compaction evidence accepts successor ranges in model-visible order when a predecessor
+/// compacts only its logical leading summary and its retained suffix physically precedes that
+/// summary, while reverse correlation rejects an orphan summary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn context_compaction_constraints_use_projected_successor_order() -> Result<(), Box<dyn Error>>

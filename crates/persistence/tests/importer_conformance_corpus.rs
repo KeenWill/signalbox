@@ -640,12 +640,11 @@ fn assert_entry_maps(
     assert_eq!(entry.content(), &expected);
 }
 
-/// the Codex era's structured tool vocabulary — tool search
-/// call and output, local shell call, web search call, and the custom tool call
-/// and its output — retains each call identity, structured argument or action
-/// value, and result content in converted order. The targeted asserts below
-/// carry that enforcement (testing-style rule 10); the golden supplements them
-/// with the full raw-record, source-metadata, and frontier shape.
+/// the Codex era's structured tool vocabulary — tool search call and output, local shell call, web
+/// search call, and the custom tool call and its output — retains each call identity, structured
+/// argument or action value, and result content in converted order. The targeted asserts below
+/// carry that enforcement (testing-style rule 10); the golden supplements them with the full
+/// raw-record, source-metadata, and frontier shape.
 #[test]
 fn codex_rollout_v1_structured_tools_match_golden() {
     let imported = convert_codex(CODEX_V1_STRUCTURED_TOOLS);

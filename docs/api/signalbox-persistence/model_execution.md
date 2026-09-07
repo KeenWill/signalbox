@@ -7,64 +7,10 @@
 ```rust
 pub struct ToolContinuationUsageLimit {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ToolContinuationUsageLimit
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for model_execution::ToolContinuationUsageLimit
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for model_execution::ToolContinuationUsageLimit {}
-impl<T> parse_display::IntoResult<T> for model_execution::ToolContinuationUsageLimit {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::ToolContinuationUsageLimit
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::ToolContinuationUsageLimit {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ToolContinuationUsageLimit {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::ToolContinuationUsageLimit
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::ToolContinuationUsageLimit
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::ToolContinuationUsageLimit
-where
-    T: ?marker::Sized,
-{
-}
 impl model_execution::ToolContinuationUsageLimit {
     pub const fn new(
-        target: model_call::ResolvedProviderTarget,
-        fast_mode: model_settings::FastMode,
+        target: signalbox_domain::ResolvedProviderTarget,
+        fast_mode: signalbox_domain::FastMode,
         max_output_tokens: u64,
         context_window_tokens: u64,
     ) -> Self;
@@ -77,7 +23,10 @@ impl model_execution::ToolContinuationUsageLimit {
 
 ```rust
 pub type ToolContinuationUsageLimitCatalog = map::HashMap<
-    (model_call::ResolvedProviderTarget, model_settings::FastMode),
+    (
+        signalbox_domain::ResolvedProviderTarget,
+        signalbox_domain::FastMode,
+    ),
     model_execution::ToolContinuationUsageLimit,
 >;
 ```
@@ -87,67 +36,13 @@ pub type ToolContinuationUsageLimitCatalog = map::HashMap<
 ```rust
 pub struct ProspectiveModelCall {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ProspectiveModelCall
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for model_execution::ProspectiveModelCall
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for model_execution::ProspectiveModelCall {}
-impl<T> parse_display::IntoResult<T> for model_execution::ProspectiveModelCall {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::ProspectiveModelCall
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::ProspectiveModelCall {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ProspectiveModelCall {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::ProspectiveModelCall
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::ProspectiveModelCall
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::ProspectiveModelCall
-where
-    T: ?marker::Sized,
-{
-}
 impl model_execution::ProspectiveModelCall {
     pub fn render(
         &self,
-        tools: boxed::Box<[tool_loop::ToolDefinition]>,
+        tools: boxed::Box<[signalbox_application::ToolDefinition]>,
     ) -> result::Result<
-        model_execution::PreparedModelOperation,
-        model_execution::ModelFrontierRenderingError,
+        signalbox_application::PreparedModelOperation,
+        signalbox_application::ModelFrontierRenderingError,
     >;
     pub fn prospective_input(&self) -> model_execution::ProspectiveModelInput<'_>;
 }
@@ -157,71 +52,17 @@ impl model_execution::ProspectiveModelCall {
 
 ```rust
 pub enum ProspectiveModelInput<'a> {
-    Committed(context_frontier::ContextFrontierId),
+    Committed(signalbox_domain::ContextFrontierId),
     Preview {
-        projected_members: &'a [context_frontier::SemanticTranscriptEntryRef],
+        projected_members: &'a [signalbox_domain::SemanticTranscriptEntryRef],
         uncommitted_content_bytes: u64,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ProspectiveModelInput<'a>
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for model_execution::ProspectiveModelInput<'a>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for model_execution::ProspectiveModelInput<'a> {}
-impl<T> parse_display::IntoResult<T> for model_execution::ProspectiveModelInput<'a> {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::ProspectiveModelInput<'a>
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::ProspectiveModelInput<'a> {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ProspectiveModelInput<'a> {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::ProspectiveModelInput<'a>
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::ProspectiveModelInput<'a>
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::ProspectiveModelInput<'a>
-where
-    T: ?marker::Sized,
-{
-}
-impl convert::From<context_frontier::ContextFrontierId>
+impl convert::From<signalbox_domain::ContextFrontierId>
     for model_execution::ProspectiveModelInput<'_>
 {
-    fn from(frontier: context_frontier::ContextFrontierId) -> Self;
+    fn from(frontier: signalbox_domain::ContextFrontierId) -> Self;
 }
 ```
 
@@ -230,62 +71,8 @@ impl convert::From<context_frontier::ContextFrontierId>
 ```rust
 pub struct ReportedModelCallUsage {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ReportedModelCallUsage
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for model_execution::ReportedModelCallUsage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for model_execution::ReportedModelCallUsage {}
-impl<T> parse_display::IntoResult<T> for model_execution::ReportedModelCallUsage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::ReportedModelCallUsage
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::ReportedModelCallUsage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ReportedModelCallUsage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::ReportedModelCallUsage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::ReportedModelCallUsage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::ReportedModelCallUsage
-where
-    T: ?marker::Sized,
-{
-}
 impl model_execution::ReportedModelCallUsage {
-    pub const fn usage(self) -> model_execution::ProviderReportedTokenUsage;
+    pub const fn usage(self) -> signalbox_domain::ProviderReportedTokenUsage;
     pub const fn input_includes_cache_tokens(self) -> bool;
     pub const fn input_is_retained(self) -> bool;
     pub const fn retained_input_tokens(self) -> option::Option<u64>;
@@ -305,60 +92,6 @@ pub enum ModelCallIdentityCollision {
     ReclassifiedTurn,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ModelCallIdentityCollision
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for model_execution::ModelCallIdentityCollision
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for model_execution::ModelCallIdentityCollision {}
-impl<T> parse_display::IntoResult<T> for model_execution::ModelCallIdentityCollision {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::ModelCallIdentityCollision
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::ModelCallIdentityCollision {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ModelCallIdentityCollision {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::ModelCallIdentityCollision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::ModelCallIdentityCollision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::ModelCallIdentityCollision
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for model_execution::ModelCallIdentityCollision {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -379,63 +112,9 @@ pub enum ModelCallCorruption {
     },
     CurrentSession(session::SessionCorruption),
     Scheduling(submit_input::SubmitInputCorruption),
-    Execution(model_execution::ModelCallExecutionReconstitutionFailure),
+    Execution(signalbox_domain::ModelCallExecutionReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::ModelCallCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for model_execution::ModelCallCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for model_execution::ModelCallCorruption {}
-impl<T> parse_display::IntoResult<T> for model_execution::ModelCallCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::ModelCallCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::ModelCallCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ModelCallCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::ModelCallCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::ModelCallCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::ModelCallCorruption
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for model_execution::ModelCallCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -458,56 +137,14 @@ pub enum ModelCallRepositoryError {
     InvalidTransition(&'static str),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for model_execution::ModelCallRepositoryError {}
-impl<T> parse_display::IntoResult<T> for model_execution::ModelCallRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::ModelCallRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::ModelCallRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::ModelCallRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::ModelCallRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::ModelCallRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::ModelCallRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for model_execution::ModelCallRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for model_execution::ModelCallRepositoryError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for model_execution::ModelCallRepositoryError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for model_execution::ModelCallRepositoryError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 impl convert::From<model_execution::ModelCallCorruption>
     for model_execution::ModelCallRepositoryError
@@ -536,60 +173,6 @@ pub enum CredentialPoolRuntimeAction {
     Quarantine,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::CredentialPoolRuntimeAction
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for model_execution::CredentialPoolRuntimeAction
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for model_execution::CredentialPoolRuntimeAction {}
-impl<T> parse_display::IntoResult<T> for model_execution::CredentialPoolRuntimeAction {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::CredentialPoolRuntimeAction
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::CredentialPoolRuntimeAction {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::CredentialPoolRuntimeAction {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::CredentialPoolRuntimeAction
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::CredentialPoolRuntimeAction
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::CredentialPoolRuntimeAction
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## CredentialPoolRuntimeExhaustion
@@ -600,60 +183,6 @@ pub enum CredentialPoolRuntimeExhaustion {
     Fail,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::CredentialPoolRuntimeExhaustion
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for model_execution::CredentialPoolRuntimeExhaustion
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for model_execution::CredentialPoolRuntimeExhaustion {}
-impl<T> parse_display::IntoResult<T> for model_execution::CredentialPoolRuntimeExhaustion {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::CredentialPoolRuntimeExhaustion
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::CredentialPoolRuntimeExhaustion {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::CredentialPoolRuntimeExhaustion {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::CredentialPoolRuntimeExhaustion
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::CredentialPoolRuntimeExhaustion
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::CredentialPoolRuntimeExhaustion
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## CredentialPoolRuntimeMember
@@ -661,60 +190,6 @@ where
 ```rust
 pub struct CredentialPoolRuntimeMember {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::CredentialPoolRuntimeMember
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for model_execution::CredentialPoolRuntimeMember
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for model_execution::CredentialPoolRuntimeMember {}
-impl<T> parse_display::IntoResult<T> for model_execution::CredentialPoolRuntimeMember {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::CredentialPoolRuntimeMember
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::CredentialPoolRuntimeMember {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::CredentialPoolRuntimeMember {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::CredentialPoolRuntimeMember
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::CredentialPoolRuntimeMember
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::CredentialPoolRuntimeMember
-where
-    T: ?marker::Sized,
-{
-}
 impl model_execution::CredentialPoolRuntimeMember {
     pub fn credential_reference(&self) -> &str;
 }
@@ -732,60 +207,6 @@ impl model_execution::CredentialPoolRuntimeMember {
 ```rust
 pub struct CredentialPoolRuntimePolicy {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for model_execution::CredentialPoolRuntimePolicy
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for model_execution::CredentialPoolRuntimePolicy
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for model_execution::CredentialPoolRuntimePolicy {}
-impl<T> parse_display::IntoResult<T> for model_execution::CredentialPoolRuntimePolicy {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::CredentialPoolRuntimePolicy
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::CredentialPoolRuntimePolicy {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::CredentialPoolRuntimePolicy {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::CredentialPoolRuntimePolicy
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::CredentialPoolRuntimePolicy
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::CredentialPoolRuntimePolicy
-where
-    T: ?marker::Sized,
-{
-}
 impl model_execution::CredentialPoolRuntimePolicy {
     pub fn name(&self) -> &str;
 }
@@ -806,8 +227,10 @@ impl model_execution::CredentialPoolRuntimePolicy {
 ## CredentialPoolRuntimeCatalog
 
 ```rust
-pub type CredentialPoolRuntimeCatalog =
-    map::HashMap<model_call::ResolvedProviderTarget, model_execution::CredentialPoolRuntimePolicy>;
+pub type CredentialPoolRuntimeCatalog = map::HashMap<
+    signalbox_domain::ResolvedProviderTarget,
+    model_execution::CredentialPoolRuntimePolicy,
+>;
 ```
 
 ## PostgresModelCallRepository
@@ -815,68 +238,14 @@ pub type CredentialPoolRuntimeCatalog =
 ```rust
 pub struct PostgresModelCallRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for model_execution::PostgresModelCallRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for model_execution::PostgresModelCallRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for model_execution::PostgresModelCallRepository {}
-impl<T> parse_display::IntoResult<T> for model_execution::PostgresModelCallRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for model_execution::PostgresModelCallRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for model_execution::PostgresModelCallRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for model_execution::PostgresModelCallRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for model_execution::PostgresModelCallRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for model_execution::PostgresModelCallRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for model_execution::PostgresModelCallRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl model_execution::PostgresModelCallRepository {
     pub const fn pool(&self) -> &sqlx_postgres::PgPool;
 }
 impl model_execution::PostgresModelCallRepository {
     pub fn new(
         pool: sqlx_postgres::PgPool,
-        targets: model_execution::ModelTargetCatalog,
-        credential_reference: model_execution::ModelCallCredentialReference,
+        targets: signalbox_domain::ModelTargetCatalog,
+        credential_reference: signalbox_application::ModelCallCredentialReference,
     ) -> Self;
     pub fn with_session_credentials(
         self,
@@ -889,7 +258,7 @@ impl model_execution::PostgresModelCallRepository {
     pub fn with_same_credential_attempt_bound(self, bound: nonzero::NonZeroUsize) -> Self;
     pub fn with_cache_inclusive_input_targets(
         self,
-        targets: set::HashSet<model_call::ResolvedProviderTarget>,
+        targets: set::HashSet<signalbox_domain::ResolvedProviderTarget>,
     ) -> Self;
     pub fn with_continuation_usage_limits(
         self,
@@ -898,8 +267,8 @@ impl model_execution::PostgresModelCallRepository {
     pub async fn latest_reported_usage<'a>(
         &self,
         session: signalbox_domain::SessionId,
-        target: model_call::ResolvedProviderTarget,
-        fast_mode: model_settings::FastMode,
+        target: signalbox_domain::ResolvedProviderTarget,
+        fast_mode: signalbox_domain::FastMode,
         replays_provider_compaction: bool,
         prospective: impl convert::Into<model_execution::ProspectiveModelInput<'a>>,
     ) -> result::Result<
@@ -909,22 +278,22 @@ impl model_execution::PostgresModelCallRepository {
     pub async fn request_too_large_requires_compaction(
         &self,
         session: signalbox_domain::SessionId,
-        target: model_call::ResolvedProviderTarget,
-        persisted_prospective_prefix: context_frontier::ContextFrontierId,
+        target: signalbox_domain::ResolvedProviderTarget,
+        persisted_prospective_prefix: signalbox_domain::ContextFrontierId,
     ) -> result::Result<bool, model_execution::ModelCallRepositoryError>;
     pub async fn resolve_session_credential_reference(
         &self,
         session: signalbox_domain::SessionId,
-        target: model_call::ResolvedProviderTarget,
+        target: signalbox_domain::ResolvedProviderTarget,
     ) -> result::Result<
-        model_execution::ModelCallCredentialReference,
+        signalbox_application::ModelCallCredentialReference,
         model_execution::ModelCallRepositoryError,
     >;
     pub fn tool_loop_repository(&self) -> tool_loop::PostgresToolLoopRepository;
     pub fn approval_judge_repository(&self) -> approval_judge::PostgresApprovalJudgeRepository;
     pub async fn preview_activation_operation(
         &self,
-        preview: &turn_eligibility::PreparedTurnActivation,
+        preview: &signalbox_domain::PreparedTurnActivation,
         call: signalbox_domain::ModelCallId,
     ) -> result::Result<
         option::Option<model_execution::ProspectiveModelCall>,
@@ -934,18 +303,18 @@ impl model_execution::PostgresModelCallRepository {
         &self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
-        failure_identities: model_execution::FailedModelCallTurnIdentities,
-        steering_frontier: context_frontier::ContextFrontierId,
+        failure_identities: signalbox_domain::FailedModelCallTurnIdentities,
+        steering_frontier: signalbox_domain::ContextFrontierId,
         next_steering_identities: NextSteeringIdentities,
     ) -> result::Result<
-        model_execution::PrepareModelCallOutcome,
+        signalbox_application::PrepareModelCallOutcome,
         model_execution::ModelCallRepositoryError,
     >
     where
         NextSteeringIdentities: function::FnMut(
             signalbox_domain::AcceptedInputId,
         ) -> (
-            context_frontier::SemanticTranscriptEntryId,
+            signalbox_domain::SemanticTranscriptEntryId,
             signalbox_domain::TurnId,
         );
     pub async fn authorize_send(
@@ -953,17 +322,17 @@ impl model_execution::PostgresModelCallRepository {
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
     ) -> result::Result<
-        model_execution::AuthorizeModelCallOutcome,
+        signalbox_application::AuthorizeModelCallOutcome,
         model_execution::ModelCallRepositoryError,
     >;
     pub async fn apply_terminal_observation<NextTurn>(
         &self,
         session: signalbox_domain::SessionId,
-        observation: model_execution::CorrelatedModelCallTerminalObservation,
-        identities: model_execution::ModelCallTerminalIdentities,
+        observation: signalbox_domain::CorrelatedModelCallTerminalObservation,
+        identities: signalbox_domain::ModelCallTerminalIdentities,
         next_reclassified_turn: NextTurn,
     ) -> result::Result<
-        model_execution::ModelCallTerminalOutcome,
+        signalbox_domain::ModelCallTerminalOutcome,
         model_execution::ModelCallRepositoryError,
     >
     where
@@ -973,12 +342,12 @@ impl model_execution::PostgresModelCallRepository {
         &self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
-        cause: model_execution::PreparedModelCallFailureCause,
-        attachment_failure: option::Option<model_execution::AttachmentPreparationFailure>,
-        identities: model_execution::FailedModelCallTurnIdentities,
+        cause: signalbox_application::PreparedModelCallFailureCause,
+        attachment_failure: option::Option<signalbox_application::AttachmentPreparationFailure>,
+        identities: signalbox_domain::FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> result::Result<
-        model_execution::FailedModelCallTurn,
+        signalbox_domain::FailedModelCallTurn,
         model_execution::ModelCallRepositoryError,
     >
     where
@@ -988,59 +357,61 @@ impl model_execution::PostgresModelCallRepository {
         &self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
-        attachment_failure: option::Option<model_execution::AttachmentPreparationFailure>,
+        attachment_failure: option::Option<signalbox_application::AttachmentPreparationFailure>,
     ) -> result::Result<
-        model_execution::RetainedPreparedFailureStatus,
+        signalbox_application::RetainedPreparedFailureStatus,
         model_execution::ModelCallRepositoryError,
     >;
     pub async fn reread_ambiguous_authorization(
         &self,
         session: signalbox_domain::SessionId,
-        prepared: &model_execution::PreparedModelCallRequest,
+        prepared: &signalbox_domain::PreparedModelCallRequest,
     ) -> result::Result<
-        model_execution::ModelCallAuthorizationReread,
+        signalbox_application::ModelCallAuthorizationReread,
         model_execution::ModelCallRepositoryError,
     >;
     pub async fn reread_terminal_observation(
         &self,
         session: signalbox_domain::SessionId,
-        observation: &model_execution::CorrelatedModelCallTerminalObservation,
+        observation: &signalbox_domain::CorrelatedModelCallTerminalObservation,
     ) -> result::Result<
-        model_execution::RetainedModelCallObservationStatus,
+        signalbox_application::RetainedModelCallObservationStatus,
         model_execution::ModelCallRepositoryError,
     >;
     pub async fn recover_after_restart(
         &self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
-        identities: model_execution::FailedModelCallTurnIdentities,
+        identities: signalbox_domain::FailedModelCallTurnIdentities,
     ) -> result::Result<
-        model_execution::ModelCallTerminalOutcome,
+        signalbox_domain::ModelCallTerminalOutcome,
         model_execution::ModelCallRepositoryError,
     >;
 }
-impl model_execution::PrepareModelCallTransaction for model_execution::PostgresModelCallRepository {
+impl signalbox_application::PrepareModelCallTransaction
+    for model_execution::PostgresModelCallRepository
+{
     type Error = model_execution::ModelCallRepositoryError;
     async fn prepare<NextSteeringIdentities>(
         &mut self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
-        failure_identities: model_execution::FailedModelCallTurnIdentities,
-        steering_frontier: context_frontier::ContextFrontierId,
+        failure_identities: signalbox_domain::FailedModelCallTurnIdentities,
+        steering_frontier: signalbox_domain::ContextFrontierId,
         next_steering_identities: NextSteeringIdentities,
     ) -> result::Result<
-        model_execution::PrepareModelCallOutcome,
-        <Self as model_execution::PrepareModelCallTransaction>::Error,
+        signalbox_application::PrepareModelCallOutcome,
+        <Self as signalbox_application::PrepareModelCallTransaction>::Error,
     >
     where
         NextSteeringIdentities: function::FnMut(
                 signalbox_domain::AcceptedInputId,
             ) -> (
-                context_frontier::SemanticTranscriptEntryId,
+                signalbox_domain::SemanticTranscriptEntryId,
                 signalbox_domain::TurnId,
             ) + marker::Send;
 }
-impl model_execution::FailPreparedModelCallTransaction
+impl signalbox_application::FailPreparedModelCallTransaction
     for model_execution::PostgresModelCallRepository
 {
     type Error = model_execution::ModelCallRepositoryError;
@@ -1048,13 +419,13 @@ impl model_execution::FailPreparedModelCallTransaction
         &mut self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
-        cause: model_execution::PreparedModelCallFailureCause,
-        attachment_failure: option::Option<model_execution::AttachmentPreparationFailure>,
-        identities: model_execution::FailedModelCallTurnIdentities,
+        cause: signalbox_application::PreparedModelCallFailureCause,
+        attachment_failure: option::Option<signalbox_application::AttachmentPreparationFailure>,
+        identities: signalbox_domain::FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> result::Result<
-        model_execution::FailedModelCallTurn,
-        <Self as model_execution::FailPreparedModelCallTransaction>::Error,
+        signalbox_domain::FailedModelCallTurn,
+        <Self as signalbox_application::FailPreparedModelCallTransaction>::Error,
     >
     where
         NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId
@@ -1063,13 +434,13 @@ impl model_execution::FailPreparedModelCallTransaction
         &mut self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
-        attachment_failure: option::Option<model_execution::AttachmentPreparationFailure>,
+        attachment_failure: option::Option<signalbox_application::AttachmentPreparationFailure>,
     ) -> result::Result<
-        model_execution::RetainedPreparedFailureStatus,
-        <Self as model_execution::FailPreparedModelCallTransaction>::Error,
+        signalbox_application::RetainedPreparedFailureStatus,
+        <Self as signalbox_application::FailPreparedModelCallTransaction>::Error,
     >;
 }
-impl model_execution::AuthorizeModelCallTransaction
+impl signalbox_application::AuthorizeModelCallTransaction
     for model_execution::PostgresModelCallRepository
 {
     type Error = model_execution::ModelCallRepositoryError;
@@ -1078,16 +449,16 @@ impl model_execution::AuthorizeModelCallTransaction
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
     ) -> result::Result<
-        model_execution::AuthorizeModelCallOutcome,
-        <Self as model_execution::AuthorizeModelCallTransaction>::Error,
+        signalbox_application::AuthorizeModelCallOutcome,
+        <Self as signalbox_application::AuthorizeModelCallTransaction>::Error,
     >;
     async fn reread_after_ambiguous_commit(
         &mut self,
         session: signalbox_domain::SessionId,
-        prepared: &model_execution::PreparedModelCallRequest,
+        prepared: &signalbox_domain::PreparedModelCallRequest,
     ) -> result::Result<
-        model_execution::ModelCallAuthorizationReread,
-        <Self as model_execution::AuthorizeModelCallTransaction>::Error,
+        signalbox_application::ModelCallAuthorizationReread,
+        <Self as signalbox_application::AuthorizeModelCallTransaction>::Error,
     >;
     fn cancellation_signal(
         &self,
@@ -1095,19 +466,19 @@ impl model_execution::AuthorizeModelCallTransaction
         call: signalbox_domain::ModelCallId,
     ) -> impl future::Future<Output = ()> + marker::Send + 'static;
 }
-impl model_execution::CommitModelCallObservationTransaction
+impl signalbox_application::CommitModelCallObservationTransaction
     for model_execution::PostgresModelCallRepository
 {
     type Error = model_execution::ModelCallRepositoryError;
     async fn commit_observation<NextTurn>(
         &mut self,
         session: signalbox_domain::SessionId,
-        observation: model_execution::CorrelatedModelCallTerminalObservation,
-        identities: model_execution::ModelCallTerminalIdentityCandidates,
+        observation: signalbox_domain::CorrelatedModelCallTerminalObservation,
+        identities: signalbox_application::ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
     ) -> result::Result<
-        option::Option<model_execution::ModelCallObservationCommitOutcome>,
-        <Self as model_execution::CommitModelCallObservationTransaction>::Error,
+        option::Option<signalbox_application::ModelCallObservationCommitOutcome>,
+        <Self as signalbox_application::CommitModelCallObservationTransaction>::Error,
     >
     where
         NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId
@@ -1115,10 +486,10 @@ impl model_execution::CommitModelCallObservationTransaction
     async fn reread_observation(
         &mut self,
         session: signalbox_domain::SessionId,
-        observation: &model_execution::CorrelatedModelCallTerminalObservation,
+        observation: &signalbox_domain::CorrelatedModelCallTerminalObservation,
     ) -> result::Result<
-        model_execution::RetainedModelCallObservationStatus,
-        <Self as model_execution::CommitModelCallObservationTransaction>::Error,
+        signalbox_application::RetainedModelCallObservationStatus,
+        <Self as signalbox_application::CommitModelCallObservationTransaction>::Error,
     >;
 }
 ```

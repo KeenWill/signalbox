@@ -828,8 +828,8 @@ mod tests {
         assert_eq!(store.observed[0].id(), candidate);
     }
 
-    /// partial ingestion returns the checked accepted aggregate
-    /// and every loss without claiming the incomplete source is durable.
+    /// partial ingestion returns the checked accepted aggregate and every loss without claiming the
+    /// incomplete source is durable.
     #[tokio::test]
     async fn resilient_ingestion_reports_exact_skips_without_storage() {
         let candidate = conversation(1);
@@ -869,8 +869,8 @@ mod tests {
         assert!(store.observed.is_empty());
     }
 
-    /// a resilient conversion with no losses may use the same
-    /// exact-source durable resolution as strict conversion.
+    /// a resilient conversion with no losses may use the same exact-source durable resolution as
+    /// strict conversion.
     #[tokio::test]
     async fn resilient_complete_ingestion_stores_with_no_skips() {
         let candidate = conversation(1);
@@ -914,8 +914,8 @@ mod tests {
         assert_eq!(store.observed.len(), 1);
     }
 
-    /// all-invalid nonempty input reports every loss without
-    /// minting entry identities or attempting a durable write.
+    /// all-invalid nonempty input reports every loss without minting entry identities or attempting
+    /// a durable write.
     #[tokio::test]
     async fn resilient_ingestion_with_no_valid_records_never_stores() {
         let candidate = conversation(1);

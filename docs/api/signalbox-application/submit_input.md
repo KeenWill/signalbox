@@ -30,28 +30,28 @@ impl SubmitInputRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
-        content: user_content::UserContent,
-        delivery: delivery_request::DeliveryRequest,
+        content: signalbox_domain::UserContent,
+        delivery: signalbox_domain::DeliveryRequest,
     ) -> result::Result<Self, SubmitInputRequestError>;
     pub fn try_new_with_content_limit(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
-        content: user_content::UserContent,
-        delivery: delivery_request::DeliveryRequest,
+        content: signalbox_domain::UserContent,
+        delivery: signalbox_domain::DeliveryRequest,
         max_content_utf8_bytes: option::Option<usize>,
     ) -> result::Result<Self, SubmitInputRequestError>;
     pub fn try_new_core_interrupt(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
-        content: user_content::UserContent,
+        content: signalbox_domain::UserContent,
         expected_active_turn: signalbox_domain::TurnId,
-        descendant_scope: vocabulary::DescendantTerminationScope,
-        configuration: delivery_request::PerInputConfigurationChoices,
+        descendant_scope: signalbox_domain::DescendantTerminationScope,
+        configuration: signalbox_domain::PerInputConfigurationChoices,
     ) -> result::Result<Self, SubmitInputRequestError>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn session(&self) -> signalbox_domain::SessionId;
-    pub const fn content(&self) -> &user_content::UserContent;
-    pub const fn delivery(&self) -> delivery_request::DeliveryRequest;
+    pub const fn content(&self) -> &signalbox_domain::UserContent;
+    pub const fn delivery(&self) -> signalbox_domain::DeliveryRequest;
 }
 ```
 
@@ -61,8 +61,8 @@ impl SubmitInputRequest {
 pub trait SubmitInputIdGenerator {
     fn next_accepted_input_id(&mut self) -> signalbox_domain::AcceptedInputId;
     fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
-    fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_semantic_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
     fn next_closure_decision_command_id(&mut self) -> signalbox_domain::DurableCommandId;
     fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
@@ -76,8 +76,8 @@ pub struct UuidV7SubmitInputIdGenerator;
 impl SubmitInputIdGenerator for UuidV7SubmitInputIdGenerator {
     fn next_accepted_input_id(&mut self) -> signalbox_domain::AcceptedInputId;
     fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
-    fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_semantic_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
     fn next_closure_decision_command_id(&mut self) -> signalbox_domain::DurableCommandId;
     fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
@@ -87,7 +87,7 @@ impl SubmitInputIdGenerator for UuidV7SubmitInputIdGenerator {
 
 ```rust
 pub enum SubmitInputOutcome {
-    Recorded(result::SubmitInputResult),
+    Recorded(signalbox_domain::SubmitInputResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
@@ -102,10 +102,10 @@ pub trait SubmitInputTransaction {
     type Error;
     fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
         &mut self,
-        command: command::SubmitInput,
+        command: signalbox_domain::SubmitInput,
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: option::Option<signalbox_domain::TurnId>,
-        cancellation_identities: model_execution::CancelledModelCallTurnIdentities,
+        cancellation_identities: signalbox_domain::CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
         next_closure_decision: NextClosureDecision,
@@ -119,8 +119,8 @@ pub trait SubmitInputTransaction {
         NextToolCancellation: function::FnMut(
                 &[signalbox_domain::ToolRequestId],
             ) -> (
-                vec::Vec<context_frontier::SemanticTranscriptEntryId>,
-                context_frontier::ContextFrontierId,
+                vec::Vec<signalbox_domain::SemanticTranscriptEntryId>,
+                signalbox_domain::ContextFrontierId,
             ) + marker::Send,
         NextClosureDecision: function::FnMut() -> signalbox_domain::DurableCommandId + marker::Send,
         NextClosureAttempt: function::FnMut() -> signalbox_domain::TurnAttemptId + marker::Send;

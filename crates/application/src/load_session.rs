@@ -166,8 +166,8 @@ mod tests {
         }
     }
 
-    /// application orchestration returns the exact
-    /// complete domain snapshot supplied by the current-session port.
+    /// application orchestration returns the exact complete domain snapshot supplied by the
+    /// current-session port.
     #[test]
     fn complete_current_session_is_returned_unchanged() {
         let requested = session_id(1);
@@ -187,9 +187,8 @@ mod tests {
         assert_eq!(service.into_reader().observed(), [requested]);
     }
 
-    /// docs/spec/sessions-and-transcript.md: true session absence
-    /// remains `None`; the application does not fabricate an initial or
-    /// partial projection.
+    /// docs/spec/sessions-and-transcript.md: true session absence remains `None`; the application
+    /// does not fabricate an initial or partial projection.
     #[test]
     fn true_session_absence_is_preserved() {
         let requested = session_id(1);
@@ -201,8 +200,8 @@ mod tests {
         assert_eq!(service.into_reader().observed(), [requested]);
     }
 
-    /// loading by semantic session identity is a single query;
-    /// an adapter failure is returned without retry or command handling.
+    /// loading by semantic session identity is a single query; an adapter failure is returned
+    /// without retry or command handling.
     #[test]
     fn reader_failure_is_returned_without_retry() {
         let requested = session_id(1);

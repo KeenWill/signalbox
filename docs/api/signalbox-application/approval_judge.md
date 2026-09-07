@@ -35,12 +35,12 @@ impl ApprovalJudgeDispatchAuthority {
 ```rust
 pub struct ApprovalJudgePullRequestAuthorityInput {
     pub dispatch: ApprovalJudgeDispatchProvenance,
-    pub repository: repo_watch::RepositorySlug,
-    pub pull_request: repo_watch::PullRequestNumber,
-    pub head_sha: repo_watch::CommitSha,
-    pub head_repository: repo_watch::RepositorySlug,
-    pub head_branch: repo_watch::BranchName,
-    pub base_branch: repo_watch::BranchName,
+    pub repository: signalbox_domain::RepositorySlug,
+    pub pull_request: signalbox_domain::PullRequestNumber,
+    pub head_sha: signalbox_domain::CommitSha,
+    pub head_repository: signalbox_domain::RepositorySlug,
+    pub head_branch: signalbox_domain::BranchName,
+    pub base_branch: signalbox_domain::BranchName,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -56,17 +56,17 @@ impl ApprovalJudgePullRequestAuthority {
     #[must_use]
     pub const fn dispatch(&self) -> ApprovalJudgeDispatchProvenance;
     #[must_use]
-    pub const fn repository(&self) -> &repo_watch::RepositorySlug;
+    pub const fn repository(&self) -> &signalbox_domain::RepositorySlug;
     #[must_use]
-    pub const fn pull_request(&self) -> repo_watch::PullRequestNumber;
+    pub const fn pull_request(&self) -> signalbox_domain::PullRequestNumber;
     #[must_use]
-    pub const fn head_sha(&self) -> &repo_watch::CommitSha;
+    pub const fn head_sha(&self) -> &signalbox_domain::CommitSha;
     #[must_use]
-    pub const fn head_repository(&self) -> &repo_watch::RepositorySlug;
+    pub const fn head_repository(&self) -> &signalbox_domain::RepositorySlug;
     #[must_use]
-    pub const fn head_branch(&self) -> &repo_watch::BranchName;
+    pub const fn head_branch(&self) -> &signalbox_domain::BranchName;
     #[must_use]
-    pub const fn base_branch(&self) -> &repo_watch::BranchName;
+    pub const fn base_branch(&self) -> &signalbox_domain::BranchName;
 }
 ```
 
@@ -75,8 +75,8 @@ impl ApprovalJudgePullRequestAuthority {
 ```rust
 pub struct ApprovalJudgeBranchAuthorityInput {
     pub dispatch: ApprovalJudgeDispatchProvenance,
-    pub repository: repo_watch::RepositorySlug,
-    pub branch: repo_watch::BranchName,
+    pub repository: signalbox_domain::RepositorySlug,
+    pub branch: signalbox_domain::BranchName,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -92,9 +92,9 @@ impl ApprovalJudgeBranchAuthority {
     #[must_use]
     pub const fn dispatch(&self) -> ApprovalJudgeDispatchProvenance;
     #[must_use]
-    pub const fn repository(&self) -> &repo_watch::RepositorySlug;
+    pub const fn repository(&self) -> &signalbox_domain::RepositorySlug;
     #[must_use]
-    pub const fn branch(&self) -> &repo_watch::BranchName;
+    pub const fn branch(&self) -> &signalbox_domain::BranchName;
 }
 ```
 
@@ -107,15 +107,15 @@ impl ApprovalJudgeCompletionIdentities {
     #[must_use]
     pub const fn new(
         continuation_attempt: signalbox_domain::TurnAttemptId,
-        failure_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        failure_entry: signalbox_domain::SemanticTranscriptEntryId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
     ) -> Self;
     #[must_use]
     pub const fn continuation_attempt(self) -> signalbox_domain::TurnAttemptId;
     #[must_use]
-    pub const fn failure_entry(self) -> context_frontier::SemanticTranscriptEntryId;
+    pub const fn failure_entry(self) -> signalbox_domain::SemanticTranscriptEntryId;
     #[must_use]
-    pub const fn terminal_frontier(self) -> context_frontier::ContextFrontierId;
+    pub const fn terminal_frontier(self) -> signalbox_domain::ContextFrontierId;
 }
 ```
 
@@ -123,10 +123,10 @@ impl ApprovalJudgeCompletionIdentities {
 
 ```rust
 pub trait ApprovalJudgeAuthorization {
-    fn request(&self) -> &request::ToolRequest;
+    fn request(&self) -> &signalbox_domain::ToolRequest;
     fn call(&self) -> signalbox_domain::ModelCallId;
-    fn selection(&self) -> configuration::DirectModelSelection;
-    fn target(&self) -> model_call::ResolvedProviderTarget;
+    fn selection(&self) -> signalbox_domain::DirectModelSelection;
+    fn target(&self) -> signalbox_domain::ResolvedProviderTarget;
     fn credential_reference(&self) -> &str;
 }
 ```

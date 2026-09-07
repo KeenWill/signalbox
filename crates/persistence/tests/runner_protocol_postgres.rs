@@ -6252,10 +6252,9 @@ async fn grant_revocation_serializes_profile_replacement() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// profile replacement stays durable after an
-/// availability-equivalent re-registration. The domain validates the
-/// replacement against the enrollment-owned current revision while the
-/// placement record carries the pinned registration snapshot forward.
+/// profile replacement stays durable after an availability-equivalent re-registration. The domain
+/// validates the replacement against the enrollment-owned current revision while the placement
+/// record carries the pinned registration snapshot forward.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn profile_replacement_survives_equivalent_reregistration() -> Result<(), Box<dyn Error>> {
@@ -6476,9 +6475,8 @@ async fn combined_tool_override_survives_omitted_runner_availability() -> Result
     Ok(())
 }
 
-/// a session-policy tool/profile pair admits a lease
-/// only with confirmed approval provenance; policy-auto provenance is
-/// rejected even for a direct lease-row insert.
+/// a session-policy tool/profile pair admits a lease only with confirmed approval provenance;
+/// policy-auto provenance is rejected even for a direct lease-row insert.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn session_policy_lease_requires_confirmed_provenance() -> Result<(), Box<dyn Error>> {
@@ -6571,9 +6569,8 @@ async fn session_policy_lease_requires_confirmed_provenance() -> Result<(), Box<
     Ok(())
 }
 
-/// a one-shot user override is the user confirming
-/// one exact command in advance, so its provenance admits a session-policy
-/// lease exactly as an applied user command does.
+/// a one-shot user override is the user confirming one exact command in advance, so its provenance
+/// admits a session-policy lease exactly as an applied user command does.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn session_policy_lease_admits_user_override_provenance() -> Result<(), Box<dyn Error>> {
@@ -6628,9 +6625,8 @@ async fn session_policy_lease_admits_user_override_provenance() -> Result<(), Bo
     Ok(())
 }
 
-/// a profileless lease on a Confirm-permission tool
-/// admits only confirmed approval provenance; policy-auto provenance is
-/// rejected even for a direct lease-row insert.
+/// a profileless lease on a Confirm-permission tool admits only confirmed approval provenance;
+/// policy-auto provenance is rejected even for a direct lease-row insert.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn profileless_confirm_lease_requires_confirmed_provenance() -> Result<(), Box<dyn Error>> {
@@ -14334,8 +14330,8 @@ async fn load_rejects_stale_returning_runner_grant() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// a profile-free tombstone retains the predecessor placement's
-/// approval policy even when the successor placement selects a different one.
+/// a profile-free tombstone retains the predecessor placement's approval policy even when the
+/// successor placement selects a different one.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn profile_free_tombstone_uses_predecessor_approval_policy() -> Result<(), Box<dyn Error>> {

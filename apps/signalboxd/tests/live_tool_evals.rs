@@ -4705,7 +4705,9 @@ fn git_pack_index_object_ids(content: &[u8]) -> Option<BTreeSet<Oid>> {
     let names_bytes = count.checked_mul(SHA1_BYTES)?;
     let names = content.get(names_offset..names_offset.checked_add(names_bytes)?)?;
     names
-        .chunks_exact(SHA1_BYTES)
+        .as_chunks::<SHA1_BYTES>()
+        .0
+        .iter()
         .map(|bytes| Oid::from_bytes(bytes).ok())
         .collect()
 }

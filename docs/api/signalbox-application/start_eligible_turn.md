@@ -6,9 +6,9 @@
 
 ```rust
 pub trait StartEligibleTurnIdGenerator {
-    fn next_model_identity_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_origin_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_starting_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_model_identity_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_origin_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_starting_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
     fn next_initial_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
 ```
@@ -19,9 +19,9 @@ pub trait StartEligibleTurnIdGenerator {
 pub struct UuidV7StartEligibleTurnIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl StartEligibleTurnIdGenerator for UuidV7StartEligibleTurnIdGenerator {
-    fn next_model_identity_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_origin_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_starting_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_model_identity_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_origin_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_starting_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
     fn next_initial_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
 ```
@@ -31,7 +31,7 @@ impl StartEligibleTurnIdGenerator for UuidV7StartEligibleTurnIdGenerator {
 ```rust
 pub enum StartEligibleTurnOutcome {
     NoEligibleTurn,
-    Activated(boxed::Box<turn_eligibility::ActivatedTurn>),
+    Activated(boxed::Box<signalbox_domain::ActivatedTurn>),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -44,7 +44,7 @@ pub trait StartEligibleTurnTransaction {
     fn handle(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: signalbox_domain::AcceptedInputTurnActivationIdentities,
     ) -> impl future::Future<
         Output = result::Result<
             StartEligibleTurnOutcome,
@@ -54,7 +54,7 @@ pub trait StartEligibleTurnTransaction {
     fn handle_with_activation_observer(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: signalbox_domain::AcceptedInputTurnActivationIdentities,
         observer: sync::Arc<
             dyn function::Fn(signalbox_domain::TurnId) + marker::Send + marker::Sync,
         >,

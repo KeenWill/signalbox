@@ -27,7 +27,7 @@ workspace = true
 
 [dev-dependencies]
 expect-test = "1.5.1"
-signalbox-expect-table = { path = "../expect-table" }
+expectable = { git = "https://github.com/KeenWill/expectable-rs", tag = "v0.1.0" }
 tokio = { version = "1.53.0", default-features = false, features = [
     "rt-multi-thread",
     "macros",

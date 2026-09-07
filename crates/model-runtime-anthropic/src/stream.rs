@@ -2045,10 +2045,9 @@ mod tests {
             .collect()
     }
 
-    /// a streamed server-side fallback marker terminates the stream, and
-    /// the continuing identity still reaches the caller — the same served-target
-    /// evidence the buffered path preserves, so the provider-target rule can
-    /// classify the substitution rather than seeing generic ambiguity.
+    /// a streamed server-side fallback marker terminates the stream, and the continuing identity
+    /// still reaches the caller — the same served-target evidence the buffered path preserves, so
+    /// the provider-target rule can classify the substitution rather than seeing generic ambiguity.
     #[test]
     fn streamed_fallback_block_reports_the_substituting_model() {
         let (terminal, observations) = drive(&[

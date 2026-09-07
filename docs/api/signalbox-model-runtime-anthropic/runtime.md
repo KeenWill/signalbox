@@ -6,52 +6,46 @@
 
 ```rust
 pub struct AnthropicRuntime<A> {/* private */}
-impl<T> policy::PolicyExt for AnthropicRuntime<A>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl<A> fmt::Debug for AnthropicRuntime<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl<A: credential::CredentialAccess> AnthropicRuntime<A> {
+impl<A: signalbox_model_runtime::CredentialAccess> AnthropicRuntime<A> {
     pub fn new(
         config: AnthropicConfig,
         credentials: A,
     ) -> result::Result<Self, AnthropicConstructionError>;
 }
-impl<C: clone::Clone + marker::Send + marker::Sync, A: credential::CredentialAccess>
-    input_count::ModelInputTokenCounter<C> for AnthropicRuntime<A>
+impl<
+        C: clone::Clone + marker::Send + marker::Sync,
+        A: signalbox_model_runtime::CredentialAccess,
+    > signalbox_model_runtime::ModelInputTokenCounter<C> for AnthropicRuntime<A>
 {
     async fn count_input_tokens(
         &self,
-        operation: operation::ModelOperation<C>,
-        cancellation: runtime::CancellationSignal,
-    ) -> input_count::InputTokenCountOutcome<C>;
+        operation: signalbox_model_runtime::ModelOperation<C>,
+        cancellation: signalbox_model_runtime::CancellationSignal,
+    ) -> signalbox_model_runtime::InputTokenCountOutcome<C>;
 }
-impl<C: clone::Clone + marker::Send + marker::Sync, A: credential::CredentialAccess>
-    runtime::ModelRuntime<C> for AnthropicRuntime<A>
+impl<
+        C: clone::Clone + marker::Send + marker::Sync,
+        A: signalbox_model_runtime::CredentialAccess,
+    > signalbox_model_runtime::ModelRuntime<C> for AnthropicRuntime<A>
 {
     type Prepared = AnthropicPreparedRequest<C>;
     async fn prepare(
         &self,
-        operation: operation::ModelOperation<C>,
-        cancellation: runtime::CancellationSignal,
-    ) -> preparation::PreparationOutcome<C, <Self as runtime::ModelRuntime>::Prepared>;
+        operation: signalbox_model_runtime::ModelOperation<C>,
+        cancellation: signalbox_model_runtime::CancellationSignal,
+    ) -> signalbox_model_runtime::PreparationOutcome<
+        C,
+        <Self as signalbox_model_runtime::ModelRuntime>::Prepared,
+    >;
     async fn execute(
         &self,
-        prepared: <Self as runtime::ModelRuntime>::Prepared,
-        sink: &mut (dyn observation::ObservationSink<C> + marker::Send),
-        cancellation: runtime::CancellationSignal,
-    ) -> evidence::TerminalReport<C>;
+        prepared: <Self as signalbox_model_runtime::ModelRuntime>::Prepared,
+        sink: &mut (dyn signalbox_model_runtime::ObservationSink<C> + marker::Send),
+        cancellation: signalbox_model_runtime::CancellationSignal,
+    ) -> signalbox_model_runtime::TerminalReport<C>;
 }
 ```
 
@@ -60,19 +54,6 @@ impl<C: clone::Clone + marker::Send + marker::Sync, A: credential::CredentialAcc
 ```rust
 #[must_use]
 pub struct AnthropicPreparedRequest<C> {/* private */}
-impl<T> policy::PolicyExt for AnthropicPreparedRequest<C>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## AnthropicConstructionError
@@ -86,19 +67,6 @@ pub enum AnthropicConstructionError {
     ClientConstruction { detail: string::String },
 }
 // derives: fmt::Debug
-impl<T> policy::PolicyExt for AnthropicConstructionError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl fmt::Display for AnthropicConstructionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

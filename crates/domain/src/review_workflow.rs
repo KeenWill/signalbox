@@ -4810,7 +4810,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 )]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
     use uuid::Uuid;
 
     use super::*;
@@ -5698,11 +5698,7 @@ mod tests {
         );
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct FindingTransitionRow {
         current: String,
         permitted_events: String,
@@ -5857,9 +5853,9 @@ mod tests {
             .collect()
     }
 
-    /// S29: change-request review freezes its comparison revision.
+    /// change-request review freezes its comparison revision.
     #[test]
-    fn s29_change_request_target_requires_frozen_base_revision() {
+    fn change_request_target_requires_frozen_base_revision() {
         let error = ReviewTarget::try_new(
             target_id(1),
             key("code-host"),
@@ -6178,9 +6174,9 @@ mod tests {
         assert_eq!(finding.finding(), finding_id(4));
     }
 
-    /// S29: diff-relative locations require a frozen comparison.
+    /// diff-relative locations require a frozen comparison.
     #[test]
-    fn s29_diff_relative_finding_requires_target_comparison_revision() {
+    fn diff_relative_finding_requires_target_comparison_revision() {
         let target = target_without_base();
         let error = ReviewFindingProposal::try_new(
             finding_ref(10),
@@ -6196,9 +6192,9 @@ mod tests {
         );
     }
 
-    /// S29: standalone commit review may remain file-relative.
+    /// standalone commit review may remain file-relative.
     #[test]
-    fn s29_file_relative_finding_allows_standalone_commit_target() {
+    fn file_relative_finding_allows_standalone_commit_target() {
         let target = target_without_base();
         let proposal = ReviewFindingProposal::try_new(
             finding_ref(10),
@@ -6700,10 +6696,10 @@ mod tests {
         );
     }
 
-    /// S29: a running pass admits monotonic lag after its canonical
+    /// a running pass admits monotonic lag after its canonical
     /// turn terminalizes.
     #[test]
-    fn s29_running_pass_admits_terminal_turn_projection_lag() {
+    fn running_pass_admits_terminal_turn_projection_lag() {
         let lagging = ReviewPassState::Running { turn: turn_id(6) };
         let input = ReviewPassReconstitutionInput::new(
             pass_ref(3),
@@ -6734,10 +6730,10 @@ mod tests {
         );
     }
 
-    /// S29: a queued pass starts only while its canonical turn is
+    /// a queued pass starts only while its canonical turn is
     /// active; terminal outcomes cannot lead an unprojected start.
     #[test]
-    fn s29_queued_pass_start_requires_active_turn() {
+    fn queued_pass_start_requires_active_turn() {
         let mut run = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -6770,10 +6766,10 @@ mod tests {
         assert_eq!(error.failure(), ReviewPassTransitionFailure::TurnNotActive);
     }
 
-    /// S29: run reconstitution accepts its exact canonical pass
+    /// run reconstitution accepts its exact canonical pass
     /// outcome.
     #[test]
-    fn s29_run_reconstitution_accepts_exact_pass_outcome() {
+    fn run_reconstitution_accepts_exact_pass_outcome() {
         let state = ReviewRunState::Succeeded {
             concluding_pass: pass_ref(3),
         };
@@ -6801,10 +6797,10 @@ mod tests {
         );
     }
 
-    /// S29: run reconstitution rejects a contradictory canonical
+    /// run reconstitution rejects a contradictory canonical
     /// pass outcome.
     #[test]
-    fn s29_run_reconstitution_rejects_cross_wired_pass_outcome() {
+    fn run_reconstitution_rejects_cross_wired_pass_outcome() {
         let state = ReviewRunState::Succeeded {
             concluding_pass: pass_ref(3),
         };
@@ -6829,10 +6825,10 @@ mod tests {
         assert_eq!(mismatch.input(), &mismatched);
     }
 
-    /// S29: canonical pass evidence must carry the run's frozen
+    /// canonical pass evidence must carry the run's frozen
     /// policy.
     #[test]
-    fn s29_run_reconstitution_rejects_foreign_pass_policy() {
+    fn run_reconstitution_rejects_foreign_pass_policy() {
         let state = ReviewRunState::Succeeded {
             concluding_pass: pass_ref(3),
         };
@@ -6896,10 +6892,10 @@ mod tests {
         );
     }
 
-    /// S29: a run that names a pass requires independently loaded
+    /// a run that names a pass requires independently loaded
     /// canonical pass evidence.
     #[test]
-    fn s29_run_reconstitution_requires_pass_evidence() {
+    fn run_reconstitution_requires_pass_evidence() {
         let state = ReviewRunState::Succeeded {
             concluding_pass: pass_ref(3),
         };
@@ -7238,9 +7234,9 @@ mod tests {
         );
     }
 
-    /// S29: a running pass accepts an active canonical turn.
+    /// a running pass accepts an active canonical turn.
     #[test]
-    fn s29_running_pass_accepts_active_turn_outcome() {
+    fn running_pass_accepts_active_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Running { turn: turn_id(6) },
             ReviewPassTurnOutcome::Active,
@@ -7248,10 +7244,10 @@ mod tests {
         );
     }
 
-    /// S29: a failed pass may project completed execution whose
+    /// a failed pass may project completed execution whose
     /// workflow result was invalid.
     #[test]
-    fn s29_failed_pass_accepts_completed_turn_outcome() {
+    fn failed_pass_accepts_completed_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Failed { turn: turn_id(6) },
             ReviewPassTurnOutcome::Completed,
@@ -7259,9 +7255,9 @@ mod tests {
         );
     }
 
-    /// S29: a failed pass accepts a failed canonical turn.
+    /// a failed pass accepts a failed canonical turn.
     #[test]
-    fn s29_failed_pass_accepts_failed_turn_outcome() {
+    fn failed_pass_accepts_failed_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Failed { turn: turn_id(6) },
             ReviewPassTurnOutcome::Failed,
@@ -7269,9 +7265,9 @@ mod tests {
         );
     }
 
-    /// S29: a failed pass accepts a refused canonical turn.
+    /// a failed pass accepts a refused canonical turn.
     #[test]
-    fn s29_failed_pass_accepts_refused_turn_outcome() {
+    fn failed_pass_accepts_refused_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Failed { turn: turn_id(6) },
             ReviewPassTurnOutcome::Refused,
@@ -7279,9 +7275,9 @@ mod tests {
         );
     }
 
-    /// S29: a blocked pass accepts a reconciliation-required turn.
+    /// a blocked pass accepts a reconciliation-required turn.
     #[test]
-    fn s29_blocked_pass_accepts_reconciliation_turn_outcome() {
+    fn blocked_pass_accepts_reconciliation_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Blocked {
                 turn: turn_id(6),
@@ -7292,9 +7288,9 @@ mod tests {
         );
     }
 
-    /// S29: a post-start cancelled pass accepts a cancelled turn.
+    /// a post-start cancelled pass accepts a cancelled turn.
     #[test]
-    fn s29_cancelled_pass_accepts_cancelled_turn_outcome() {
+    fn cancelled_pass_accepts_cancelled_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Cancelled {
                 turn: Some(turn_id(6)),
@@ -7304,7 +7300,7 @@ mod tests {
         );
     }
 
-    /// S29: authenticated successful pass evidence may project one
+    /// authenticated successful pass evidence may project one
     /// exact effect result without changing its execution facts.
     #[test]
     fn succeeded_pass_evidence_projects_one_exact_effect_result() {
@@ -7340,7 +7336,7 @@ mod tests {
         );
     }
 
-    /// S29: an authenticated effect projection admits exact replay
+    /// an authenticated effect projection admits exact replay
     /// but cannot be rebound to a distinct result.
     #[test]
     fn pass_evidence_result_projection_is_immutable() {
@@ -7364,7 +7360,7 @@ mod tests {
         assert_eq!(projected.project_result(distinct), None);
     }
 
-    /// S29: authenticated blocked pass evidence may project one exact
+    /// authenticated blocked pass evidence may project one exact
     /// effect result without changing its execution facts.
     #[test]
     fn blocked_pass_evidence_projects_one_exact_effect_result() {
@@ -7400,7 +7396,7 @@ mod tests {
         );
     }
 
-    /// S29: non-effect pass states cannot project effect results.
+    /// non-effect pass states cannot project effect results.
     #[test]
     fn non_effect_pass_evidence_rejects_result_projection() {
         let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
@@ -7441,10 +7437,10 @@ mod tests {
         assert_eq!(cancelled.project_result(result), None);
     }
 
-    /// S29: a terminal canonical turn outcome always carries its
+    /// a terminal canonical turn outcome always carries its
     /// checked terminal frontier.
     #[test]
-    fn s29_pass_evidence_rejects_terminal_outcome_without_frontier() {
+    fn pass_evidence_rejects_terminal_outcome_without_frontier() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7471,10 +7467,10 @@ mod tests {
         );
     }
 
-    /// S29: an active canonical turn outcome never carries a
+    /// an active canonical turn outcome never carries a
     /// terminal frontier.
     #[test]
-    fn s29_pass_evidence_rejects_active_outcome_with_frontier() {
+    fn pass_evidence_rejects_active_outcome_with_frontier() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7675,10 +7671,10 @@ mod tests {
         );
     }
 
-    /// S29: an event cannot be replayed into another same-run
+    /// an event cannot be replayed into another same-run
     /// finding.
     #[test]
-    fn s29_finding_history_rejects_foreign_event_owner() {
+    fn finding_history_rejects_foreign_event_owner() {
         let event = finding_event(
             finding_ref(11),
             ReviewEventOrdinal::one(),
@@ -8333,7 +8329,7 @@ mod tests {
             │ BlockedWithReason │ Superseded, Stale, Posted, Fixed                               │
             └───────────────────┴────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table(finding_transition_rows()));
+        .assert_eq(&print(&finding_transition_rows()));
     }
 
     /// a repair-blocked finding cannot cross the publication-only

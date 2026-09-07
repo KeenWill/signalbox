@@ -79,10 +79,6 @@ not a second terminal-state model.
 
 Digests detect replay disagreement and confer no authority.
 
-The daemon retains a runner-authored failure detail verbatim as operator
-evidence, exposes it through runner inspection, and never parses or branches on
-it. Why: a runner can add detail codes without a daemon change.
-
 The daemon-local `ToolDefinition` is a compatibility representation, not a
 second source of policy.
 

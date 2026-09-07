@@ -35,10 +35,12 @@ pub const MAX_USER_INPUT_PARTS: usize = signalbox_domain::UserContent::MAX_PARTS
 // numeric-bound: guard - prevents one submitted input from exhausting wire-frame memory
 pub const MAX_USER_INPUT_TEXT_BYTES: usize = signalbox_domain::UserContent::MAX_TEXT_BYTES;
 /// Maximum encoded bytes in one process-protocol attachment media type.
-// numeric-bound: guard - the user-input wire grammar advertises accepting media types only to this length
+// numeric-bound: guard - the user-input wire grammar advertises accepting media types only to this
+// length
 pub const MAX_USER_INPUT_MEDIA_TYPE_BYTES: usize = signalbox_domain::DeclaredMediaType::MAX_BYTES;
 /// Maximum encoded bytes in one process-protocol attachment display filename.
-// numeric-bound: guard - the user-input wire grammar advertises accepting display filenames only to this length
+// numeric-bound: guard - the user-input wire grammar advertises accepting display filenames only to
+// this length
 pub const MAX_USER_INPUT_DISPLAY_FILENAME_BYTES: usize =
     signalbox_domain::AttachmentDisplayFilename::MAX_BYTES;
 

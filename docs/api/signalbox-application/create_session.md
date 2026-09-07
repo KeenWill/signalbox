@@ -26,33 +26,31 @@ pub struct CreateSessionRequest {/* private */}
 impl CreateSessionRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
-        initial_configuration_defaults: configuration::SessionConfigurationDefaults,
+        initial_configuration_defaults: signalbox_domain::SessionConfigurationDefaults,
     ) -> result::Result<Self, InvalidDurableCommandId>;
     pub fn try_new_from_template(
         command_id: signalbox_domain::DurableCommandId,
-        template_provenance: session_template::SessionTemplateProvenance,
-        resolved_configuration_defaults: configuration::SessionConfigurationDefaults,
+        template_provenance: signalbox_domain::SessionTemplateProvenance,
+        resolved_configuration_defaults: signalbox_domain::SessionConfigurationDefaults,
     ) -> result::Result<Self, InvalidDurableCommandId>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn initial_configuration_defaults(
         &self,
-    ) -> &configuration::SessionConfigurationDefaults;
+    ) -> &signalbox_domain::SessionConfigurationDefaults;
     pub const fn template_provenance(
         &self,
-    ) -> option::Option<&session_template::SessionTemplateProvenance>;
-    pub fn with_placement(self, placement: session_placement::SessionPlacement) -> Self;
+    ) -> option::Option<&signalbox_domain::SessionTemplateProvenance>;
+    pub fn with_placement(self, placement: signalbox_domain::SessionPlacement) -> Self;
     pub fn with_lifecycle(
         self,
-        start_gate: session_lifecycle_command::StartGate,
-        ownership: session_lifecycle::SessionOwnership,
-        finish_condition: option::Option<session_lifecycle_command::FinishCondition>,
+        start_gate: signalbox_domain::StartGate,
+        ownership: signalbox_domain::SessionOwnership,
+        finish_condition: option::Option<signalbox_domain::FinishCondition>,
     ) -> Self;
-    pub const fn start_gate(&self) -> session_lifecycle_command::StartGate;
-    pub const fn ownership(&self) -> session_lifecycle::SessionOwnership;
-    pub const fn finish_condition(
-        &self,
-    ) -> option::Option<&session_lifecycle_command::FinishCondition>;
-    pub const fn placement(&self) -> &session_placement::SessionPlacement;
+    pub const fn start_gate(&self) -> signalbox_domain::StartGate;
+    pub const fn ownership(&self) -> signalbox_domain::SessionOwnership;
+    pub const fn finish_condition(&self) -> option::Option<&signalbox_domain::FinishCondition>;
+    pub const fn placement(&self) -> &signalbox_domain::SessionPlacement;
 }
 ```
 
@@ -78,7 +76,7 @@ impl SessionIdGenerator for UuidV7SessionIdGenerator {
 
 ```rust
 pub enum CreateSessionOutcome {
-    Applied(session::CreateSessionAppliedResult),
+    Applied(signalbox_domain::CreateSessionAppliedResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
@@ -93,7 +91,7 @@ pub trait CreateSessionTransaction {
     type Error;
     fn handle(
         &mut self,
-        prepared: session::PreparedCreateSession,
+        prepared: signalbox_domain::PreparedCreateSession,
     ) -> impl future::Future<
         Output = result::Result<CreateSessionOutcome, <Self as CreateSessionTransaction>::Error>,
     > + marker::Send;
@@ -104,7 +102,7 @@ pub trait CreateSessionTransaction {
 
 ```rust
 pub enum CreateSessionError<TransactionError> {
-    Preparation(session::CreateSessionPreparationFailure),
+    Preparation(signalbox_domain::CreateSessionPreparationFailure),
     Transaction(TransactionError),
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq

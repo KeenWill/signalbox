@@ -10,12 +10,6 @@ pub enum ConversationRole {
     Assistant,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ConversationRole
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ConversationMessage
@@ -26,12 +20,6 @@ pub struct ConversationMessage {
     pub parts: vec::Vec<MessagePart>,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ConversationMessage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ConversationMessage {
     pub fn user_text(text: impl convert::Into<string::String>) -> Self;
     pub fn assistant_text(text: impl convert::Into<string::String>) -> Self;
@@ -57,12 +45,6 @@ pub enum MessagePart {
     },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for MessagePart
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ToolResultRecord
@@ -74,12 +56,6 @@ pub struct ToolResultRecord {
     pub is_error: bool,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ToolResultRecord
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## AssistantPart
@@ -101,10 +77,4 @@ pub enum AssistantPart {
     SuppressedToolCall(ToolName),
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for AssistantPart
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```

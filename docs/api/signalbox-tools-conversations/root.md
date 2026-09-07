@@ -64,12 +64,6 @@ pub enum ConversationCursor {
     Imported(signalbox_domain::ImportedConversationId),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ConversationCursor
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ConversationListRequest
@@ -77,12 +71,6 @@ where
 ```rust
 pub struct ConversationListRequest {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ConversationListRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ConversationListRequest {
     pub const fn new(after: option::Option<ConversationCursor>, max_results: usize) -> Self;
     pub const fn after(&self) -> option::Option<ConversationCursor>;
@@ -106,12 +94,6 @@ pub enum ConversationListItem {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ConversationListItem
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ConversationListItem {
     pub const fn cursor(&self) -> ConversationCursor;
     pub fn title(&self) -> option::Option<&str>;
@@ -123,12 +105,6 @@ impl ConversationListItem {
 ```rust
 pub struct ConversationListPage {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ConversationListPage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ConversationListPage {
     pub fn new(items: vec::Vec<ConversationListItem>, has_more: bool) -> Self;
     pub fn items(&self) -> &[ConversationListItem];
@@ -142,12 +118,6 @@ impl ConversationListPage {
 ```rust
 pub struct ConversationTranscriptRequest {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ConversationTranscriptRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ConversationTranscriptRequest {
     pub const fn new(
         requesting_session: signalbox_domain::SessionId,
@@ -170,15 +140,9 @@ impl ConversationTranscriptRequest {
 pub enum ConversationTranscriptRead {
     Read(TranscriptPage),
     NotFound,
-    Refused(session_placement::SessionReadScopeRefusal),
+    Refused(signalbox_domain::SessionReadScopeRefusal),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ConversationTranscriptRead
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ImportedTranscriptRequest
@@ -186,12 +150,6 @@ where
 ```rust
 pub struct ImportedTranscriptRequest {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ImportedTranscriptRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ImportedTranscriptRequest {
     pub const fn new(
         conversation: signalbox_domain::ImportedConversationId,
@@ -217,12 +175,6 @@ pub enum TranscriptEntryKind {
     System,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for TranscriptEntryKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## TranscriptEntry
@@ -230,12 +182,6 @@ where
 ```rust
 pub struct TranscriptEntry {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for TranscriptEntry
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl TranscriptEntry {
     pub fn new(
         position: nonzero::NonZeroU64,
@@ -255,12 +201,6 @@ impl TranscriptEntry {
 ```rust
 pub struct TranscriptPage {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for TranscriptPage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl TranscriptPage {
     pub fn new(entries: vec::Vec<TranscriptEntry>, has_more: bool) -> Self;
     pub fn entries(&self) -> &[TranscriptEntry];
@@ -273,7 +213,7 @@ impl TranscriptPage {
 
 ```rust
 pub trait ConversationIntrospectionPort: marker::Send {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: signalbox_application::ClassifyOperatorFailure;
     fn list_conversations(
         &mut self,
         request: ConversationListRequest,
@@ -312,7 +252,6 @@ pub struct ListConversationsArguments {
     pub max_results: usize,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for ListConversationsArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ConversationCursorArguments
@@ -323,7 +262,6 @@ pub struct ConversationCursorArguments {
     pub id: string::String,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for ConversationCursorArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ConversationCursorKind
@@ -334,13 +272,6 @@ pub enum ConversationCursorKind {
     Imported,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for ConversationCursorKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for ConversationCursorKind where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReadOwnConversationArguments
@@ -352,7 +283,6 @@ pub struct ReadOwnConversationArguments {
     pub max_bytes: usize,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for ReadOwnConversationArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReadConversationArguments
@@ -365,7 +295,6 @@ pub struct ReadConversationArguments {
     pub max_bytes: usize,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for ReadConversationArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReadImportedConversationArguments
@@ -378,10 +307,6 @@ pub struct ReadImportedConversationArguments {
     pub max_bytes: usize,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for ReadImportedConversationArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ConversationToolConstructionError
@@ -394,12 +319,6 @@ pub enum ConversationToolConstructionError {
     Duplicate,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ConversationToolConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for ConversationToolConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -413,15 +332,14 @@ impl error::Error for ConversationToolConstructionError {
 ```rust
 pub struct ConversationTools<Port> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for ConversationTools<Port>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Port> ConversationTools<Port> {
     pub fn try_new(port: Port) -> result::Result<Self, ConversationToolConstructionError>;
-    pub fn into_parts(self) -> (tool_loop::CompiledToolCatalog, ConversationExecutor<Port>);
+    pub fn into_parts(
+        self,
+    ) -> (
+        signalbox_application::CompiledToolCatalog,
+        ConversationExecutor<Port>,
+    );
 }
 ```
 
@@ -430,26 +348,20 @@ impl<Port> ConversationTools<Port> {
 ```rust
 pub struct ConversationExecutor<Port> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for ConversationExecutor<Port>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Port> ConversationExecutor<Port> {
     pub fn into_port(self) -> Port;
 }
-impl<Port> tool_loop::ToolExecutor for ConversationExecutor<Port>
+impl<Port> signalbox_application::ToolExecutor for ConversationExecutor<Port>
 where
     Port: ConversationIntrospectionPort,
 {
     type Error = ConversationExecutorError<<Port as ConversationIntrospectionPort>::Error>;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -476,10 +388,11 @@ where
 {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl<PortError> operator_failure::ClassifyOperatorFailure for ConversationExecutorError<PortError>
+impl<PortError> signalbox_application::ClassifyOperatorFailure
+    for ConversationExecutorError<PortError>
 where
-    PortError: operator_failure::ClassifyOperatorFailure,
+    PortError: signalbox_application::ClassifyOperatorFailure,
 {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```

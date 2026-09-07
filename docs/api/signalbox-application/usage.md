@@ -242,7 +242,7 @@ pub struct UsageAggregateTokenAxes {
 pub struct UsageSelection {
     pub session: option::Option<signalbox_domain::SessionId>,
     pub turn: option::Option<signalbox_domain::TurnId>,
-    pub model: option::Option<model_call::ResolvedProviderTarget>,
+    pub model: option::Option<signalbox_domain::ResolvedProviderTarget>,
     pub provenance: option::Option<UsageProvenance>,
     pub call_kind: option::Option<UsageCallKind>,
 }
@@ -328,7 +328,7 @@ pub struct UsageCallEvidence {
     pub scope: UsageCallScope,
     pub call: signalbox_domain::ModelCallId,
     pub session: signalbox_domain::SessionId,
-    pub model: model_call::ResolvedProviderTarget,
+    pub model: signalbox_domain::ResolvedProviderTarget,
     pub credential_profile: UsageCredentialProfileLabel,
     pub credential_reference: option::Option<string::String>,
     pub provenance: UsageProvenance,
@@ -394,7 +394,7 @@ impl UsageCallPage {
 ```rust
 pub struct UsageAggregateKey {
     pub call_kind: UsageCallKind,
-    pub model: model_call::ResolvedProviderTarget,
+    pub model: signalbox_domain::ResolvedProviderTarget,
     pub credential_profile: UsageCredentialProfileLabel,
     pub credential_reference: option::Option<string::String>,
     pub provenance: UsageProvenance,

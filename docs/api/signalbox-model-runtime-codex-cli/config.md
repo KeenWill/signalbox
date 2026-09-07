@@ -6,12 +6,12 @@
 
 ```rust
 pub struct CodexCliConfig {
-    pub model_capabilities: capability::ModelCapabilityCatalog,
+    pub model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
     pub model_context_window_overrides: map::HashMap<string::String, u32>,
     pub executable: path::PathBuf,
     pub working_directory: path::PathBuf,
-    pub credential_reference: credential::CredentialReference,
-    pub credential_homes: map::HashMap<credential::CredentialReference, path::PathBuf>,
+    pub credential_reference: signalbox_model_runtime::CredentialReference,
+    pub credential_homes: map::HashMap<signalbox_model_runtime::CredentialReference, path::PathBuf>,
     pub exchange_timeout: option::Option<time::Duration>,
     pub interrupt_grace: time::Duration,
     pub post_kill_reap_bound: option::Option<time::Duration>,
@@ -19,22 +19,18 @@ pub struct CodexCliConfig {
     pub stderr_limit: usize,
 }
 // derives: fmt::Debug, clone::Clone
-impl<T> dyn_clone::DynClone for CodexCliConfig
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl CodexCliConfig {
     pub fn new(
         executable: impl convert::Into<path::PathBuf>,
         working_directory: impl convert::Into<path::PathBuf>,
-        credential_reference: credential::CredentialReference,
+        credential_reference: signalbox_model_runtime::CredentialReference,
         post_kill_reap_bound: option::Option<time::Duration>,
     ) -> Self;
     pub fn with_credential_homes(
         self,
-        homes: impl collect::IntoIterator<Item = (credential::CredentialReference, path::PathBuf)>,
+        homes: impl collect::IntoIterator<
+            Item = (signalbox_model_runtime::CredentialReference, path::PathBuf),
+        >,
     ) -> Self;
 }
 ```

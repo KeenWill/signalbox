@@ -449,7 +449,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use super::{
         AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
@@ -541,11 +541,7 @@ mod tests {
     /// One derived slot's snapshot row: only the acceptance ordinal and
     /// priority fact the derivation depends on (TS-12). The field names are
     /// the rendered column headers.
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct DerivedSlotRow {
         derived: usize,
         accepted: u64,
@@ -583,7 +579,7 @@ mod tests {
             })
             .collect();
 
-        table(rows)
+        print(&rows)
     }
 
     /// The rendering helper contains lookup and branching logic, so it gets
@@ -682,10 +678,10 @@ mod tests {
         assert_eq!(work.order(), interrupt_order);
     }
 
-    /// S09: ordinary work is ordered by immutable acceptance
+    /// ordinary work is ordered by immutable acceptance
     /// position, independent of fact iteration order.
     #[test]
-    fn s09_ordinary_work_is_fifo_by_acceptance_position() {
+    fn ordinary_work_is_fifo_by_acceptance_position() {
         let first = accepted_ordinary(1);
         let second = accepted_ordinary(2);
         let third = accepted_ordinary(3);
@@ -696,10 +692,10 @@ mod tests {
         );
     }
 
-    /// S07: an interrupt is the immediate successor of its active
+    /// an interrupt is the immediate successor of its active
     /// predecessor and jumps all then-unstarted ordinary work.
     #[test]
-    fn s07_interrupt_precedes_existing_ordinary_work() {
+    fn interrupt_precedes_existing_ordinary_work() {
         let first = accepted_ordinary(1);
         let second = accepted_ordinary(2);
         let interrupt = accepted_interrupt(3, first);
@@ -710,10 +706,10 @@ mod tests {
         );
     }
 
-    /// S07: nested interrupts recursively compose the same
+    /// nested interrupts recursively compose the same
     /// immediate-successor rule.
     #[test]
-    fn s07_nested_interrupts_form_one_successor_chain() {
+    fn nested_interrupts_form_one_successor_chain() {
         let first = accepted_ordinary(1);
         let second = accepted_ordinary(2);
         let interrupt = accepted_interrupt(3, first);
@@ -742,10 +738,10 @@ mod tests {
         .assert_eq(&derived_order_table(&facts));
     }
 
-    /// S07 / S08 / S09: after an interrupt successor, ordinary and
+    /// after an interrupt successor, ordinary and
     /// reclassified work retain their original acceptance order.
     #[test]
-    fn s07_s08_s09_work_after_interrupt_retains_original_positions() {
+    fn work_after_interrupt_retains_original_positions() {
         let first = accepted_ordinary(1);
         let second = accepted_ordinary(2);
         let interrupt = accepted_interrupt(3, first);
@@ -774,10 +770,10 @@ mod tests {
         .assert_eq(&derived_order_table(&facts));
     }
 
-    /// S03: restart can derive the same order from every iteration
+    /// restart can derive the same order from every iteration
     /// permutation of the same durable fact set.
     #[test]
-    fn s03_total_order_is_deterministic_for_all_fact_permutations() {
+    fn total_order_is_deterministic_for_all_fact_permutations() {
         let first = accepted_ordinary(1);
         let second = accepted_ordinary(2);
         let interrupt = accepted_interrupt(3, first);
@@ -792,10 +788,10 @@ mod tests {
         );
     }
 
-    /// S03: the empty and singleton currently-known fact sets each
+    /// the empty and singleton currently-known fact sets each
     /// have one deterministic total order.
     #[test]
-    fn s03_empty_and_singleton_fact_sets_have_total_orders() {
+    fn empty_and_singleton_fact_sets_have_total_orders() {
         let no_currently_known_work: [AcceptedInputQueueWork; 0] = [];
         let only = accepted_ordinary(1);
 
@@ -809,10 +805,10 @@ mod tests {
         );
     }
 
-    /// S03: order derivation rejects facts associated with different
+    /// order derivation rejects facts associated with different
     /// sessions instead of comparing their session-local positions.
     #[test]
-    fn s03_mixed_session_fact_sets_are_rejected() {
+    fn mixed_session_fact_sets_are_rejected() {
         let first = accepted_ordinary_in_session(session_id(100), 1);
         let second = accepted_ordinary_in_session(session_id(200), 2);
 
@@ -825,10 +821,10 @@ mod tests {
         );
     }
 
-    /// S03: duplicate identity or position facts cannot be silently
+    /// duplicate identity or position facts cannot be silently
     /// tie-broken into a queue order.
     #[test]
-    fn s03_duplicate_turns_and_positions_are_rejected() {
+    fn duplicate_turns_and_positions_are_rejected() {
         let position = positions(2);
         let distinct_turn = ordinary(1, position[0]);
         let duplicated_turn_at_first_position = ordinary(2, position[0]);
@@ -864,10 +860,10 @@ mod tests {
         );
     }
 
-    /// S07: every interrupt priority fact names one different,
+    /// every interrupt priority fact names one different,
     /// currently known predecessor.
     #[test]
-    fn s07_missing_and_self_interrupt_predecessors_are_rejected() {
+    fn missing_and_self_interrupt_predecessors_are_rejected() {
         let position = positions(2);
 
         assert_eq!(
@@ -886,10 +882,10 @@ mod tests {
         );
     }
 
-    /// S07: the baseline permits only one immediate interrupt
+    /// the baseline permits only one immediate interrupt
     /// successor for a predecessor.
     #[test]
-    fn s07_multiple_interrupt_successors_are_rejected() {
+    fn multiple_interrupt_successors_are_rejected() {
         let position = positions(3);
 
         assert_eq!(
@@ -906,10 +902,10 @@ mod tests {
         );
     }
 
-    /// S03 / S07: unrooted interrupt cycles cannot be interpreted
+    /// unrooted interrupt cycles cannot be interpreted
     /// as durable queue order.
     #[test]
-    fn s03_s07_interrupt_cycles_are_rejected() {
+    fn interrupt_cycles_are_rejected() {
         let position = positions(2);
 
         assert_eq!(
@@ -921,10 +917,10 @@ mod tests {
         );
     }
 
-    /// S07: an interrupt input must have been accepted after its
+    /// an interrupt input must have been accepted after its
     /// active predecessor even though priority moves it ahead of ordinary work.
     #[test]
-    fn s07_time_inverted_interrupt_edges_are_rejected() {
+    fn time_inverted_interrupt_edges_are_rejected() {
         let position = positions(2);
 
         assert_eq!(
@@ -943,10 +939,10 @@ mod tests {
         );
     }
 
-    /// S07: later interrupt inputs cannot target a predecessor that
+    /// later interrupt inputs cannot target a predecessor that
     /// must already have terminalized for an earlier interrupt target to run.
     #[test]
-    fn s07_reversed_active_target_chronology_is_rejected() {
+    fn reversed_active_target_chronology_is_rejected() {
         let first = accepted_ordinary(1);
         let second = accepted_ordinary(2);
         let interrupt_after_second = accepted_interrupt(3, second);
@@ -970,10 +966,10 @@ mod tests {
         );
     }
 
-    /// S07: interrupt targets may advance across ordinary roots as
+    /// interrupt targets may advance across ordinary roots as
     /// those roots become active in durable order.
     #[test]
-    fn s07_independent_interrupt_chains_follow_active_progress() {
+    fn independent_interrupt_chains_follow_active_progress() {
         let first = accepted_ordinary(1);
         let second = accepted_ordinary(2);
         let first_interrupt = accepted_interrupt(3, first);

@@ -2,9 +2,9 @@
 
 use crate::*;
 
-/// pending-steering acceptance and source terminalization
-/// serialize on the source lifecycle row, so racing commits cannot both
-/// succeed from snapshots in which the reciprocal effect is not yet visible.
+/// pending-steering acceptance and source terminalization serialize on the source lifecycle row, so
+/// racing commits cannot both succeed from snapshots in which the reciprocal effect is not yet
+/// visible.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn pending_steering_and_source_terminalization_serialize() -> Result<(), Box<dyn Error>> {
@@ -152,10 +152,9 @@ async fn pending_steering_and_source_terminalization_serialize() -> Result<(), B
     Ok(())
 }
 
-/// after a real pool restart, startup atomically
-/// ends the prior-process attempt as Lost, retains it as attempt-only terminal
-/// provenance, appends `TurnFailed`, terminalizes Failed, remains idempotent on
-/// replay, and exposes the queued successor to the ordinary scheduler path.
+/// after a real pool restart, startup atomically ends the prior-process attempt as Lost, retains it
+/// as attempt-only terminal provenance, appends `TurnFailed`, terminalizes Failed, remains
+/// idempotent on replay, and exposes the queued successor to the ordinary scheduler path.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn restart_scan_recovers_lost_attempt_once_and_unblocks_successor()
@@ -384,8 +383,8 @@ async fn restart_scan_recovers_lost_attempt_once_and_unblocks_successor()
     Ok(())
 }
 
-/// failure after the typed outbox append rolls the
-/// complete Lost recovery back; retry then commits the state and event once.
+/// failure after the typed outbox append rolls the complete Lost recovery back; retry then commits
+/// the state and event once.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn startup_recovery_and_outbox_commit_or_roll_back_together() -> Result<(), Box<dyn Error>> {
@@ -519,9 +518,8 @@ async fn startup_recovery_and_outbox_commit_or_roll_back_together() -> Result<()
     Ok(())
 }
 
-/// evidence-free restart recovery
-/// ends the abandoned source attempt and atomically reclassifies pending
-/// steering, leaving no startup blocker on replay.
+/// evidence-free restart recovery ends the abandoned source attempt and atomically reclassifies
+/// pending steering, leaving no startup blocker on replay.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn restart_reclassifies_pending_steering() -> Result<(), Box<dyn Error>> {
@@ -2056,10 +2054,9 @@ async fn concurrent_attempt_and_frontier_inserts_fail_closed() -> Result<(), Box
     Ok(())
 }
 
-/// all baseline authoritative rejections are typed
-/// terminal records. Active-work delivery modes reject `NoActiveTurn`, stale
-/// defaults and unresolved aliases retain their exact evidence, and missing
-/// sessions create no aggregate or queued-work effects.
+/// all baseline authoritative rejections are typed terminal records. Active-work delivery modes
+/// reject `NoActiveTurn`, stale defaults and unresolved aliases retain their exact evidence, and
+/// missing sessions create no aggregate or queued-work effects.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn submit_records_authoritative_rejections() -> Result<(), Box<dyn Error>> {

@@ -24,11 +24,13 @@ impl FilesystemBlobStore {
         namespace_id: uuid::Uuid,
         binding_state: NamespaceBindingState,
     ) -> result::Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError>;
+    #[cfg(feature = "test-support")]
     pub fn try_new_bound_for_conformance(
         root: path::PathBuf,
         namespace_id: uuid::Uuid,
         binding_state: NamespaceBindingState,
     ) -> result::Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError>;
+    #[cfg(feature = "test-support")]
     pub fn try_new_for_conformance(
         root: path::PathBuf,
     ) -> result::Result<Self, FilesystemBlobStoreConstructionError>;
@@ -89,6 +91,7 @@ impl fmt::Debug for OpenedFilesystemBlobRoot {
 }
 impl OpenedFilesystemBlobRoot {
     pub fn open(root: path::PathBuf) -> result::Result<Self, FilesystemBlobStoreConstructionError>;
+    #[cfg(feature = "test-support")]
     pub fn open_without_locality_check_for_test(
         root: path::PathBuf,
     ) -> result::Result<Self, FilesystemBlobStoreConstructionError>;
@@ -107,6 +110,7 @@ impl FilesystemBlobStaging {
     pub fn try_new(
         root: path::PathBuf,
     ) -> result::Result<Self, FilesystemBlobStoreConstructionError>;
+    #[cfg(feature = "test-support")]
     pub fn try_new_without_locality_check_for_test(
         root: path::PathBuf,
     ) -> result::Result<Self, FilesystemBlobStoreConstructionError>;

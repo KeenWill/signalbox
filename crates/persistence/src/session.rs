@@ -866,8 +866,8 @@ mod tests {
         );
     }
 
-    /// an imported interactive row cannot silently discard
-    /// a contradictory delegated spawning identity.
+    /// an imported interactive row cannot silently discard a contradictory delegated spawning
+    /// identity.
     #[test]
     fn imported_provenance_rejects_spawning_request() {
         let error = validate_imported_creation_provenance(

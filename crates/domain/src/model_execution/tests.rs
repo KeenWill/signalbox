@@ -345,10 +345,10 @@ fn attachment_execution_input(
     .with_attachment_blob_facts(facts)
 }
 
-/// S02: model preparation admits immutable catalog
+/// model preparation admits immutable catalog
 /// facts when they exactly cover every referenced attachment digest.
 #[test]
-fn s02_exact_attachment_catalog_facts_reach_preparation() {
+fn exact_attachment_catalog_facts_reach_preparation() {
     let digest = BlobDigest::digest(b"attachment fixture bytes");
     let length = NonZeroU64::new(24).expect("the fixture length is positive");
 
@@ -840,10 +840,10 @@ fn assert_one_reclassified_turn(
     );
 }
 
-/// S02: a complete frontier read must preserve exact
+/// a complete frontier read must preserve exact
 /// semantic order, not merely the same entry membership.
 #[test]
-fn s02_reconstitution_rejects_reordered_frontier_entries() {
+fn reconstitution_rejects_reordered_frontier_entries() {
     let execution = active_execution();
     let first = SemanticTranscriptEntry::from_validated_parts(
         semantic_transcript_entry_id(20),
@@ -897,10 +897,10 @@ fn s02_reconstitution_rejects_reordered_frontier_entries() {
     );
 }
 
-/// S02: an execution snapshot must be the exact
+/// an execution snapshot must be the exact
 /// eligibility-fixed turn start, not another same-content frontier.
 #[test]
-fn s02_reconstitution_rejects_nonstarting_snapshot() {
+fn reconstitution_rejects_nonstarting_snapshot() {
     let execution = active_execution();
     let other_snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
         execution.session,
@@ -933,11 +933,11 @@ fn s02_reconstitution_rejects_nonstarting_snapshot() {
     );
 }
 
-/// S02 / S11: a fresh
+/// a fresh
 /// continuation attempt admits its call-free result frontier only inside
 /// the transaction that will insert the prepared continuation call.
 #[test]
-fn s02_s11_continuation_reconstitutes_exact_frontier_and_pin() {
+fn continuation_reconstitutes_exact_frontier_and_pin() {
     let initial = active_execution();
     let request = tool_request_id(30);
     let assistant_tool_use = SemanticTranscriptEntry::from_validated_parts(
@@ -1160,11 +1160,11 @@ fn s02_s11_continuation_reconstitutes_exact_frontier_and_pin() {
     assert_eq!(authorized.call().state(), CurrentModelCallState::InFlight);
 }
 
-/// S10: each continuation result must name the
+/// each continuation result must name the
 /// physical attempt that executed its exact request in the producing
 /// model-call batch.
 #[test]
-fn s10_continuation_rejects_duplicate_attempt_for_two_requests() {
+fn continuation_rejects_duplicate_attempt_for_two_requests() {
     let initial = active_execution();
     let producing_call = model_call_id(70);
     let first_request = tool_request_id(71);
@@ -1262,10 +1262,10 @@ fn s10_continuation_rejects_duplicate_attempt_for_two_requests() {
     );
 }
 
-/// S11: a prepared continuation belongs to the most
+/// a prepared continuation belongs to the most
 /// recent tool round and cannot reuse results from an earlier round.
 #[test]
-fn s11_continuation_rejects_unresolved_latest_tool_round() {
+fn continuation_rejects_unresolved_latest_tool_round() {
     let initial = active_execution();
     let earlier_request = tool_request_id(30);
     let latest_request = tool_request_id(40);
@@ -1357,10 +1357,10 @@ fn s11_continuation_rejects_unresolved_latest_tool_round() {
     );
 }
 
-/// S07 / S11: a cancellation-only close marker is
+/// a cancellation-only close marker is
 /// terminal history and cannot satisfy ordinary continuation resolution.
 #[test]
-fn s07_s11_continuation_rejects_tool_closed() {
+fn continuation_rejects_tool_closed() {
     let initial = active_execution();
     let request = tool_request_id(30);
     let attempt = turn_attempt_id(35);
@@ -1438,10 +1438,10 @@ fn s07_s11_continuation_rejects_tool_closed() {
     );
 }
 
-/// S11: a call-free continuation pin is checked against the
+/// a call-free continuation pin is checked against the
 /// immutable target catalog before it can authorize the next provider call.
 #[test]
-fn s11_continuation_rejects_crosswired_turn_pin() {
+fn continuation_rejects_crosswired_turn_pin() {
     let initial = active_execution();
     let request = tool_request_id(30);
     let assistant_tool_use = SemanticTranscriptEntry::from_validated_parts(
@@ -1506,10 +1506,10 @@ fn s11_continuation_rejects_crosswired_turn_pin() {
     );
 }
 
-/// S08: steering correlation considers only the
+/// steering correlation considers only the
 /// current turn's suffix and ignores steering retained in its start.
 #[test]
-fn s08_reconstitution_ignores_historical_steering() {
+fn reconstitution_ignores_historical_steering() {
     let execution = active_execution();
     let historical_input = accepted_input_id(20);
     let historical = SemanticTranscriptEntry::from_validated_parts(
@@ -1559,10 +1559,10 @@ fn s08_reconstitution_ignores_historical_steering() {
         .expect("historical steering is not current-turn consumed steering");
 }
 
-/// S02: a call that names a distinct
+/// a call that names a distinct
 /// snapshot must consume a nonempty steering suffix.
 #[test]
-fn s02_reconstitution_rejects_empty_distinct_call_snapshot() {
+fn reconstitution_rejects_empty_distinct_call_snapshot() {
     let execution = prepared_execution();
     let call = execution
         .current_call()
@@ -1609,10 +1609,10 @@ fn s02_reconstitution_rejects_empty_distinct_call_snapshot() {
     );
 }
 
-/// S02: persisted target facts must still match immutable
+/// persisted target facts must still match immutable
 /// configured target resolution when an execution is reloaded.
 #[test]
-fn s02_reconstitution_rejects_call_target_crosswired_from_turn_pin() {
+fn reconstitution_rejects_call_target_crosswired_from_turn_pin() {
     let execution = prepared_execution();
     let call = execution
         .current_call()
@@ -1639,10 +1639,10 @@ fn s02_reconstitution_rejects_call_target_crosswired_from_turn_pin() {
     );
 }
 
-/// S02: a call row cannot manufacture the durable target that
+/// a call row cannot manufacture the durable target that
 /// belongs independently to its owning turn.
 #[test]
-fn s02_reconstitution_requires_independent_turn_pin() {
+fn reconstitution_requires_independent_turn_pin() {
     let execution = prepared_execution();
     let call = execution
         .current_call()
@@ -1670,10 +1670,10 @@ fn s02_reconstitution_requires_independent_turn_pin() {
     );
 }
 
-/// S02: once a call has durably pinned its exact target, a later
+/// once a call has durably pinned its exact target, a later
 /// deployment-availability change cannot retarget or strand that call.
 #[test]
-fn s02_prepared_call_reloads_after_target_becomes_unavailable() {
+fn prepared_call_reloads_after_target_becomes_unavailable() {
     let execution = prepared_execution();
     let expected_call = execution
         .current_call()
@@ -1701,10 +1701,10 @@ fn s02_prepared_call_reloads_after_target_becomes_unavailable() {
     assert_eq!(reloaded.current_call(), Some(&expected_call));
 }
 
-/// S02: target resolution records the frozen
+/// target resolution records the frozen
 /// selection, target, and exact frontier before send authorization.
 #[test]
-fn s02_preparation_is_a_distinct_checkpoint() {
+fn preparation_is_a_distinct_checkpoint() {
     let execution = active_execution();
     let prepared = execution
         .prepare_initial_call(model_call_id(9))
@@ -1725,10 +1725,10 @@ fn s02_preparation_is_a_distinct_checkpoint() {
     );
 }
 
-/// S08: preparation must supply one fresh semantic identity for
+/// preparation must supply one fresh semantic identity for
 /// every pending steering input in the complete active acceptance tail.
 #[test]
-fn s08_preparation_requires_the_complete_steering_identity_inventory() {
+fn preparation_requires_the_complete_steering_identity_inventory() {
     let mut execution = active_execution();
     execution.active_turn = execution.active_turn.with_pending_steering_for_test(
         vec![(
@@ -1749,10 +1749,10 @@ fn s08_preparation_requires_the_complete_steering_identity_inventory() {
     );
 }
 
-/// S08: every pending input is consumed in immutable
+/// every pending input is consumed in immutable
 /// acceptance order into one prefix extension named by the prepared call.
 #[test]
-fn s08_preparation_consumes_multiple_steering_inputs_in_order() {
+fn preparation_consumes_multiple_steering_inputs_in_order() {
     let mut execution = active_execution();
     let first = accepted_input_id(20);
     let second = accepted_input_id(21);
@@ -1841,10 +1841,10 @@ fn s08_preparation_consumes_multiple_steering_inputs_in_order() {
     );
 }
 
-/// S02: an immutable-catalog miss is retained as the
+/// an immutable-catalog miss is retained as the
 /// exact proof authorizing known-failure closure before any call exists.
 #[test]
-fn s02_target_resolution_failure_requires_matching_proof() {
+fn target_resolution_failure_requires_matching_proof() {
     let mut execution = active_execution();
     execution.targets =
         ModelTargetCatalog::try_from_definitions([]).expect("the empty test catalog is valid");
@@ -1871,10 +1871,10 @@ fn s02_target_resolution_failure_requires_matching_proof() {
     assert_eq!(failed.disposition(), &TurnDisposition::Failed);
 }
 
-/// S02: a catalog miss obtained elsewhere cannot
+/// a catalog miss obtained elsewhere cannot
 /// discard a turn whose own immutable catalog resolves successfully.
 #[test]
-fn s02_resolvable_turn_rejects_foreign_resolution_failure() {
+fn resolvable_turn_rejects_foreign_resolution_failure() {
     let execution = active_execution();
     let foreign_proof = ModelTargetCatalog::try_from_definitions([])
         .expect("the empty test catalog is valid")
@@ -1894,10 +1894,10 @@ fn s02_resolvable_turn_rejects_foreign_resolution_failure() {
     assert_eq!(error, ModelCallClosureError::TargetResolutionMismatch);
 }
 
-/// S02: provider rendering receives the frontier in semantic
+/// provider rendering receives the frontier in semantic
 /// order and the exact accepted user content keyed by its origin identity.
 #[test]
-fn s02_prepared_request_preserves_exact_origin_content() {
+fn prepared_request_preserves_exact_origin_content() {
     let execution = prepared_execution();
     let request = execution
         .resume_prepared_call()
@@ -1923,7 +1923,7 @@ fn s02_prepared_request_preserves_exact_origin_content() {
     );
 }
 
-/// S37: a resumed prepared request carries the turn's exact frozen
+/// a resumed prepared request carries the turn's exact frozen
 /// validated model settings.
 #[test]
 fn prepared_request_carries_the_turns_exact_validated_model_settings() {
@@ -1937,10 +1937,10 @@ fn prepared_request_carries_the_turns_exact_validated_model_settings() {
     assert_eq!(request.model_settings(), expected);
 }
 
-/// S02: resuming a prepared call renders only content named by
+/// resuming a prepared call renders only content named by
 /// that call's immutable frontier, excluding steering accepted later.
 #[test]
-fn s02_prepared_request_excludes_later_pending_steering_content() {
+fn prepared_request_excludes_later_pending_steering_content() {
     let mut execution = prepared_execution_consuming_steering();
     let later = accepted_input_id(21);
     execution.active_turn = execution.active_turn.with_pending_steering_for_test(
@@ -1965,10 +1965,10 @@ fn s02_prepared_request_excludes_later_pending_steering_content() {
     assert_eq!(request.origin_contents.len(), 2);
 }
 
-/// S02: authorization advances the exact attempt and
+/// authorization advances the exact attempt and
 /// call together without changing identity or frontier.
 #[test]
-fn s02_authorization_advances_attempt_and_call_together() {
+fn authorization_advances_attempt_and_call_together() {
     let authorized = prepared_execution()
         .authorize_send()
         .expect("prepared execution may authorize send");
@@ -2003,11 +2003,11 @@ fn s02_authorization_advances_attempt_and_call_together() {
     );
 }
 
-/// S07: interruption before a physical
+/// interruption before a physical
 /// call exists ends the attempt and turn directly with the sole applied
 /// proof and one explicit cancellation marker.
 #[test]
-fn s07_interrupt_cancels_unprepared_work_directly() {
+fn interrupt_cancels_unprepared_work_directly() {
     let execution = active_execution();
     let interrupt = applied_interrupt(&execution);
     let expected_turn = execution.turn();
@@ -2048,10 +2048,10 @@ fn s07_interrupt_cancels_unprepared_work_directly() {
     ));
 }
 
-/// S07: an interrupt closes a checkpointed
+/// an interrupt closes a checkpointed
 /// but unsent tool attempt without inventing send authorization.
 #[test]
-fn s07_interrupt_closes_prepared_tool_attempt() {
+fn interrupt_closes_prepared_tool_attempt() {
     let execution = active_execution();
     let request = batch_request(41, &execution);
     let tool_use = SemanticTranscriptEntry::from_validated_parts(
@@ -2138,10 +2138,10 @@ fn s07_interrupt_closes_prepared_tool_attempt() {
     assert_eq!(*attempt, crash_lost_attempt);
 }
 
-/// S07: interrupt result projection is bound to the
+/// interrupt result projection is bound to the
 /// exact yielded frontier identity, not merely equal semantic content.
 #[test]
-fn s07_tool_cancellation_rejects_same_content_foreign_frontier() {
+fn tool_cancellation_rejects_same_content_foreign_frontier() {
     let execution = active_execution();
     let foreign_yield = ResolvedContextFrontierSnapshot::try_from_candidate(
         execution.session(),
@@ -2184,12 +2184,12 @@ fn s07_tool_cancellation_rejects_same_content_foreign_frontier() {
     assert_eq!(error, ModelCallClosureError::InterruptCorrelationMismatch);
 }
 
-/// S07: an executing-batch cancellation
+/// an executing-batch cancellation
 /// projection must be bound to the interrupted turn. A projection prepared
 /// for a foreign turn, but reusing this turn's current frontier identity as
 /// its yielded source, cannot terminalize this turn with foreign results.
 #[test]
-fn s07_tool_cancellation_rejects_foreign_turn_projection() {
+fn tool_cancellation_rejects_foreign_turn_projection() {
     let execution = active_execution();
     let foreign_turn = turn_id(99);
     assert_ne!(foreign_turn, execution.turn());
@@ -2243,10 +2243,10 @@ fn s07_tool_cancellation_rejects_foreign_turn_projection() {
     assert_eq!(error, ModelCallClosureError::InterruptCorrelationMismatch);
 }
 
-/// S07: the legitimate same-turn executing-batch cancellation
+/// the legitimate same-turn executing-batch cancellation
 /// projection remains accepted after the turn binding is added.
 #[test]
-fn s07_tool_cancellation_accepts_same_turn_projection() {
+fn tool_cancellation_accepts_same_turn_projection() {
     let execution = active_execution();
     let expected_turn = execution.turn();
     let expected_prefix = execution.current_snapshot.frontier();
@@ -2301,10 +2301,10 @@ fn s07_tool_cancellation_accepts_same_turn_projection() {
     );
 }
 
-/// S07: a prepared but unsent call closes
+/// a prepared but unsent call closes
 /// as proof-bearing cancellation without crossing send authorization.
 #[test]
-fn s07_interrupt_cancels_prepared_call_directly() {
+fn interrupt_cancels_prepared_call_directly() {
     let execution = prepared_execution();
     let interrupt = applied_interrupt(&execution);
     let outcome = execution
@@ -2339,11 +2339,11 @@ fn s07_interrupt_cancels_prepared_call_directly() {
     );
 }
 
-/// S07: issued work durably records the
+/// issued work durably records the
 /// same cancellation authority on the attempt and call while retaining
 /// the active slot.
 #[test]
-fn s07_interrupt_requests_issued_call_cancellation() {
+fn interrupt_requests_issued_call_cancellation() {
     let execution = in_flight_execution();
     let interrupt = applied_interrupt(&execution);
     let outcome = execution
@@ -2374,11 +2374,11 @@ fn s07_interrupt_requests_issued_call_cancellation() {
     assert_eq!(stopped.interrupt(), interrupt.proof());
 }
 
-/// S07: confirmed physical cancellation
+/// confirmed physical cancellation
 /// after a durable stop request is the evidence that releases the slot as
 /// `Cancelled`.
 #[test]
-fn s07_confirmed_cancellation_terminalizes_stopped_call() {
+fn confirmed_cancellation_terminalizes_stopped_call() {
     let (execution, interrupt) = stop_requested_execution(in_flight_execution());
     let observation = correlated_observation(&execution, ModelCallTerminalObservation::Cancelled);
     let outcome = execution
@@ -2415,10 +2415,10 @@ fn s07_confirmed_cancellation_terminalizes_stopped_call() {
     );
 }
 
-/// S07: outcome-authoritative completion racing a
+/// outcome-authoritative completion racing a
 /// stop request wins while retaining the interrupt in attempt history.
 #[test]
-fn s07_completion_race_preserves_outcome_and_stop_history() {
+fn completion_race_preserves_outcome_and_stop_history() {
     let (execution, interrupt) = stop_requested_execution(in_flight_execution());
     let observation = correlated_observation(
         &execution,
@@ -2451,11 +2451,11 @@ fn s07_completion_race_preserves_outcome_and_stop_history() {
     );
 }
 
-/// S07 / S11: a tool-using response racing
+/// a tool-using response racing
 /// an applied interrupt records its proposals, closes them without
 /// attempts, and terminalizes through the original stop proof.
 #[test]
-fn s07_s11_tool_response_race_closes_without_execution() {
+fn tool_response_race_closes_without_execution() {
     let (execution, interrupt) = stop_requested_execution(in_flight_execution());
     let request = tool_request_id(40);
     let expected_turn = execution.turn();
@@ -2510,11 +2510,11 @@ fn s07_s11_tool_response_race_closes_without_execution() {
     ));
 }
 
-/// S04 / S07: an applied interrupt makes
+/// an applied interrupt makes
 /// unacknowledged call ambiguity terminal reconciliation, preserving the
 /// exact operation and stop proof while releasing the slot.
 #[test]
-fn s04_s07_stopped_ambiguity_requires_reconciliation() {
+fn stopped_ambiguity_requires_reconciliation() {
     let pending = accepted_input_id(40);
     let execution = with_pending_steering(in_flight_execution(), pending);
     let source_turn = execution.turn();
@@ -2568,11 +2568,11 @@ fn s04_s07_stopped_ambiguity_requires_reconciliation() {
     );
 }
 
-/// S02: an authoritative reread of a durably
+/// an authoritative reread of a durably
 /// issued call reconstructs the same provider-facing correlation without
 /// authorizing or transitioning it a second time.
 #[test]
-fn s02_in_flight_reread_reconstructs_exact_authorization() {
+fn in_flight_reread_reconstructs_exact_authorization() {
     let execution = in_flight_execution();
     let expected_call = execution
         .current_call()
@@ -2596,11 +2596,11 @@ fn s02_in_flight_reread_reconstructs_exact_authorization() {
     assert!(prepared_execution().resume_in_flight_call().is_none());
 }
 
-/// S02: a provider observation remains bound to the
+/// a provider observation remains bound to the
 /// exact session, turn, attempt, call, target, and frontier that crossed
 /// send authorization.
 #[test]
-fn s02_terminal_observation_rejects_cross_wired_call() {
+fn terminal_observation_rejects_cross_wired_call() {
     let execution = in_flight_execution();
     let mut observation =
         correlated_observation(&execution, ModelCallTerminalObservation::KnownFailed);
@@ -2619,11 +2619,11 @@ fn s02_terminal_observation_rejects_cross_wired_call() {
     assert_eq!(error, ModelCallClosureError::ObservationCorrelationMismatch);
 }
 
-/// S02: successful final text, physical
+/// successful final text, physical
 /// completion, attempt/turn completion, and the final marker share one
 /// prefix-preserving candidate.
 #[test]
-fn s02_completion_is_atomic_and_ordered() {
+fn completion_is_atomic_and_ordered() {
     let execution = in_flight_execution();
     let observation = correlated_observation(
         &execution,
@@ -2687,11 +2687,11 @@ fn s02_completion_is_atomic_and_ordered() {
     );
 }
 
-/// S02 / S10: a tool-using completion
+/// a tool-using completion
 /// commits ordered request references, yields its attempt, and parks on
 /// the earliest undecided request without completing the turn.
 #[test]
-fn s02_s10_tool_round_yields_and_parks_in_order() {
+fn tool_round_yields_and_parks_in_order() {
     let execution = in_flight_execution();
     let first_request = tool_request_id(20);
     let second_request = tool_request_id(21);
@@ -2793,10 +2793,10 @@ fn s02_s10_tool_round_yields_and_parks_in_order() {
     );
 }
 
-/// S10: a later model round cannot reuse a tool
+/// a later model round cannot reuse a tool
 /// request identity already present in immutable transcript history.
 #[test]
-fn s10_tool_round_rejects_historical_request_identity() {
+fn tool_round_rejects_historical_request_identity() {
     let execution = in_flight_execution();
     let request = tool_request_id(20);
     let mut frontier_entries = execution.frontier_entries.to_vec();
@@ -2855,10 +2855,10 @@ fn s10_tool_round_rejects_historical_request_identity() {
     assert_eq!(error, ModelCallClosureError::FrontierDerivationFailed);
 }
 
-/// S02 / S15: an all-auto batch creates one fresh
+/// an all-auto batch creates one fresh
 /// prepared continuation attempt while retaining the same logical turn.
 #[test]
-fn s02_s15_all_auto_tool_round_prepares_continuation() {
+fn all_auto_tool_round_prepares_continuation() {
     let execution = in_flight_execution();
     let request = tool_request_id(20);
     let continuation = turn_attempt_id(21);
@@ -2899,10 +2899,10 @@ fn s02_s15_all_auto_tool_round_prepares_continuation() {
     assert_eq!(current_attempt.state(), &CurrentTurnAttemptState::Prepared);
 }
 
-/// S08: a definitive response terminalizes its source only
+/// a definitive response terminalizes its source only
 /// together with ordered, visible reclassification of pending steering.
 #[test]
-fn s08_completion_reclassifies_pending_steering_atomically() {
+fn completion_reclassifies_pending_steering_atomically() {
     let pending = accepted_input_id(20);
     let successor = turn_id(21);
     let execution = with_pending_steering(in_flight_execution(), pending);
@@ -2939,10 +2939,10 @@ fn s08_completion_reclassifies_pending_steering_atomically() {
     );
 }
 
-/// S08: terminal observation cannot release the source while a
+/// terminal observation cannot release the source while a
 /// pending input lacks its exact reclassified successor identity.
 #[test]
-fn s08_terminal_observation_rejects_missing_reclassification() {
+fn terminal_observation_rejects_missing_reclassification() {
     let pending = accepted_input_id(20);
     let execution = with_pending_steering(in_flight_execution(), pending);
     let observation = correlated_observation(&execution, ModelCallTerminalObservation::KnownFailed);
@@ -2963,10 +2963,10 @@ fn s08_terminal_observation_rejects_missing_reclassification() {
     );
 }
 
-/// S08: a refusal reclassifies pending steering without adding
+/// a refusal reclassifies pending steering without adding
 /// response content to the refused turn's terminal frontier.
 #[test]
-fn s08_refusal_reclassifies_pending_steering_atomically() {
+fn refusal_reclassifies_pending_steering_atomically() {
     let pending = accepted_input_id(20);
     let successor = turn_id(21);
     let execution = with_pending_steering(in_flight_execution(), pending);
@@ -2992,10 +2992,10 @@ fn s08_refusal_reclassifies_pending_steering_atomically() {
     );
 }
 
-/// S08: trustworthy pre-send failure releases its source only
+/// trustworthy pre-send failure releases its source only
 /// together with pending-steering reclassification.
 #[test]
-fn s08_prepared_failure_reclassifies_pending_steering_atomically() {
+fn prepared_failure_reclassifies_pending_steering_atomically() {
     let pending = accepted_input_id(20);
     let successor = turn_id(21);
     let execution = with_pending_steering(prepared_execution(), pending);
@@ -3017,10 +3017,10 @@ fn s08_prepared_failure_reclassifies_pending_steering_atomically() {
     );
 }
 
-/// S03: a failed required compaction closes the fresh physical
+/// a failed required compaction closes the fresh physical
 /// attempt without fabricating a provider call.
 #[test]
-fn s03_automatic_compaction_failure_closes_call_free_turn() {
+fn automatic_compaction_failure_closes_call_free_turn() {
     let failure_entry = semantic_transcript_entry_id(10);
     let execution = active_execution();
     let session = execution.session();
@@ -3055,10 +3055,10 @@ fn s03_automatic_compaction_failure_closes_call_free_turn() {
     );
 }
 
-/// S08: a known failure after steering consumption
+/// a known failure after steering consumption
 /// appends its marker to the call frontier without losing consumed input.
 #[test]
-fn s08_prepared_failure_extends_steering_call_frontier() {
+fn prepared_failure_extends_steering_call_frontier() {
     let failure_entry = semantic_transcript_entry_id(30);
     let failed = prepared_execution_consuming_steering()
         .fail_prepared_call(FailedModelCallTurnIdentities::new(
@@ -3083,10 +3083,10 @@ fn s08_prepared_failure_extends_steering_call_frontier() {
     );
 }
 
-/// S04: ambiguous physical completion ends the live
+/// ambiguous physical completion ends the live
 /// attempt and retains the exact call in a durable recovery wait.
 #[test]
-fn s04_ambiguity_preserves_call_and_waits() {
+fn ambiguity_preserves_call_and_waits() {
     let execution = in_flight_execution();
     let observation = correlated_observation(&execution, ModelCallTerminalObservation::Ambiguous);
     let outcome = execution
@@ -3112,11 +3112,11 @@ fn s04_ambiguity_preserves_call_and_waits() {
     );
 }
 
-/// S04 / S08: startup converts an unsent prepared call
+/// startup converts an unsent prepared call
 /// to known failure, records the lost attempt, and reclassifies steering
 /// before releasing the source.
 #[test]
-fn s04_s08_restart_closes_prepared_call_and_reclassifies_steering() {
+fn restart_closes_prepared_call_and_reclassifies_steering() {
     let pending = accepted_input_id(20);
     let successor = turn_id(21);
     let execution = with_pending_steering(prepared_execution(), pending);
@@ -3153,10 +3153,10 @@ fn s04_s08_restart_closes_prepared_call_and_reclassifies_steering() {
     );
 }
 
-/// S04: startup cannot infer the fate of an
+/// startup cannot infer the fate of an
 /// issued prior-process call, so it records ambiguity and a lost attempt.
 #[test]
-fn s04_restart_preserves_in_flight_call_as_ambiguous() {
+fn restart_preserves_in_flight_call_as_ambiguous() {
     let outcome = in_flight_execution()
         .recover_after_restart(FailedModelCallTurnIdentities::new(
             semantic_transcript_entry_id(10),
@@ -3184,12 +3184,12 @@ fn s04_restart_preserves_in_flight_call_as_ambiguous() {
     );
 }
 
-/// S02 / S04: cancellation-requested call state lacks
+/// cancellation-requested call state lacks
 /// the proof-bearing stopped-attempt facts required by
 /// docs/spec/turn-lifecycle-and-scheduling.md, so this evidence-free
 /// execution projection fails closed during reconstitution.
 #[test]
-fn s02_s04_cancellation_requested_reconstitution_fails_closed() {
+fn cancellation_requested_reconstitution_fails_closed() {
     let in_flight = in_flight_execution();
     let cancellation_requested = in_flight
         .current_call()
@@ -3218,10 +3218,10 @@ fn s02_s04_cancellation_requested_reconstitution_fails_closed() {
     );
 }
 
-/// S02: definitive known failure closes the physical call and
+/// definitive known failure closes the physical call and
 /// logical turn as failed in one candidate.
 #[test]
-fn s02_known_failure_closes_call_attempt_and_turn() {
+fn known_failure_closes_call_attempt_and_turn() {
     let execution = in_flight_execution();
     let observation = correlated_observation(&execution, ModelCallTerminalObservation::KnownFailed);
     let outcome = execution
@@ -3247,10 +3247,10 @@ fn s02_known_failure_closes_call_attempt_and_turn() {
     assert_eq!(failed.disposition(), &TurnDisposition::Failed);
 }
 
-/// S02: a cause-free physical cancellation is not a logical
+/// a cause-free physical cancellation is not a logical
 /// cancellation and closes the logical turn as failed.
 #[test]
-fn s02_cause_free_physical_cancellation_fails_turn() {
+fn cause_free_physical_cancellation_fails_turn() {
     let execution = in_flight_execution();
     let observation = correlated_observation(&execution, ModelCallTerminalObservation::Cancelled);
     let outcome = execution
@@ -3278,10 +3278,10 @@ fn s02_cause_free_physical_cancellation_fails_turn() {
     assert_eq!(failed.disposition(), &TurnDisposition::Failed);
 }
 
-/// S02: an explicit provider refusal preserves its physical and
+/// an explicit provider refusal preserves its physical and
 /// logical classifications without manufacturing semantic response text.
 #[test]
-fn s02_refusal_closes_call_attempt_and_turn_without_content() {
+fn refusal_closes_call_attempt_and_turn_without_content() {
     let execution = in_flight_execution();
     let observation = correlated_observation(&execution, ModelCallTerminalObservation::Refused);
     let outcome = execution

@@ -6,19 +6,6 @@
 
 ```rust
 pub struct S3BlobStore {/* private */}
-impl<T> policy::PolicyExt for S3BlobStore
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl fmt::Debug for S3BlobStore {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -43,10 +30,12 @@ impl S3BlobStore {
     pub async fn verify_multipart_lifecycle(
         &self,
     ) -> result::Result<(), signalbox_blob_store::BlobStoreError>;
+    #[cfg(feature = "test-support")]
     pub async fn delete_for_conformance(
         &self,
         expected: signalbox_blob_store::ExpectedBlob,
     ) -> result::Result<(), signalbox_blob_store::BlobStoreError>;
+    #[cfg(feature = "test-support")]
     pub async fn corrupt_for_conformance(
         &self,
         expected: signalbox_blob_store::ExpectedBlob,
@@ -88,19 +77,6 @@ pub enum S3BlobStoreConstructionError {
     NamespaceMarker,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> policy::PolicyExt for S3BlobStoreConstructionError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 impl fmt::Display for S3BlobStoreConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -115,17 +91,4 @@ pub enum S3NamespaceBindingState {
     Recorded,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> policy::PolicyExt for S3NamespaceBindingState
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```

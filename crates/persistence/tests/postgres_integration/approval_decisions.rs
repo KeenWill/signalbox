@@ -1295,8 +1295,8 @@ async fn automatic_policy_decision_requires_no_explicit_event_effect() -> Result
     Ok(())
 }
 
-/// a credential-suppressed proposal commits as an
-/// inert request plus a fixed runtime-safety denial and leaves the turn running.
+/// a credential-suppressed proposal commits as an inert request plus a fixed runtime-safety denial
+/// and leaves the turn running.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn suppressed_tool_request_is_denied_and_continues() -> Result<(), Box<dyn Error>> {
@@ -1337,8 +1337,8 @@ async fn suppressed_tool_request_is_denied_and_continues() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// runtime-safety provenance cannot be attached to ordinary
-/// provider arguments or a request that retained human approval posture.
+/// runtime-safety provenance cannot be attached to ordinary provider arguments or a request that
+/// retained human approval posture.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn runtime_safety_denial_requires_suppressed_arguments() -> Result<(), Box<dyn Error>> {
@@ -1587,8 +1587,8 @@ async fn approval_guard_user_decision_requires_event_and_lifecycle_effect()
     Ok(())
 }
 
-/// a later request cannot gain a decision while an earlier
-/// request in the same proposal batch still owns the approval wait.
+/// a later request cannot gain a decision while an earlier request in the same proposal batch still
+/// owns the approval wait.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_guard_rejects_decision_for_later_request() -> Result<(), Box<dyn Error>> {
@@ -1681,8 +1681,8 @@ async fn approval_guard_rejects_decision_for_later_request() -> Result<(), Box<d
     Ok(())
 }
 
-/// one transaction cannot collapse multiple explicit approval
-/// waits from the same proposal into a single final continuation transition.
+/// one transaction cannot collapse multiple explicit approval waits from the same proposal into a
+/// single final continuation transition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_guard_rejects_multiple_decisions_in_one_transaction() -> Result<(), Box<dyn Error>>
@@ -1767,9 +1767,8 @@ async fn approval_guard_rejects_multiple_decisions_in_one_transaction() -> Resul
     Ok(())
 }
 
-/// recovery remains the sole active gate after an earlier
-/// automatic request becomes ambiguous; a later human request cannot acquire
-/// a decision and event while that recovery wait owns the turn.
+/// recovery remains the sole active gate after an earlier automatic request becomes ambiguous; a
+/// later human request cannot acquire a decision and event while that recovery wait owns the turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_guard_rejects_decision_during_recovery() -> Result<(), Box<dyn Error>> {
@@ -2635,9 +2634,8 @@ async fn recorded_override_before_a_fresh_call(
     ))
 }
 
-/// an override recorded before a call is checkpointed is frozen
-/// into that call, the consuming proposal records approval under
-/// `user_override` provenance naming the overridden denial, and the
+/// an override recorded before a call is checkpointed is frozen into that call, the consuming
+/// proposal records approval under `user_override` provenance naming the overridden denial, and the
 /// consumption dispatches one decided event carrying that provenance.
 ///
 /// The ordering is the whole point, so the consuming call is reached through

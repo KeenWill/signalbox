@@ -30,19 +30,16 @@ pub struct TerminalReport<C> {
 ///
 /// - [`Completed`](Self::Completed): `Completed`.
 /// - [`Refused`](Self::Refused): `Refused`.
-/// - [`ProviderError`](Self::ProviderError): `KnownFailed`, for a complete,
-///   correlated definitive provider error response; credential rejection
-///   stays distinguishable via [`ProviderErrorKind::CredentialRejected`].
-/// - [`CancellationConfirmed`](Self::CancellationConfirmed): `Cancelled`, for
-///   a complete, correlated response definitively confirming provider
-///   cancellation.
-/// - [`ProvenUnsent`](Self::ProvenUnsent): `KnownFailed`, or `Cancelled` when
-///   the cause is [`UnsentCause::CancelledBeforeSend`] and the caller holds
-///   the applied-interrupt proof required by
-///   docs/spec/model-call-execution.md.
-/// - [`BoundaryLoss`](Self::BoundaryLoss): `Ambiguous` — the request crossed
-///   or may have crossed the acceptance-capable boundary and no definitive
-///   response classifies it.
+/// - [`ProviderError`](Self::ProviderError): `KnownFailed`, for a complete, correlated definitive
+///   provider error response; credential rejection stays distinguishable via
+///   [`ProviderErrorKind::CredentialRejected`].
+/// - [`CancellationConfirmed`](Self::CancellationConfirmed): `Cancelled`, for a complete,
+///   correlated response definitively confirming provider cancellation.
+/// - [`ProvenUnsent`](Self::ProvenUnsent): `KnownFailed`, or `Cancelled` when the cause is
+///   [`UnsentCause::CancelledBeforeSend`] and the caller holds the applied-interrupt proof required
+///   by docs/spec/model-call-execution.md.
+/// - [`BoundaryLoss`](Self::BoundaryLoss): `Ambiguous` — the request crossed or may have crossed
+///   the acceptance-capable boundary and no definitive response classifies it.
 ///
 /// A provider-reported model identity is carried as a separate fact where
 /// observed; comparing it with the resolved target (the mismatch rule in

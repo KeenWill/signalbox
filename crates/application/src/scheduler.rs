@@ -2248,8 +2248,8 @@ mod tests {
         }
     }
 
-    /// a provider future that never returns cannot retain a
-    /// scheduler admission slot past the compiled-or-lowered occupancy bound.
+    /// a provider future that never returns cannot retain a scheduler admission slot past the
+    /// compiled-or-lowered occupancy bound.
     #[tokio::test(start_paused = true)]
     async fn inv007_scheduler_expires_a_stalled_pass_and_calls_recovery() {
         capture_telemetry_for_this_thread();
