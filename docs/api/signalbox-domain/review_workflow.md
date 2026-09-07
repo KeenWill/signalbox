@@ -2,258 +2,6 @@
 
 # review_workflow
 
-## ReviewPassKind
-
-```rust
-pub enum ReviewPassKind {
-    ImportExternalContext,
-    ReadOnlyReview,
-    Judge,
-    Dedupe,
-    Publish,
-    Fix,
-    PropagateStack,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## ReviewPassState
-
-```rust
-pub enum ReviewPassState {
-    Queued,
-    Running {
-        turn: TurnId,
-    },
-    Succeeded {
-        turn: TurnId,
-        output_frontier: ContextFrontierId,
-        result: option::Option<ReviewPassResult>,
-    },
-    Failed {
-        turn: TurnId,
-    },
-    Blocked {
-        turn: TurnId,
-        result: option::Option<ReviewPassResult>,
-    },
-    Cancelled {
-        turn: option::Option<TurnId>,
-    },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewPassTurnOutcome
-
-```rust
-pub enum ReviewPassTurnOutcome {
-    Active,
-    Completed,
-    Refused,
-    Failed,
-    Cancelled,
-    ReconciliationRequired,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewPassTurnEvidence
-
-```rust
-pub struct ReviewPassTurnEvidence {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassTurnEvidence {
-    pub const fn new(
-        turn: TurnId,
-        session: SessionId,
-        accepted_input: AcceptedInputId,
-        outcome: ReviewPassTurnOutcome,
-        terminal_frontier: option::Option<ContextFrontierId>,
-    ) -> Self;
-    pub const fn turn(self) -> TurnId;
-    pub const fn session(self) -> SessionId;
-    pub const fn accepted_input(self) -> AcceptedInputId;
-    pub const fn outcome(self) -> ReviewPassTurnOutcome;
-    pub const fn terminal_frontier(self) -> option::Option<ContextFrontierId>;
-}
-```
-
-## ReviewPassAcceptedInputEvidence
-
-```rust
-pub struct ReviewPassAcceptedInputEvidence {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassAcceptedInputEvidence {
-    pub const fn new(
-        accepted_input: AcceptedInputId,
-        session: SessionId,
-        origin_turn: option::Option<TurnId>,
-    ) -> Self;
-    pub const fn accepted_input(self) -> AcceptedInputId;
-    pub const fn session(self) -> SessionId;
-    pub const fn origin_turn(self) -> option::Option<TurnId>;
-}
-```
-
-## ReviewPassReconstitutionInput
-
-```rust
-pub struct ReviewPassReconstitutionInput {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassReconstitutionInput {
-    pub const fn new(
-        reference: ReviewPassRef,
-        kind: ReviewPassKind,
-        workflow_run: ReviewRunRef,
-        workflow: ReviewWorkflowKind,
-        session: SessionId,
-        accepted_input: AcceptedInputId,
-        accepted_input_evidence: ReviewPassAcceptedInputEvidence,
-        state: ReviewPassState,
-        turn_evidence: option::Option<ReviewPassTurnEvidence>,
-    ) -> Self;
-    pub const fn reference(&self) -> ReviewPassRef;
-    pub const fn kind(&self) -> ReviewPassKind;
-    pub const fn workflow_run(&self) -> ReviewRunRef;
-    pub const fn workflow(&self) -> ReviewWorkflowKind;
-    pub const fn session(&self) -> SessionId;
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn accepted_input_evidence(&self) -> ReviewPassAcceptedInputEvidence;
-    pub const fn state(&self) -> &ReviewPassState;
-    pub const fn turn_evidence(&self) -> option::Option<ReviewPassTurnEvidence>;
-}
-```
-
-## ReviewPass
-
-```rust
-pub struct ReviewPass {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPass {
-    pub fn try_new(
-        reference: ReviewPassRef,
-        kind: ReviewPassKind,
-        run: &mut ReviewRun,
-        session: SessionId,
-        accepted_input: ReviewPassAcceptedInputEvidence,
-    ) -> result::Result<Self, ReviewPassConstructionError>;
-    pub fn try_reconstitute(
-        input: ReviewPassReconstitutionInput,
-    ) -> result::Result<Self, ReviewPassReconstitutionError>;
-    pub fn transition(
-        self,
-        next: ReviewPassState,
-        turn_evidence: option::Option<ReviewPassTurnEvidence>,
-    ) -> result::Result<Self, ReviewPassTransitionError>;
-    pub fn bind_result(
-        self,
-        result: ReviewPassResult,
-    ) -> result::Result<Self, ReviewPassTransitionError>;
-    pub const fn reference(&self) -> ReviewPassRef;
-    pub const fn kind(&self) -> ReviewPassKind;
-    pub const fn session(&self) -> SessionId;
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn origin_turn(&self) -> TurnId;
-    pub const fn state(&self) -> &ReviewPassState;
-}
-```
-
-## ReviewPassConstructionFailure
-
-```rust
-pub enum ReviewPassConstructionFailure {
-    ForeignRun,
-    RunWorkflowMismatch,
-    RunNotQueued,
-    RunAlreadyHasPass,
-    AcceptedInputSessionMismatch,
-    AcceptedInputHasNoOriginTurn,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewPassConstructionError
-
-```rust
-pub struct ReviewPassConstructionError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassConstructionError {
-    pub const fn reference(&self) -> ReviewPassRef;
-    pub const fn kind(&self) -> ReviewPassKind;
-    pub const fn workflow(&self) -> ReviewWorkflowKind;
-    pub const fn run_evidence(&self) -> ReviewRunEvidence;
-    pub const fn sessions(&self) -> (SessionId, SessionId);
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn origin_turn(&self) -> option::Option<TurnId>;
-    pub const fn failure(&self) -> ReviewPassConstructionFailure;
-}
-```
-
-## ReviewPassReconstitutionFailure
-
-```rust
-pub enum ReviewPassReconstitutionFailure {
-    ForeignWorkflowRun,
-    RunWorkflowMismatch,
-    AcceptedInputEvidenceMismatch,
-    AcceptedInputSessionMismatch,
-    AcceptedInputHasNoOriginTurn,
-    MissingTurnEvidence,
-    UnexpectedTurnEvidence,
-    TurnMismatch,
-    TurnOriginMismatch,
-    TurnSessionMismatch,
-    TurnAcceptedInputMismatch,
-    TurnOutcomeMismatch,
-    TurnFrontierShapeMismatch,
-    OutputFrontierMismatch,
-    IncompatibleResult,
-    ForeignResultTarget,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewPassReconstitutionError
-
-```rust
-pub struct ReviewPassReconstitutionError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassReconstitutionError {
-    pub const fn failure(&self) -> ReviewPassReconstitutionFailure;
-    pub const fn input(&self) -> &ReviewPassReconstitutionInput;
-    pub fn into_input(self) -> ReviewPassReconstitutionInput;
-}
-```
-
-## ReviewPassTransitionFailure
-
-```rust
-pub enum ReviewPassTransitionFailure {
-    Evidence(ReviewPassReconstitutionFailure),
-    InvalidTransition,
-    TurnChanged,
-    TurnNotActive,
-    IncompatibleResult,
-    ResultAlreadyBound,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewPassTransitionError
-
-```rust
-pub struct ReviewPassTransitionError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassTransitionError {
-    pub const fn failure(&self) -> ReviewPassTransitionFailure;
-    pub fn states(&self) -> (ReviewPassState, ReviewPassState);
-    pub const fn turn_evidence(&self) -> option::Option<ReviewPassTurnEvidence>;
-    pub const fn current(&self) -> &ReviewPass;
-    pub fn into_current(self) -> ReviewPass;
-}
-```
-
 ## ReviewFindingDiffSide
 
 ```rust
@@ -805,6 +553,258 @@ pub enum ReviewExternalLinkTransitionFailure {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPassKind
+
+```rust
+pub enum ReviewPassKind {
+    ImportExternalContext,
+    ReadOnlyReview,
+    Judge,
+    Dedupe,
+    Publish,
+    Fix,
+    PropagateStack,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## ReviewPassState
+
+```rust
+pub enum ReviewPassState {
+    Queued,
+    Running {
+        turn: TurnId,
+    },
+    Succeeded {
+        turn: TurnId,
+        output_frontier: ContextFrontierId,
+        result: option::Option<ReviewPassResult>,
+    },
+    Failed {
+        turn: TurnId,
+    },
+    Blocked {
+        turn: TurnId,
+        result: option::Option<ReviewPassResult>,
+    },
+    Cancelled {
+        turn: option::Option<TurnId>,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPassTurnOutcome
+
+```rust
+pub enum ReviewPassTurnOutcome {
+    Active,
+    Completed,
+    Refused,
+    Failed,
+    Cancelled,
+    ReconciliationRequired,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPassTurnEvidence
+
+```rust
+pub struct ReviewPassTurnEvidence {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassTurnEvidence {
+    pub const fn new(
+        turn: TurnId,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        outcome: ReviewPassTurnOutcome,
+        terminal_frontier: option::Option<ContextFrontierId>,
+    ) -> Self;
+    pub const fn turn(self) -> TurnId;
+    pub const fn session(self) -> SessionId;
+    pub const fn accepted_input(self) -> AcceptedInputId;
+    pub const fn outcome(self) -> ReviewPassTurnOutcome;
+    pub const fn terminal_frontier(self) -> option::Option<ContextFrontierId>;
+}
+```
+
+## ReviewPassAcceptedInputEvidence
+
+```rust
+pub struct ReviewPassAcceptedInputEvidence {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassAcceptedInputEvidence {
+    pub const fn new(
+        accepted_input: AcceptedInputId,
+        session: SessionId,
+        origin_turn: option::Option<TurnId>,
+    ) -> Self;
+    pub const fn accepted_input(self) -> AcceptedInputId;
+    pub const fn session(self) -> SessionId;
+    pub const fn origin_turn(self) -> option::Option<TurnId>;
+}
+```
+
+## ReviewPassReconstitutionInput
+
+```rust
+pub struct ReviewPassReconstitutionInput {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassReconstitutionInput {
+    pub const fn new(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        workflow_run: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        accepted_input_evidence: ReviewPassAcceptedInputEvidence,
+        state: ReviewPassState,
+        turn_evidence: option::Option<ReviewPassTurnEvidence>,
+    ) -> Self;
+    pub const fn reference(&self) -> ReviewPassRef;
+    pub const fn kind(&self) -> ReviewPassKind;
+    pub const fn workflow_run(&self) -> ReviewRunRef;
+    pub const fn workflow(&self) -> ReviewWorkflowKind;
+    pub const fn session(&self) -> SessionId;
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn accepted_input_evidence(&self) -> ReviewPassAcceptedInputEvidence;
+    pub const fn state(&self) -> &ReviewPassState;
+    pub const fn turn_evidence(&self) -> option::Option<ReviewPassTurnEvidence>;
+}
+```
+
+## ReviewPass
+
+```rust
+pub struct ReviewPass {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPass {
+    pub fn try_new(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        run: &mut ReviewRun,
+        session: SessionId,
+        accepted_input: ReviewPassAcceptedInputEvidence,
+    ) -> result::Result<Self, ReviewPassConstructionError>;
+    pub fn try_reconstitute(
+        input: ReviewPassReconstitutionInput,
+    ) -> result::Result<Self, ReviewPassReconstitutionError>;
+    pub fn transition(
+        self,
+        next: ReviewPassState,
+        turn_evidence: option::Option<ReviewPassTurnEvidence>,
+    ) -> result::Result<Self, ReviewPassTransitionError>;
+    pub fn bind_result(
+        self,
+        result: ReviewPassResult,
+    ) -> result::Result<Self, ReviewPassTransitionError>;
+    pub const fn reference(&self) -> ReviewPassRef;
+    pub const fn kind(&self) -> ReviewPassKind;
+    pub const fn session(&self) -> SessionId;
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn origin_turn(&self) -> TurnId;
+    pub const fn state(&self) -> &ReviewPassState;
+}
+```
+
+## ReviewPassConstructionFailure
+
+```rust
+pub enum ReviewPassConstructionFailure {
+    ForeignRun,
+    RunWorkflowMismatch,
+    RunNotQueued,
+    RunAlreadyHasPass,
+    AcceptedInputSessionMismatch,
+    AcceptedInputHasNoOriginTurn,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPassConstructionError
+
+```rust
+pub struct ReviewPassConstructionError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassConstructionError {
+    pub const fn reference(&self) -> ReviewPassRef;
+    pub const fn kind(&self) -> ReviewPassKind;
+    pub const fn workflow(&self) -> ReviewWorkflowKind;
+    pub const fn run_evidence(&self) -> ReviewRunEvidence;
+    pub const fn sessions(&self) -> (SessionId, SessionId);
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn origin_turn(&self) -> option::Option<TurnId>;
+    pub const fn failure(&self) -> ReviewPassConstructionFailure;
+}
+```
+
+## ReviewPassReconstitutionFailure
+
+```rust
+pub enum ReviewPassReconstitutionFailure {
+    ForeignWorkflowRun,
+    RunWorkflowMismatch,
+    AcceptedInputEvidenceMismatch,
+    AcceptedInputSessionMismatch,
+    AcceptedInputHasNoOriginTurn,
+    MissingTurnEvidence,
+    UnexpectedTurnEvidence,
+    TurnMismatch,
+    TurnOriginMismatch,
+    TurnSessionMismatch,
+    TurnAcceptedInputMismatch,
+    TurnOutcomeMismatch,
+    TurnFrontierShapeMismatch,
+    OutputFrontierMismatch,
+    IncompatibleResult,
+    ForeignResultTarget,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPassReconstitutionError
+
+```rust
+pub struct ReviewPassReconstitutionError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassReconstitutionError {
+    pub const fn failure(&self) -> ReviewPassReconstitutionFailure;
+    pub const fn input(&self) -> &ReviewPassReconstitutionInput;
+    pub fn into_input(self) -> ReviewPassReconstitutionInput;
+}
+```
+
+## ReviewPassTransitionFailure
+
+```rust
+pub enum ReviewPassTransitionFailure {
+    Evidence(ReviewPassReconstitutionFailure),
+    InvalidTransition,
+    TurnChanged,
+    TurnNotActive,
+    IncompatibleResult,
+    ResultAlreadyBound,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPassTransitionError
+
+```rust
+pub struct ReviewPassTransitionError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassTransitionError {
+    pub const fn failure(&self) -> ReviewPassTransitionFailure;
+    pub fn states(&self) -> (ReviewPassState, ReviewPassState);
+    pub const fn turn_evidence(&self) -> option::Option<ReviewPassTurnEvidence>;
+    pub const fn current(&self) -> &ReviewPass;
+    pub fn into_current(self) -> ReviewPass;
+}
 ```
 
 ## ReviewFindingStatus
