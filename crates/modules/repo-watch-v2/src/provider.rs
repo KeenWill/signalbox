@@ -10,10 +10,10 @@ use signalbox_ownership_seam::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
     RepoWatchCheckSuiteObservation, RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    RepoWatchReviewObservation, RepoWatchThreadObservation, RepoWatchThreadState,
-    RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation, RepositorySlug, ReviewState,
-    ReviewThreadId, WorkflowName,
+    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
+    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchThreadObservation,
+    RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
+    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
 };
 
 use crate::{
@@ -48,6 +48,11 @@ query RepositoryWatchReviewThreads($owner: String!, $name: String!, $number: Int
 pub enum ObservationError {
     Transport(GitHubClientError),
     InvalidResponse,
+    InvalidState {
+        repository: RepositorySlug,
+        pull_request: Option<PullRequestNumber>,
+        source: RepoWatchRepositoryStateError,
+    },
     RequestBudgetExceeded {
         limit: usize,
     },
@@ -73,6 +78,15 @@ impl fmt::Display for ObservationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transport(error) => write!(f, "{error}"),
+            Self::InvalidState {
+                repository,
+                pull_request,
+                source,
+            } => write!(
+                f,
+                "repository-watch observation {} pull_request={pull_request:?}: {source}",
+                repository.as_str()
+            ),
             Self::CheckSuiteLimitExceeded { limit } => write!(
                 f,
                 "commit check-run inventory exceeds GitHub's {limit}-suite limit"
@@ -92,6 +106,7 @@ impl Error for ObservationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Transport(error) => Some(error),
+            Self::InvalidState { source, .. } => Some(source),
             Self::Request { source, .. } => Some(source),
             Self::InvalidResponse
             | Self::RequestBudgetExceeded { .. }
@@ -420,7 +435,11 @@ pub async fn fetch_observation(
         branch_heads,
         workflow_runs,
     })
-    .map_err(|_| ObservationError::InvalidResponse)?;
+    .map_err(|source| ObservationError::InvalidState {
+        repository: repository.clone(),
+        pull_request: None,
+        source,
+    })?;
     Ok(RepositoryObservation {
         repository: repository.clone(),
         default_branch,
@@ -509,7 +528,11 @@ async fn fetch_pull(
         threads,
         reactions,
     })
-    .map_err(|_| detail.invalid())
+    .map_err(|source| ObservationError::InvalidState {
+        repository: repository.clone(),
+        pull_request: Some(number),
+        source,
+    })
 }
 
 async fn fetch_checks(
@@ -898,6 +921,34 @@ mod tests {
                 "pageInfo": {"hasNextPage": false, "endCursor": null}
             }}}}}),
         }
+    }
+
+    #[tokio::test]
+    async fn duplicate_check_runs_preserve_the_aggregate_failure_cause() {
+        let mut io = fixture();
+        let path = "/repos/example/project/commits/1111111111111111111111111111111111111111/check-runs?filter=all&per_page=100&page=1";
+        let page = io.pages.get_mut(path).expect("check-run page");
+        page.1 = true;
+        let repeated = page.0.clone();
+        io.pages
+            .insert(path.replace("&page=1", "&page=2"), (repeated, false));
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let error = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect_err("repeated check run is rejected");
+        let ObservationError::InvalidState {
+            repository: actual_repository,
+            pull_request: Some(number),
+            source: RepoWatchRepositoryStateError::DuplicateCheckRun(id),
+        } = &error
+        else {
+            panic!("aggregate failure keeps its typed cause: {error:?}");
+        };
+        assert_eq!(actual_repository, &repository);
+        assert_eq!(number.get(), 1);
+        assert_eq!(id.get(), 3);
+        assert!(error.to_string().contains("duplicate check run 3"));
     }
 
     #[tokio::test]
