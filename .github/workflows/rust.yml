@@ -175,7 +175,7 @@ jobs:
             cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
           fi
           bazel build --config=api --jobs=4 "${cache_args[@]}" //:api_json
-          mapfile -t json_dirs < <(bazel cquery --config=api //:api_json --output=files)
+          mapfile -t json_dirs < <(bazel cquery --config=api //:api_json --output=files | tr ' ' '\n')
           python3 scripts/domain_spine_digest.py --json-dir "${json_dirs[@]}" >> "$GITHUB_STEP_SUMMARY"
   checker-and-format-tests:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
