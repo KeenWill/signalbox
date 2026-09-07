@@ -1188,7 +1188,7 @@ mod tests {
     /// The wire vocabulary as text. The review read verbs are enumerated from
     /// the protocol itself so a later one cannot be admitted by a list here
     /// staying silent about it.
-    const WIRE_VOCABULARY: &str = include_str!("../../../../crates/process-protocol/src/lib.rs");
+    const WIRE_VOCABULARY: &str = include_str!("../../../../crates/process-protocol/src/request.rs");
 
     fn client_request_variant_names(source: &str) -> BTreeSet<String> {
         let declaration = "pub enum ClientRequest {";
