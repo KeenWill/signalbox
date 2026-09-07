@@ -198,9 +198,11 @@ export function ProductNavigation({
 function CommandPalette({
   context,
   openerRef,
+  helpOpenerRef,
 }: {
   context: ProductCommandContext
   openerRef: RefObject<HTMLElement | null>
+  helpOpenerRef: RefObject<HTMLElement | null>
 }) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   const focusTimelineAfterClose = useRef(false)
@@ -261,6 +263,7 @@ function CommandPalette({
                     focusTimelineAfterClose.current =
                       command.id.startsWith('selection.') &&
                       productCommandAvailable(command.id, context)
+                    if (command.id === 'help.open') helpOpenerRef.current = openerRef.current
                     invokeProductCommand('surface.escape', context)
                     invokeProductCommand(command.id, context)
                   }}
@@ -279,7 +282,15 @@ function CommandPalette({
   )
 }
 
-function KeyboardHelp({ context }: { context: ProductCommandContext }) {
+function KeyboardHelp({
+  context,
+  openerRef,
+  fallbackRef,
+}: {
+  context: ProductCommandContext
+  openerRef: RefObject<HTMLElement | null>
+  fallbackRef: RefObject<HTMLElement | null>
+}) {
   const open = useAppSelector((state) => state.app.overlay === 'help')
   return (
     <Dialog.Root
@@ -293,6 +304,15 @@ function KeyboardHelp({ context }: { context: ProductCommandContext }) {
         <Dialog.Content
           className="dialog-content product-palette"
           aria-describedby="keyboard-help-description"
+          onEscapeKeyDown={(event) => event.stopPropagation()}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            const opener = openerRef.current
+            openerRef.current = null
+            if (context.getState().app.overlay !== null) return
+            if (opener?.isConnected && opener.getClientRects().length > 0) opener.focus()
+            else fallbackRef.current?.focus()
+          }}
         >
           <div className="dialog-heading">
             <div>
@@ -553,6 +573,7 @@ export function ProductApp({
   const mainRef = useRef<HTMLElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const paletteOpenerRef = useRef<HTMLElement | null>(null)
+  const helpOpenerRef = useRef<HTMLElement | null>(null)
   const navigationOpenerRef = useRef<HTMLElement | null>(null)
   const artifactButtonRef = useRef<HTMLButtonElement>(null)
   const artifactDigestRef = useRef<HTMLInputElement>(null)
@@ -729,6 +750,10 @@ export function ProductApp({
           return
         }
         if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
+          if (binding.commandId === 'help.open') {
+            const activeElement = document.activeElement
+            helpOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
+          }
           if (binding.commandId === 'palette.open') {
             const activeElement = document.activeElement
             paletteOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
@@ -1063,8 +1088,12 @@ export function ProductApp({
           )}
         </aside>
       )}
-      <CommandPalette context={context} openerRef={paletteOpenerRef} />
-      <KeyboardHelp context={context} />
+      <CommandPalette
+        context={context}
+        openerRef={paletteOpenerRef}
+        helpOpenerRef={helpOpenerRef}
+      />
+      <KeyboardHelp context={context} openerRef={helpOpenerRef} fallbackRef={mainRef} />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {
