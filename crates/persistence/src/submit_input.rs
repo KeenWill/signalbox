@@ -1829,6 +1829,7 @@ async fn prospective_attachment_frontier_exceeds_bound(
                                 | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+                                | InitialSemanticTranscriptEntryPayload::ToolInadmissible { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
                                 | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. }
                                 | InitialSemanticTranscriptEntryPayload::Imported { .. } => None,
@@ -2223,6 +2224,7 @@ async fn delegated_parked_attachment_frontier_origins(
                 | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+                | InitialSemanticTranscriptEntryPayload::ToolInadmissible { .. }
                 | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
                 | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. }
                 | InitialSemanticTranscriptEntryPayload::Imported { .. } => None,
@@ -5997,6 +5999,21 @@ async fn load_scheduling_projection_with_semantic_frontiers(
                 request: ToolRequestId::from_uuid(request),
             },
             (
+                "tool_inadmissible",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(request),
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::ToolInadmissible {
+                request: ToolRequestId::from_uuid(request),
+            },
+            (
                 "tool_closed_by_turn_end",
                 None,
                 None,
@@ -6037,6 +6054,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
                 | "assistant_tool_use"
                 | "tool_execution_result"
                 | "tool_denied"
+                | "tool_inadmissible"
                 | "tool_closed_by_turn_end"
                 | "turn_completed",
                 _,
@@ -6165,6 +6183,19 @@ async fn load_scheduling_projection_with_semantic_frontiers(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let inadmissible_request_ids: Vec<Uuid> = sqlx::query_scalar("SELECT request_id FROM tool_request WHERE session_id = $1 AND inadmissible_reason IS NOT NULL")
+        .bind(session_id.into_uuid()).fetch_all(&mut *connection).await?;
+    let inadmissible_requests = crate::tool_loop::load_requests_by_id(
+        connection,
+        &inadmissible_request_ids
+            .into_iter()
+            .map(ToolRequestId::from_uuid)
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(map_tool_loop_error)?
+    .into_values()
+    .collect();
     let mut input = AcceptedInputSchedulingReconstitutionInput::new(
         session,
         turns,
@@ -6185,6 +6216,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
         );
     }
     input
+        .with_inadmissible_requests(inadmissible_requests)
         .with_runner_placement_frontiers(
             placement_frontiers
                 .into_iter()

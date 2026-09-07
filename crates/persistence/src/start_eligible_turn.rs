@@ -1187,6 +1187,7 @@ async fn insert_prepared_accepted_activation(
         | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
         | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
         | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+        | InitialSemanticTranscriptEntryPayload::ToolInadmissible { .. }
         | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
@@ -1273,6 +1274,7 @@ async fn insert_prepared_accepted_activation(
             | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+            | InitialSemanticTranscriptEntryPayload::ToolInadmissible { .. }
             | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
             | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. } => {
                 return Err(StartEligibleTurnRepositoryError::HubInvariant(

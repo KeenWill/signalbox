@@ -1711,6 +1711,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::ProviderCompaction { .. }
                 | ProcessTranscriptEntry::ProviderReasoning { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
+                | ProcessTranscriptEntry::ToolInadmissible { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }
                 | ProcessTranscriptEntry::TurnFailed { .. }
                 | ProcessTranscriptEntry::TurnCompleted { .. }
@@ -1756,6 +1757,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::ProviderReasoning { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
                 | ProcessTranscriptEntry::ToolDenied { .. }
+                | ProcessTranscriptEntry::ToolInadmissible { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }
                 | ProcessTranscriptEntry::TurnFailed { .. }
                 | ProcessTranscriptEntry::TurnCompleted { .. }

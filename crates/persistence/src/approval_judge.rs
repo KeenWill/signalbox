@@ -202,6 +202,8 @@ pub enum PrepareApprovalJudgeOutcome {
 pub enum CompleteApprovalJudgeOutcome {
     /// Approve or deny was recorded and batch progression may continue.
     Decided,
+    /// The observation committed and placement loss resolved the request before dispatch.
+    ClosedInadmissible,
     /// The judge explicitly left the request parked for a user decision.
     EscalatedToHuman,
     /// An unattended turn was terminalized and audited for its dispatch.
@@ -508,7 +510,9 @@ impl PostgresApprovalJudgeRepository {
         let final_request = batch
             .requests()
             .iter()
-            .filter(|request| batch.approval(request.id()).is_none())
+            .filter(|request| {
+                request.inadmissible_reason().is_none() && batch.approval(request.id()).is_none()
+            })
             .count()
             == 1;
         let continuation = (recommendation != DelegateApprovalRecommendation::EscalateToHuman
@@ -582,10 +586,28 @@ impl PostgresApprovalJudgeRepository {
                     },
                 )
                 .await?;
-                CompleteApprovalJudgeOutcome::Decided
+                if crate::tool_loop::resolve_lost_runner_batch_after_judge(
+                    &mut transaction,
+                    prepared.request(),
+                )
+                .await
+                .map_err(map_tool_error)?
+                {
+                    CompleteApprovalJudgeOutcome::ClosedInadmissible
+                } else {
+                    CompleteApprovalJudgeOutcome::Decided
+                }
             }
             None => {
-                if let Some(dispatch) =
+                if crate::tool_loop::resolve_lost_runner_batch_after_judge(
+                    &mut transaction,
+                    prepared.request(),
+                )
+                .await
+                .map_err(map_tool_error)?
+                {
+                    CompleteApprovalJudgeOutcome::ClosedInadmissible
+                } else if let Some(dispatch) =
                     unattended_escalation_dispatch(&mut transaction, prepared, authority_stands)
                         .await?
                 {
@@ -694,6 +716,12 @@ impl PostgresApprovalJudgeRepository {
         .await?
         .rows_affected();
         require_single(rows, "failed judge call")?;
+        crate::tool_loop::resolve_lost_runner_batch_after_judge(
+            &mut transaction,
+            prepared.request(),
+        )
+        .await
+        .map_err(map_tool_error)?;
         transaction
             .commit()
             .await
@@ -1625,6 +1653,15 @@ async fn exact_completed(
         && row.try_get::<Option<Decimal>, _>("cache_read_input_tokens")? == encoded.cache_read;
     if !exact {
         return Ok(None);
+    }
+    let inadmissible: bool = sqlx::query_scalar(
+        "SELECT inadmissible_reason IS NOT NULL FROM tool_request WHERE request_id = $1",
+    )
+    .bind(prepared.request().id().into_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
+    if inadmissible {
+        return Ok(Some(CompleteApprovalJudgeOutcome::ClosedInadmissible));
     }
     let continuation_exact = stored == Some(DelegateApprovalRecommendation::EscalateToHuman)
         || exact_completion_continuation(connection, prepared, identities.continuation_attempt())

@@ -1112,55 +1112,16 @@ impl RunnerProtocolStore {
             return Err(RunnerProtocolCorruption::CrossWiredReference.into());
         }
 
+        crate::tool_loop::resolve_lost_runner_batch(&mut transaction, session)
+            .await
+            .map_err(|error| match error {
+                crate::tool_loop::ToolLoopRepositoryError::Database { source: error, .. } => {
+                    RunnerProtocolStoreError::Database(error)
+                }
+                _ => RunnerProtocolCorruption::CrossWiredReference.into(),
+            })?;
         if let Some(lease) = current_lease {
             persist_runner_loss_lease_and_wait(&mut transaction, &lost, lease).await?;
-        } else {
-            let has_active_runner_boundary: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                     SELECT 1
-                       FROM turn_lifecycle AS lifecycle
-                       JOIN turn_attempt AS turn_attempt
-                         ON turn_attempt.turn_attempt_id =
-                            lifecycle.current_attempt_id
-                        AND turn_attempt.turn_id = lifecycle.turn_id
-                        AND turn_attempt.session_id = lifecycle.session_id
-                       JOIN tool_request AS request
-                         ON request.producing_model_call_id =
-                            lifecycle.active_tool_round_call_id
-                        AND request.turn_id = lifecycle.turn_id
-                        AND request.session_id = lifecycle.session_id
-                       JOIN runner_current_session_placement AS placement_head
-                         ON placement_head.session_id = lifecycle.session_id
-                       JOIN runner_session_placement_tool AS required
-                         ON required.session_id = placement_head.session_id
-                        AND required.event_ordinal = placement_head.event_ordinal
-                        AND required.tool_name = request.tool_name
-                        AND required.runner_required
-                      WHERE lifecycle.session_id = $1
-                        AND lifecycle.state_kind = 'active'
-                        AND lifecycle.active_phase_kind = 'running'
-                        AND lifecycle.active_tool_round_call_id IS NOT NULL
-                        AND turn_attempt.state_kind = 'running'
-                        AND NOT EXISTS (
-                            SELECT 1
-                              FROM tool_approval_decision AS denied
-                             WHERE denied.request_id = request.request_id
-                               AND denied.decision_kind = 'deny'
-                        )
-                        AND NOT EXISTS (
-                            SELECT 1
-                              FROM tool_attempt AS finished
-                             WHERE finished.request_id = request.request_id
-                               AND finished.state_kind = 'terminal'
-                        )
-                 )",
-            )
-            .bind(session.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-            if has_active_runner_boundary {
-                yield_turn_to_runner_recovery_without_lease(&mut transaction, &lost).await?;
-            }
         }
         outbox::append(
             transaction.as_mut(),
@@ -3217,103 +3178,6 @@ async fn persist_runner_loss_lease_and_wait(
         terminalize_runner_loss_attempt_ambiguous(transaction, &correlation).await?;
     }
     yield_turn_to_runner_recovery(transaction, placement, &correlation).await
-}
-
-async fn yield_turn_to_runner_recovery_without_lease(
-    transaction: &mut Transaction<'_, Postgres>,
-    placement: &SessionRunnerPlacement,
-) -> Result<(), RunnerProtocolStoreError> {
-    let runner = placement_loss_fence_runner(placement)
-        .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
-    let retired = sqlx::query(
-        "UPDATE tool_attempt AS attempt
-            SET state_kind = 'terminal',
-                terminal_disposition_kind = 'known_failed',
-                error_kind = 'crash_lost'
-           FROM tool_request AS request,
-                turn_lifecycle AS lifecycle,
-                runner_current_session_placement AS placement_head,
-                runner_session_placement_tool AS required
-          WHERE lifecycle.session_id = $1
-            AND lifecycle.state_kind = 'active'
-            AND lifecycle.active_phase_kind = 'running'
-            AND lifecycle.active_tool_round_call_id IS NOT NULL
-            AND request.producing_model_call_id =
-                lifecycle.active_tool_round_call_id
-            AND request.turn_id = lifecycle.turn_id
-            AND request.session_id = lifecycle.session_id
-            AND attempt.request_id = request.request_id
-            AND attempt.turn_id = request.turn_id
-            AND attempt.session_id = request.session_id
-            AND attempt.state_kind = 'prepared'
-            AND placement_head.session_id = lifecycle.session_id
-            AND required.session_id = placement_head.session_id
-            AND required.event_ordinal = placement_head.event_ordinal
-            AND required.tool_name = request.tool_name
-            AND required.runner_required",
-    )
-    .bind(placement.session().into_uuid())
-    .execute(&mut **transaction)
-    .await?
-    .rows_affected();
-    if retired > 1 {
-        return Err(RunnerProtocolCorruption::IncompleteInventory.into());
-    }
-    let yielded = sqlx::query(
-        "UPDATE turn_attempt AS attempt
-            SET state_kind = 'ended', end_variant = 'without_stop',
-                end_disposition = 'yielded_to_durable_wait'
-           FROM turn_lifecycle AS lifecycle
-          WHERE lifecycle.session_id = $1
-            AND lifecycle.state_kind = 'active'
-            AND lifecycle.active_phase_kind = 'running'
-            AND lifecycle.active_tool_round_call_id IS NOT NULL
-            AND lifecycle.current_attempt_id = attempt.turn_attempt_id
-            AND lifecycle.turn_id = attempt.turn_id
-            AND lifecycle.session_id = attempt.session_id
-            AND attempt.state_kind = 'running'
-            AND attempt.end_variant IS NULL
-            AND attempt.end_disposition IS NULL",
-    )
-    .bind(placement.session().into_uuid())
-    .execute(&mut **transaction)
-    .await?
-    .rows_affected();
-    if yielded != 1 {
-        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
-    }
-    let changed = sqlx::query(
-        "UPDATE turn_lifecycle AS lifecycle
-            SET active_phase_kind = 'awaiting_runner_recovery',
-                current_attempt_id = NULL,
-                runner_recovery_runner_id = $2,
-                runner_recovery_placement_revision = $3,
-                runner_recovery_tool_attempt_id = NULL
-          WHERE lifecycle.session_id = $1
-            AND lifecycle.state_kind = 'active'
-            AND lifecycle.active_phase_kind = 'running'
-            AND lifecycle.active_tool_round_call_id IS NOT NULL
-            AND EXISTS (
-                SELECT 1
-                  FROM turn_attempt AS attempt
-                 WHERE attempt.turn_attempt_id = lifecycle.current_attempt_id
-                   AND attempt.turn_id = lifecycle.turn_id
-                   AND attempt.session_id = lifecycle.session_id
-                   AND attempt.state_kind = 'ended'
-                   AND attempt.end_variant = 'without_stop'
-                   AND attempt.end_disposition = 'yielded_to_durable_wait'
-            )",
-    )
-    .bind(placement.session().into_uuid())
-    .bind(runner.into_uuid())
-    .bind(Decimal::from(placement.revision().get()))
-    .execute(&mut **transaction)
-    .await?
-    .rows_affected();
-    if changed != 1 {
-        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
-    }
-    Ok(())
 }
 
 async fn append_lost_unclaimed_lease_event(

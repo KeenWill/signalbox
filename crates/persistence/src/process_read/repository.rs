@@ -344,6 +344,7 @@ impl ProcessReadRepository {
                 call.turn_id AS assistant_turn_id,
                 result_attempt.request_id AS result_attempt_request_id,
                 transcript_request.tool_name AS transcript_tool_name,
+                transcript_request.inadmissible_reason AS transcript_inadmissible_reason,
                 transcript_request.arguments_text AS transcript_tool_arguments,
                 result_attempt.terminal_disposition_kind AS result_disposition,
                 result_attempt.result_text AS result_text,

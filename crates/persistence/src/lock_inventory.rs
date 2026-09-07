@@ -28,6 +28,8 @@
 //! row first.
 //!
 //! Additional row-lock protocols:
+//! - `tool_loop::placement_loss::close_lost_runner_requests_after_observation`: after the
+//!   session scheduler, `tool_request FOR UPDATE` in proposal order.
 //! - `review_workflow::append_finding_event`: ordinary events lock every `review_finding` for the
 //!   target `FOR NO KEY UPDATE`, by `finding_id`; publication reconciliation takes the external
 //!   link before its finding.

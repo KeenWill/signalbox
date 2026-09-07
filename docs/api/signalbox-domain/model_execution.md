@@ -22,6 +22,7 @@ impl ModelCallExecutionReconstitutionInput {
         self,
         correlations: vec::Vec<ToolResultAttemptCorrelation>,
     ) -> Self;
+    pub fn with_tool_inadmissible_correlations(self, requests: vec::Vec<ToolRequest>) -> Self;
     pub fn with_tool_denial_correlations(
         self,
         correlations: vec::Vec<ToolApprovalResolution>,

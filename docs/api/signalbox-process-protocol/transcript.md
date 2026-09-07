@@ -291,6 +291,10 @@ pub enum TranscriptEntry {
         tool_request_id: CanonicalUuid,
         content: string::String,
     },
+    ToolInadmissible {
+        tool_request_id: CanonicalUuid,
+        content: string::String,
+    },
     ToolClosed {
         tool_request_id: CanonicalUuid,
         content: string::String,

@@ -51,8 +51,8 @@ pub use proposal::{
 };
 pub use request::{ToolRequest, ToolRequestReconstitutionInput};
 pub use result::{
-    ToolRequestResolution, ToolResultContent, ToolResultText, ToolResultTextError,
-    ToolResultTextFailure,
+    ToolInadmissibleReason, ToolRequestResolution, ToolResultContent, ToolResultText,
+    ToolResultTextError, ToolResultTextFailure,
 };
 
 pub(crate) use proposal::MAX_TOOL_REQUESTS_PER_RESPONSE;

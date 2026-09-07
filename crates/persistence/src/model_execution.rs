@@ -1250,6 +1250,8 @@ impl PostgresModelCallRepository {
             load_attachment_blob_facts(&mut transaction, &origin_contents).await?;
         let tool_result_correlations =
             load_tool_result_correlations(&mut transaction, &frontier_entries).await?;
+        let tool_inadmissible_correlations =
+            load_tool_inadmissible_correlations(&mut transaction, &frontier_entries).await?;
         let tool_denial_correlations =
             load_tool_denial_correlations(&mut transaction, &frontier_entries).await?;
         // The canonical projection the renderer sends. A preview never commits
@@ -1283,6 +1285,7 @@ impl PostgresModelCallRepository {
         .with_attachment_blob_facts(attachment_blob_facts)
         .with_tool_result_correlations(tool_result_correlations)
         .with_tool_denial_correlations(tool_denial_correlations)
+        .with_tool_inadmissible_correlations(tool_inadmissible_correlations)
         .reconstitute()
         .map_err(|error| {
             let (_, failure) = error.into_parts();
@@ -3551,6 +3554,17 @@ async fn load_tool_continuation_headroom_evidence(
 
                             UNION ALL
 
+                            SELECT octet_length(request.inadmissible_reason) AS content_bytes
+                              FROM semantic_transcript_entry AS entry
+                              JOIN tool_request AS request ON request.request_id = entry.tool_result_request_id
+                                AND request.session_id = entry.source_session_id
+                             WHERE entry.payload_kind = 'tool_inadmissible'
+                               AND request.producing_model_call_id = model_call.model_call_id
+                               AND request.session_id = model_call.session_id
+                               AND request.turn_id = model_call.turn_id
+
+                            UNION ALL
+
                             -- A returning foreground await renders the child's
                             -- delivered result as this round's tool result, so
                             -- its content joins the round through the awaiting
@@ -5566,6 +5580,8 @@ async fn require_live_execution_with_targets(
     let attachment_blob_facts = load_attachment_blob_facts(connection, &origin_contents).await?;
     let tool_result_correlations =
         load_tool_result_correlations(connection, &frontier_entries).await?;
+    let tool_inadmissible_correlations =
+        load_tool_inadmissible_correlations(connection, &frontier_entries).await?;
     let tool_denial_correlations =
         load_tool_denial_correlations(connection, &frontier_entries).await?;
     let recovered_targets;
@@ -5607,7 +5623,8 @@ async fn require_live_execution_with_targets(
     )
     .with_attachment_blob_facts(attachment_blob_facts)
     .with_tool_result_correlations(tool_result_correlations)
-    .with_tool_denial_correlations(tool_denial_correlations);
+    .with_tool_denial_correlations(tool_denial_correlations)
+    .with_tool_inadmissible_correlations(tool_inadmissible_correlations);
     if availability_successor {
         input = input.with_availability_successor();
     }
@@ -6250,6 +6267,24 @@ async fn load_delegated_consumed_steering(
         .collect()
 }
 
+async fn load_tool_inadmissible_correlations(
+    connection: &mut PgConnection,
+    entries: &[SemanticTranscriptEntry],
+) -> Result<Vec<signalbox_domain::ToolRequest>, ModelCallRepositoryError> {
+    let requests = entries
+        .iter()
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::ToolInadmissible { request } => Some(*request),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    Ok(crate::tool_loop::load_requests_by_id(connection, &requests)
+        .await
+        .map_err(map_tool_evidence_error)?
+        .into_values()
+        .collect())
+}
+
 async fn load_tool_denial_correlations(
     connection: &mut PgConnection,
     frontier_entries: &[SemanticTranscriptEntry],
@@ -6463,6 +6498,7 @@ async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
             | SemanticTranscriptEntryPayload::ToolClosed { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | SemanticTranscriptEntryPayload::Imported { .. } => None,
@@ -7951,6 +7987,7 @@ async fn load_tool_conversation_entries(
     for entry in request.frontier_entries() {
         match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantToolUse { request, .. }
+            | SemanticTranscriptEntryPayload::ToolInadmissible { request }
             | SemanticTranscriptEntryPayload::ToolClosed { request } => {
                 request_ids.insert(*request);
             }
@@ -8054,6 +8091,15 @@ async fn load_tool_conversation_entries(
                     request,
                     approval,
                 });
+            }
+            SemanticTranscriptEntryPayload::ToolInadmissible {
+                request: request_id,
+            } => {
+                let request = requests
+                    .get(request_id)
+                    .cloned()
+                    .ok_or(ModelCallCorruption::Missing("closed tool request evidence"))?;
+                resolved.push(ResolvedToolConversationEntry::Inadmissible { source, request });
             }
             SemanticTranscriptEntryPayload::ToolClosed {
                 request: request_id,
@@ -9118,7 +9164,19 @@ async fn persist_tool_round(
         round.requests(),
     )
     .await?;
+    crate::tool_loop::close_lost_runner_requests(connection, round.session(), round.call().id())
+        .await
+        .map_err(map_tool_evidence_error)?;
     for approval in round.automatic_approvals() {
+        let inadmissible: bool = sqlx::query_scalar(
+            "SELECT inadmissible_reason IS NOT NULL FROM tool_request WHERE request_id = $1",
+        )
+        .bind(approval.request().into_uuid())
+        .fetch_one(&mut *connection)
+        .await?;
+        if inadmissible {
+            continue;
+        }
         let (decision_kind, denial_reason) = encode_tool_approval(approval.decision());
         let source = encode_tool_decision_source(approval.source())?;
         let override_denied_request = match (approval.source(), approval.decider()) {
@@ -9245,6 +9303,9 @@ async fn persist_tool_round(
             );
         }
     }
+    crate::tool_loop::resolve_lost_runner_batch(connection, round.session())
+        .await
+        .map_err(map_tool_evidence_error)?;
     outbox::append(
         connection,
         OutboxEvent::ToolBatchTransition {
@@ -11177,6 +11238,7 @@ fn preview_entry_content_bytes(
         | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
         | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
         | SemanticTranscriptEntryPayload::ToolDenied { .. }
+        | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
         | SemanticTranscriptEntryPayload::ToolClosed { .. }
         | SemanticTranscriptEntryPayload::TurnCompleted { .. }
         | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
