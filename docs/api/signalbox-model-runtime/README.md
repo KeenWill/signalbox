@@ -5,7 +5,7 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | capability | 6 | 0 | 0 | [capability](capability.md) |
-| cli_process | 7 | 1 | 1 | [cli_process](cli_process.md) |
+| cli_process | 7 | 1 | 2 | [cli_process](cli_process.md) |
 | cli_redaction | 4 | 0 | 3 | [cli_redaction](cli_redaction.md) |
 | credential | 4 | 1 | 0 | [credential](credential.md) |
 | evidence | 23 | 0 | 1 | [evidence](evidence.md) |
@@ -17,7 +17,7 @@
 | preparation | 3 | 0 | 0 | [preparation](preparation.md) |
 | provider_json | 2 | 0 | 2 | [provider_json](provider_json.md) |
 | provider_support | 1 | 0 | 8 | [provider_support](provider_support.md) |
-| redaction | 1 | 0 | 1 | [redaction](redaction.md) |
+| redaction | 1 | 0 | 2 | [redaction](redaction.md) |
 | runtime | 1 | 1 | 0 | [runtime](runtime.md) |
 | scripted | 3 | 0 | 0 | [scripted](scripted.md) |
 | settings | 7 | 0 | 0 | [settings](settings.md) |

@@ -34,7 +34,7 @@ fn policy(members: Vec<CredentialPoolRuntimeMember>) -> CredentialPoolRuntimePol
     )
 }
 
-struct CapacityCall {
+pub(super) struct CapacityCall {
     session: SessionId,
     call: ModelCallId,
     repository: PostgresModelCallRepository,
@@ -43,7 +43,7 @@ struct CapacityCall {
 }
 
 /// Creates distinct session and call identities from an arbitrary fixture seed.
-async fn prepare_capacity_call(
+pub(super) async fn prepare_capacity_call(
     pool: &PgPool,
     seed: u128,
     policy: CredentialPoolRuntimePolicy,

@@ -343,8 +343,7 @@ impl RuntimeState {
                     .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
             }
         }
-        self.store
-            .submit_pending(&mut codec, &mut self.sink)
+        crate::repo_watch_dispatch::submit_pending(&self.store, configuration, &mut self.sink)
             .await
             .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
         Ok(())
