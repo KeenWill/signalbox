@@ -253,6 +253,9 @@ pub(crate) struct ResponseEvent {
     pub item_id: Option<String>,
     pub item: Option<Box<RawValue>>,
     pub delta: Option<String>,
+    pub text: Option<String>,
+    pub refusal: Option<String>,
+    pub arguments: Option<String>,
     pub code: Option<String>,
     pub message: Option<String>,
 }
