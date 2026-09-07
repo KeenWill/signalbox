@@ -373,8 +373,10 @@ fn socket_artifacts_conflict(process_path: &Path, runner_path: &Path) -> bool {
     let oauth_root = oauth_credential_root(&process_artifacts[0]);
     process_artifacts
         .iter()
-        .chain(std::iter::once(&oauth_root))
         .any(|process| runner_artifacts.iter().any(|runner| runner == process))
+        || runner_artifacts
+            .iter()
+            .any(|runner| runner.starts_with(&oauth_root) || oauth_root.starts_with(runner))
 }
 
 fn credential_files_conflict(left: &Path, right: &Path) -> bool {
@@ -3373,6 +3375,38 @@ mod tests {
                 RequiredSettingFailure::Conflicts,
             )
         );
+    }
+
+    #[test]
+    fn runner_socket_cannot_contain_or_enter_the_oauth_credential_root() {
+        for runner in [
+            "/tmp/oauth-overlap/process.sock.oauth/runner.sock",
+            "/tmp/oauth-overlap",
+        ] {
+            let error = HubConfiguration::from_values(HubConfigurationValues {
+                process_socket_path: Some(OsString::from("/tmp/oauth-overlap/process.sock")),
+                runner_socket_path: Some(OsString::from(runner)),
+                ..hub_configuration_values()
+            })
+            .err()
+            .expect("runner artifacts cannot overlap the OAuth directory");
+            assert_eq!(
+                error,
+                HubConfigurationError::new(
+                    RUNNER_SOCKET_PATH_ENVIRONMENT,
+                    RequiredSettingFailure::Conflicts,
+                ),
+                "{runner}",
+            );
+        }
+        HubConfiguration::from_values(HubConfigurationValues {
+            process_socket_path: Some(OsString::from("/tmp/oauth-overlap/process.sock")),
+            runner_socket_path: Some(OsString::from(
+                "/tmp/oauth-overlap/process.sock.oauth-sibling/runner.sock",
+            )),
+            ..hub_configuration_values()
+        })
+        .expect("a shared name prefix does not overlap directory components");
     }
 
     #[test]

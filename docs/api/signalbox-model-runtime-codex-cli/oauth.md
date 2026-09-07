@@ -24,13 +24,26 @@ pub trait OauthCredentialInstaller: marker::Send {
 }
 ```
 
+## OauthDeliveryOutcome
+
+```rust
+pub enum OauthDeliveryOutcome {
+    Delivered,
+    Cancelled,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## OauthDeliveryFuture
 
 ```rust
 pub type OauthDeliveryFuture<'a> = pin::Pin<
     boxed::Box<
         dyn future::Future<
-                Output = result::Result<(), signalbox_model_runtime::CredentialAccessFailure>,
+                Output = result::Result<
+                    OauthDeliveryOutcome,
+                    signalbox_model_runtime::CredentialAccessFailure,
+                >,
             > + marker::Send
             + 'a,
     >,

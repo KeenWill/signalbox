@@ -23,9 +23,19 @@ pub trait OauthCredentialInstaller: Send {
     -> Result<(), CredentialAccessFailure>;
 }
 
+/// Delivery completion or cancellation before credential installation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OauthDeliveryOutcome {
+    /// Credentials were installed for this invocation.
+    Delivered,
+    /// The caller cancelled while waiting for delivery.
+    Cancelled,
+}
+
 /// One asynchronous delivery operation under daemon credential authority.
-pub type OauthDeliveryFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<(), CredentialAccessFailure>> + Send + 'a>>;
+pub type OauthDeliveryFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<OauthDeliveryOutcome, CredentialAccessFailure>> + Send + 'a>,
+>;
 
 /// Daemon-owned refresh and generation authority, independent of storage representation.
 pub trait OauthCredentialProvider: Send + Sync + std::fmt::Debug {

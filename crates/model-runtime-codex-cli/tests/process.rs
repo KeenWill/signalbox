@@ -42,17 +42,81 @@ impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for OauthFixture
         _: CancellationSignal,
     ) -> signalbox_model_runtime_codex_cli::OauthDeliveryFuture<'a> {
         Box::pin(async move {
-            installer.install(signalbox_model_runtime_codex_cli::OauthCredentialMaterial {
-                access_token: signalbox_model_runtime::CredentialValue::new(
-                    b"opaque-access-that-crosses-the-small-stderr-evidence-window".to_vec(),
-                ),
-                identity_token: signalbox_model_runtime::CredentialValue::new(
-                    b"opaque-identity".to_vec(),
-                ),
-                account_id: Some("fixture-account".into()),
-            })
+            installer
+                .install(signalbox_model_runtime_codex_cli::OauthCredentialMaterial {
+                    access_token: signalbox_model_runtime::CredentialValue::new(
+                        b"opaque-access-that-crosses-the-small-stderr-evidence-window".to_vec(),
+                    ),
+                    identity_token: signalbox_model_runtime::CredentialValue::new(
+                        b"opaque-identity".to_vec(),
+                    ),
+                    account_id: Some("fixture-account".into()),
+                })
+                .map(|()| signalbox_model_runtime_codex_cli::OauthDeliveryOutcome::Delivered)
         })
     }
+}
+
+#[derive(Debug)]
+struct WaitingOauthFixture;
+
+impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for WaitingOauthFixture {
+    fn deliver<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        _: &'a mut dyn signalbox_model_runtime_codex_cli::OauthCredentialInstaller,
+        cancellation: CancellationSignal,
+    ) -> signalbox_model_runtime_codex_cli::OauthDeliveryFuture<'a> {
+        Box::pin(async move {
+            cancellation.await;
+            Ok(signalbox_model_runtime_codex_cli::OauthDeliveryOutcome::Cancelled)
+        })
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn oauth_delivery_cancellation_reports_cancelled_preparation() {
+    let temporary = tempfile::tempdir().expect("working directory");
+    let root_path = temporary.path().join("oauth");
+    let root = signalbox_model_runtime_codex_cli::OauthCredentialRoot::open(&root_path)
+        .expect("private root");
+    let mut config = CodexCliConfig::new(
+        temporary.path().join("unused-cli"),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
+    );
+    config
+        .oauth_profiles
+        .insert(CredentialReference::new(CREDENTIAL_REFERENCE));
+    let runtime = CodexCliRuntime::new(config)
+        .expect("runtime")
+        .with_oauth_delivery(std::sync::Arc::new(WaitingOauthFixture), root);
+    let (cancel, cancelled) = tokio::sync::oneshot::channel();
+    let waiting = runtime.prepare(
+        operation("oauth-cancel", DeliveryMode::Buffered, OperationShape::Text),
+        CancellationSignal::when(async {
+            let _ = cancelled.await;
+        }),
+    );
+    tokio::pin!(waiting);
+    assert!(
+        std::future::poll_fn(|context| {
+            std::task::Poll::Ready(
+                std::future::Future::poll(waiting.as_mut(), context).is_pending(),
+            )
+        })
+        .await
+    );
+    cancel.send(()).expect("waiting preparation");
+    assert!(
+        matches!(waiting.await, PreparationOutcome::Cancelled { correlation } if correlation == "oauth-cancel")
+    );
+    assert_eq!(
+        std::fs::read_dir(root_path).expect("root entries").count(),
+        0
+    );
 }
 
 #[cfg(unix)]
