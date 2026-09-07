@@ -528,6 +528,7 @@ fn render_frontier_messages<'a>(
                 producing_call: *producing_call,
                 block: block.clone(),
             }),
+            SemanticTranscriptEntryPayload::ProviderReasoning { .. } => {}
             SemanticTranscriptEntryPayload::AssistantToolUse {
                 producing_call,
                 request,
@@ -773,6 +774,7 @@ fn projected_frontier_content_bytes<'a>(
             SemanticTranscriptEntryPayload::ProviderCompaction { block, .. } => {
                 block.as_json().len()
             }
+            SemanticTranscriptEntryPayload::ProviderReasoning { item, .. } => item.as_json().len(),
             // Identity-only payloads carry no content of their own. Tool
             // payloads name evidence rather than carrying it, and that
             // evidence is summed below.
@@ -2446,6 +2448,11 @@ where
                                 self.ids.next_semantic_entry_id(),
                             ));
                         }
+                        AssistantResponsePart::ProviderReasoning(_) => {
+                            continuing.push(ToolResponsePartIdentity::provider_reasoning(
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
                         AssistantResponsePart::ToolCall(_) => {
                             // A retained-policy count mismatch is an internal
                             // defect. Confirm is the conservative candidate:
@@ -2478,6 +2485,11 @@ where
                         }
                         AssistantResponsePart::ProviderCompaction(_) => {
                             stopped.push(StoppedToolResponsePartIdentity::provider_compaction(
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                        AssistantResponsePart::ProviderReasoning(_) => {
+                            stopped.push(StoppedToolResponsePartIdentity::provider_reasoning(
                                 self.ids.next_semantic_entry_id(),
                             ));
                         }
@@ -2567,9 +2579,9 @@ where
             .parts()
             .iter()
             .filter_map(|part| match part {
-                AssistantResponsePart::Text(_) | AssistantResponsePart::ProviderCompaction(_) => {
-                    None
-                }
+                AssistantResponsePart::Text(_)
+                | AssistantResponsePart::ProviderCompaction(_)
+                | AssistantResponsePart::ProviderReasoning(_) => None,
                 AssistantResponsePart::ToolCall(proposal) => {
                     if proposal.is_suppressed() {
                         return Some(InitialToolApproval::RuntimeSafetyDeny);
