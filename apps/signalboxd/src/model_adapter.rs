@@ -3,9 +3,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use signalbox_model_runtime::{
-    CancellationSignal, InputTokenCountOutcome, MessagePart, ModelInputTokenCounter,
-    ModelOperation, ModelRuntime, ObservationSink, PreparationDefect, PreparationOutcome,
-    TerminalReport,
+    CancellationSignal, InputTokenCountOutcome, MessagePart, ModelCapabilityCatalog,
+    ModelInputTokenCounter, ModelOperation, ModelRuntime, ObservationSink, PreparationDefect,
+    PreparationOutcome, TerminalReport,
 };
 use signalbox_model_runtime_claude_cli::{
     ClaudeCliConstructionError, ClaudeCliPreparedRequest, ClaudeCliRuntime,
@@ -56,6 +56,7 @@ where
             };
         }
         omit_unreplayable_provider_compaction(&mut operation, ModelAdapter::Anthropic);
+        omit_unreplayable_provider_reasoning(&mut operation, &self.routes, &self.capabilities);
         let Some(runtime) = self.anthropic.as_ref() else {
             return InputTokenCountOutcome::Failed {
                 correlation: operation.correlation,
@@ -106,6 +107,7 @@ pub struct ConfiguredModelRuntime<A, O> {
     claude_cli: Option<Arc<ClaudeCliRuntime>>,
     codex_cli: Option<Arc<CodexCliRuntime>>,
     routes: HashMap<String, ModelAdapter>,
+    capabilities: ModelCapabilityCatalog,
 }
 
 impl<A, O> Clone for ConfiguredModelRuntime<A, O> {
@@ -116,6 +118,7 @@ impl<A, O> Clone for ConfiguredModelRuntime<A, O> {
             claude_cli: self.claude_cli.clone(),
             codex_cli: self.codex_cli.clone(),
             routes: self.routes.clone(),
+            capabilities: self.capabilities.clone(),
         }
     }
 }
@@ -146,6 +149,7 @@ impl<A, O> ConfiguredModelRuntime<A, O> {
                 .map_err(ConfiguredAdapterConstructionError::CodexCli)?
                 .map(Arc::new),
             routes: configuration.adapter_routes(),
+            capabilities: configuration.runtime_model_capability_catalog(),
         })
     }
 }
@@ -222,6 +226,48 @@ fn omit_unreplayable_provider_compaction<C>(
     });
 }
 
+fn omit_unreplayable_provider_reasoning<C>(
+    operation: &mut ModelOperation<C>,
+    routes: &HashMap<String, ModelAdapter>,
+    capabilities: &ModelCapabilityCatalog,
+) {
+    let effective = capabilities
+        .resolve(&operation.resolved_target)
+        .and_then(|selected| {
+            selected
+                .effective_target(&operation.resolved_target, operation.settings.fast_mode)
+                .ok()
+        })
+        .map(|(target, _)| target);
+    let family = effective
+        .filter(|target| routes.get(target.as_str()) == Some(&ModelAdapter::OpenAi))
+        .and_then(|target| capabilities.resolve(target))
+        .and_then(|capabilities| capabilities.reasoning_replay_family());
+    operation.messages.retain_mut(|message| {
+        let carried_reasoning = message
+            .parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::ProviderReasoning { .. }));
+        message.parts.retain(|part| match part {
+            MessagePart::ProviderReasoning {
+                producing_target,
+                producing_credential,
+                ..
+            } => {
+                family.is_some()
+                    && routes.get(producing_target.as_str()) == Some(&ModelAdapter::OpenAi)
+                    && capabilities
+                        .resolve(producing_target)
+                        .and_then(|capabilities| capabilities.reasoning_replay_family())
+                        == family
+                    && producing_credential == &operation.credential_reference
+            }
+            _ => true,
+        });
+        !carried_reasoning || !message.parts.is_empty()
+    });
+}
+
 impl<C, A, O> ModelRuntime<C> for ConfiguredModelRuntime<A, O>
 where
     C: Clone + Send + Sync,
@@ -241,6 +287,7 @@ where
         if let Some(adapter) = adapter {
             omit_unreplayable_provider_compaction(&mut operation, adapter);
         }
+        omit_unreplayable_provider_reasoning(&mut operation, &self.routes, &self.capabilities);
         match adapter {
             Some(ModelAdapter::Anthropic) => {
                 let runtime = match self.anthropic.as_ref() {
@@ -356,17 +403,20 @@ mod tests {
     use signalbox_model_runtime::{
         AnthropicServiceTier, AssistantPart, CancellationSignal, CodexCliServiceTier,
         CompletionEvidence, CompletionFinish, ConversationMessage, CredentialReference,
-        ExchangeFacts, FastMode, InputTokenCountOutcome, MessagePart, ModelInputTokenCounter,
-        ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationSink,
-        OpenAiServiceTier, PreparationDefect, PreparationOutcome, ProviderReportedModel,
-        ReasoningLevel, RequestedTarget, ResolvedTarget, Script, ScriptedModel, ServiceTier,
-        TerminalEvidence, TokenUsage,
+        ExchangeFacts, FastMode, InputTokenCountOutcome, MessagePart, ModelCapabilityCatalog,
+        ModelInputTokenCounter, ModelOperation, ModelRuntime, ModelSettings, Observation,
+        ObservationSink, OpenAiServiceTier, PreparationDefect, PreparationOutcome,
+        ProviderReportedModel, ReasoningLevel, RequestedTarget, ResolvedTarget, Script,
+        ScriptedModel, ServiceTier, TerminalEvidence, TokenUsage,
     };
     use signalbox_model_runtime_claude_cli::SUPPORTED_CLAUDE_CLI_VERSION;
 
     use crate::configuration::{HubModelConfiguration, ModelAdapter};
 
-    use super::{ConfiguredModelRuntime, omit_unreplayable_provider_compaction};
+    use super::{
+        ConfiguredModelRuntime, omit_unreplayable_provider_compaction,
+        omit_unreplayable_provider_reasoning,
+    };
 
     #[derive(Default)]
     struct Observations(Vec<Observation<String>>);
@@ -458,6 +508,141 @@ mod tests {
             operation.messages[0].parts,
             vec![MessagePart::Text(String::from("preserved output"))]
         );
+    }
+
+    struct ReasoningReplayFixture {
+        source: ModelOperation<String>,
+        routes: HashMap<String, ModelAdapter>,
+        capabilities: ModelCapabilityCatalog,
+    }
+
+    /// One preserved reasoning source, including a text-bearing and an opaque-only message.
+    fn reasoning_replay_fixture(
+        producer: &str,
+    ) -> Result<ReasoningReplayFixture, signalbox_model_runtime::ModelCapabilityCatalogError> {
+        use signalbox_model_runtime::{
+            FastModeTarget, ModelCapabilities, ModelCapabilityDefinition,
+        };
+        let mut operation = operation_with_provider_compaction("gpt-compatible");
+        let part = MessagePart::ProviderReasoning {
+            item_json: String::from(
+                r#"{ "type":"reasoning", "id":"rs_source", "encrypted_content":"opaque" }"#,
+            ),
+            producing_target: ResolvedTarget::new(producer),
+            producing_credential: operation.credential_reference.clone(),
+        };
+        operation.messages[0].parts[1] = part.clone();
+        operation.messages[1].parts[0] = part;
+        let targets = [
+            ("gpt-producer", ModelAdapter::OpenAi, Some("shared")),
+            ("gpt-compatible", ModelAdapter::OpenAi, Some("shared")),
+            ("gpt-other", ModelAdapter::OpenAi, Some("other")),
+            ("gpt-untagged", ModelAdapter::OpenAi, None),
+            ("claude-foreign", ModelAdapter::Anthropic, Some("shared")),
+        ];
+        let routes = targets
+            .iter()
+            .map(|(target, adapter, _)| (target.to_string(), *adapter))
+            .collect();
+        let catalog = ModelCapabilityCatalog::try_from_definitions(targets.into_iter().map(
+            |(target, _, family)| {
+                ModelCapabilityDefinition::new(
+                    ResolvedTarget::new(target),
+                    ModelCapabilities::new(
+                        Default::default(),
+                        (target == "gpt-other")
+                            .then(|| FastModeTarget::Mapped(ResolvedTarget::new("gpt-compatible"))),
+                        Default::default(),
+                    )
+                    .with_reasoning_replay_family(family.map(str::to_owned)),
+                )
+            },
+        ))?;
+        Ok(ReasoningReplayFixture {
+            source: operation,
+            routes,
+            capabilities: catalog,
+        })
+    }
+
+    #[test]
+    fn reasoning_replay_omits_incompatible_parts_and_keeps_the_source_for_a_later_call() {
+        let ReasoningReplayFixture {
+            source,
+            routes,
+            capabilities,
+        } = reasoning_replay_fixture("gpt-producer").expect("distinct fixture targets");
+        for target in ["gpt-other", "gpt-untagged", "claude-foreign"] {
+            let mut incompatible = source.clone();
+            incompatible.resolved_target = ResolvedTarget::new(target);
+            omit_unreplayable_provider_reasoning(&mut incompatible, &routes, &capabilities);
+            assert_eq!(incompatible.messages.len(), 1, "{target}");
+            assert_eq!(
+                incompatible.messages[0].parts,
+                vec![MessagePart::Text(String::from("preserved output"))],
+                "{target}"
+            );
+            let mut compatible = source.clone();
+            omit_unreplayable_provider_reasoning(&mut compatible, &routes, &capabilities);
+            assert_eq!(compatible.messages, source.messages, "{target}");
+        }
+    }
+
+    #[test]
+    fn reasoning_replay_omits_a_different_credential_without_changing_the_source() {
+        let ReasoningReplayFixture {
+            source,
+            routes,
+            capabilities,
+        } = reasoning_replay_fixture("gpt-producer").expect("distinct fixture targets");
+        let mut different_credential = source.clone();
+        different_credential.credential_reference = CredentialReference::new("other-credential");
+        omit_unreplayable_provider_reasoning(&mut different_credential, &routes, &capabilities);
+        assert_eq!(different_credential.messages.len(), 1);
+        assert_eq!(
+            different_credential.messages[0].parts,
+            vec![MessagePart::Text(String::from("preserved output"))]
+        );
+        let mut compatible = source.clone();
+        omit_unreplayable_provider_reasoning(&mut compatible, &routes, &capabilities);
+        assert_eq!(compatible.messages, source.messages);
+    }
+
+    #[test]
+    fn reasoning_replay_requires_the_producing_adapter_and_family() {
+        for producer in [
+            "gpt-other",
+            "gpt-untagged",
+            "claude-foreign",
+            "removed-target",
+        ] {
+            let ReasoningReplayFixture {
+                source: mut operation,
+                routes,
+                capabilities,
+            } = reasoning_replay_fixture(producer).expect("distinct fixture targets");
+            omit_unreplayable_provider_reasoning(&mut operation, &routes, &capabilities);
+            assert_eq!(operation.messages.len(), 1, "{producer}");
+            assert_eq!(
+                operation.messages[0].parts,
+                vec![MessagePart::Text(String::from("preserved output"))],
+                "{producer}"
+            );
+        }
+    }
+
+    #[test]
+    fn reasoning_replay_uses_the_effective_fast_target_family() {
+        let ReasoningReplayFixture {
+            source,
+            routes,
+            capabilities,
+        } = reasoning_replay_fixture("gpt-producer").expect("distinct fixture targets");
+        let mut fast = source.clone();
+        fast.resolved_target = ResolvedTarget::new("gpt-other");
+        fast.settings.fast_mode = FastMode::Enabled;
+        omit_unreplayable_provider_reasoning(&mut fast, &routes, &capabilities);
+        assert_eq!(fast.messages, source.messages);
     }
 
     #[test]
@@ -709,6 +894,7 @@ service_tiers = ["priority"]
                 invocations: Arc::clone(&invocations),
             })),
             openai: None::<Arc<()>>,
+            capabilities: ModelCapabilityCatalog::empty(),
             claude_cli: None,
             codex_cli: None,
             routes: HashMap::from([

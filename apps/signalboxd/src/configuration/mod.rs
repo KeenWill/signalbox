@@ -40,7 +40,8 @@ use model_routing::{
 use model_settings::{
     RuntimeCapabilityProjection, parse_model_capabilities, parse_model_settings_overlay,
     parse_model_settings_profiles, parse_provider_compaction_capability,
-    project_runtime_model_capabilities, validate_adapter_model_settings,
+    project_runtime_model_capabilities, record_reasoning_replay_family,
+    validate_adapter_model_settings,
 };
 pub use numeric_bounds::NumericBoundsConfiguration;
 #[cfg(test)]
@@ -509,6 +510,7 @@ impl HubModelConfiguration {
         let mut selectable_targets = HashSet::with_capacity(models.len());
         let mut provider_model_adapters = HashMap::with_capacity(models.len());
         let mut runtime_capability_projections = Vec::with_capacity(models.len());
+        let mut reasoning_families = std::collections::BTreeMap::new();
         for model in models {
             reject_unknown_fields(
                 model,
@@ -530,6 +532,7 @@ impl HubModelConfiguration {
                     "service_tiers",
                     "settings_profile",
                     "provider_compaction",
+                    "reasoning_replay_family",
                 ],
             )?;
             let selection = DirectModelSelection::from_uuid(required_uuid(model, "selection_id")?);
@@ -547,6 +550,12 @@ impl HubModelConfiguration {
             let max_output_tokens = required_positive_u32(model, "max_output_tokens")?;
             let context_window_tokens = required_positive_u32(model, "context_window_tokens")?;
             let provider_compaction = parse_provider_compaction_capability(model, mapping.adapter)?;
+            let reasoning_replay_family = record_reasoning_replay_family(
+                model,
+                mapping.adapter,
+                provider_model,
+                &mut reasoning_families,
+            )?;
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
@@ -671,6 +680,8 @@ impl HubModelConfiguration {
                 context_window_tokens,
             )
             .map_err(|_| HubModelConfigurationError::InvalidField)?;
+            let runtime_definition = runtime_definition
+                .with_provider_reasoning_support(reasoning_replay_family.is_some());
             let runtime_definition = if provider_compaction {
                 runtime_definition.with_provider_compaction()
             } else {
@@ -700,6 +711,7 @@ impl HubModelConfiguration {
                         "max_output_tokens",
                         "context_window_tokens",
                         "provider_compaction",
+                        "reasoning_replay_family",
                     ],
                 )?;
                 let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -720,6 +732,12 @@ impl HubModelConfiguration {
                 let provider_model = provider_model.to_owned();
                 let provider_compaction =
                     parse_provider_compaction_capability(serving_target, mapping.adapter)?;
+                let reasoning_replay_family = record_reasoning_replay_family(
+                    serving_target,
+                    mapping.adapter,
+                    &provider_model,
+                    &mut reasoning_families,
+                )?;
                 let max_output_tokens = required_positive_u32(serving_target, "max_output_tokens")?;
                 let context_window_tokens =
                     required_positive_u32(serving_target, "context_window_tokens")?;
@@ -740,6 +758,8 @@ impl HubModelConfiguration {
                     context_window_tokens,
                 )
                 .map_err(|_| HubModelConfigurationError::InvalidField)?;
+                let runtime_definition = runtime_definition
+                    .with_provider_reasoning_support(reasoning_replay_family.is_some());
                 runtime_definitions.push(if provider_compaction {
                     runtime_definition.with_provider_compaction()
                 } else {
@@ -798,6 +818,7 @@ impl HubModelConfiguration {
                 .map_err(|_| HubModelConfigurationError::DuplicateSelection)?;
         let runtime_model_capabilities = project_runtime_model_capabilities(
             runtime_capability_projections,
+            reasoning_families,
             &target_provider_models,
             &target_adapters,
             &selectable_targets,
