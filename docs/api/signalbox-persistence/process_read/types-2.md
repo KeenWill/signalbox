@@ -6,6 +6,12 @@
 
 ```rust
 pub enum ProcessTranscriptEntry {
+    RunnerPlacementChanged {
+        entry_index: u64,
+        source_session: signalbox_domain::SessionId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
+        placement_revision: signalbox_domain::RunnerGeneration,
+    },
     DelegatedTask {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,

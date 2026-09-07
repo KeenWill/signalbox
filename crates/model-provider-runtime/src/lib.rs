@@ -1520,6 +1520,24 @@ fn render_runtime_messages(
     let mut collecting_tool_results = false;
     for message in messages {
         match message {
+            ModelConversationMessage::RunnerPlacementChanged {
+                placement_revision,
+                sandbox,
+                ..
+            } => {
+                let revision = placement_revision.get();
+                let content = match sandbox {
+                    signalbox_domain::RunnerSandboxProfile::WorkspaceRestricted => format!(
+                        "Signalbox session event: runner placement changed to revision {revision} with profile workspace-restricted; the prior placement can no longer execute. The successor writable root and working directory are now active. Relocation did not delete prior files; they may still exist, but only paths exposed inside the successor restricted workspace are reachable."
+                    ),
+                    signalbox_domain::RunnerSandboxProfile::Ambient => format!(
+                        "Signalbox session event: runner placement changed to revision {revision} with profile ambient; the prior placement can no longer execute. The successor working directory is now active. Relocation did not delete prior files, and they may remain reachable at their previous paths through the invoking user's filesystem; check before recreating or overwriting them."
+                    ),
+                };
+                rendered.push(ConversationMessage::user_text(content));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
             ModelConversationMessage::ModelIdentityChanged {
                 defaults_version,
                 selected,

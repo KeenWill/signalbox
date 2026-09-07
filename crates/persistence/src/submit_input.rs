@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::{NonZeroU32, NonZeroU64};
 
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::Value;
 use signalbox_application::{SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputTransaction};
 use signalbox_domain::{
@@ -735,7 +735,10 @@ impl SubmitInputRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
-                | CommandKind::SessionLifecycle,
+                | CommandKind::SessionLifecycle
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner,
             ) => Err(Self::wrong_kind(command_id)),
         }
     }
@@ -846,7 +849,10 @@ where
             | CommandKind::RegisterWorkspace
             | CommandKind::MintGitRemote
             | CommandKind::WithdrawGitRemote
-            | CommandKind::SessionLifecycle,
+            | CommandKind::SessionLifecycle
+            | CommandKind::ReplaceLostRunner
+            | CommandKind::AbandonLostRunner
+            | CommandKind::PromotePendingRunner,
         ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
@@ -894,7 +900,10 @@ where
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
-                | CommandKind::SessionLifecycle,
+                | CommandKind::SessionLifecycle
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             )),
@@ -1967,10 +1976,21 @@ async fn prospective_attachment_frontier_exceeds_bound(
                                 } => distinct.insert(*accepted_input).then_some(*accepted_input),
                                 InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
                                 | InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
-                                | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
-                                | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
-                                | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
-                                | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
+                                | InitialSemanticTranscriptEntryPayload::DelegationMessage {
+                                    ..
+                                }
+                                | InitialSemanticTranscriptEntryPayload::DelegationResult {
+                                    ..
+                                }
+                                | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged {
+                                    ..
+                                }
+                                | InitialSemanticTranscriptEntryPayload::ContextSummary {
+                                    ..
+                                }
+                                | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                                    ..
+                                }
                                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
                                 | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
@@ -2364,6 +2384,7 @@ async fn delegated_parked_attachment_frontier_origins(
                 | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
                 | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
                 | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
+                | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
                 | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
@@ -3395,6 +3416,9 @@ async fn load_scheduling_projection_with_semantic_frontiers(
     let mut turn_configurations = BTreeMap::<TurnId, OriginConfiguration>::new();
     let mut pinned_target_identities = BTreeMap::new();
     let mut required_frontiers = BTreeSet::new();
+    let placement_frontiers: Vec<Uuid> = sqlx::query_scalar("SELECT context_frontier_id FROM runner_placement_boundary WHERE session_id = $1 ORDER BY placement_revision")
+        .bind(session_id_to_uuid(session_id)).fetch_all(&mut *connection).await?;
+    required_frontiers.extend(placement_frontiers.iter().copied());
     let mut required_model_calls = BTreeSet::new();
     let mut named_continuation_gate_calls = BTreeSet::new();
     for row in rows {
@@ -5429,6 +5453,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
             entry.source_session_id,
             entry.semantic_entry_id,
             entry.payload_kind,
+            entry.runner_placement_revision,
             entry.origin_accepted_input_id,
             entry.steering_source_turn_id,
             entry.failed_turn_id,
@@ -5562,6 +5587,30 @@ async fn load_scheduling_projection_with_semantic_frontiers(
         let source_session = session_id_from_uuid(source_session_uuid);
         let entry = SemanticTranscriptEntryId::from_uuid(entry_uuid);
         let payload_kind: String = required(&row, "payload_kind")?;
+        if payload_kind == "runner_placement_changed" {
+            let revision: Decimal = required(&row, "runner_placement_revision")?;
+            let revision = revision
+                .to_u64()
+                .and_then(signalbox_domain::RunnerGeneration::try_from_u64)
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "placement boundary revision",
+                ))?;
+            let matches: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runner_placement_boundary AS boundary JOIN runner_session_placement_record AS record USING (session_id, event_ordinal) WHERE boundary.session_id = $1 AND boundary.semantic_entry_id = $2 AND boundary.placement_revision = $3 AND record.placement_revision = boundary.placement_revision AND record.event_kind = 'runner_replaced')")
+                .bind(source_session_uuid).bind(entry_uuid).bind(Decimal::from(revision.get())).fetch_one(&mut *connection).await?;
+            if !matches {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("placement boundary record").into(),
+                );
+            }
+            semantic_entries.push(SemanticTranscriptEntryReconstitutionInput::new(
+                entry,
+                source_session,
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ));
+            continue;
+        }
         let origin: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
         let steering_source_turn: Option<Uuid> = row.try_get("steering_source_turn_id")?;
         let failed_turn: Option<Uuid> = row.try_get("failed_turn_id")?;
@@ -6305,6 +6354,12 @@ async fn load_scheduling_projection_with_semantic_frontiers(
         );
     }
     input
+        .with_runner_placement_frontiers(
+            placement_frontiers
+                .into_iter()
+                .map(ContextFrontierId::from_uuid)
+                .collect(),
+        )
         .with_model_call_facts(pinned_targets, model_calls)
         .with_context_compaction_facts(compaction_calls, compactions)
         .with_consumed_steering_facts(consumed_steering)

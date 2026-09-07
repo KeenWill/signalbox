@@ -125,8 +125,7 @@ pub struct PinnedRunnerPlacement {
 /// Durable source of a session placement's runner-loss transition.
 ///
 /// The source is retained so a later replacement transaction can decide
-/// whether same-runner recovery is admissible. The current domain replacement
-/// transitions refuse a same-runner successor for every source.
+/// whether same-runner recovery is admissible.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunnerPlacementLossSource {
     /// The runner connection became durably lost.
@@ -509,7 +508,9 @@ impl SessionRunnerPlacement {
         if !registration.is_current() {
             return Err(RunnerDomainError::RegistrationChanged);
         }
-        if registration.runner == before.runner {
+        if registration.runner == before.runner
+            && lost.source != RunnerPlacementLossSource::Registration
+        {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
         let revision = self

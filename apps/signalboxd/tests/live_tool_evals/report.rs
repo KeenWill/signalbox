@@ -2099,6 +2099,7 @@ pub(crate) fn completed_tool_result_entry_indices(
             | ProcessTranscriptEntry::TurnCancelled { .. }
             | ProcessTranscriptEntry::ImportedText { .. }
             | ProcessTranscriptEntry::Imported { .. } => None,
+            ProcessTranscriptEntry::RunnerPlacementChanged { .. } => None,
         })
         .collect()
 }

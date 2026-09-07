@@ -411,6 +411,7 @@ impl ModelCallExecution {
             frontier_entries: self.frontier_entries.clone(),
             origin_contents: self.origin_contents.clone(),
             attachment_blob_facts: self.attachment_blob_facts.clone(),
+            runner_placements: BTreeMap::new(),
         })
     }
 
@@ -596,6 +597,7 @@ impl ModelCallExecution {
                 | SemanticTranscriptEntryPayload::ToolDenied { .. }
                 | SemanticTranscriptEntryPayload::ToolClosed { .. }
                 | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+                | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
                 | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
             })
             .collect();
@@ -612,6 +614,7 @@ impl ModelCallExecution {
             frontier_entries: self.frontier_entries.clone(),
             origin_contents,
             attachment_blob_facts: self.attachment_blob_facts.clone(),
+            runner_placements: BTreeMap::new(),
         })
     }
 
@@ -1465,6 +1468,7 @@ fn reconstitute(
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
             | SemanticTranscriptEntryPayload::ToolClosed { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
         };
         if let Some(accepted_input) = accepted_input {
@@ -1880,6 +1884,7 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
             | SemanticTranscriptEntryPayload::ToolClosed { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
         })
         .collect::<Vec<_>>();
@@ -1928,6 +1933,7 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. } => false,
         };
         if !valid {
@@ -1963,6 +1969,7 @@ fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> 
         | SemanticTranscriptEntryPayload::ToolDenied { .. }
         | SemanticTranscriptEntryPayload::ToolClosed { .. }
         | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+        | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
         | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
     }
 }

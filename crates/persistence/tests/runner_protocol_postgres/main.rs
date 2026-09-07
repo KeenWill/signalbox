@@ -83,6 +83,8 @@ mod loss_history;
 mod loss_propagation;
 mod outbox;
 mod placement;
+mod recovery_commands;
+mod recovery_provisioning;
 mod runner_recovery;
 mod store_load;
 

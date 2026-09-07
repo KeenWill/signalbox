@@ -748,10 +748,29 @@ where
 
     async fn serve_message(
         &mut self,
-        _state: &mut RunnerStateRoot,
+        state: &mut RunnerStateRoot,
         message: Message,
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
         match message {
+            Message::Enrolled(promoted) => {
+                if promoted.connection_epoch != self.connection_epoch {
+                    return Err(RunnerConnectionError::Violation(
+                        ProtocolViolation::ConnectionCorrelationMismatch,
+                    ));
+                }
+                let receipt = EnrollmentReceipt::new(
+                    promoted.request_id,
+                    promoted.enrollment_id,
+                    promoted.runner_id,
+                    promoted.authentication_id,
+                    promoted.registration_revision,
+                    promoted.advertisement_digest,
+                    EnrollmentAuthority::Active,
+                );
+                state.record_promotion(receipt.clone())?;
+                self.receipt = receipt;
+                Ok(None)
+            }
             Message::Heartbeat(challenge) => {
                 let acknowledgement = self.heartbeat_acknowledgement(challenge)?;
                 send_message(&mut self.io, Message::HeartbeatAck(acknowledgement)).await?;
@@ -1561,6 +1580,7 @@ mod tests {
                 &mut hub_io,
                 Message::WorkspaceProvision(WorkspaceProvision {
                     correlation: correlation.clone(),
+                    recovery: None,
                 }),
             )
             .await;

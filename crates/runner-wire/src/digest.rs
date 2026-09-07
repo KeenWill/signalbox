@@ -222,7 +222,7 @@ pub enum Recovery {
 }
 
 impl Recovery {
-    fn validate(&self) -> Result<(), ValueError> {
+    pub(crate) fn validate(&self) -> Result<(), ValueError> {
         match self {
             Self::Commit { revision } => WorkspaceRevision::try_new(revision.clone())
                 .map(|_| ())

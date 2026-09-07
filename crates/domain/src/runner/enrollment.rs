@@ -14,9 +14,11 @@ use std::{
     sync::atomic::AtomicU64, sync::atomic::Ordering,
 };
 
-/// Active or terminally revoked logical enrollment.
+/// Pending, active, or terminally revoked logical enrollment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunnerEnrollmentState {
+    /// The successor admits only connection and command-bound provisioning work.
+    Pending,
     /// The enrollment may register runner availability.
     Active,
     /// The enrollment is terminally unable to register.
@@ -51,6 +53,34 @@ impl PartialEq for RunnerEnrollment {
 impl Eq for RunnerEnrollment {}
 
 impl RunnerEnrollment {
+    /// Validates a successor's immutable advertisement without granting execution authority.
+    pub fn new_pending(
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        authentication: RunnerAuthenticationId,
+        allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+        advertisement: RunnerAdvertisement,
+        catalog: &RunnerCatalog,
+    ) -> Result<(Self, ValidatedRunnerRegistration), RunnerDomainError> {
+        let mut enrollment = Self::new(enrollment, runner, authentication, allowed_classes);
+        let registration = enrollment.register(advertisement, catalog)?;
+        enrollment.state = RunnerEnrollmentState::Pending;
+        enrollment
+            .registration_active
+            .store(false, Ordering::Release);
+        Ok((enrollment, registration))
+    }
+
+    /// Activates the exact pending facts after their command-authorized durable installation.
+    pub fn promote_pending_in_place(&mut self) -> Result<(), RunnerDomainError> {
+        if self.state != RunnerEnrollmentState::Pending {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        self.state = RunnerEnrollmentState::Active;
+        self.registration_active.store(true, Ordering::Release);
+        Ok(())
+    }
+
     /// Creates an active logical enrollment with no issued registration revision.
     pub fn new(
         enrollment: RunnerEnrollmentId,

@@ -913,6 +913,27 @@ where
             )
             .await
         }
+        ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index,
+            source_session,
+            entry,
+            placement_revision,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::RunnerPlacementChanged {
+                        placement_revision: (*placement_revision).into(),
+                    },
+                },
+            )
+            .await
+        }
         ProcessTranscriptEntry::ToolClosed {
             entry_index,
             source_session,

@@ -27,7 +27,7 @@
 | replace_session_defaults | 13 | 0 | 0 | [replace_session_defaults](replace_session_defaults.md) |
 | repo_watch | 43 | 0 | 0 | [repo_watch](repo_watch.md) |
 | review_workflow | 83 | 0 | 1 | [review_workflow](review_workflow.md) |
-| runner | 70 | 0 | 0 | [runner](runner.md) |
+| runner | 80 | 0 | 0 | [runner](runner.md) |
 | semantic_entry | 8 | 0 | 0 | [semantic_entry](semantic_entry.md) |
 | session | 22 | 0 | 0 | [session](session.md) |
 | session_delegation | 37 | 0 | 3 | [session_delegation](session_delegation.md) |
@@ -46,4 +46,4 @@
 | user_content | 15 | 0 | 0 | [user_content](user_content.md) |
 | workspace | 4 | 0 | 0 | [workspace](workspace.md) |
 | workspace_instruction | 18 | 0 | 0 | [workspace_instruction](workspace_instruction.md) |
-| root | 30 | 0 | 0 | [root](root.md) |
+| root | 32 | 0 | 0 | [root](root.md) |

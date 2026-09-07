@@ -371,6 +371,15 @@ provider delta or a metadata title or tag. A single explicit raw-output option
 is the only opt-in to unescaped text. A recorded review finding carries an
 opaque caller-supplied file-path key.
 
+`replace_lost_runner` and `abandon_lost_runner` carry the command and session
+identities; replacement also carries a nullable complete checkout revision.
+`promote_pending_runner` carries the command identity and pending enrollment
+request identity. Each returns a correlated closed terminal receipt, and equal
+pending replacement replay waits on the same durable operation. The terminal
+client exposes `runner replace <session> [--revision <sha>]`,
+`runner abandon <session>`, and `runner promote <enrollment-request-id>`, with
+an optional `--command-id` for replay.
+
 ## Planned
 
 - OAuth credential provisioning, re-provisioning after rejected refresh, and
@@ -380,8 +389,8 @@ opaque caller-supplied file-path key.
 - Configuration reload request: [design](../design/process-protocol.md).
 - Program-run cancellation request and receipt:
   [design](../design/process-protocol.md).
-- Runner creation, status, and recovery requests, and the status read's failure
-  evidence: [design](../design/process-protocol.md).
+- Runner creation and status requests, and the status read's failure evidence:
+  [design](../design/process-protocol.md).
 - `spawn_session` creation of a delegated child:
   [design](../design/process-protocol.md).
 - Cascade metadata on stop receipts: [design](../design/process-protocol.md).

@@ -41,14 +41,76 @@ const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAXIMUM_CONCURRENT_CONNECTIONS: usize = 64;
 const REGISTRATION_ONLY_CREDENTIAL_PROFILE: &str = "github-runner";
 
+mod recovery;
+
 /// Boxed future returned by the injected durable registration service.
 pub type RunnerRegistrationFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, RunnerRegistrationFailure>> + Send + 'a>>;
 
+/// The exact enrollment response and the authority admitted by its transaction.
+#[derive(Clone, Debug)]
+pub enum RunnerEnrollmentResponse {
+    /// The enrollment admits registration and execution authority.
+    Active(Enrolled),
+    /// The enrollment admits only pending replacement work.
+    Pending(signalbox_runner_wire::ReplacementPending),
+}
+
+impl RunnerEnrollmentResponse {
+    fn into_message(self) -> (CanonicalUuid, PositiveU64, Message) {
+        match self {
+            Self::Active(receipt) => (
+                receipt.enrollment_id,
+                receipt.connection_epoch,
+                Message::Enrolled(receipt),
+            ),
+            Self::Pending(receipt) => (
+                receipt.enrollment_id,
+                receipt.connection_epoch,
+                Message::ReplacementPending(receipt),
+            ),
+        }
+    }
+}
+
 /// Durable-before-ack boundary consumed by the runner socket runtime.
 pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
+    /// Loads the committed active receipt of an explicitly promoted candidate.
+    fn promotion_receipt(
+        &self,
+        enrollment: CanonicalUuid,
+    ) -> RunnerRegistrationFuture<'_, Option<Enrolled>>;
+    /// Loads command-retired workspace cleanup authorized on this connection.
+    fn replacement_releases(
+        &self,
+        enrollment: CanonicalUuid,
+    ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceRelease>>;
+    /// Acknowledges one exact completed staging cleanup.
+    fn workspace_released(
+        &self,
+        enrollment: CanonicalUuid,
+        receipt: signalbox_runner_wire::WorkspaceReleased,
+    ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceReleaseRecorded>;
+    /// Retains a correlated provisioning refusal before acknowledging it.
+    fn provisioning_failed(
+        &self,
+        enrollment: CanonicalUuid,
+        failure: signalbox_runner_wire::OperationFailed,
+    ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded>;
+    /// Loads committed command-bound operations for this candidate.
+    fn replacement_operations(
+        &self,
+        enrollment: CanonicalUuid,
+    ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceProvision>>;
+
+    /// Retains an exact ready receipt and installs it when its boundary is available.
+    fn workspace_ready(
+        &self,
+        enrollment: CanonicalUuid,
+        receipt: signalbox_runner_wire::WorkspaceReady,
+    ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::WorkspaceRecorded>>;
     /// Atomically creates or exactly replays pristine enrollment authority.
-    fn enroll(&self, request: Enroll) -> RunnerRegistrationFuture<'_, Enrolled>;
+    fn enroll(&self, request: Enroll) -> RunnerRegistrationFuture<'_, RunnerEnrollmentResponse>;
 
     /// Validates one reconnect and returns canonical current registration facts.
     fn resume(&self, request: Resume) -> RunnerRegistrationFuture<'_, Resumed>;
@@ -126,6 +188,10 @@ impl PostgresRunnerRegistrationService {
             }
         }
         self.propagate_pending_connection_losses(None).await?;
+        self.store
+            .resume_runner_replacements()
+            .await
+            .map_err(recovery::store_error)?;
         Ok(transitions)
     }
 
@@ -172,7 +238,10 @@ impl PostgresRunnerRegistrationService {
         Ok(())
     }
 
-    async fn enroll_durably(&self, request: Enroll) -> Result<Enrolled, RunnerRegistrationFailure> {
+    async fn enroll_durably(
+        &self,
+        request: Enroll,
+    ) -> Result<RunnerEnrollmentResponse, RunnerRegistrationFailure> {
         let _admission = self.registration_admission.lock().await;
         let correlation = AvailableCorrelation::Enrollment(request.request_id);
         if request.digest_version != DIGEST_VERSION {
@@ -245,7 +314,7 @@ impl PostgresRunnerRegistrationService {
             connection_cause = ?connection.cause(),
             "runner connection established"
         );
-        Ok(Enrolled {
+        let response = Enrolled {
             request_id: CanonicalUuid::from_uuid(receipt.request().into_uuid()),
             enrollment_id: CanonicalUuid::from_uuid(identities.enrollment().into_uuid()),
             runner_id: CanonicalUuid::from_uuid(identities.runner().into_uuid()),
@@ -253,7 +322,22 @@ impl PostgresRunnerRegistrationService {
             registration_revision: positive_revision(receipt.registration().revision())?,
             connection_epoch: positive_epoch(connection.epoch())?,
             advertisement_digest: digest,
-        })
+        };
+        Ok(
+            if receipt.enrollment().state() == signalbox_domain::RunnerEnrollmentState::Pending {
+                RunnerEnrollmentResponse::Pending(signalbox_runner_wire::ReplacementPending {
+                    request_id: response.request_id,
+                    enrollment_id: response.enrollment_id,
+                    runner_id: response.runner_id,
+                    authentication_id: response.authentication_id,
+                    registration_revision: response.registration_revision,
+                    connection_epoch: response.connection_epoch,
+                    advertisement_digest: response.advertisement_digest,
+                })
+            } else {
+                RunnerEnrollmentResponse::Active(response)
+            },
+        )
     }
 
     async fn resume_durably(&self, request: Resume) -> Result<Resumed, RunnerRegistrationFailure> {
@@ -519,6 +603,16 @@ impl PostgresRunnerRegistrationService {
                         error,
                     )
                 })?;
+            self.store
+                .resume_runner_replacements()
+                .await
+                .map_err(|error| {
+                    store_failure(
+                        operation_kind,
+                        AvailableCorrelation::ConnectionEpoch(wire_epoch),
+                        recovery::store_error(error),
+                    )
+                })?;
         }
         Ok(outcome)
     }
@@ -570,14 +664,54 @@ fn log_connection_transition(
     }
 }
 
-fn registration_only_catalog() -> Result<RunnerCatalog, RunnerDomainError> {
+pub(crate) fn registration_only_catalog() -> Result<RunnerCatalog, RunnerDomainError> {
     let profile = CredentialProfileName::try_new(REGISTRATION_ONLY_CREDENTIAL_PROFILE.to_owned())?;
     let policy = CredentialProfilePolicy::try_new(profile, [])?;
     RunnerCatalog::try_new([], [], [policy], [], [])
 }
 
 impl RunnerRegistrationService for PostgresRunnerRegistrationService {
-    fn enroll(&self, request: Enroll) -> RunnerRegistrationFuture<'_, Enrolled> {
+    fn promotion_receipt(
+        &self,
+        enrollment: CanonicalUuid,
+    ) -> RunnerRegistrationFuture<'_, Option<Enrolled>> {
+        Box::pin(self.promotion_receipt_durably(enrollment))
+    }
+    fn replacement_releases(
+        &self,
+        enrollment: CanonicalUuid,
+    ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceRelease>> {
+        Box::pin(self.replacement_releases_durably(enrollment))
+    }
+    fn workspace_released(
+        &self,
+        enrollment: CanonicalUuid,
+        receipt: signalbox_runner_wire::WorkspaceReleased,
+    ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceReleaseRecorded> {
+        Box::pin(self.workspace_released_durably(enrollment, receipt))
+    }
+    fn provisioning_failed(
+        &self,
+        enrollment: CanonicalUuid,
+        failure: signalbox_runner_wire::OperationFailed,
+    ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded> {
+        Box::pin(self.provisioning_failed_durably(enrollment, failure))
+    }
+    fn replacement_operations(
+        &self,
+        enrollment: CanonicalUuid,
+    ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceProvision>> {
+        Box::pin(self.replacement_operations_durably(enrollment))
+    }
+
+    fn workspace_ready(
+        &self,
+        enrollment: CanonicalUuid,
+        receipt: signalbox_runner_wire::WorkspaceReady,
+    ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::WorkspaceRecorded>> {
+        Box::pin(self.workspace_ready_durably(enrollment, receipt))
+    }
+    fn enroll(&self, request: Enroll) -> RunnerRegistrationFuture<'_, RunnerEnrollmentResponse> {
         Box::pin(self.enroll_durably(request))
     }
 
@@ -1227,11 +1361,9 @@ where
     let context = match first.message {
         Message::Enroll(request) => match service.enroll(request).await {
             Ok(response) => {
-                let context = ConnectionContext {
-                    enrollment: response.enrollment_id,
-                    epoch: response.connection_epoch,
-                };
-                if let Err(error) = write_message(&mut writer, Message::Enrolled(response)).await {
+                let (enrollment, epoch, message) = response.into_message();
+                let context = ConnectionContext { enrollment, epoch };
+                if let Err(error) = write_message(&mut writer, message).await {
                     transition_is_current(
                         &service,
                         context,
@@ -1293,6 +1425,8 @@ where
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
         heartbeat.tick().await;
         let mut heartbeat_state = HeartbeatState::new();
+        let mut sent_provisions = std::collections::BTreeSet::new();
+        let mut sent_promotion = false;
         loop {
         tokio::select! {
             biased;
@@ -1342,6 +1476,28 @@ where
                     Err(error) => return Err(error),
                 };
                 match frame.message {
+                    Message::WorkspaceReleased(receipt) => {
+                        if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReleased, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
+                        match service.workspace_released(context.enrollment, receipt).await {
+                            Ok(recorded) => write_message(&mut writer, Message::WorkspaceReleaseRecorded(recorded)).await?,
+                            Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
+                        }
+                    }
+                    Message::OperationFailed(failure) => {
+                        if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::OperationFailed, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
+                        match service.provisioning_failed(context.enrollment, failure).await {
+                            Ok(recorded) => write_message(&mut writer, Message::OperationFailureRecorded(recorded)).await?,
+                            Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
+                        }
+                    }
+                    Message::WorkspaceReady(receipt) => {
+                        if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReady, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
+                        match service.workspace_ready(context.enrollment, receipt).await {
+                            Ok(Some(recorded)) => write_message(&mut writer, Message::WorkspaceRecorded(recorded)).await?,
+                            Ok(None) => {},
+                            Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
+                        }
+                    }
                     Message::Advertise(request) => {
                         if !transition_or_reject_not_current(
                             &service,
@@ -1465,6 +1621,20 @@ where
                 match heartbeat_state.next_tick()? {
                     HeartbeatTick::Challenge(challenge) => {
                         write_message(&mut writer, Message::Heartbeat(challenge)).await?;
+                        if !sent_promotion && let Some(receipt) = service.promotion_receipt(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
+                            if receipt.connection_epoch != context.epoch { return Ok(()); }
+                            write_message(&mut writer, Message::Enrolled(receipt)).await?;
+                            sent_promotion = true;
+                        }
+                        let operations = service.replacement_operations(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?;
+                        for operation in operations {
+                            if sent_provisions.insert(operation.correlation.authorization_id) {
+                                write_message(&mut writer, Message::WorkspaceProvision(operation)).await?;
+                            }
+                        }
+                        for release in service.replacement_releases(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
+                            write_message(&mut writer, Message::WorkspaceRelease(release)).await?;
+                        }
                     }
                     HeartbeatTick::Missed(1) => {
                         if !transition_or_reject_not_current(
@@ -2063,8 +2233,70 @@ mod tests {
     }
 
     impl RunnerRegistrationService for EnrollmentService {
-        fn enroll(&self, _request: Enroll) -> RunnerRegistrationFuture<'_, Enrolled> {
-            Box::pin(std::future::ready(Ok(self.response.clone())))
+        fn promotion_receipt(
+            &self,
+            _enrollment: CanonicalUuid,
+        ) -> RunnerRegistrationFuture<'_, Option<Enrolled>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn replacement_releases(
+            &self,
+            _enrollment: CanonicalUuid,
+        ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceRelease>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn workspace_released(
+            &self,
+            _enrollment: CanonicalUuid,
+            receipt: signalbox_runner_wire::WorkspaceReleased,
+        ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceReleaseRecorded> {
+            Box::pin(async move {
+                Err(RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::WorkspaceReleased,
+                    AvailableCorrelation::Release(receipt.correlation),
+                    RejectionCode::Unavailable,
+                ))
+            })
+        }
+        fn provisioning_failed(
+            &self,
+            _enrollment: CanonicalUuid,
+            failure: signalbox_runner_wire::OperationFailed,
+        ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded> {
+            Box::pin(async move {
+                Err(RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::OperationFailed,
+                    AvailableCorrelation::OperationFailure(failure.failure.correlation),
+                    RejectionCode::Unavailable,
+                ))
+            })
+        }
+        fn replacement_operations(
+            &self,
+            _enrollment: CanonicalUuid,
+        ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceProvision>> {
+            Box::pin(std::future::ready(Ok(Vec::new())))
+        }
+
+        fn workspace_ready(
+            &self,
+            _enrollment: CanonicalUuid,
+            receipt: signalbox_runner_wire::WorkspaceReady,
+        ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::WorkspaceRecorded>>
+        {
+            Box::pin(std::future::ready(Err(RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::WorkspaceReady,
+                AvailableCorrelation::Provision(receipt.correlation),
+                RejectionCode::Unavailable,
+            ))))
+        }
+        fn enroll(
+            &self,
+            _request: Enroll,
+        ) -> RunnerRegistrationFuture<'_, RunnerEnrollmentResponse> {
+            Box::pin(std::future::ready(Ok(RunnerEnrollmentResponse::Active(
+                self.response.clone(),
+            ))))
         }
 
         fn resume(&self, request: Resume) -> RunnerRegistrationFuture<'_, Resumed> {
@@ -2681,6 +2913,7 @@ mod tests {
                 &mut writer,
                 Message::WorkspaceProvision(signalbox_runner_wire::WorkspaceProvision {
                     correlation: correlation.clone(),
+                    recovery: None,
                 }),
             )
             .await
@@ -2925,14 +3158,17 @@ mod tests {
     async fn runner_shutdown_is_a_durable_shutdown_state() {
         let (_container, _database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
-        let enrolled = service
+        let RunnerEnrollmentResponse::Active(enrolled) = service
             .enroll(Enroll {
                 request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
                 digest_version: DIGEST_VERSION,
                 advertisement: empty_advertisement(),
             })
             .await
-            .expect("the real registration service enrolls the runner");
+            .expect("the real registration service enrolls the runner")
+        else {
+            panic!("pristine enrollment is active")
+        };
 
         service
             .transition_connection(
@@ -3086,14 +3322,17 @@ mod tests {
     async fn abrupt_transport_death_is_durably_lost_not_healthy() {
         let (_container, _database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
-        let enrolled = service
+        let RunnerEnrollmentResponse::Active(enrolled) = service
             .enroll(Enroll {
                 request_id: identity(1),
                 digest_version: DIGEST_VERSION,
                 advertisement: empty_advertisement(),
             })
             .await
-            .expect("the real registration service enrolls the runner");
+            .expect("the real registration service enrolls the runner")
+        else {
+            panic!("pristine enrollment is active")
+        };
 
         service
             .transition_connection(
@@ -3120,14 +3359,17 @@ mod tests {
     async fn duplicate_transport_loss_reports_only_first_transition_as_applied() {
         let (_container, _database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
-        let enrolled = service
+        let RunnerEnrollmentResponse::Active(enrolled) = service
             .enroll(Enroll {
                 request_id: identity(1),
                 digest_version: DIGEST_VERSION,
                 advertisement: empty_advertisement(),
             })
             .await
-            .expect("the real registration service enrolls the runner");
+            .expect("the real registration service enrolls the runner")
+        else {
+            panic!("pristine enrollment is active")
+        };
         let enrollment = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
         let epoch = RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch.get())
             .expect("the enrolled connection epoch is positive");
@@ -3213,14 +3455,17 @@ mod tests {
     async fn startup_marks_a_prior_process_connection_lost_before_admission() {
         let (_container, _database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
-        let enrolled = service
+        let RunnerEnrollmentResponse::Active(enrolled) = service
             .enroll(Enroll {
                 request_id: identity(1),
                 digest_version: DIGEST_VERSION,
                 advertisement: empty_advertisement(),
             })
             .await
-            .expect("the prior process enrolls the runner");
+            .expect("the prior process enrolls the runner")
+        else {
+            panic!("pristine enrollment is active")
+        };
 
         let transitions = service
             .mark_orphaned_connections_lost()
@@ -3252,14 +3497,17 @@ mod tests {
     async fn terminal_connection_transition_propagates_loss_to_placed_sessions() {
         let (_container, database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
-        let enrolled = service
+        let RunnerEnrollmentResponse::Active(enrolled) = service
             .enroll(Enroll {
                 request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
                 digest_version: DIGEST_VERSION,
                 advertisement: empty_advertisement(),
             })
             .await
-            .expect("the runner enrolls before session placement");
+            .expect("the runner enrolls before session placement")
+        else {
+            panic!("pristine enrollment is active")
+        };
         let pool = fresh_pool(&database_url).await;
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED));
         let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
@@ -3297,14 +3545,17 @@ mod tests {
     async fn terminal_connection_replay_resumes_its_pending_loss_cursor() {
         let (_container, database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
-        let enrolled = service
+        let RunnerEnrollmentResponse::Active(enrolled) = service
             .enroll(Enroll {
                 request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
                 digest_version: DIGEST_VERSION,
                 advertisement: empty_advertisement(),
             })
             .await
-            .expect("the runner enrolls before session placement");
+            .expect("the runner enrolls before session placement")
+        else {
+            panic!("pristine enrollment is active")
+        };
         let pool = fresh_pool(&database_url).await;
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED));
         let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
@@ -3363,14 +3614,17 @@ mod tests {
     async fn startup_resumes_a_previously_committed_loss_cursor() {
         let (_container, database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
-        let enrolled = service
+        let RunnerEnrollmentResponse::Active(enrolled) = service
             .enroll(Enroll {
                 request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
                 digest_version: DIGEST_VERSION,
                 advertisement: empty_advertisement(),
             })
             .await
-            .expect("the prior daemon enrolls the runner");
+            .expect("the prior daemon enrolls the runner")
+        else {
+            panic!("pristine enrollment is active")
+        };
         let pool = fresh_pool(&database_url).await;
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED));
         let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
@@ -3420,14 +3674,17 @@ mod tests {
         let (_container, _database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
         let advertisement = empty_advertisement();
-        let enrolled = service
+        let RunnerEnrollmentResponse::Active(enrolled) = service
             .enroll(Enroll {
                 request_id: identity(1),
                 digest_version: DIGEST_VERSION,
                 advertisement: advertisement.clone(),
             })
             .await
-            .expect("the real registration service enrolls the runner");
+            .expect("the real registration service enrolls the runner")
+        else {
+            panic!("pristine enrollment is active")
+        };
         let resumed = service
             .resume(Resume {
                 request_id: enrolled.request_id,
@@ -3475,14 +3732,17 @@ mod tests {
         let (_container, _database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
         let advertisement = empty_advertisement();
-        let enrolled = service
+        let RunnerEnrollmentResponse::Active(enrolled) = service
             .enroll(Enroll {
                 request_id: identity(1),
                 digest_version: DIGEST_VERSION,
                 advertisement: advertisement.clone(),
             })
             .await
-            .expect("the real registration service enrolls the runner");
+            .expect("the real registration service enrolls the runner")
+        else {
+            panic!("pristine enrollment is active")
+        };
         let resumed = service
             .resume(Resume {
                 request_id: enrolled.request_id,
@@ -3537,14 +3797,17 @@ mod tests {
         let (_container, _database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
         let advertisement = empty_advertisement();
-        let enrolled = service
+        let RunnerEnrollmentResponse::Active(enrolled) = service
             .enroll(Enroll {
                 request_id: identity(1),
                 digest_version: DIGEST_VERSION,
                 advertisement: advertisement.clone(),
             })
             .await
-            .expect("the real registration service enrolls the runner");
+            .expect("the real registration service enrolls the runner")
+        else {
+            panic!("pristine enrollment is active")
+        };
 
         let refused = service
             .advertise(

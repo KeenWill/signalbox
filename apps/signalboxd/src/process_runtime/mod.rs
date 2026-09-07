@@ -351,6 +351,7 @@ impl InboundFrameBudgets {
     }
 }
 
+mod runner_recovery;
 mod runtime;
 
 use runtime::{ProcessFanouts, nudge_delegation_issuer};
