@@ -10,6 +10,14 @@
   "customManagers": [
     {
       "customType": "regex",
+      "managerFilePatterns": ["/^tooling\\/postgres_test_image\\.rs$/"],
+      "matchStrings": ["POSTGRES_IMAGE_TAG: &str =\\s*\"(?<currentValue>[^\"@]+)@(?<currentDigest>sha256:[a-f0-9]+)\""],
+      "depNameTemplate": "postgres",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker",
+    },
+    {
+      "customType": "regex",
       "managerFilePatterns": ["/^MODULE\\.bazel$/"],
       "matchStrings": ["RUST_VERSION = \"(?<currentValue>[^\"]+)\""],
       "depNameTemplate": "rust",

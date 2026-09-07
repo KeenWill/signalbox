@@ -20,7 +20,7 @@ rust_library(
     name = "signalbox_program_runtime",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
-    compile_data = [],
+    compile_data = glob(["src/**/*.js"]),
     crate_features = [
         "default",
         "postgres-integration",
@@ -61,4 +61,51 @@ rust_test(
         "--forbid=unsafe_code",
     ],
     deps = ["//crates/persistence:signalbox_persistence"] + all_crate_deps(normal_dev = True),
+)
+
+rust_test(
+    name = "program_host_postgres",
+    size = "large",
+    srcs = ["tests/program_host_postgres.rs"],
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = [
+        "--ignored",
+        "--test-threads=16",
+    ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
+    crate_features = ["postgres-integration"],
+    crate_root = "tests/program_host_postgres.rs",
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env_files = [":cargo_environment"],
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    tags = [
+        "manual",
+        "requires-network",
+    ],
+    deps = [
+        ":signalbox_program_runtime",
+        "//crates/domain:signalbox_domain",
+        "//crates/persistence:signalbox_persistence",
+        "@crates//:testcontainers-modules",
+    ] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "postgres_tests",
+    tags = ["manual"],
+    tests = [":program_host_postgres"],
 )

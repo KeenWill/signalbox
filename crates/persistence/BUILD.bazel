@@ -55,6 +55,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -102,6 +103,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -149,6 +151,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -196,6 +199,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -243,6 +247,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -290,6 +295,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -337,6 +343,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -384,6 +391,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -431,6 +439,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -478,6 +487,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -525,6 +535,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -575,6 +586,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -625,6 +637,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -675,6 +688,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -722,6 +736,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -769,6 +784,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",

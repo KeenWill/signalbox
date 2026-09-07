@@ -5,6 +5,7 @@ exports_files([
     "config/session-templates.example.toml",
     "config/signalbox-runner.example.toml",
     "tooling/codex-cli/package.json",
+    "tooling/postgres_test_image.rs",
     "config/signalboxd.example.toml",
 ])
 

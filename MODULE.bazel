@@ -36,6 +36,12 @@ crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 v8 = use_extension("//tooling/bazel:v8.bzl", "v8")
 use_repo(v8, "rusty_v8_archive")
 
+# Cached binaries cannot load JavaScript from a previous compilation sandbox.
+crate.annotation(
+    crate = "deno_core",
+    patch_args = ["-p1"],
+    patches = ["//tooling/bazel:patches/deno-embedded-javascript.patch"],
+)
 crate.annotation(
     build_script_data = ["@rusty_v8_archive//file"],
     build_script_env = {
