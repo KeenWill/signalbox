@@ -12,7 +12,7 @@ use signalbox_model_runtime::{
 use crate::response::{
     convert_usage, decode_response, emit, map_terminal, output_tool_calls, provider_error,
 };
-use crate::wire::{Response, ResponseError, ResponseEvent, WireOutputItem};
+use crate::wire::{Response, ResponseError, ResponseEvent, WireContent, WireOutputItem};
 
 pub(crate) enum StreamStep {
     Continue,
@@ -25,15 +25,99 @@ pub(crate) enum LaterRecords {
     AllApplied,
 }
 
+struct ObservedContent {
+    kind: &'static str,
+    deltas: Option<String>,
+    snapshot: Option<String>,
+    complete: bool,
+}
+
 #[derive(Default)]
 struct ItemParts {
     kind: Option<String>,
     nonempty: BTreeMap<u32, bool>,
+    content: BTreeMap<u32, ObservedContent>,
     complete: bool,
     item_done: bool,
 }
 
 impl ItemParts {
+    fn content(&mut self, index: u32, kind: &'static str) -> Result<&mut ObservedContent, String> {
+        let content = self
+            .content
+            .entry(index)
+            .or_insert_with(|| ObservedContent {
+                kind,
+                deltas: None,
+                snapshot: None,
+                complete: false,
+            });
+        if content.kind != kind {
+            return Err("content part changed its observed type".to_string());
+        }
+        Ok(content)
+    }
+
+    fn observe_delta(
+        &mut self,
+        index: u32,
+        kind: &'static str,
+        fragment: &str,
+    ) -> Result<(), String> {
+        let content = self.content(index, kind)?;
+        if content.complete {
+            return Err("delta follows content completion".to_string());
+        }
+        if !fragment.is_empty() {
+            content
+                .deltas
+                .get_or_insert_with(String::new)
+                .push_str(fragment);
+        }
+        Ok(())
+    }
+
+    fn observe_snapshot(
+        &mut self,
+        index: u32,
+        kind: &'static str,
+        value: &str,
+        complete: bool,
+    ) -> Result<(), String> {
+        let content = self.content(index, kind)?;
+        if content.snapshot.as_deref().is_some_and(|previous| {
+            if content.complete {
+                value != previous
+            } else {
+                !value.starts_with(previous)
+            }
+        }) || (complete
+            && content
+                .deltas
+                .as_deref()
+                .is_some_and(|deltas| value != deltas))
+        {
+            return Err("completed content differs from its observed bytes".to_string());
+        }
+        content.snapshot = Some(value.to_string());
+        content.complete |= complete;
+        Ok(())
+    }
+
+    fn observe_content(
+        &mut self,
+        index: u32,
+        part: &WireContent,
+        complete: bool,
+    ) -> Result<(), String> {
+        let (kind, text) = match part {
+            WireContent::OutputText { text } => ("output_text", text.as_str()),
+            WireContent::Refusal { refusal } => ("refusal", refusal.as_str()),
+            WireContent::Unknown => return Err("unrecognized output content type".to_string()),
+        };
+        self.observe_snapshot(index, kind, text, complete)
+    }
+
     fn observe_part(&mut self, index: u32, nonempty: bool) -> Result<(), String> {
         match self.nonempty.get(&index) {
             Some(&previous) if previous != nonempty => {
@@ -319,6 +403,18 @@ impl StreamDecoder {
                     };
                     content_index
                 };
+                let content_kind = match event.kind.as_str() {
+                    "response.function_call_arguments.delta" => "function_call_arguments",
+                    "response.refusal.delta" => "refusal",
+                    _ => "output_text",
+                };
+                if let Err(detail) = self.item_parts.entry(index).or_default().observe_delta(
+                    content_index,
+                    content_kind,
+                    &delta,
+                ) {
+                    return self.violation(detail);
+                }
                 if tool_arguments || !delta.is_empty() {
                     let layout = self.item_parts.entry(index).or_default();
                     if let Err(detail) = layout.observe_part(content_index, true) {
@@ -373,6 +469,13 @@ impl StreamDecoder {
                     let Some(text) = part.text() else {
                         return self.violation("unrecognized output content type");
                     };
+                    if let Err(detail) = self.item_parts.entry(index).or_default().observe_content(
+                        content_index,
+                        &part,
+                        event.kind == "response.content_part.done",
+                    ) {
+                        return self.violation(detail);
+                    }
                     if (!text.is_empty() || event.kind == "response.content_part.done")
                         && let Err(detail) = self
                             .item_parts
@@ -415,6 +518,12 @@ impl StreamDecoder {
             }
         }
         metadata?;
+        if response.status.as_deref() == Some("completed")
+            && response.error.is_none()
+            && response.incomplete_details.is_none()
+        {
+            self.finish_reported = Some(map_terminal("completed", None, self.tool_calls_at_loss()));
+        }
         if matches!(response.status.as_deref(), Some("completed" | "incomplete")) {
             let length = u32::try_from(output.as_ref().map_or(0, Vec::len))
                 .map_err(|error| error.to_string())?;
@@ -523,12 +632,18 @@ impl StreamDecoder {
         let layout = self.item_parts.entry(index).or_default();
         match item.kind.as_str() {
             "reasoning" => layout.finish(BTreeMap::new())?,
-            "function_call" => layout.finish(BTreeMap::from([(0, true)]))?,
+            "function_call" => {
+                if let Some(arguments) = item.arguments.as_deref() {
+                    layout.observe_snapshot(0, "function_call_arguments", arguments, complete)?;
+                }
+                layout.finish(BTreeMap::from([(0, true)]))?;
+            }
             "message" => {
                 let mut parts = BTreeMap::new();
                 for (position, part) in item.content.iter().flatten().enumerate() {
                     let text = part.text().ok_or("unrecognized output content type")?;
                     let position = u32::try_from(position).map_err(|error| error.to_string())?;
+                    layout.observe_content(position, part, complete)?;
                     if complete {
                         parts.insert(position, !text.is_empty());
                     } else if !text.is_empty() {
@@ -732,6 +847,196 @@ mod tests {
             })
         ));
     }
+    #[test]
+    fn terminal_content_must_match_published_delta_bytes_and_type() {
+        for (delta_type, fragment, item, expected_finish) in [
+            (
+                "response.output_text.delta",
+                "ready",
+                json!({"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"changed"}]}),
+                FinishReason::EndTurn,
+            ),
+            (
+                "response.output_text.delta",
+                "ready",
+                json!({"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"refusal","refusal":"ready"}]}),
+                FinishReason::EndTurn,
+            ),
+            (
+                "response.refusal.delta",
+                "ready",
+                json!({"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ready"}]}),
+                FinishReason::EndTurn,
+            ),
+            (
+                "response.refusal.delta",
+                "ready",
+                json!({"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"refusal","refusal":"changed"}]}),
+                FinishReason::EndTurn,
+            ),
+            (
+                "response.function_call_arguments.delta",
+                "{}",
+                json!({"type":"function_call","id":"msg_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{ }"}),
+                FinishReason::ToolUse,
+            ),
+        ] {
+            let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+            let mut sink = Vec::new();
+            assert!(matches!(
+                apply(
+                    &mut decoder,
+                    json!({
+                        "type":delta_type,"output_index":0,"content_index":0,"item_id":"msg_fixture","delta":fragment
+                    }),
+                    &mut sink
+                ),
+                StreamStep::Continue
+            ));
+            assert_eq!(sink.len(), 1, "the original fragment reached the sink");
+            let mut event = terminal();
+            event["response"]["output"] = json!([item]);
+            let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                panic!("contradictory terminal must terminate");
+            };
+            let TerminalEvidence::BoundaryLoss(loss) = *evidence else {
+                panic!("{delta_type} cannot complete with rewritten content");
+            };
+            assert!(matches!(
+                loss.cause,
+                LossCause::StreamProtocolViolation { .. }
+            ));
+            assert_eq!(loss.finish_reported, Some(expected_finish));
+            assert_eq!(
+                loss.reported_model,
+                Some(ProviderReportedModel::new("model-fixture"))
+            );
+            assert_eq!(loss.usage.input_tokens, Some(5));
+            assert!(
+                !sink.iter().any(|observation| matches!(
+                    observation.fact,
+                    ObservationFact::FinishReported(_)
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn item_completion_rejects_rewritten_streamed_content() {
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+        let mut sink = Vec::new();
+        for fragment in ["rea", "dy"] {
+            assert!(matches!(
+                apply(
+                    &mut decoder,
+                    json!({"type":"response.output_text.delta",
+                "output_index":0,"content_index":0,"item_id":"msg_fixture","delta":fragment}),
+                    &mut sink
+                ),
+                StreamStep::Continue
+            ));
+        }
+        let StreamStep::Terminal(evidence) = apply(
+            &mut decoder,
+            json!({"type":"response.output_item.done",
+            "output_index":0,"item":{"type":"message","id":"msg_fixture","status":"completed","role":"assistant",
+            "content":[{"type":"output_text","text":"changed"}]}}),
+            &mut sink,
+        ) else {
+            panic!("rewritten completed item must terminate");
+        };
+        assert!(matches!(
+            *evidence,
+            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                cause: LossCause::StreamProtocolViolation { .. },
+                ..
+            })
+        ));
+        assert_eq!(sink.len(), 2);
+    }
+
+    #[test]
+    fn terminal_cannot_rewrite_an_item_done_snapshot_without_deltas() {
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+        let mut sink = Vec::new();
+        assert!(matches!(
+            apply(
+                &mut decoder,
+                json!({"type":"response.output_item.done",
+            "output_index":0,"item":terminal()["response"]["output"][0]}),
+                &mut sink
+            ),
+            StreamStep::Continue
+        ));
+        let mut event = terminal();
+        event["response"]["output"][0]["content"][0]["text"] = json!("changed");
+        assert!(
+            matches!(apply(&mut decoder, event, &mut sink), StreamStep::Terminal(evidence)
+            if matches!(*evidence, TerminalEvidence::BoundaryLoss(_)))
+        );
+    }
+
+    #[test]
+    fn matching_content_snapshots_preserve_accumulated_deltas() {
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+        let mut sink = Vec::new();
+        for fragment in ["rea", "dy"] {
+            assert!(matches!(
+                apply(
+                    &mut decoder,
+                    json!({"type":"response.output_text.delta",
+                "output_index":0,"content_index":0,"item_id":"msg_fixture","delta":fragment}),
+                    &mut sink
+                ),
+                StreamStep::Continue
+            ));
+        }
+        assert!(matches!(
+            apply(
+                &mut decoder,
+                json!({"type":"response.content_part.done",
+            "output_index":0,"content_index":0,"item_id":"msg_fixture","part":{"type":"output_text","text":"ready"}}),
+                &mut sink
+            ),
+            StreamStep::Continue
+        ));
+        assert!(matches!(
+            apply(
+                &mut decoder,
+                json!({"type":"response.output_item.done",
+            "output_index":0,"item":terminal()["response"]["output"][0]}),
+                &mut sink
+            ),
+            StreamStep::Continue
+        ));
+        let StreamStep::Terminal(evidence) = apply(&mut decoder, terminal(), &mut sink) else {
+            panic!("matching terminal must terminate");
+        };
+        let TerminalEvidence::Completed(completion) = *evidence else {
+            panic!("matching content completes");
+        };
+        assert_eq!(
+            completion.content,
+            vec![signalbox_model_runtime::AssistantPart::Text(
+                "ready".to_string()
+            )]
+        );
+        assert_eq!(
+            sink[0].fact,
+            ObservationFact::TextDelta {
+                index: 0,
+                text: "rea".to_string()
+            }
+        );
+        assert_eq!(
+            sink[1].fact,
+            ObservationFact::TextDelta {
+                index: 0,
+                text: "dy".to_string()
+            }
+        );
+    }
+
     #[test]
     fn multiple_message_content_parts_have_distinct_flattened_delta_indices() {
         let mut decoder = StreamDecoder::new(ExchangeFacts::default());
