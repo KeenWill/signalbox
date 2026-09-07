@@ -98,10 +98,10 @@ pub use model_execution::{
     ModelCallTerminalIdentityCandidates, ModelConversationMessage, ModelFrontierRenderingError,
     ModelToolResultContent, ModelUserContent, ModelUserContentPart, PrepareModelCallOutcome,
     PrepareModelCallTransaction, PreparedModelCallFailureCause, PreparedModelOperation,
-    RetainedModelCallExecutionState, RetainedModelCallObservationStatus,
-    RetainedPreparedFailureStatus, ScriptedModelCallCapability, ScriptedModelCallError,
-    ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
-    render_model_user_content,
+    ProviderReasoningProvenance, RetainedModelCallExecutionState,
+    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallCapability,
+    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
+    UuidV7ModelCallExecutionIdGenerator, render_model_user_content,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{

@@ -1226,7 +1226,8 @@ impl OperationTracker {
                 | MessagePart::ToolCall(_)
                 | MessagePart::Thinking { .. }
                 | MessagePart::RedactedThinking { .. }
-                | MessagePart::ProviderCompaction { .. } => None,
+                | MessagePart::ProviderCompaction { .. }
+                | MessagePart::ProviderReasoning { .. } => None,
             })
         });
         self.record_new_results(tool_results);

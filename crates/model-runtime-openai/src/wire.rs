@@ -10,6 +10,7 @@ pub(crate) struct CreateResponse {
     pub input: Vec<WireInputItem>,
     pub max_output_tokens: u32,
     pub store: bool,
+    pub include: &'static [&'static str],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<WireReasoning>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,6 +49,8 @@ pub(crate) enum WireInputItem {
         call_id: String,
         output: String,
     },
+    #[serde(untagged)]
+    ProviderReasoning(Box<RawValue>),
 }
 
 #[derive(Debug, Serialize)]
@@ -158,6 +161,7 @@ pub(crate) struct WireOutputItem {
     pub call_id: Option<String>,
     pub name: Option<String>,
     pub arguments: Option<String>,
+    pub encrypted_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
