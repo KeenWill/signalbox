@@ -244,6 +244,12 @@ pub(crate) fn decode_response<C: Clone>(
     let mut refused = false;
     let mut ids = BTreeSet::new();
     for item in &items {
+        if item.id.as_deref().is_none_or(str::is_empty) {
+            return loss(
+                "response output item lacks a non-empty id".to_string(),
+                None,
+            );
+        }
         let ConvertedItem {
             parts,
             refused: item_refused,
@@ -535,6 +541,54 @@ mod tests {
     }
 
     #[test]
+    fn every_buffered_output_item_requires_a_nonempty_id() {
+        for status in ["completed", "incomplete"] {
+            for item in [
+                json!({"type":"message","id":"msg_second","role":"assistant","content":[{"type":"output_text","text":"after"}]}),
+                json!({"type":"reasoning","id":"rs_fixture","summary":[]}),
+                json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"}),
+            ] {
+                let mut value = response();
+                value["status"] = json!(status);
+                value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                value["output"].as_array_mut().unwrap().push(item.clone());
+                assert!(matches!(
+                    decode(value.clone()).0,
+                    TerminalEvidence::Completed(_)
+                ));
+                for id in [None, Some(Value::Null), Some(json!(""))] {
+                    let mut invalid = value.clone();
+                    if let Some(id) = id {
+                        invalid["output"][1]["id"] = id;
+                    } else {
+                        invalid["output"][1].as_object_mut().unwrap().remove("id");
+                    }
+                    let (TerminalEvidence::BoundaryLoss(loss), observations) = decode(invalid)
+                    else {
+                        panic!("missing or empty item IDs must fail closed for {status}: {item}");
+                    };
+                    assert!(matches!(
+                        loss.cause,
+                        LossCause::ResponseUnintelligible { .. }
+                    ));
+                    assert_eq!(
+                        loss.tool_calls,
+                        if item["type"] == "function_call" {
+                            ToolCallsAtLoss::Opened
+                        } else {
+                            ToolCallsAtLoss::NoneOpened
+                        }
+                    );
+                    assert!(!observations.iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn interleaved_text_and_function_calls_keep_provider_order() {
         let mut value = response();
         value["output"] = json!([
@@ -553,8 +607,7 @@ mod tests {
     #[test]
     fn duplicate_function_call_ids_are_boundary_loss_with_opened_tools() {
         let mut value = response();
-        let call =
-            json!({"type":"function_call","call_id":"same","name":"lookup","arguments":"{}"});
+        let call = json!({"type":"function_call","id":"fc_fixture","call_id":"same","name":"lookup","arguments":"{}"});
         value["output"] = json!([call, call]);
         let (TerminalEvidence::BoundaryLoss(loss), _) = decode(value) else {
             panic!("duplicate calls fail closed");
@@ -565,7 +618,7 @@ mod tests {
     #[test]
     fn malformed_tool_calls_are_not_fabricated_into_proposals() {
         for field in ["call_id", "name", "arguments"] {
-            let mut call = json!({"type":"function_call","call_id":"call_fixture","name":"lookup","arguments":"{}"});
+            let mut call = json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"});
             call.as_object_mut().unwrap().remove(field);
             let mut value = response();
             value["output"] = json!([call]);
