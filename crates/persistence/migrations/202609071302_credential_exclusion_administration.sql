@@ -64,6 +64,7 @@ CREATE TABLE credential_exclusion (
     session_id uuid REFERENCES session,
     origin text NOT NULL CHECK (origin IN ('pool_trigger', 'codex_home', 'oauth_refresh')),
     action_id bigint UNIQUE REFERENCES credential_pool_member_action,
+    oauth_generation bigint CHECK (oauth_generation IS NULL OR (oauth_generation > 0 AND origin = 'codex_home')),
     CHECK ((kind = 'profile_quarantine' AND pool_policy_id IS NULL AND session_id IS NULL)
         OR (kind = 'membership_exclusion' AND pool_policy_id IS NOT NULL AND session_id IS NULL AND origin = 'pool_trigger')
         OR (kind = 'session_displacement' AND pool_policy_id IS NOT NULL AND session_id IS NOT NULL AND origin = 'pool_trigger')),
@@ -197,9 +198,26 @@ SELECT exclusion.*,
                      AND newer.pool_policy_id IS NOT DISTINCT FROM exclusion.pool_policy_id
                      AND newer.session_id IS NOT DISTINCT FROM exclusion.session_id
                      AND newer.record_generation > exclusion.record_generation)
+       AND (exclusion.oauth_generation IS NULL OR EXISTS (
+           SELECT 1 FROM oauth_credential_authorization authorization
+             WHERE authorization.profile = exclusion.profile
+               AND authorization.generation = exclusion.oauth_generation
+               AND authorization.quarantined AND authorization.quarantine_cause = 'credential_home'))
        AND (exclusion.action_id IS NULL OR action.consumed_turn_id IS NULL)
        AND NOT EXISTS (SELECT 1 FROM clear_credential_exclusion_command AS command
                        WHERE command.outcome = 'cleared'
                          AND command.cleared_generation = exclusion.record_generation) AS active
   FROM credential_exclusion AS exclusion
   LEFT JOIN credential_pool_member_action AS action ON action.action_id = exclusion.action_id;
+
+CREATE FUNCTION credential_home_quarantine_cleared(checked_profile text, checked_generation bigint)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+SELECT COALESCE((
+    SELECT EXISTS (SELECT 1 FROM clear_credential_exclusion_command cleared
+        WHERE cleared.cleared_generation = exclusion.record_generation AND cleared.outcome = 'cleared')
+      FROM credential_exclusion exclusion
+      WHERE exclusion.profile = checked_profile AND exclusion.origin = 'codex_home'
+        AND exclusion.oauth_generation = checked_generation
+      ORDER BY exclusion.record_generation DESC LIMIT 1
+), false);
+$$;
