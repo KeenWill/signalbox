@@ -2,81 +2,6 @@
 
 # review_workflow
 
-## ReviewTargetSubject
-
-```rust
-pub enum ReviewTargetSubject {
-    ChangeRequest(ReviewChangeRequestNumber),
-    Commit,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## ReviewTargetParentRef
-
-```rust
-pub struct ReviewTargetParentRef {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewTargetParentRef {
-    pub const fn target(&self) -> ReviewTargetId;
-    pub const fn provider(&self) -> &ReviewKey;
-    pub const fn repository(&self) -> &ReviewKey;
-    pub const fn head_revision(&self) -> &ReviewKey;
-}
-```
-
-## ReviewTarget
-
-```rust
-pub struct ReviewTarget {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewTarget {
-    pub fn try_new(
-        id: ReviewTargetId,
-        provider: ReviewKey,
-        repository: ReviewKey,
-        subject: ReviewTargetSubject,
-        head_revision: ReviewKey,
-        base_revision: option::Option<ReviewKey>,
-        stack_parent: option::Option<&ReviewTarget>,
-    ) -> result::Result<Self, ReviewTargetError>;
-    pub fn try_reconstitute(
-        id: ReviewTargetId,
-        provider: ReviewKey,
-        repository: ReviewKey,
-        subject: ReviewTargetSubject,
-        head_revision: ReviewKey,
-        base_revision: option::Option<ReviewKey>,
-        stack_parent: option::Option<ReviewTargetId>,
-        stack_parent_evidence: option::Option<&ReviewTarget>,
-    ) -> result::Result<Self, ReviewTargetError>;
-    pub const fn id(&self) -> ReviewTargetId;
-    pub const fn provider(&self) -> &ReviewKey;
-    pub const fn repository(&self) -> &ReviewKey;
-    pub const fn subject(&self) -> ReviewTargetSubject;
-    pub const fn head_revision(&self) -> &ReviewKey;
-    pub const fn base_revision(&self) -> option::Option<&ReviewKey>;
-    pub const fn stack_parent(&self) -> option::Option<&ReviewTargetParentRef>;
-    pub fn ancestry(&self) -> &[ReviewTargetId];
-}
-```
-
-## ReviewTargetError
-
-```rust
-pub enum ReviewTargetError {
-    MissingChangeRequestBase { target: ReviewTargetId },
-    SelfParent { target: ReviewTargetId },
-    CyclicParent { target: ReviewTargetId },
-    ForeignParent { target: ReviewTargetId },
-    MissingParentBase { target: ReviewTargetId },
-    DisconnectedParent { target: ReviewTargetId },
-    RepeatedChangeRequest { target: ReviewTargetId },
-    ParentIdentityMismatch { target: ReviewTargetId },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
 ## ReviewRunRef
 
 ```rust
@@ -1334,6 +1259,81 @@ pub struct ReviewPolicyError {/* private */}
 impl ReviewPolicyError {
     pub const fn into_parts(self) -> (ReviewPolicyVersion, ReviewConfidence, ReviewConfidence);
 }
+```
+
+## ReviewTargetSubject
+
+```rust
+pub enum ReviewTargetSubject {
+    ChangeRequest(ReviewChangeRequestNumber),
+    Commit,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## ReviewTargetParentRef
+
+```rust
+pub struct ReviewTargetParentRef {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewTargetParentRef {
+    pub const fn target(&self) -> ReviewTargetId;
+    pub const fn provider(&self) -> &ReviewKey;
+    pub const fn repository(&self) -> &ReviewKey;
+    pub const fn head_revision(&self) -> &ReviewKey;
+}
+```
+
+## ReviewTarget
+
+```rust
+pub struct ReviewTarget {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewTarget {
+    pub fn try_new(
+        id: ReviewTargetId,
+        provider: ReviewKey,
+        repository: ReviewKey,
+        subject: ReviewTargetSubject,
+        head_revision: ReviewKey,
+        base_revision: option::Option<ReviewKey>,
+        stack_parent: option::Option<&ReviewTarget>,
+    ) -> result::Result<Self, ReviewTargetError>;
+    pub fn try_reconstitute(
+        id: ReviewTargetId,
+        provider: ReviewKey,
+        repository: ReviewKey,
+        subject: ReviewTargetSubject,
+        head_revision: ReviewKey,
+        base_revision: option::Option<ReviewKey>,
+        stack_parent: option::Option<ReviewTargetId>,
+        stack_parent_evidence: option::Option<&ReviewTarget>,
+    ) -> result::Result<Self, ReviewTargetError>;
+    pub const fn id(&self) -> ReviewTargetId;
+    pub const fn provider(&self) -> &ReviewKey;
+    pub const fn repository(&self) -> &ReviewKey;
+    pub const fn subject(&self) -> ReviewTargetSubject;
+    pub const fn head_revision(&self) -> &ReviewKey;
+    pub const fn base_revision(&self) -> option::Option<&ReviewKey>;
+    pub const fn stack_parent(&self) -> option::Option<&ReviewTargetParentRef>;
+    pub fn ancestry(&self) -> &[ReviewTargetId];
+}
+```
+
+## ReviewTargetError
+
+```rust
+pub enum ReviewTargetError {
+    MissingChangeRequestBase { target: ReviewTargetId },
+    SelfParent { target: ReviewTargetId },
+    CyclicParent { target: ReviewTargetId },
+    ForeignParent { target: ReviewTargetId },
+    MissingParentBase { target: ReviewTargetId },
+    DisconnectedParent { target: ReviewTargetId },
+    RepeatedChangeRequest { target: ReviewTargetId },
+    ParentIdentityMismatch { target: ReviewTargetId },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## ReviewKey
