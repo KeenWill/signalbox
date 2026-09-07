@@ -243,6 +243,15 @@ pub enum ModelConversationMessage {
         /// Exact assistant-owned text.
         content: AssistantText,
     },
+    /// One complete provider reasoning item rendered for replay.
+    ProviderReasoning {
+        /// The source-qualified semantic entry.
+        source: SemanticTranscriptEntryRef,
+        /// The outcome-authoritative producing call.
+        producing_call: ModelCallId,
+        /// The complete retained provider item.
+        item: signalbox_domain::ProviderReasoningItem,
+    },
     /// One opaque provider-produced compaction block rendered with the assistant role.
     ProviderCompaction {
         /// The source-qualified semantic entry being rendered.
@@ -528,7 +537,16 @@ fn render_frontier_messages<'a>(
                 producing_call: *producing_call,
                 block: block.clone(),
             }),
-            SemanticTranscriptEntryPayload::ProviderReasoning { .. } => {}
+            SemanticTranscriptEntryPayload::ProviderReasoning {
+                producing_call,
+                item,
+            } => {
+                messages.push(ModelConversationMessage::ProviderReasoning {
+                    source,
+                    producing_call: *producing_call,
+                    item: item.clone(),
+                });
+            }
             SemanticTranscriptEntryPayload::AssistantToolUse {
                 producing_call,
                 request,
@@ -774,7 +792,7 @@ fn projected_frontier_content_bytes<'a>(
             SemanticTranscriptEntryPayload::ProviderCompaction { block, .. } => {
                 block.as_json().len()
             }
-            SemanticTranscriptEntryPayload::ProviderReasoning { .. } => 0,
+            SemanticTranscriptEntryPayload::ProviderReasoning { item, .. } => item.as_json().len(),
             // Identity-only payloads carry no content of their own. Tool
             // payloads name evidence rather than carrying it, and that
             // evidence is summed below.
@@ -3152,23 +3170,32 @@ mod tests {
     }
 
     #[test]
-    fn omitted_reasoning_contributes_no_rendered_content_bytes() {
+    fn durable_reasoning_projection_preserves_source_call_bytes_and_content_cost() {
+        let raw = r#"{ "type":"reasoning", "id":"rs_fixture", "summary":[], "encrypted_content":"opaque" }"#;
         let source = SemanticTranscriptEntryRef::from_source(
             identity(40, SessionId::from_uuid),
             identity(41, SemanticTranscriptEntryId::from_uuid),
         );
+        let producing_call = identity(42, ModelCallId::from_uuid);
+        let item = signalbox_domain::ProviderReasoningItem::try_new(raw.to_string())
+            .expect("durable fixture");
         let payload = SemanticTranscriptEntryPayload::ProviderReasoning {
-            producing_call: identity(42, ModelCallId::from_uuid),
-            item: signalbox_domain::ProviderReasoningItem::try_new(String::from(
-                r#"{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"opaque"}"#,
-            )).expect("complete reasoning fixture"),
+            producing_call,
+            item: item.clone(),
         };
         let messages = render_frontier_messages([(source, &payload)], |_| None, |_| None, [])
-            .expect("reasoning is omitted");
-        assert!(messages.is_empty());
+            .expect("reasoning renders");
+        assert_eq!(
+            messages.as_ref(),
+            &[ModelConversationMessage::ProviderReasoning {
+                source,
+                producing_call,
+                item
+            }]
+        );
         assert_eq!(
             projected_frontier_content_bytes([(source, &payload)], |_| None, []),
-            0
+            raw.len()
         );
     }
 
@@ -6355,6 +6382,7 @@ mod tests {
                 ModelConversationMessage::ContextSummary { content, .. }
                 | ModelConversationMessage::Assistant { content, .. } => content.as_str().len(),
                 ModelConversationMessage::ProviderCompaction { block, .. } => block.as_json().len(),
+                ModelConversationMessage::ProviderReasoning { item, .. } => item.as_json().len(),
                 // Mirrors `user_content_text_bytes`: attachment stubs carry a
                 // fixed-width digest and bounded declarations held under
                 // `MAX_RENDERED_ATTACHMENT_STUB_BYTES`, so they sit outside the

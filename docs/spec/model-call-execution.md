@@ -120,14 +120,15 @@ call from durable evidence.
 
 The runtime bridge in `crates/model-provider-runtime` maps the runtime's typed
 terminal evidence to exactly one disposition: completed text, provider
-compaction blocks, and tool-call content to `Completed`, refusal to `Refused`, a
-provider error or other proof of non-acceptance to `KnownFailed`, cancellation
-before send or confirmed cancellation to `Cancelled`, and loss after possible
-acceptance to `Ambiguous`. The requested selection, the pinned resolved target,
-and the provider-reported identity are three separate facts, and the bridge is
-the one place that relates the third to the second. Exactly one of three
-relations holds: exact, alias concretion (the configured spelling followed by a
-dated snapshot qualifier), or different lineage.
+compaction blocks, provider reasoning items, and tool-call content to
+`Completed`, refusal to `Refused`, a provider error or other proof of
+non-acceptance to `KnownFailed`, cancellation before send or confirmed
+cancellation to `Cancelled`, and loss after possible acceptance to `Ambiguous`.
+The requested selection, the pinned resolved target, and the provider-reported
+identity are three separate facts, and the bridge is the one place that relates
+the third to the second. Exactly one of three relations holds: exact, alias
+concretion (the configured spelling followed by a dated snapshot qualifier), or
+different lineage.
 
 `apply_terminal_observation` derives one of seven outcomes from fresh state, and
 persistence commits the outcome atomically with its outbox rows. Ambiguity parks

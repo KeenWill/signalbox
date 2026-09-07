@@ -1264,3 +1264,104 @@ fn a_non_http_base_url_scheme_fails_construction() {
         OpenAiConstructionError::InvalidBaseUrl { .. }
     ));
 }
+
+#[tokio::test]
+async fn streamed_reasoning_replays_exact_completed_bytes_between_two_tool_calls() {
+    use signalbox_model_runtime::{
+        ConversationRole, MessagePart, ToolDefinition, ToolResultRecord,
+    };
+    // Whitespace, field order, escaped text, and an unknown field make reserialization observable.
+    let complete = r#"{ "type":"reasoning", "id":"rs_continuation", "status":"completed", "encrypted_content":"complete\u002dopaque", "summary":[], "provider_extension": {"b":2,"a":1} }"#;
+    let first_call = r#"{"type":"function_call","id":"fc_first","status":"completed","call_id":"call_first","name":"lookup","arguments":"{}"}"#;
+    let second_call = r#"{"type":"function_call","id":"fc_second","status":"completed","call_id":"call_second","name":"lookup","arguments":"{}"}"#;
+    let stream = format!(
+        "data: {{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{{\"type\":\"reasoning\",\"id\":\"rs_continuation\",\"status\":\"in_progress\",\"encrypted_content\":\"truncated\",\"summary\":[]}}}}\n\n\
+         data: {{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{complete}}}\n\n\
+         data: {{\"type\":\"response.completed\",\"response\":{{\"object\":\"response\",\"id\":\"resp_first\",\"model\":\"model-exact-1\",\"status\":\"completed\",\"output\":[{first_call},{complete},{second_call}],\"usage\":{{\"input_tokens\":4,\"output_tokens\":8}}}}}}\n\n"
+    );
+    let final_body = br#"{"object":"response","id":"resp_second","model":"model-exact-1","status":"completed","output":[{"type":"message","id":"msg_final","status":"completed","role":"assistant","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":12,"output_tokens":2}}"#;
+    let server = CannedServer::serving(vec![
+        http_response(
+            "200 OK",
+            &[("content-type", "text/event-stream")],
+            stream.as_bytes(),
+        ),
+        http_response(
+            "200 OK",
+            &[("content-type", "application/json")],
+            final_body,
+        ),
+    ])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+    let mut first = operation("reasoning-first");
+    first.delivery = DeliveryMode::Streamed;
+    first.tools = vec![ToolDefinition::with_schema(
+        "lookup",
+        "Lookup.",
+        serde_json::json!({"type":"object"}),
+    )];
+    let (report, observations) = execute(&runtime, first, CancellationSignal::never()).await;
+    let TerminalEvidence::Completed(completion) = report.evidence else {
+        panic!("streamed reasoning and tools complete");
+    };
+    assert_eq!(completion.finish, CompletionFinish::ToolUse);
+    assert_eq!(completion.content.len(), 3);
+    assert_eq!(
+        completion.content[1],
+        AssistantPart::ProviderReasoning {
+            item_json: complete.to_string()
+        }
+    );
+    assert!(
+        !observations
+            .iter()
+            .any(|observation| matches!(observation.fact, ObservationFact::ThinkingDelta { .. }))
+    );
+    let mut second = operation("reasoning-second");
+    let mut replay = Vec::new();
+    let mut results = Vec::new();
+    for part in completion.content {
+        match part {
+            AssistantPart::ProviderReasoning { item_json } => {
+                replay.push(MessagePart::ProviderReasoning { item_json })
+            }
+            AssistantPart::ToolCall(call) => {
+                results.push(MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: call.id.clone(),
+                    content: "found".to_string(),
+                    is_error: false,
+                }));
+                replay.push(MessagePart::ToolCall(call));
+            }
+            _ => panic!("fixture contains only reasoning and calls"),
+        }
+    }
+    second.messages.push(ConversationMessage {
+        role: ConversationRole::Assistant,
+        parts: replay,
+    });
+    second.messages.push(ConversationMessage {
+        role: ConversationRole::User,
+        parts: results,
+    });
+    let (report, _) = execute(&runtime, second, CancellationSignal::never()).await;
+    assert!(matches!(report.evidence, TerminalEvidence::Completed(_)));
+    let requests = server.recorded_requests();
+    let body = requests[1].split_once("\r\n\r\n").expect("request body").1;
+    #[derive(serde::Deserialize)]
+    struct RequestInput {
+        input: Vec<Box<serde_json::value::RawValue>>,
+    }
+    let parsed: RequestInput = serde_json::from_str(body).expect("request JSON");
+    assert_eq!(parsed.input[2].get(), complete);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(parsed.input[1].get()).unwrap()["call_id"],
+        "call_first"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(parsed.input[3].get()).unwrap()["call_id"],
+        "call_second"
+    );
+    assert!(!body.contains("truncated"));
+}

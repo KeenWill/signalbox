@@ -393,6 +393,7 @@ mod tests {
                 Some(signalbox_model_runtime::AssistantPart::Thinking { .. })
                 | Some(signalbox_model_runtime::AssistantPart::RedactedThinking { .. })
                 | Some(signalbox_model_runtime::AssistantPart::ProviderCompaction { .. })
+                | Some(signalbox_model_runtime::AssistantPart::ProviderReasoning { .. })
                 | Some(signalbox_model_runtime::AssistantPart::ToolCall(_))
                 | Some(signalbox_model_runtime::AssistantPart::SuppressedToolCall(_))
                 | None => None,

@@ -1609,6 +1609,27 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 }
                 collecting_tool_results = false;
             }
+            ModelConversationMessage::ProviderReasoning {
+                producing_call,
+                item,
+                ..
+            } => {
+                let part = MessagePart::ProviderReasoning {
+                    item_json: item.as_json().to_owned(),
+                };
+                if assistant_call == Some(*producing_call) {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    }
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::Assistant,
+                        parts: vec![part],
+                    });
+                    assistant_call = Some(*producing_call);
+                }
+                collecting_tool_results = false;
+            }
             ModelConversationMessage::AssistantToolUse {
                 producing_call,
                 request,
@@ -1982,6 +2003,7 @@ fn classify_terminal(
             let finish = completion.finish;
             let mut response_parts = Vec::new();
             let mut has_provider_compaction = false;
+            let mut has_provider_reasoning = false;
             let mut tool_count = 0usize;
             for part in completion.content {
                 match part {
@@ -1993,6 +2015,16 @@ fn classify_terminal(
                             )
                         })?;
                         response_parts.push(AssistantResponsePart::Text(text));
+                    }
+                    AssistantPart::ProviderReasoning { item_json } => {
+                        let item = signalbox_domain::ProviderReasoningItem::try_new(item_json)
+                            .map_err(|_| {
+                                ClassificationFailure::bare(
+                                    RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                                )
+                            })?;
+                        has_provider_reasoning = true;
+                        response_parts.push(AssistantResponsePart::ProviderReasoning(item));
                     }
                     AssistantPart::ProviderCompaction { block_json } => {
                         let block = ProviderCompactionBlock::try_new(block_json).map_err(|_| {
@@ -2083,6 +2115,13 @@ fn classify_terminal(
                         },
                         ModelCallCauseCode::Completed,
                     )
+                } else if has_provider_reasoning {
+                    classify(
+                        ModelCallTerminalObservation::CompletedWithProviderReasoning {
+                            response: response_parts,
+                        },
+                        ModelCallCauseCode::Completed,
+                    )
                 } else {
                     let assistant_text = response_parts
                         .into_iter()
@@ -2139,7 +2178,8 @@ fn classify_terminal(
                 .into_iter()
                 .filter_map(|part| match part {
                     AssistantPart::ProviderCompaction { block_json } => Some(block_json),
-                    AssistantPart::Text(_)
+                    AssistantPart::ProviderReasoning { .. }
+                    | AssistantPart::Text(_)
                     | AssistantPart::Thinking { .. }
                     | AssistantPart::RedactedThinking { .. }
                     | AssistantPart::ToolCall(_)
@@ -3117,6 +3157,85 @@ mod tests {
                         .expect("fixture text is admitted"),
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn reasoning_completion_enters_the_durable_vocabulary_without_compaction_usage() {
+        let raw = r#"{ "type":"reasoning", "id":"rs_fixture", "summary":[], "encrypted_content":"opaque" }"#;
+        let classified = classify_terminal(
+            completion(
+                "model-exact",
+                vec![
+                    AssistantPart::Text("before".to_string()),
+                    AssistantPart::ProviderReasoning {
+                        item_json: raw.to_string(),
+                    },
+                    AssistantPart::Text("after".to_string()),
+                ],
+            ),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("encrypted reasoning is representable");
+        let ModelCallTerminalObservation::CompletedWithProviderReasoning { response } =
+            classified.observation
+        else {
+            panic!("reasoning does not require compaction iteration counts");
+        };
+        assert_eq!(response.len(), 3);
+        let signalbox_domain::AssistantResponsePart::ProviderReasoning(item) = &response[1] else {
+            panic!("reasoning keeps its response position");
+        };
+        assert_eq!(item.as_json(), raw);
+    }
+
+    #[test]
+    fn durable_reasoning_replays_between_calls_in_the_same_assistant_message() {
+        let raw = r#"{ "type":"reasoning", "id":"rs_fixture", "summary":[], "encrypted_content":"opaque" }"#;
+        let first = request(20, "{}");
+        let second = request(21, "{}");
+        let rendered = render_runtime_messages(&[
+            ModelConversationMessage::AssistantToolUse {
+                source: source(30),
+                producing_call: call(),
+                request: first.clone(),
+            },
+            ModelConversationMessage::ProviderReasoning {
+                source: source(31),
+                producing_call: call(),
+                item: signalbox_domain::ProviderReasoningItem::try_new(raw.to_string())
+                    .expect("durable fixture"),
+            },
+            ModelConversationMessage::AssistantToolUse {
+                source: source(32),
+                producing_call: call(),
+                request: second.clone(),
+            },
+        ]);
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].parts.len(), 3);
+        assert_eq!(
+            rendered[0].parts[1],
+            signalbox_model_runtime::MessagePart::ProviderReasoning {
+                item_json: raw.to_string()
+            }
+        );
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_first) = &rendered[0].parts[0]
+        else {
+            panic!("first tool retained");
+        };
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_second) = &rendered[0].parts[2]
+        else {
+            panic!("second tool retained");
+        };
+        assert_eq!(
+            replayed_first.id.as_str(),
+            first.id().into_uuid().to_string()
+        );
+        assert_eq!(
+            replayed_second.id.as_str(),
+            second.id().into_uuid().to_string()
         );
     }
 

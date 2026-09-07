@@ -102,6 +102,11 @@ pub enum ModelConversationMessage {
         producing_call: signalbox_domain::ModelCallId,
         content: signalbox_domain::AssistantText,
     },
+    ProviderReasoning {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        producing_call: signalbox_domain::ModelCallId,
+        item: signalbox_domain::ProviderReasoningItem,
+    },
     ProviderCompaction {
         source: signalbox_domain::SemanticTranscriptEntryRef,
         producing_call: signalbox_domain::ModelCallId,

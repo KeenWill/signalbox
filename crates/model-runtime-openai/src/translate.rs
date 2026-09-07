@@ -89,6 +89,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
         max_output_tokens: operation.settings.max_output_tokens,
         reasoning: reasoning_effort.map(|effort| WireReasoning { effort }),
         store: false,
+        include: &["reasoning.encrypted_content"],
         service_tier,
         temperature: operation.settings.temperature,
         top_p: operation.settings.top_p,
@@ -446,6 +447,30 @@ fn wire_messages(
                     "OpenAI cannot replay another provider's thinking",
                 ));
             }
+            MessagePart::ProviderReasoning { item_json } => {
+                if message.role != ConversationRole::Assistant {
+                    return Err(unsupported("provider reasoning requires assistant history"));
+                }
+                signalbox_model_runtime::validate_provider_json_nesting(item_json.as_bytes())
+                    .map_err(|_| {
+                        unsupported("replayed reasoning exceeds the JSON nesting bound")
+                    })?;
+                let item: crate::wire::WireOutputItem =
+                    serde_json::from_str(item_json).map_err(|_| {
+                        unsupported("replayed reasoning must be a complete reasoning item")
+                    })?;
+                if item.kind != "reasoning"
+                    || item.id.as_deref().is_none_or(str::is_empty)
+                    || item.encrypted_content.is_none()
+                {
+                    return Err(unsupported(
+                        "replayed reasoning lacks its type, id or encrypted content",
+                    ));
+                }
+                let raw = serde_json::value::RawValue::from_string(item_json.clone())
+                    .map_err(|_| unsupported("replayed reasoning must be JSON"))?;
+                out.push(WireInputItem::ProviderReasoning(raw));
+            }
             MessagePart::ProviderCompaction { .. } => {
                 return Err(unsupported("OpenAI provider compaction is unsupported"));
             }
@@ -639,6 +664,9 @@ mod tests {
 
         expect![[r#"
             {
+              "include": [
+                "reasoning.encrypted_content"
+              ],
               "input": [
                 {
                   "content": "Answer briefly.",
@@ -776,6 +804,9 @@ mod tests {
     fn minimal_operation_omits_every_unset_optional_field() {
         expect![[r#"
             {
+              "include": [
+                "reasoning.encrypted_content"
+              ],
               "input": [
                 {
                   "content": "hello",
