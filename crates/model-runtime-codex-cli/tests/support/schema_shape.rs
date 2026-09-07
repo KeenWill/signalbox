@@ -16,7 +16,15 @@ pub(super) fn object_shape(
     actual: &Value,
     actual_root: &Value,
 ) -> Result<Vec<String>, String> {
-    object_fields(expected, expected, actual, actual_root)
+    if !compatible(expected, expected, actual, actual_root) {
+        return Err("incompatible notification root schema".into());
+    }
+    object_fields(
+        dereference(expected, expected),
+        expected,
+        dereference(actual, actual_root),
+        actual_root,
+    )
 }
 
 fn object_fields(

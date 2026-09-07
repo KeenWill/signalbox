@@ -407,3 +407,25 @@ fn consumed_item_discriminators_remain_required_strings() {
         }
     }
 }
+
+#[test]
+fn notification_roots_cannot_become_nullable() {
+    for (name, expected) in [
+        ("ErrorNotification", derived::<frame::ErrorNotification>()),
+        (
+            "TurnCompletedNotification",
+            derived::<frame::TurnCompleted>(),
+        ),
+        (
+            "AccountRateLimitsUpdatedNotification",
+            derived::<frame::AccountRateLimitsUpdated>(),
+        ),
+    ] {
+        let mut actual = schema(name);
+        actual["type"] = serde_json::json!(["object", "null"]);
+        assert!(
+            schema_shape::object_shape(&expected, &actual, &actual).is_err(),
+            "{name}"
+        );
+    }
+}
