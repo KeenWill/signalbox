@@ -19,15 +19,34 @@ fn exhaustion_state(exclusion: serde_json::Value) -> serde_json::Value {
 
 #[test]
 fn pool_exhaustion_accepts_each_closed_exclusion_arm() {
-    for exclusion in [
-        serde_json::json!({"kind":"profile_quarantine","record_generation":null}),
-        serde_json::json!({"kind":"membership_exclusion","record_generation":"4"}),
-        serde_json::json!({"kind":"session_displacement","record_generation":null}),
-        serde_json::json!({"kind":"chain_exclusion","predecessor_model_call_id":uuid(5)}),
-        serde_json::json!({"kind":"transient_exclusion","observation_model_call_id":uuid(6)}),
-        serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":10}),
+    for (exclusion, reset_at_unix_ms) in [
+        (
+            serde_json::json!({"kind":"profile_quarantine","record_generation":null}),
+            None,
+        ),
+        (
+            serde_json::json!({"kind":"membership_exclusion","record_generation":"4"}),
+            None,
+        ),
+        (
+            serde_json::json!({"kind":"session_displacement","record_generation":null}),
+            None,
+        ),
+        (
+            serde_json::json!({"kind":"chain_exclusion","predecessor_model_call_id":uuid(5)}),
+            None,
+        ),
+        (
+            serde_json::json!({"kind":"transient_exclusion","observation_model_call_id":uuid(6)}),
+            Some(1_000),
+        ),
+        (
+            serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":10}),
+            Some(1_000),
+        ),
     ] {
-        let state = exhaustion_state(exclusion.clone());
+        let mut state = exhaustion_state(exclusion.clone());
+        state["members"][0]["reset_at_unix_ms"] = serde_json::json!(reset_at_unix_ms);
         let decoded: TurnState = serde_json::from_value(state.clone()).expect("valid evidence arm");
         assert_eq!(
             serde_json::to_value(decoded).expect("wire encoding"),
@@ -72,17 +91,69 @@ fn pool_exhaustion_rejects_partial_reordered_and_duplicate_members() {
 
 #[test]
 fn pool_exhaustion_rejects_unknown_exclusions_and_invalid_generations() {
-    for exclusion in [
-        serde_json::json!({"kind":"future_exclusion"}),
-        serde_json::json!({"kind":"profile_quarantine"}),
-        serde_json::json!({"kind":"profile_quarantine","record_generation":"0"}),
-        serde_json::json!({"kind":"profile_quarantine","record_generation":null,"secret":"unexpected"}),
-        serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":11,"reserve_percent":10}),
-        serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":101}),
+    for (exclusion, reset_at_unix_ms) in [
+        (serde_json::json!({"kind":"future_exclusion"}), None),
+        (serde_json::json!({"kind":"profile_quarantine"}), None),
+        (
+            serde_json::json!({"kind":"profile_quarantine","record_generation":"0"}),
+            None,
+        ),
+        (
+            serde_json::json!({"kind":"profile_quarantine","record_generation":null,"secret":"unexpected"}),
+            None,
+        ),
+        (
+            serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":11,"reserve_percent":10}),
+            Some(1_000),
+        ),
+        (
+            serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":101}),
+            Some(1_000),
+        ),
     ] {
+        let mut state = exhaustion_state(exclusion.clone());
+        state["members"][0]["reset_at_unix_ms"] = serde_json::json!(reset_at_unix_ms);
         assert!(
-            serde_json::from_value::<TurnState>(exhaustion_state(exclusion.clone())).is_err(),
+            serde_json::from_value::<TurnState>(state).is_err(),
             "{exclusion}"
+        );
+    }
+}
+
+#[test]
+fn pool_exhaustion_rejects_reset_presence_inconsistent_with_exclusion() {
+    // Arbitrary reset timestamp: only its presence is under test.
+    for (exclusion, reset_at_unix_ms) in [
+        (
+            serde_json::json!({"kind":"profile_quarantine","record_generation":null}),
+            Some(1_000),
+        ),
+        (
+            serde_json::json!({"kind":"membership_exclusion","record_generation":"4"}),
+            Some(1_000),
+        ),
+        (
+            serde_json::json!({"kind":"session_displacement","record_generation":null}),
+            Some(1_000),
+        ),
+        (
+            serde_json::json!({"kind":"chain_exclusion","predecessor_model_call_id":uuid(5)}),
+            Some(1_000),
+        ),
+        (
+            serde_json::json!({"kind":"transient_exclusion","observation_model_call_id":uuid(6)}),
+            None,
+        ),
+        (
+            serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":10}),
+            None,
+        ),
+    ] {
+        let mut state = exhaustion_state(exclusion.clone());
+        state["members"][0]["reset_at_unix_ms"] = serde_json::json!(reset_at_unix_ms);
+        assert!(
+            serde_json::from_value::<TurnState>(state).is_err(),
+            "{exclusion} with reset {reset_at_unix_ms:?}"
         );
     }
 }

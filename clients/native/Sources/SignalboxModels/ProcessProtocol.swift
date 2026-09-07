@@ -5278,6 +5278,12 @@ public struct SignalboxCredentialPoolMemberEvidence: Decodable, Equatable, Senda
     profile = try decoder.decode("profile")
     resetAtUnixMS = try decoder.decodeIfPresent("reset_at_unix_ms")
     exclusion = try decoder.decode("exclusion")
+    switch exclusion {
+    case .profileQuarantine, .membershipExclusion, .sessionDisplacement, .chainExclusion:
+      guard resetAtUnixMS == nil else { throw poolEvidenceError(decoder) }
+    case .transientExclusion, .headroomReserve:
+      guard resetAtUnixMS != nil else { throw poolEvidenceError(decoder) }
+    }
   }
 }
 

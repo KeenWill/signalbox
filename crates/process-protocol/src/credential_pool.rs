@@ -84,17 +84,23 @@ pub fn valid_credential_pool_evidence(
                     CredentialPoolExclusion::ProfileQuarantine { record_generation }
                     | CredentialPoolExclusion::MembershipExclusion { record_generation }
                     | CredentialPoolExclusion::SessionDisplacement { record_generation } => {
-                        record_generation.is_none_or(|generation| generation.value() > 0)
+                        member.reset_at_unix_ms.is_none()
+                            && record_generation.is_none_or(|generation| generation.value() > 0)
                     }
                     CredentialPoolExclusion::HeadroomReserve {
                         observed_headroom_percent,
                         reserve_percent,
                     } => {
-                        *reserve_percent <= 100
+                        member.reset_at_unix_ms.is_some()
+                            && *reserve_percent <= 100
                             && *observed_headroom_percent <= i64::from(*reserve_percent)
                     }
-                    CredentialPoolExclusion::ChainExclusion { .. }
-                    | CredentialPoolExclusion::TransientExclusion { .. } => true,
+                    CredentialPoolExclusion::ChainExclusion { .. } => {
+                        member.reset_at_unix_ms.is_none()
+                    }
+                    CredentialPoolExclusion::TransientExclusion { .. } => {
+                        member.reset_at_unix_ms.is_some()
+                    }
                 }
         })
 }
