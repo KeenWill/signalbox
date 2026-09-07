@@ -7,6 +7,54 @@
 ```rust
 pub struct ReviewWorkflowStore {/* private */}
 // derives: clone::Clone, fmt::Debug
+impl signalbox_application::ReviewWorkflowReader for review_workflow::ReviewWorkflowStore {
+    type Error = review_workflow::ReviewWorkflowStoreError;
+    async fn load_target(
+        &self,
+        target: signalbox_domain::ReviewTargetId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::ReviewTarget>,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
+    >;
+    async fn load_run(
+        &self,
+        run: signalbox_domain::ReviewRunId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::ReviewRun>,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
+    >;
+    async fn load_run_with_pass(
+        &self,
+        run: signalbox_domain::ReviewRunId,
+    ) -> result::Result<
+        option::Option<(
+            signalbox_domain::ReviewRun,
+            option::Option<signalbox_domain::ReviewPass>,
+        )>,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
+    >;
+    async fn load_pass(
+        &self,
+        pass: signalbox_domain::ReviewPassId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::ReviewPass>,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
+    >;
+    async fn load_finding(
+        &self,
+        finding: signalbox_domain::ReviewFindingId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::ReviewFinding>,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
+    >;
+    async fn list_findings(
+        &self,
+        run: signalbox_domain::ReviewRunId,
+    ) -> result::Result<
+        vec::Vec<signalbox_domain::ReviewFinding>,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
+    >;
+}
 impl review_workflow::ReviewWorkflowStore {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn insert_target(
@@ -89,44 +137,8 @@ impl review_workflow::ReviewWorkflowStore {
         option::Option<(signalbox_domain::ReviewRun, signalbox_domain::ReviewPass)>,
         review_workflow::ReviewWorkflowStoreError,
     >;
-    pub async fn insert_finding(
-        &self,
-        finding: &signalbox_domain::ReviewFinding,
-    ) -> result::Result<(), review_workflow::ReviewWorkflowStoreError>;
-    pub async fn insert_findings(
-        &self,
-        pass: &signalbox_domain::ReviewPassEvidence,
-        findings: &[signalbox_domain::ReviewFinding],
-    ) -> result::Result<(), review_workflow::ReviewWorkflowStoreError>;
-    pub async fn append_finding_event(
-        &self,
-        finding: signalbox_domain::ReviewFindingId,
-        event: signalbox_domain::ReviewFindingEvent,
-    ) -> result::Result<
-        option::Option<signalbox_domain::ReviewFinding>,
-        review_workflow::ReviewWorkflowStoreError,
-    >;
-    pub async fn load_finding(
-        &self,
-        finding: signalbox_domain::ReviewFindingId,
-    ) -> result::Result<
-        option::Option<signalbox_domain::ReviewFinding>,
-        review_workflow::ReviewWorkflowStoreError,
-    >;
-    pub async fn load_findings(
-        &self,
-        findings: &[signalbox_domain::ReviewFindingId],
-    ) -> result::Result<
-        map::BTreeMap<signalbox_domain::ReviewFindingId, signalbox_domain::ReviewFinding>,
-        review_workflow::ReviewWorkflowStoreError,
-    >;
-    pub async fn list_findings(
-        &self,
-        run: signalbox_domain::ReviewRunId,
-    ) -> result::Result<
-        vec::Vec<signalbox_domain::ReviewFinding>,
-        review_workflow::ReviewWorkflowStoreError,
-    >;
+}
+impl review_workflow::ReviewWorkflowStore {
     pub async fn reserve_external_link(
         &self,
         requested: signalbox_domain::ReviewExternalLink,
@@ -167,52 +179,44 @@ impl review_workflow::ReviewWorkflowStore {
         review_workflow::ReviewWorkflowStoreError,
     >;
 }
-impl signalbox_application::ReviewWorkflowReader for review_workflow::ReviewWorkflowStore {
-    type Error = review_workflow::ReviewWorkflowStoreError;
-    async fn load_target(
+impl review_workflow::ReviewWorkflowStore {
+    pub async fn insert_finding(
         &self,
-        target: signalbox_domain::ReviewTargetId,
-    ) -> result::Result<
-        option::Option<signalbox_domain::ReviewTarget>,
-        <Self as signalbox_application::ReviewWorkflowReader>::Error,
-    >;
-    async fn load_run(
+        finding: &signalbox_domain::ReviewFinding,
+    ) -> result::Result<(), review_workflow::ReviewWorkflowStoreError>;
+    pub async fn insert_findings(
         &self,
-        run: signalbox_domain::ReviewRunId,
-    ) -> result::Result<
-        option::Option<signalbox_domain::ReviewRun>,
-        <Self as signalbox_application::ReviewWorkflowReader>::Error,
-    >;
-    async fn load_run_with_pass(
+        pass: &signalbox_domain::ReviewPassEvidence,
+        findings: &[signalbox_domain::ReviewFinding],
+    ) -> result::Result<(), review_workflow::ReviewWorkflowStoreError>;
+    pub async fn append_finding_event(
         &self,
-        run: signalbox_domain::ReviewRunId,
+        finding: signalbox_domain::ReviewFindingId,
+        event: signalbox_domain::ReviewFindingEvent,
     ) -> result::Result<
-        option::Option<(
-            signalbox_domain::ReviewRun,
-            option::Option<signalbox_domain::ReviewPass>,
-        )>,
-        <Self as signalbox_application::ReviewWorkflowReader>::Error,
+        option::Option<signalbox_domain::ReviewFinding>,
+        review_workflow::ReviewWorkflowStoreError,
     >;
-    async fn load_pass(
-        &self,
-        pass: signalbox_domain::ReviewPassId,
-    ) -> result::Result<
-        option::Option<signalbox_domain::ReviewPass>,
-        <Self as signalbox_application::ReviewWorkflowReader>::Error,
-    >;
-    async fn load_finding(
+    pub async fn load_finding(
         &self,
         finding: signalbox_domain::ReviewFindingId,
     ) -> result::Result<
         option::Option<signalbox_domain::ReviewFinding>,
-        <Self as signalbox_application::ReviewWorkflowReader>::Error,
+        review_workflow::ReviewWorkflowStoreError,
     >;
-    async fn list_findings(
+    pub async fn load_findings(
+        &self,
+        findings: &[signalbox_domain::ReviewFindingId],
+    ) -> result::Result<
+        map::BTreeMap<signalbox_domain::ReviewFindingId, signalbox_domain::ReviewFinding>,
+        review_workflow::ReviewWorkflowStoreError,
+    >;
+    pub async fn list_findings(
         &self,
         run: signalbox_domain::ReviewRunId,
     ) -> result::Result<
         vec::Vec<signalbox_domain::ReviewFinding>,
-        <Self as signalbox_application::ReviewWorkflowReader>::Error,
+        review_workflow::ReviewWorkflowStoreError,
     >;
 }
 impl review_workflow::ReviewWorkflowStore {
