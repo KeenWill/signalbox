@@ -19,9 +19,10 @@ use super::reread::StoredTerminalFrontierMember;
 use super::reread::completed_terminal_frontier_matches;
 use super::reread::failed_terminal_frontier_matches;
 use super::reread::record_reclassified_turn_candidate;
+use super::transaction_impls::cancellation_poll_interval;
 use super::{
     ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
-    ToolContinuationUsageLimit, cancellation_poll_interval, commit_failure_is_ambiguous,
+    ToolContinuationUsageLimit, commit_failure_is_ambiguous,
 };
 
 #[test]
