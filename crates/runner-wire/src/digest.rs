@@ -456,9 +456,12 @@ pub fn advertisement_digest(value: &Advertisement) -> Result<Digest, ValueError>
         .map(repository_record)
         .collect::<Vec<_>>();
     fields.inventory_bytes(records.iter().map(Vec::as_slice));
-    if let Some(directory) = &value.default_working_directory {
-        fields.optional(Some(directory.as_bytes()));
-    }
+    fields.optional(
+        value
+            .default_working_directory
+            .as_deref()
+            .map(str::as_bytes),
+    );
     Ok(fields.finish())
 }
 

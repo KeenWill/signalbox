@@ -273,7 +273,7 @@ where
 pub struct InProcessEligibilityNudge {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl InProcessEligibilityNudge {
-    pub async fn nudge_when_ready(
+    pub async fn nudge_waiting_for_capacity(
         &self,
         session: signalbox_domain::SessionId,
     ) -> EligibilityNudgeOutcome;

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Summarize cargo-public-api declarations against the event base."""
 
+import argparse
 import json
 import os
 import tarfile
@@ -235,8 +236,12 @@ def public_api(path):
 
 
 def main():
-    from render_domain_spine import ROOT, build_json, configuration
+    from render_domain_spine import ROOT, build_json, configuration, json_input
 
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--json-dir', type=Path, nargs='+',
+                        help='Read current rustdoc JSON from these directories')
+    args = parser.parse_args()
     revision = baseline_revision()
     with tempfile.TemporaryDirectory(prefix='domain-spine-base-') as temporary:
         directory = Path(temporary)
@@ -247,7 +252,7 @@ def main():
         with tarfile.open(archive) as source:
             source.extractall(workspace, filter='data')
         for crate in configuration()['crates']:
-            current_json = build_json(crate)
+            current_json = json_input(crate, args.json_dir) if args.json_dir else build_json(crate)
             current = public_api(current_json)
             current_links = declaration_links(crate, json.loads(current_json.read_text()))
             base_json = build_json(crate, workspace=workspace, target=ROOT / 'target/domain-spine-base')

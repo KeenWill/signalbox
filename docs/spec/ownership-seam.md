@@ -7,6 +7,9 @@ terminal, goal change, command settlement, injection settlement, and session
 ownership change. Every other core outbox event advances the module cursor
 without becoming module input.
 
+The lifecycle source also exposes whether a session has a durable terminal fact,
+independently of the module's cursor.
+
 The output boundary exposes checked wrappers for the existing typed
 create-session, submit-input, goal attach and resume, release-start, sticky
 stop, adopt, and ownership-release commands. Modules do not mint turn, input, or
@@ -28,6 +31,9 @@ import edges, module SQL that names `public` relations, and core SQL that names
 `mod_` relations. PostgreSQL grants independently deny direct core-table reads,
 core-function execution, and cross-schema references.
 
-## Planned
-
-- Reload-intent input: [design](../design/ownership-seam.md).
+The reload-intent input carries the command identity, checked per-repository
+rule sets, and rule-set digest. The module activates the set atomically and
+idempotently by identity and digest, retaining each repository's event tail in
+the activation transaction. Delivery grants neither role access to the other's
+tables; [process protocol](process-protocol.md) owns intent persistence and
+recovery.

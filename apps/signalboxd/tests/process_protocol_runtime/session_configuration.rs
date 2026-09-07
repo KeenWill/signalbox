@@ -806,3 +806,299 @@ async fn absent_defaults_replacement_precedes_settings_validation() -> Result<()
     drop(connection);
     runtime.stop().await
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn reload_configuration_swaps_request_catalogs_and_replays_without_reading_files()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::configuration_reload::ConfigurationReload;
+    let (_container, pool) = postgres().await?;
+    let socket = SocketDirectory::create()?;
+    let files = tempfile::tempdir()?;
+    let model_path = files.path().join("models.toml");
+    let template_path = files.path().join("templates.toml");
+    let mut model_source = MODEL_CONFIGURATION.parse::<toml_edit::DocumentMut>()?;
+    let example = include_str!("../../../../config/signalboxd.example.toml")
+        .parse::<toml_edit::DocumentMut>()?;
+    model_source.insert("numeric_bounds", example["numeric_bounds"].clone());
+    let models = HubModelConfiguration::parse(&model_source.to_string())?;
+    fs::write(&model_path, model_source.to_string())?;
+    fs::write(&template_path, "version = 1\n")?;
+    let templates = signalboxd::SessionTemplateConfiguration::default();
+    let reload = ConfigurationReload::new(
+        pool.clone(),
+        models.clone(),
+        templates.clone(),
+        model_path.clone(),
+        template_path,
+        None,
+    )
+    .map_err(|error| io::Error::other(format!("reload fixture: {error:?}")))?;
+    let listener = LocalProcessListener::bind(socket.socket())?;
+    let (nudge, _work) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    let runtime = ProcessRuntime::new_with_templates(
+        listener,
+        pool.clone(),
+        nudge,
+        InProcessToolDispatchGate::default(),
+        models.clone(),
+        templates,
+    )
+    .with_configuration_reload(reload.clone());
+    let (shutdown, receiver) = watch::channel(false);
+    let task = tokio::spawn(runtime.run(receiver));
+    let mut connection = Connection::connect(socket.socket()).await?;
+    let scripted = RecordingCountedScriptedModel::following(
+        [completed_script(
+            "fixture-model-added",
+            "reloaded model reply",
+            TokenUsage::unreported(),
+        )],
+        [4],
+    );
+    let probe = scripted.clone();
+    let pass_pool = pool.clone();
+    let compose = move |models: &HubModelConfiguration| {
+        let catalog = models.runtime_model_catalog();
+        let provider = RuntimeModelCallProvider::new(scripted.clone(), catalog.clone(), None);
+        let repository = PostgresModelCallRepository::new(
+            pass_pool.clone(),
+            models.target_catalog(),
+            ModelCallCredentialReference::new("reload-recording-fixture"),
+        )
+        .with_session_credentials(models.credential_family_catalog());
+        let execution = signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository.clone(),
+                InProcessAttemptDispatchGate::default(),
+                provider.clone(),
+                None,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(pass_pool.clone(), None, Vec::new()),
+        );
+        let compaction: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+            Arc::new(RuntimeContextCompactionModel::new(
+                ScriptedModel::<ModelCallId>::following([]),
+                catalog.clone(),
+            ));
+        Ok::<_, signalboxd::model_catalog_runtime::ModelRuntimeBuildError>(
+            ContextGuardedTurnPass::new(
+                StartEligibleTurnRepository::new(pass_pool.clone()),
+                repository,
+                provider,
+                NoToolCatalog,
+                catalog,
+                models.clone(),
+                compaction,
+                execution,
+            )
+            .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+                pass_pool.clone(),
+                None,
+                Vec::new(),
+            )),
+        )
+    };
+    let mut pass =
+        signalboxd::model_catalog_runtime::CatalogEligibilityPass::new(reload.clone(), compose);
+    let selections = model_source["models"]
+        .as_array_of_tables_mut()
+        .expect("model tables");
+    let mut added = selections.iter().next().expect("existing model").clone();
+    let added_selection = CanonicalUuid::from_uuid(Uuid::from_u128(0x4101));
+    added["selection_id"] = toml_edit::value(added_selection.into_uuid().to_string());
+    added["target_id"] = toml_edit::value(Uuid::from_u128(0x4102).to_string());
+    added["provider_model"] = toml_edit::value("fixture-model-added");
+    selections.push(added);
+    model_source.remove("aliases");
+    fs::write(&model_path, model_source.to_string())?;
+    let command_id = command()?;
+    connection
+        .request(1, ClientRequest::ReloadConfiguration { command_id })
+        .await?;
+    let receipt = response_within(&mut connection).await?;
+    assert_eq!(
+        receipt.message(),
+        &ServerMessage::ConfigurationReloaded {
+            command_id,
+            reloaded_sections: signalbox_process_protocol::ReloadedSection::ALL.to_vec(),
+        }
+    );
+    fs::remove_file(&model_path)?;
+    connection
+        .request(2, ClientRequest::ReloadConfiguration { command_id })
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        receipt.message()
+    );
+    connection
+        .request(3, ClientRequest::ListModelAliases {})
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::ModelAliasesStart {}
+    );
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::ModelAliasesEnd {
+            alias_count: CanonicalU64::new(0)
+        }
+    );
+    let mut execution_connection = Connection::connect(socket.socket()).await?;
+    let (session, _) = create_direct_session_with_settings(
+        &mut execution_connection,
+        added_selection,
+        ModelSettingsOverlay::inherit_all(),
+    )
+    .await?;
+    let (_, turn) = submit_first_input(
+        &mut execution_connection,
+        session,
+        "Use the reloaded model.".to_owned(),
+    )
+    .await?;
+    pass.run(SessionId::from_uuid(session.into_uuid())).await?;
+    assert_eq!(probe.counted_operations().len(), 1);
+    assert_eq!(probe.prepared_operations().len(), 1);
+    assert_eq!(
+        probe.prepared_operations()[0].resolved_target.as_str(),
+        "fixture-model-added"
+    );
+    let state: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(state, "terminal");
+    drop(execution_connection);
+    model_source.remove("numeric_bounds");
+    let diagnostic = HubModelConfiguration::parse(&model_source.to_string())
+        .expect_err("numeric bounds are required")
+        .to_string();
+    assert!(diagnostic.len() > signalbox_process_protocol::MAX_CONFIGURATION_RELOAD_REASON_BYTES);
+    fs::write(&model_path, model_source.to_string())?;
+    let rejected_command = command()?;
+    connection
+        .request(
+            4,
+            ClientRequest::ReloadConfiguration {
+                command_id: rejected_command,
+            },
+        )
+        .await?;
+    let refusal = response_within(&mut connection).await?;
+    let ServerMessage::ConfigurationReloadFailed {
+        command_id,
+        phase,
+        reason,
+    } = refusal.message()
+    else {
+        panic!("invalid replacement must return a durable reload failure");
+    };
+    assert_eq!(*command_id, rejected_command);
+    assert_eq!(
+        *phase,
+        signalbox_process_protocol::ConfigurationReloadPhase::Validate
+    );
+    assert!(reason.starts_with("model configuration is missing required numeric bounds:"));
+    assert!(reason.len() <= signalbox_process_protocol::MAX_CONFIGURATION_RELOAD_REASON_BYTES);
+    assert!(!reason.chars().any(char::is_control));
+    fs::remove_file(&model_path)?;
+    connection
+        .request(
+            5,
+            ClientRequest::ReloadConfiguration {
+                command_id: rejected_command,
+            },
+        )
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        refusal.message()
+    );
+    drop(connection);
+    shutdown.send(true)?;
+    task.await??;
+    pool.close().await;
+    socket.cleanup()?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn reload_receipt_failure_requires_recovery_after_catalog_installation()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::configuration_reload::{ConfigurationReload, ConfigurationReloadError};
+    let (_container, pool) = postgres().await?;
+    let files = tempfile::tempdir()?;
+    let model_path = files.path().join("models.toml");
+    let template_path = files.path().join("templates.toml");
+    let mut source = MODEL_CONFIGURATION.parse::<toml_edit::DocumentMut>()?;
+    let example = include_str!("../../../../config/signalboxd.example.toml")
+        .parse::<toml_edit::DocumentMut>()?;
+    source.insert("numeric_bounds", example["numeric_bounds"].clone());
+    let models = HubModelConfiguration::parse(&source.to_string())?;
+    let mut replacement = source;
+    replacement.remove("aliases");
+    fs::write(&model_path, replacement.to_string())?;
+    fs::write(&template_path, "version = 1\n")?;
+    let reload = ConfigurationReload::new(
+        pool.clone(),
+        models,
+        signalboxd::SessionTemplateConfiguration::default(),
+        model_path,
+        template_path,
+        None,
+    )
+    .map_err(|error| io::Error::other(format!("reload fixture: {error:?}")))?;
+    let aliases_before = reload.catalogs().models.model_aliases().count();
+    let request = signalbox_persistence::reload_configuration::ReloadConfiguration {
+        command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+    };
+    sqlx::raw_sql("CREATE FUNCTION reject_reload_commit_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'commit fixture failure' USING ERRCODE = '23514'; END $$;
+        CREATE CONSTRAINT TRIGGER reject_reload_claim_fixture AFTER INSERT ON reload_configuration_command DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_reload_commit_fixture();")
+        .execute(&pool).await?;
+    let error = reload
+        .reload(request)
+        .await
+        .expect_err("claim commit is rejected");
+    assert!(matches!(
+        error,
+        ConfigurationReloadError::BeforeEffect(
+            signalbox_persistence::reload_configuration::ReloadRepositoryError::Database(_)
+        )
+    ));
+    assert_eq!(
+        reload.catalogs().models.model_aliases().count(),
+        aliases_before
+    );
+    sqlx::raw_sql("DROP TRIGGER reject_reload_claim_fixture ON reload_configuration_command;
+        CREATE CONSTRAINT TRIGGER reject_reload_receipt_fixture AFTER INSERT ON reload_configuration_result DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_reload_commit_fixture();")
+        .execute(&pool).await?;
+    let error = reload
+        .reload(request)
+        .await
+        .expect_err("receipt commit fails after installation");
+    assert!(matches!(
+        error,
+        ConfigurationReloadError::RecoveryRequired(
+            signalbox_persistence::reload_configuration::ReloadRepositoryError::Database(_)
+        )
+    ));
+    assert_eq!(reload.catalogs().models.model_aliases().count(), 0);
+    assert_eq!(
+        signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
+            pool.clone()
+        )
+        .pending()
+        .await?
+        .len(),
+        1
+    );
+    pool.close().await;
+    Ok(())
+}

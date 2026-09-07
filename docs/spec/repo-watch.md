@@ -110,9 +110,10 @@ ordinal and records its producer, frontier generation, and position within that
 frontier batch.
 
 Every table is derived or module-local state and its migration declares its
-growth class and release condition. The code implements no pruning pass. The
-required `numeric_bounds.repository_watch_webhook_retention` duration governs
-each webhook delivery's `expires_at`, measured from `received_at`. The example
+growth class and release condition. Observation commits prune expired compact
+merged baselines. The required
+`numeric_bounds.repository_watch_webhook_retention` duration governs each
+webhook delivery's `expires_at`, measured from `received_at`. The example
 configuration sets this bound to seven days; the daemon supplies no code
 default.
 
@@ -137,16 +138,21 @@ attempt to finish and does not postpone the periodic poll deadline. Each attempt
 reloads its committed comparison baseline and frontier, including compacted
 merged pull requests and their head repository identities, fetches a complete
 observation, and commits the differ's facts with their poll or webhook lineage.
-Workflow reads query completed runs by distinct current head SHA for the default
-branch and retained pull-request base and same-repository head branches; prior
-completions for those branches remain comparison input. Each observation admits
-at most 1,000 REST and GraphQL requests combined; exhausting that budget rejects
-the incomplete observation. Check inventories exceeding GitHub's 1,000-suite
-commit limit and workflow searches exceeding GitHub's 1,000-result cap also
-reject the observation. Failed observations leave the prior committed state
-intact. The daemon starts these tasks, the configured webhook listener, and one
-serialized command worker beside the convergence sweep, and drains them before
-closing its database.
+Terminal pull requests leave the ordinary baseline when observed; merged
+subjects retain a compact baseline until
+`numeric_bounds.repository_watch_webhook_retention` elapses from their merge
+time, and discussion reads run only for open subjects. Compact entries missing
+their merge time are dropped without discarding the ordinary predecessor, dated
+compact entries, or event frontier. Workflow reads query completed runs by
+distinct current head SHA for the default branch and open pull-request
+same-repository head branches; prior completions for those branches remain
+comparison input. Each observation admits at most 1,000 REST and GraphQL
+requests combined; exhausting that budget rejects the incomplete observation.
+Check inventories exceeding GitHub's 1,000-suite commit limit and workflow
+searches exceeding GitHub's 1,000-result cap also reject the observation. Failed
+observations leave the prior committed state intact. The daemon starts these
+tasks, the configured webhook listener, and one serialized command worker beside
+the convergence sweep, and drains them before closing its database.
 
 The webhook listener authenticates the configured hook identity, secret, and
 repository before accepting a delivery. An empty resolved webhook secret is
@@ -160,11 +166,12 @@ replacement before retiring the running listener, and a bind failure preserves
 the running settings. In-flight deliveries retry against the replacement
 configuration.
 
-Lifecycle reactions accept only `session_terminal` or `goal_changed` inputs and
-only `release_start` or sticky-stop lifecycle commands. These are the command
-forms used for convergence release and stale-work termination; no module lease
-table or scheduler join exists. Each reaction in a multi-action batch has its
-own one-based ordinal. A reaction naming a committed dispatch remains admissible
+Lifecycle reactions accept `session_terminal`, `goal_changed`, and retained
+`pull_request_closed` or `pull_request_merged` facts and emit only
+`release_start` or sticky-stop lifecycle commands. These are the command forms
+used for convergence release and stale-work termination; no module lease table
+or scheduler join exists. Each reaction in a multi-action batch has its own
+one-based ordinal. A reaction naming a committed dispatch remains admissible
 after its rule is deactivated; deactivation prevents only new matched
 dispatches.
 
@@ -194,9 +201,17 @@ key.
 
 Goal commissioning or resumption releases the dispatched session's held start
 gate. Goal achievement or a user-stopped goal issues a parent-only sticky stop.
-Reactions retain their original rule and action even after configuration removes
-the rule. The module commits lifecycle effects before advancing its application
-cursor; the daemon acknowledges the corresponding seam event afterward.
+A close or merge fact with a repository event ordinal after the dispatch event
+issues a parent-only sticky stop for its live dispatched session, with
+`pull_request_closed` or `pull_request_merged` retained as the ledger reason; an
+already terminal session is left alone. Reactions check durable core terminal
+facts before recording retirement or submitting its stop, including facts still
+pending at the module cursor. Retirement scans retain discovered terminal times
+on the dispatch ledger. A queued retirement whose session has ended is rejected
+locally as `session_already_terminal`. Reactions retain their original rule and
+action even after configuration removes the rule. The module commits lifecycle
+effects before advancing its application cursor; the daemon acknowledges the
+corresponding seam event afterward.
 
 The command adapter copies complete resolved template defaults without initial
 input or repository credentials and stamps the module issuer on creation claims;
@@ -233,8 +248,8 @@ Core and other modules receive no privileges on the module tables.
 A created session indexes its retained rule revision, event, dispatch, and
 action ordinal, so lifecycle reaction planning survives rule removal and process
 restart. Equal evaluation recovery finds the retained batch before considering
-newly reserved dispatch or command identities. A lifecycle reaction targets the
-session named by its trigger. A synchronous create-session command-identity
+newly reserved dispatch or command identities. A core lifecycle reaction targets
+the session named by its trigger. A synchronous create-session command-identity
 conflict is recorded as rejected on its retained action; an applied creation
 settles from its `SessionCreated` event.
 
@@ -243,14 +258,30 @@ retention permission in [persistence protocol](persistence-protocol.md), session
 command behavior, and the module event/command/database boundary in the
 [ownership seam](ownership-seam.md).
 
+Reload stops and joins ingestion and active convergence attempts before rule
+activation, then publishes the selected catalogs before reconciling convergence
+targets, using an empty target set when disabled. Disabling repository watch
+stops and joins its pollers, listener, command worker, and sweep; enabling
+composes them from the retained configuration. The runtime replaces polling
+tasks when repositories, intervals, credential paths, or signal reviewers
+change. Listener removal stops and joins its server; same-address reload swaps
+routing atomically, and an address change binds the replacement before retiring
+the old listener. Bind refusal leaves the running listener intact.
+
+Each bounded canonical poll resource or page key retains its HTTP validators and
+an accepted typed snapshot sufficient to reconstruct its normalized contribution
+and nested-fetch identities. This transport state is separate from events and
+rules and contains no raw provider JSON, credential values, or reactions from
+actors outside the configured signal-reviewer set. Before every poller
+composition, including startup and re-enablement, the runtime compares the
+persisted reviewer set with configured signal reviewers and invalidates both
+validators and snapshots when they differ. After restart with an unchanged set,
+the first complete poll sends conditional requests for every traversed resource
+with a persisted validator. After a complete accepted observation, cache
+retention removes untraversed resources and terminal pull-request pages;
+unchanged responses retain their traversed pages.
+
 ## Planned
 
 Repository-watch dispatch provenance is planned in the
 [repository watch design](../design/repo-watch.md).
-
-Restart-persistent poll caching is planned in the
-[repository watch design](../design/repo-watch.md).
-
-- Webhook listener composition and reload: [design](../design/repo-watch.md).
-- Repository polling-task composition and reload:
-  [design](../design/repo-watch.md).

@@ -41,7 +41,7 @@
 | session | 3 | 0 | 0 | [session](session.md) |
 | session_credentials | 5 | 0 | 2 | [session_credentials](session_credentials.md) |
 | session_deadline | 4 | 0 | 0 | [session_deadline](session_deadline.md) |
-| session_delegation | 12 | 0 | 0 | [session_delegation](session_delegation.md) |
+| session_delegation | 14 | 0 | 0 | [session_delegation](session_delegation.md) |
 | session_lifecycle | 5 | 0 | 0 | [session_lifecycle](session_lifecycle.md) |
 | session_lifecycle_command | 3 | 0 | 0 | [session_lifecycle_command](session_lifecycle_command.md) |
 | session_live | 2 | 0 | 0 | [session_live](session_live.md) |
@@ -56,4 +56,5 @@
 | turn_liveness | 5 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | usage | 3 | 0 | 1 | [usage](usage.md) |
 | workspace_instructions | 6 | 0 | 0 | [workspace_instructions](workspace_instructions.md) |
+| reload_configuration | 8 | 0 | 0 | [reload_configuration](reload_configuration.md) |
 | root | 0 | 0 | 10 | [root](root.md) |

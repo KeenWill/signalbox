@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 rust_package()
 
@@ -25,8 +25,8 @@ rust_doc_test(
 
 rust_integration_test(
     name = "real_rollouts",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     crate_root = "tests/real_rollouts.rs",
     data = glob(
         ["tests/**"],
@@ -41,3 +41,5 @@ rust_integration_test(
         "//crates/domain:signalbox_domain",
     ],
 )
+
+rust_quality_tests(documented_crates = [":signalbox_conversation_import_codex"])

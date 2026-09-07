@@ -55,6 +55,11 @@ use uuid::Uuid;
 
 #[path = "repo_watch_v2/checkout.rs"]
 mod checkout;
+#[path = "repo_watch_v2/retirement.rs"]
+mod retirement;
+
+// The configured merged-subject retention window is seven days.
+const MERGED_RETENTION: Duration = Duration::from_secs(604_800);
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 
@@ -1976,6 +1981,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(empty_baseline.generation, 0);
     assert!(empty_baseline.observation.is_none());
     let observed = signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        merged_at: std::collections::BTreeMap::new(),
         repository: runtime_repository.clone(),
         default_branch: default_branch.clone(),
         default_head: default_head.clone(),
@@ -1984,7 +1990,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     };
     assert!(matches!(
         store
-            .ingest_observation(&empty_baseline, &observed, EventProducer::Webhook)
+            .ingest_observation(
+                &empty_baseline,
+                &observed,
+                EventProducer::Webhook,
+                MERGED_RETENTION
+            )
             .await?,
         FrontierEventAdmission::Committed { generation: 1, .. }
     ));
@@ -1996,12 +2007,22 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     );
     assert_eq!(
         restarted
-            .ingest_observation(&restart_baseline, &observed, EventProducer::Poll)
+            .ingest_observation(
+                &restart_baseline,
+                &observed,
+                EventProducer::Poll,
+                MERGED_RETENTION
+            )
             .await?,
         FrontierEventAdmission::Unchanged
     );
     let retry = restarted
-        .ingest_observation(&empty_baseline, &observed, EventProducer::Poll)
+        .ingest_observation(
+            &empty_baseline,
+            &observed,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
         .await?;
     let FrontierEventAdmission::Committed { generation, events } = retry else {
         panic!("an identical retry must recover its committed frontier");
@@ -2024,6 +2045,109 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert!(lineage.0 > 0);
     assert!(lineage.1);
 
+    for (repository_name, lifecycle, expected_kind, expected_compact_count) in [
+        (
+            "terminal-closed/project",
+            RepoWatchPullRequestLifecycle::Closed,
+            "pull_request_closed",
+            0,
+        ),
+        (
+            "terminal-merged/project",
+            RepoWatchPullRequestLifecycle::Merged,
+            "pull_request_merged",
+            1,
+        ),
+    ] {
+        let repository = RepositorySlug::try_new(repository_name.to_owned())?;
+        let mut terminal_observation = observed.clone();
+        terminal_observation.repository = repository.clone();
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &terminal_observation,
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+        let source = &terminal_observation.observation.state().pull_requests()[0];
+        let terminal = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            context: source.context().clone(),
+            lifecycle,
+            mergeable_state: source.mergeable_state(),
+            completed_check_suites: source.completed_check_suites().to_vec(),
+            completed_check_runs: source.completed_check_runs().to_vec(),
+            reviews: source.reviews().to_vec(),
+            threads: source.threads().to_vec(),
+            reactions: source.reactions().to_vec(),
+        })?;
+        terminal_observation.merged_at.insert(
+            terminal.context().number(),
+            observed_at.replace_nanosecond(0)?,
+        );
+        terminal_observation.observation = RepoWatchObservation::new(
+            terminal_observation.observation.signal_reviewers().to_vec(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests: vec![terminal],
+                workflow_runs: terminal_observation
+                    .observation
+                    .state()
+                    .workflow_runs()
+                    .to_vec(),
+                branch_heads: terminal_observation
+                    .observation
+                    .state()
+                    .branch_heads()
+                    .to_vec(),
+            })?,
+        );
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &terminal_observation,
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+        let retained = RepoWatchStore::new(module_pool.clone())
+            .ingest_baseline(&repository)
+            .await?;
+        assert!(
+            retained
+                .observation
+                .as_ref()
+                .expect("retained observation")
+                .state()
+                .pull_requests()
+                .is_empty(),
+            "{repository_name}: terminal subjects leave the ordinary baseline"
+        );
+        assert_eq!(
+            retained.merged_baselines.len(),
+            expected_compact_count,
+            "{repository_name}"
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM gh_event WHERE repository = $1 AND event_kind = $2",
+        )
+        .bind(repository.as_str())
+        .bind(expected_kind)
+        .fetch_one(&module_pool)
+        .await?;
+        assert_eq!(
+            count, 1,
+            "{repository_name}: retirement preserves its terminal fact"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pr_state WHERE repository = $1")
+            .bind(repository.as_str())
+            .fetch_one(&module_pool)
+            .await?;
+        assert_eq!(
+            count, 0,
+            "{repository_name}: retirement deletes the ordinary projection"
+        );
+    }
+
     let compact_repository = RepositorySlug::try_new(String::from("compacted-restart/project"))?;
     let source = &comparison_baseline.state().pull_requests()[0];
     let merged = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
@@ -2042,6 +2166,11 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             comparison_baseline.signal_reviewers(),
         )?
         .expect("merged baseline");
+    let merge_time = observed_at.replace_nanosecond(0)?;
+    let compacted = signalbox_module_repo_watch_v2::ingest::MergedPullRequestBaseline {
+        state: compacted,
+        merged_at: merge_time,
+    };
     let compact_observation = RepoWatchObservation::new(
         comparison_baseline.signal_reviewers().to_vec(),
         RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
@@ -2096,6 +2225,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         reactions: merged.reactions().to_vec(),
     })?;
     let next = signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        merged_at: std::collections::BTreeMap::from([(merged.context().number(), merge_time)]),
         repository: compact_repository.clone(),
         default_branch: default_branch.clone(),
         default_head: default_head.clone(),
@@ -2110,7 +2240,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         ),
     };
     reopened
-        .ingest_observation(&restored, &next, EventProducer::Poll)
+        .ingest_observation(&restored, &next, EventProducer::Poll, MERGED_RETENTION)
         .await?;
     let kinds: Vec<String> = sqlx::query_scalar(
         "SELECT event_kind FROM gh_event WHERE repository = $1 ORDER BY repository_event_ordinal",
@@ -2120,6 +2250,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .await?;
     assert_eq!(kinds, vec![String::from("check_run_completed")]);
     let retained = reopened.ingest_baseline(&compact_repository).await?;
+    let compact_payload: String = sqlx::query_scalar(
+        "SELECT comparison_baseline::text FROM repository_state WHERE repository = $1",
+    )
+    .bind(compact_repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
     assert!(
         retained
             .observation
@@ -2141,15 +2277,93 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     );
     assert_eq!(retained.merged_baselines.len(), 1);
     assert_eq!(
-        retained.merged_baselines[0].completed_check_runs().len(),
+        retained.merged_baselines[0]
+            .state
+            .completed_check_runs()
+            .len(),
         merged.completed_check_runs().len() + 1
     );
     assert_eq!(
         reopened
-            .ingest_observation(&retained, &next, EventProducer::Poll)
+            .ingest_observation(&retained, &next, EventProducer::Poll, MERGED_RETENTION)
             .await?,
         FrontierEventAdmission::Unchanged
     );
+
+    let mut expiry_observation = next.clone();
+    expiry_observation.observation = compact_observation.clone();
+    expiry_observation.merged_at.clear();
+    expiry_observation.observed_at = merge_time + MERGED_RETENTION - Duration::from_secs(1);
+    reopened
+        .ingest_observation(
+            &retained,
+            &expiry_observation,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let before_expiry = RepoWatchStore::new(module_pool.clone())
+        .ingest_baseline(&compact_repository)
+        .await?;
+    assert_eq!(
+        before_expiry.merged_baselines.len(),
+        1,
+        "the compact baseline survives until its merge-time deadline"
+    );
+    expiry_observation.observed_at = merge_time + MERGED_RETENTION;
+    reopened
+        .ingest_observation(
+            &before_expiry,
+            &expiry_observation,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let at_expiry = RepoWatchStore::new(module_pool.clone())
+        .ingest_baseline(&compact_repository)
+        .await?;
+    assert!(
+        at_expiry.merged_baselines.is_empty(),
+        "the compact baseline expires at merge time plus the configured bound"
+    );
+    let event_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE repository = $1")
+            .bind(compact_repository.as_str())
+            .fetch_one(&module_pool)
+            .await?;
+    assert_eq!(
+        event_count, 1,
+        "compaction expiry does not delete immutable events"
+    );
+
+    let mut missing_merge_time: serde_json::Value = serde_json::from_str(&compact_payload)?;
+    missing_merge_time["merged_pull_requests"][0]
+        .as_object_mut()
+        .expect("compact baseline")
+        .remove("merged_at");
+    sqlx::query(
+        "UPDATE repository_state SET comparison_baseline = $2::jsonb WHERE repository = $1",
+    )
+    .bind(compact_repository.as_str())
+    .bind(missing_merge_time.to_string())
+    .execute(&module_pool)
+    .await?;
+    let invalidated = reopened.ingest_baseline(&compact_repository).await?;
+    assert_eq!(invalidated.observation, at_expiry.observation);
+    assert!(invalidated.merged_baselines.is_empty());
+    assert_eq!(invalidated.generation, at_expiry.generation);
+    assert_eq!(invalidated.frontier, at_expiry.frontier);
+    assert!(matches!(
+        reopened
+            .ingest_observation(&invalidated, &next, EventProducer::Poll, MERGED_RETENTION)
+            .await?,
+        FrontierEventAdmission::Committed { .. }
+    ));
+    let rebuilt = RepoWatchStore::new(module_pool.clone())
+        .ingest_baseline(&compact_repository)
+        .await?;
+    assert!(rebuilt.observation.is_some());
+    assert_eq!(rebuilt.merged_baselines[0].merged_at, merge_time);
 
     module_pool.close().await;
     core_pool.close().await;
@@ -2179,6 +2393,7 @@ fn dispatch_observation(
     let head =
         CommitSha::try_new(String::from("1111111111111111111111111111111111111111")).expect("head");
     signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        merged_at: std::collections::BTreeMap::new(),
         repository: repository.clone(),
         default_branch: branch.clone(),
         default_head: head.clone(),
@@ -2212,6 +2427,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
     };
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
+    let source = signalbox_ownership_seam::LifecycleEventSource::new(core_pool.clone());
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
         .execute(&core_pool)
         .await?;
@@ -2234,6 +2450,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
             &store.ingest_baseline(&repository).await?,
             &initial,
             EventProducer::Poll,
+            MERGED_RETENTION,
         )
         .await?;
     let rule = RepoWatchRule::try_new(
@@ -2279,6 +2496,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
                 &store.ingest_baseline(&repository).await?,
                 &observation,
                 EventProducer::Poll,
+                MERGED_RETENTION,
             )
             .await?;
         assert!(
@@ -2310,7 +2528,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
         },
     );
     store
-        .react_to_lifecycle(&creation, &mut factory, &mut codec)
+        .react_to_lifecycle(&creation, &mut factory, &mut codec, &source)
         .await?;
     let goal = LifecycleEvent::for_test(
         2,
@@ -2323,10 +2541,10 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
         }),
     );
     store
-        .react_to_lifecycle(&goal, &mut factory, &mut codec)
+        .react_to_lifecycle(&goal, &mut factory, &mut codec, &source)
         .await?;
     store
-        .react_to_lifecycle(&goal, &mut factory, &mut codec)
+        .react_to_lifecycle(&goal, &mut factory, &mut codec, &source)
         .await?;
     let reactions = store.recover_pending_commands(&mut codec).await?;
     assert_eq!(reactions.len(), 1, "a replay retains one reaction identity");
@@ -2340,7 +2558,12 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
         calls: Vec::new(),
         now,
     };
-    assert!(store.submit_pending(&mut codec, &mut sink).await.is_err());
+    assert!(
+        store
+            .submit_pending(&mut codec, &mut sink, &source)
+            .await
+            .is_err()
+    );
     assert_eq!(
         store.recover_pending_commands(&mut codec).await?.len(),
         1,
@@ -2348,7 +2571,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
     );
     sink.fail = false;
     store
-        .submit_pending(&mut codec, &mut sink)
+        .submit_pending(&mut codec, &mut sink, &source)
         .await
         .expect("retry follow-up");
     assert_eq!(
@@ -2369,7 +2592,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
         }),
     );
     store
-        .react_to_lifecycle(&terminal, &mut factory, &mut codec)
+        .react_to_lifecycle(&terminal, &mut factory, &mut codec, &source)
         .await?;
     let restarted = RepoWatchStore::new(pool.clone());
     assert!(
@@ -2387,6 +2610,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
                 &restarted.ingest_baseline(&repository).await?,
                 &observation,
                 EventProducer::Poll,
+                MERGED_RETENTION,
             )
             .await?;
         assert!(
@@ -2419,7 +2643,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
         }),
     );
     restarted
-        .react_to_lifecycle(&stop, &mut factory, &mut codec)
+        .react_to_lifecycle(&stop, &mut factory, &mut codec, &source)
         .await?;
     assert!(restarted.recover_pending_commands(&mut codec).await?.iter().any(|p| matches!(p.command().clone().into_payload(),SessionCommandPayload::Lifecycle(command) if matches!(command.operation(),SessionLifecycleOperation::Stop { sticky:StopStickiness::Sticky, .. }))),"removed rules still retain their lifecycle reaction origin");
     pool.close().await;
@@ -2555,6 +2779,12 @@ struct RuntimeHookFixture<'a> {
 fn runtime_configuration(
     hook: &RuntimeHookFixture<'_>,
 ) -> Result<signalboxd::HubModelConfiguration, Box<dyn Error>> {
+    Ok(signalboxd::HubModelConfiguration::parse(
+        &runtime_configuration_source(hook)?,
+    )?)
+}
+
+fn runtime_configuration_source(hook: &RuntimeHookFixture<'_>) -> Result<String, Box<dyn Error>> {
     let catalog = include_str!("../../../config/signalboxd.example.toml")
         .replace(
             "/usr/local/bin/signalbox-exec-supervisor",
@@ -2564,7 +2794,7 @@ fn runtime_configuration(
             "repository_watch_webhook_retention = \"604800s\"",
             &format!("repository_watch_webhook_retention = {:?}", hook.retention),
         );
-    Ok(signalboxd::HubModelConfiguration::parse(&format!(
+    Ok(format!(
         r#"{catalog}
 [repository_watch]
 version = 1
@@ -2600,7 +2830,7 @@ template = "{template}"
         id = hook.id,
         secret = hook.secret.display(),
         poll_credential = hook.secret.with_extension("missing-token").display(),
-    ))?)
+    ))
 }
 
 async fn unused_webhook_address() -> Result<std::net::SocketAddr, std::io::Error> {
@@ -2640,6 +2870,46 @@ async fn wait_for_blocked_webhook_admission(pool: &PgPool) -> Result<(), Box<dyn
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT FROM pg_locks
                  WHERE relation = 'webhook_delivery'::regclass AND NOT granted)",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+/// Waits until rule activation is blocked after the listener pause.
+async fn wait_for_blocked_reload_activation(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT FROM pg_locks
+                 WHERE relation = 'reload_activation'::regclass AND NOT granted)",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+/// Waits until reconciliation cannot yet restore eligibility through its target transaction.
+async fn wait_for_blocked_target_reconciliation(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT FROM pg_locks
+                 WHERE relation = 'convergence_sweep_target'::regclass AND NOT granted)",
             )
             .fetch_one(pool)
             .await?;
@@ -2895,6 +3165,7 @@ system_prompt = "Inspect repository activity."
                 &store.ingest_baseline(&repository).await?,
                 &dispatch_observation(&repository, run, OffsetDateTime::now_utc()),
                 EventProducer::Poll,
+                MERGED_RETENTION,
             )
             .await?;
     }
@@ -3311,6 +3582,7 @@ system_prompt = "Inspect workflow failures."
             &store.ingest_baseline(&repository).await?,
             &dispatch_observation(&repository, 1, OffsetDateTime::now_utc()),
             EventProducer::Poll,
+            MERGED_RETENTION,
         )
         .await?;
     for run in [2, 3] {
@@ -3344,6 +3616,7 @@ system_prompt = "Inspect workflow failures."
                 &store.ingest_baseline(&repository).await?,
                 &dispatch_observation(&repository, run, OffsetDateTime::now_utc()),
                 EventProducer::Poll,
+                MERGED_RETENTION,
             )
             .await?;
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -3381,5 +3654,884 @@ system_prompt = "Inspect workflow failures."
         .expect("orderly shutdown after rejected reloads");
     core_pool.close().await;
     drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn durable_reload_replays_activated_intent_and_disables_live_workers()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
+    use signalbox_module_repo_watch_v2::{ReloadIntentInput, repository_rule_set_digest};
+    use signalbox_persistence::{
+        reload_configuration::{
+            ReloadClaim, ReloadConfiguration, ReloadConfigurationRepository, ReloadIntent,
+            ReloadLookup, ReloadPhase, ReloadResult,
+        },
+        scheduler::PostgresEligibilitySweep,
+    };
+    use signalboxd::{
+        SessionTemplateConfiguration,
+        configuration_reload::ConfigurationReload,
+        repo_watch_runtime::{
+            RepositoryWatchRuntime, RepositoryWatchServices, connect_repository_watch_pool,
+        },
+    };
+    use std::sync::Arc;
+
+    let (_container, core_pool, _) = postgres().await?;
+    migrate(&core_pool).await?;
+    let module_pool = connect_repository_watch_pool(&core_pool)
+        .await
+        .expect("module pool");
+    let files = tempfile::tempdir()?;
+    let secret = files.path().join("secret");
+    std::fs::write(&secret, "hook-secret")?;
+    let mut hook = RuntimeHookFixture {
+        address: unused_webhook_address().await?,
+        path: "/reload",
+        id: 17,
+        secret: &secret,
+        enabled: false,
+        rule_version: 1,
+        template: "watch",
+        mode: "shadow",
+        retention: "604800s",
+    };
+    let prior_source = runtime_configuration_source(&hook)?;
+    let models = runtime_configuration(&hook)?;
+    let templates_source = "version = 1\n[[templates]]\nname = \"watch\"\nversion = 1\nalias = \"540ce009-c2ec-4a04-b823-c411ea189778\"\ndangerous_tool_auto_approval = false\nsystem_prompt = \"Inspect repository activity.\"\n";
+    let template_path = files.path().join("templates.toml");
+    std::fs::write(&template_path, templates_source)?;
+    let templates = SessionTemplateConfiguration::read(&template_path, || None, &models)?;
+    let model_path = files.path().join("models.toml");
+    let (nudge, _work) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(core_pool.clone()));
+    let runtime = RepositoryWatchRuntime::unstarted(
+        module_pool.clone(),
+        RepositoryWatchServices {
+            core_pool: core_pool.clone(),
+            models: Arc::new(models.clone()),
+            templates: Arc::new(templates.clone()),
+            eligibility_nudge: nudge,
+            tool_dispatch_gate: InProcessToolDispatchGate::default(),
+        },
+    );
+    let reload = ConfigurationReload::new(
+        core_pool.clone(),
+        models,
+        templates,
+        model_path.clone(),
+        template_path.clone(),
+        None,
+    )
+    .expect("reload composition")
+    .with_repository_watch(runtime.clone());
+    hook.enabled = true;
+    let replacement_source = runtime_configuration_source(&hook)?;
+    let replacement = runtime_configuration(&hook)?;
+    let watch = replacement.repository_watch().expect("watch configuration");
+    let sets = watch
+        .repositories()
+        .iter()
+        .map(|repo| RepositoryRuleSet::new(repo.repository(), watch.rules()))
+        .collect::<Vec<_>>();
+    let digest = repository_rule_set_digest(&sets)?;
+    let snapshot = |source: &str| -> Result<String, Box<dyn Error>> {
+        let mut document = source.parse::<toml_edit::DocumentMut>()?;
+        document.as_table_mut().retain(|key, _| {
+            ["models", "serving_targets", "aliases", "repository_watch"].contains(&key)
+        });
+        Ok(serde_json::json!({"model_catalog":document.to_string(), "session_templates":templates_source}).to_string())
+    };
+    let request = ReloadConfiguration {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+    };
+    let repository = ReloadConfigurationRepository::new(core_pool.clone());
+    let intent = ReloadIntent {
+        replacement_snapshot: snapshot(&replacement_source)?,
+        prior_snapshot: snapshot(&prior_source)?,
+        rule_set_digest: digest,
+    };
+    assert_eq!(
+        repository.claim(request, Ok(&intent)).await?,
+        ReloadClaim::Retained
+    );
+    let store = RepoWatchStore::new(module_pool.clone());
+    let input = ReloadIntentInput {
+        command_id: request.command_id,
+        repositories: &sets,
+        rule_set_digest: digest,
+    };
+    assert!(matches!(
+        store
+            .activate_reload(input, OffsetDateTime::now_utc())
+            .await?,
+        RuleReconciliationAdmission::Applied { .. }
+    ));
+    let first_tails: String = sqlx::query_scalar(
+        "SELECT activation_tails::text FROM reload_activation WHERE command_id = $1",
+    )
+    .bind(request.command_id.as_uuid())
+    .fetch_one(&module_pool)
+    .await?;
+    // No model file exists: recovery must use the checked intent after the activation commit.
+    std::fs::remove_file(&template_path)?;
+    reload.recover().await?;
+    std::fs::write(&template_path, templates_source)?;
+    assert_eq!(
+        repository.lookup(request).await?,
+        ReloadLookup::Recorded(ReloadResult::Reloaded)
+    );
+    let replay_tails: String = sqlx::query_scalar(
+        "SELECT activation_tails::text FROM reload_activation WHERE command_id = $1",
+    )
+    .bind(request.command_id.as_uuid())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(first_tails, replay_tails);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&first_tails)?,
+        serde_json::json!({"runtime/project":"0"})
+    );
+    assert!(
+        sqlx::query("DELETE FROM reload_activation")
+            .execute(&module_pool)
+            .await
+            .is_err()
+    );
+    let watched_repository = RepositorySlug::try_new(String::from("runtime/project"))?;
+    let obsolete_reviewers = [RepoWatchAuthorLogin::try_new(String::from(
+        "obsolete-reviewer",
+    ))?];
+    store
+        .prepare_poll_cache(&watched_repository, &obsolete_reviewers)
+        .await?;
+    sqlx::query("INSERT INTO poll_cache_page(repository,resource_key,etag,has_next,snapshot) VALUES ('runtime/project','/repos/runtime/project','old',false,'[\"metadata\",\"main\"]'::jsonb)")
+        .execute(&module_pool).await?;
+    let (shutdown, stopped) = tokio::sync::watch::channel(false);
+    let worker = runtime.spawn(stopped).await;
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(hook.address).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        webhook_status(&hook, b"wrong-secret").await?,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cache_page")
+            .fetch_one(&module_pool)
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT reviewers::text FROM poll_cache_reviewers WHERE repository='runtime/project'"
+        )
+        .fetch_one(&module_pool)
+        .await?,
+        "[]"
+    );
+    // Pause after delivery admission starts, while rule activation remains blocked.
+    let delivery = RuntimeWebhookDelivery {
+        id: Uuid::now_v7(),
+        event: "push",
+        body: RUNTIME_WEBHOOK_BODY,
+    };
+    let mut admission_lock = module_pool.begin().await?;
+    sqlx::query("LOCK TABLE webhook_delivery IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *admission_lock)
+        .await?;
+    let mut activation_lock = module_pool.begin().await?;
+    sqlx::query("LOCK TABLE reload_activation IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *activation_lock)
+        .await?;
+    hook.mode = "primary";
+    std::fs::write(&model_path, runtime_configuration_source(&hook)?)?;
+    let (response_sent, response_received) = tokio::sync::oneshot::channel();
+    let control_pool = module_pool.clone();
+    let delivery_id = delivery.id;
+    let hook_id = hook.id;
+    let (response, installed, controls) = tokio::join!(
+        async {
+            let response = webhook_delivery_status(&hook, b"hook-secret", &delivery).await?;
+            let _ = response_sent.send(response);
+            Ok::<_, Box<dyn Error>>(response)
+        },
+        async {
+            wait_for_blocked_webhook_admission(&module_pool).await?;
+            Ok::<_, Box<dyn Error>>(
+                reload
+                    .reload(ReloadConfiguration {
+                        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+                    })
+                    .await?,
+            )
+        },
+        async move {
+            wait_for_blocked_reload_activation(&control_pool).await?;
+            admission_lock.commit().await?;
+            assert_eq!(
+                response_received.await?,
+                reqwest::StatusCode::SERVICE_UNAVAILABLE
+            );
+            let pending: String = sqlx::query_scalar("SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2")
+                .bind(Decimal::from(hook_id)).bind(delivery_id).fetch_one(&control_pool).await?;
+            assert_eq!(pending, "pending");
+            activation_lock.commit().await?;
+            Ok::<_, Box<dyn Error>>(())
+        }
+    );
+    controls?;
+    assert_eq!(response?, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(installed?, ReloadLookup::Recorded(ReloadResult::Reloaded));
+    assert_eq!(
+        webhook_delivery_status(&hook, b"hook-secret", &delivery).await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    let applied: String = sqlx::query_scalar(
+        "SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(hook.id))
+    .bind(delivery.id)
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(applied, "applied");
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let running_address = hook.address;
+    hook.address = occupied.local_addr()?;
+    std::fs::write(&model_path, runtime_configuration_source(&hook)?)?;
+    let bind_failure = ReloadConfiguration {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+    };
+    assert!(matches!(
+        reload.reload(bind_failure).await?,
+        ReloadLookup::Recorded(ReloadResult::Failed {
+            phase: ReloadPhase::Install,
+            ..
+        })
+    ));
+    hook.address = running_address;
+    assert_eq!(
+        webhook_status(&hook, b"wrong-secret").await?,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    hook.enabled = false;
+    hook.rule_version = 2;
+    std::fs::write(&model_path, runtime_configuration_source(&hook)?)?;
+    let disable = ReloadConfiguration {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+    };
+    let mut target_lock = core_pool.begin().await?;
+    sqlx::query("LOCK TABLE convergence_sweep_target IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *target_lock)
+        .await?;
+    let (disabled, published_before_restoration) = tokio::join!(reload.reload(disable), async {
+        wait_for_blocked_target_reconciliation(&core_pool).await?;
+        let published = !reload
+            .catalogs()
+            .models
+            .repository_watch()
+            .expect("watch")
+            .enabled();
+        target_lock.commit().await?;
+        Ok::<_, Box<dyn Error>>(published)
+    });
+    assert!(
+        published_before_restoration?,
+        "replacement catalogs precede eligibility restoration"
+    );
+    assert_eq!(disabled?, ReloadLookup::Recorded(ReloadResult::Reloaded));
+    assert!(tokio::net::TcpStream::connect(hook.address).await.is_err());
+    hook.enabled = true;
+    hook.rule_version = 1;
+    std::fs::write(&model_path, runtime_configuration_source(&hook)?)?;
+    let stale = ReloadConfiguration {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+    };
+    assert!(matches!(
+        reload.reload(stale).await?,
+        ReloadLookup::Recorded(ReloadResult::Failed {
+            phase: ReloadPhase::Activate,
+            ..
+        })
+    ));
+    assert!(
+        !reload
+            .catalogs()
+            .models
+            .repository_watch()
+            .expect("prior watch")
+            .enabled()
+    );
+    assert!(tokio::net::TcpStream::connect(hook.address).await.is_err());
+    assert!(matches!(
+        store
+            .activate_reload(input, OffsetDateTime::now_utc())
+            .await?,
+        RuleReconciliationAdmission::Applied { .. }
+    ));
+    let active_count: i64 = sqlx::query_scalar("SELECT count(*) FROM rule")
+        .fetch_one(&module_pool)
+        .await?;
+    assert_eq!(
+        active_count, 0,
+        "replaying an older activation cannot undo a later disable"
+    );
+    store
+        .prepare_poll_cache(&watched_repository, &obsolete_reviewers)
+        .await?;
+    sqlx::query("INSERT INTO poll_cache_page(repository,resource_key,etag,has_next,snapshot) VALUES ('runtime/project','/repos/runtime/project','old',false,'[\"metadata\",\"main\"]'::jsonb)")
+        .execute(&module_pool).await?;
+    hook.enabled = true;
+    hook.rule_version = 2;
+    std::fs::write(&model_path, runtime_configuration_source(&hook)?)?;
+    let reenable = ReloadConfiguration {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+    };
+    assert_eq!(
+        reload.reload(reenable).await?,
+        ReloadLookup::Recorded(ReloadResult::Reloaded)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cache_page")
+            .fetch_one(&module_pool)
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT reviewers::text FROM poll_cache_reviewers WHERE repository='runtime/project'"
+        )
+        .fetch_one(&module_pool)
+        .await?,
+        "[]"
+    );
+    shutdown.send(true)?;
+    worker.await?.expect("clean worker shutdown");
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ConditionalRequest {
+    path: String,
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
+struct ConditionalPollFixture {
+    pages: std::collections::BTreeMap<String, (serde_json::Value, bool)>,
+    requests: std::sync::Mutex<Vec<ConditionalRequest>>,
+    changed: bool,
+}
+
+impl ConditionalPollFixture {
+    fn new() -> Self {
+        use serde_json::json;
+        // Provider numbers, revisions, and validator text are arbitrary fixture identities.
+        let root = "/repos/example/project";
+        let head = "1111111111111111111111111111111111111111";
+        let pages = [
+            (root.to_owned(), json!({"default_branch":"main","private_provider_field":"discard-me"}),false),
+            (format!("{root}/branches?per_page=100&page=1"),json!([{"name":"main","commit":{"sha":head}}]),false),
+            (format!("{root}/pulls?state=open&per_page=100&page=1"),json!([]),true),
+            (format!("{root}/pulls?state=open&per_page=100&page=2"),json!([{"number":1}]),false),
+            (format!("{root}/pulls/1"),json!({"number":1,"title":"change","body":null,"draft":false,"user":{"login":"author"},"labels":[],"state":"open","merged_at":null,"mergeable":true,"head":{"sha":head,"ref":"topic","repo":{"full_name":"example/project"}},"base":{"ref":"main"}}),false),
+            (format!("{root}/commits/{head}/check-suites?filter=all&per_page=100&page=1"),json!({"check_suites":[{"id":2,"status":"completed","updated_at":"generation","conclusion":"success"},{"id":3,"status":"pending"}]}),false),
+            (format!("{root}/commits/{head}/check-runs?filter=all&per_page=100&page=1"),json!({"check_runs":[{"id":4,"status":"completed","completed_at":"generation","name":"test","conclusion":"success"}]}),false),
+            (format!("{root}/pulls/1/reviews?per_page=100&page=1"),json!([{"id":5,"user":{"login":"reviewer"},"state":"APPROVED","commit_id":head},{"state":"PENDING"}]),false),
+            (format!("{root}/issues/1/comments?per_page=100&page=1"),json!([{"id":6,"body":"discard-me"}]),false),
+            (format!("{root}/pulls/1/comments?per_page=100&page=1"),json!([{"id":7,"body":"discard-me"}]),false),
+            (format!("{root}/issues/1/reactions?per_page=100&page=1"),json!([{"user":{"login":"reviewer"},"content":"+1"},{"user":{"login":"outsider"},"content":"-1"}]),false),
+            (format!("{root}/issues/comments/6/reactions?per_page=100&page=1"),json!([{"user":{"login":"reviewer"},"content":"heart"}]),false),
+            (format!("{root}/pulls/comments/7/reactions?per_page=100&page=1"),json!([{"user":{"login":"reviewer"},"content":"eyes"}]),false),
+            (format!("{root}/actions/runs?head_sha={head}&status=completed&per_page=100&page=1"),json!({"total_count":1,"workflow_runs":[{"id":8,"workflow_id":9,"run_attempt":1,"head_branch":"main","head_repository":{"full_name":"example/project"},"name":"build","conclusion":"success","status":"completed"}]}),false),
+        ].into_iter().map(|(path,value,next)| (path,(value,next))).collect();
+        Self {
+            pages,
+            requests: std::sync::Mutex::new(Vec::new()),
+            changed: false,
+        }
+    }
+}
+
+impl signalbox_module_repo_watch_v2::poll_cache::ConditionalObservationRead
+    for ConditionalPollFixture
+{
+    async fn conditional_page(
+        &self,
+        path: &str,
+        validators: Option<&signalbox_module_repo_watch_v2::github::HttpValidators>,
+    ) -> Result<
+        signalbox_module_repo_watch_v2::github::ConditionalPage,
+        signalbox_module_repo_watch_v2::provider::ObservationError,
+    > {
+        use signalbox_module_repo_watch_v2::{
+            github::{ConditionalPage, HttpValidators},
+            provider::ObservationError,
+        };
+        self.requests
+            .lock()
+            .expect("request log")
+            .push(ConditionalRequest {
+                path: path.to_owned(),
+                etag: validators.and_then(|v| v.etag.clone()),
+                last_modified: validators.and_then(|v| v.last_modified.clone()),
+            });
+        let (value, next) = self
+            .pages
+            .get(path)
+            .ok_or(ObservationError::InvalidResponse)?;
+        if validators.is_some() && !self.changed {
+            return Ok(ConditionalPage::Unchanged);
+        }
+        Ok(ConditionalPage::Modified {
+            body: value.to_string().into_bytes(),
+            has_next: *next,
+            validators: HttpValidators {
+                etag: Some(String::from("\"fixture-etag\"")),
+                last_modified: Some(String::from("Mon, 07 Sep 2026 12:00:00 GMT")),
+            },
+        })
+    }
+    async fn threads(
+        &self,
+        _: serde_json::Value,
+    ) -> Result<serde_json::Value, signalbox_module_repo_watch_v2::provider::ObservationError> {
+        Ok(
+            serde_json::json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}),
+        )
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn undated_compact_entries_do_not_reopen_ordinary_pull_requests() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    let io = ConditionalPollFixture::new();
+    poll_with_cache(
+        &io,
+        &store,
+        &repository,
+        &[],
+        EventProducer::Poll,
+        MERGED_RETENTION,
+    )
+    .await?;
+    let initial = store.ingest_baseline(&repository).await?;
+    let head = initial
+        .observation
+        .as_ref()
+        .expect("ordinary predecessor")
+        .state()
+        .pull_requests()[0]
+        .context()
+        .head_sha();
+    // The two stored compact subjects are distinct from the fixture's open PR.
+    let undated = serde_json::json!({
+        "number": 2, "head_repository": repository.as_str(), "head_sha": head.as_str(),
+        "signal_reviewers": [], "labels": [], "mergeable_state": "unknown",
+        "completed_check_suites": [], "completed_check_runs": [], "review_ids": [],
+        "threads": [], "reactions": []
+    });
+    let mut dated = undated.clone();
+    dated["number"] = serde_json::json!(3);
+    let merged_at = OffsetDateTime::now_utc().unix_timestamp();
+    dated["merged_at"] = serde_json::json!(merged_at);
+    sqlx::query("UPDATE repository_state SET comparison_baseline = jsonb_set(comparison_baseline, '{merged_pull_requests}', $2::jsonb) WHERE repository = $1")
+        .bind(repository.as_str())
+        .bind(serde_json::json!([undated, dated]).to_string())
+        .execute(&pool).await?;
+    let reopened = RepoWatchStore::new(pool.clone());
+    let predecessor = reopened.ingest_baseline(&repository).await?;
+    assert_eq!(predecessor.observation, initial.observation);
+    assert_eq!(predecessor.frontier, initial.frontier);
+    assert_eq!(predecessor.generation, initial.generation);
+    assert_eq!(predecessor.merged_baselines.len(), 1);
+    assert_eq!(predecessor.merged_baselines[0].state.number().get(), 3);
+    assert_eq!(
+        predecessor.merged_baselines[0].merged_at.unix_timestamp(),
+        merged_at
+    );
+    let opened_before: i64 = sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE repository = $1 AND event_kind = 'pull_request_opened'")
+        .bind(repository.as_str()).fetch_one(&pool).await?;
+    assert!(matches!(
+        poll_with_cache(&io, &reopened, &repository, &[], EventProducer::Poll, MERGED_RETENTION).await?,
+        FrontierEventAdmission::Committed { events, .. } if events.is_empty()
+    ));
+    let opened_after: i64 = sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE repository = $1 AND event_kind = 'pull_request_opened'")
+        .bind(repository.as_str()).fetch_one(&pool).await?;
+    assert_eq!(
+        opened_after, opened_before,
+        "recovery does not emit another opened event"
+    );
+    let retained = reopened.ingest_baseline(&repository).await?;
+    assert_eq!(retained.observation, initial.observation);
+    assert_eq!(retained.merged_baselines, predecessor.merged_baselines);
+    let stored_count: i32 = sqlx::query_scalar("SELECT jsonb_array_length(comparison_baseline->'merged_pull_requests') FROM repository_state WHERE repository = $1")
+        .bind(repository.as_str()).fetch_one(&pool).await?;
+    assert_eq!(
+        stored_count, 1,
+        "the next commit removes only the undated compact entry"
+    );
+    pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the_cache()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    let reviewers = [RepoWatchAuthorLogin::try_new(String::from("reviewer"))?];
+    store.prepare_poll_cache(&repository, &reviewers).await?;
+    let first = ConditionalPollFixture::new();
+    assert!(matches!(
+        poll_with_cache(
+            &first,
+            &store,
+            &repository,
+            &reviewers,
+            EventProducer::Poll,
+            MERGED_RETENTION
+        )
+        .await?,
+        FrontierEventAdmission::Committed { .. }
+    ));
+    let original = store.ingest_baseline(&repository).await?.observation;
+    let snapshots: Vec<String> =
+        sqlx::query_scalar("SELECT snapshot::text FROM poll_cache_page ORDER BY resource_key")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(snapshots.len(), first.pages.len());
+    assert!(!snapshots.join(" ").contains("discard-me"));
+    assert!(!snapshots.join(" ").contains("outsider"));
+    drop(store);
+    pool.close().await;
+    let restarted_pool = module_pool(&url).await?;
+    let restarted = RepoWatchStore::new(restarted_pool.clone());
+    let same_set_different_case = [RepoWatchAuthorLogin::try_new(String::from("REVIEWER"))?];
+    restarted
+        .prepare_poll_cache(&repository, &same_set_different_case)
+        .await?;
+    let second = ConditionalPollFixture::new();
+    assert!(matches!(
+        poll_with_cache(
+            &second,
+            &restarted,
+            &repository,
+            &reviewers,
+            EventProducer::Poll, MERGED_RETENTION)
+        .await?,
+        FrontierEventAdmission::Committed { events, .. } if events.is_empty()
+    ));
+    assert_eq!(
+        restarted.ingest_baseline(&repository).await?.observation,
+        original
+    );
+    let requests = second.requests.lock().expect("request log").clone();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.path.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        second.pages.keys().map(String::as_str).collect()
+    );
+    assert!(requests.iter().all(
+        |ConditionalRequest {
+             etag,
+             last_modified: modified,
+             ..
+         }| etag.as_deref() == Some("\"fixture-etag\"")
+            && modified.as_deref() == Some("Mon, 07 Sep 2026 12:00:00 GMT")
+    ));
+    let replacement_reviewers = [RepoWatchAuthorLogin::try_new(String::from("outsider"))?];
+    restarted
+        .prepare_poll_cache(&repository, &replacement_reviewers)
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cache_page")
+            .fetch_one(&restarted_pool)
+            .await?,
+        0
+    );
+    let third = ConditionalPollFixture::new();
+    assert!(matches!(
+        poll_with_cache(
+            &third,
+            &restarted,
+            &repository,
+            &replacement_reviewers,
+            EventProducer::Poll,
+            MERGED_RETENTION
+        )
+        .await?,
+        FrontierEventAdmission::Committed { .. }
+    ));
+    assert!(third.requests.lock().expect("request log").iter().all(
+        |ConditionalRequest {
+             etag,
+             last_modified: modified,
+             ..
+         }| etag.is_none() && modified.is_none()
+    ));
+    let reaction_actors: Vec<String> = sqlx::query_scalar("SELECT DISTINCT item->>'reviewer' FROM poll_cache_page CROSS JOIN LATERAL jsonb_array_elements(snapshot->1) item WHERE resource_key LIKE '%/reactions?%'")
+        .fetch_all(&restarted_pool).await?;
+    assert_eq!(
+        reaction_actors,
+        vec![replacement_reviewers[0].as_str().to_owned()]
+    );
+    restarted_pool.close().await;
+    core_pool.close().await;
+    container.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn completed_polls_prune_terminal_and_expired_subject_pages() -> Result<(), Box<dyn Error>> {
+    use serde_json::json;
+    use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    let reviewers = [RepoWatchAuthorLogin::try_new(String::from("reviewer"))?];
+    store.prepare_poll_cache(&repository, &reviewers).await?;
+    let root = "/repos/example/project";
+    let pull_path = format!("{root}/pulls/1");
+    let head = "1111111111111111111111111111111111111111";
+    let workflow_path =
+        format!("{root}/actions/runs?head_sha={head}&status=completed&per_page=100&page=1");
+    for merged in [false, true] {
+        let mut open = ConditionalPollFixture::new();
+        open.changed = true;
+        poll_with_cache(
+            &open,
+            &store,
+            &repository,
+            &reviewers,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+        let initial_keys: Vec<String> =
+            sqlx::query_scalar("SELECT resource_key FROM poll_cache_page ORDER BY resource_key")
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(initial_keys.len(), open.pages.len());
+        let stale_pull: String = sqlx::query_scalar(
+            "SELECT snapshot::text FROM poll_cache_page WHERE resource_key = $1",
+        )
+        .bind(&pull_path)
+        .fetch_one(&pool)
+        .await?;
+        let mut incomplete = ConditionalPollFixture::new();
+        incomplete.pages.remove(&workflow_path);
+        assert!(
+            poll_with_cache(
+                &incomplete,
+                &store,
+                &repository,
+                &reviewers,
+                EventProducer::Poll,
+                MERGED_RETENTION
+            )
+            .await
+            .is_err()
+        );
+        let after_failure: Vec<String> =
+            sqlx::query_scalar("SELECT resource_key FROM poll_cache_page ORDER BY resource_key")
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(
+            after_failure, initial_keys,
+            "a failed poll cannot prune accepted pages"
+        );
+
+        let mut terminal = ConditionalPollFixture::new();
+        terminal.changed = true;
+        terminal
+            .pages
+            .get_mut(&format!("{root}/pulls?state=open&per_page=100&page=2"))
+            .expect("open page")
+            .0 = json!([]);
+        let detail = &mut terminal.pages.get_mut(&pull_path).expect("pull detail").0;
+        detail["state"] = json!("closed");
+        if merged {
+            let now = OffsetDateTime::now_utc();
+            detail["merged_at"] = json!(format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                now.year(),
+                u8::from(now.month()),
+                now.day(),
+                now.hour(),
+                now.minute(),
+                now.second()
+            ));
+        }
+        poll_with_cache(
+            &terminal,
+            &store,
+            &repository,
+            &reviewers,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+        let expected = std::collections::BTreeSet::from([
+            root.to_owned(),
+            format!("{root}/branches?per_page=100&page=1"),
+            format!("{root}/pulls?state=open&per_page=100&page=1"),
+            format!("{root}/pulls?state=open&per_page=100&page=2"),
+            workflow_path.clone(),
+        ]);
+        let keys: Vec<String> = sqlx::query_scalar("SELECT resource_key FROM poll_cache_page")
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(
+            keys.into_iter().collect::<std::collections::BTreeSet<_>>(),
+            expected,
+            "terminal PR details, checks, reviews, comments and reactions leave the cache while the shared default-head workflow stays"
+        );
+        if merged {
+            assert_eq!(
+                store
+                    .ingest_baseline(&repository)
+                    .await?
+                    .merged_baselines
+                    .len(),
+                1
+            );
+            sqlx::query("INSERT INTO poll_cache_page(repository,resource_key,etag,has_next,snapshot) VALUES ($1,$2,'stale',false,$3::jsonb)")
+                .bind(repository.as_str()).bind(&pull_path).bind(stale_pull).execute(&pool).await?;
+            let expired = OffsetDateTime::now_utc() - MERGED_RETENTION - Duration::from_secs(1);
+            sqlx::query("UPDATE repository_state SET comparison_baseline=jsonb_set(comparison_baseline,'{merged_pull_requests,0,merged_at}',to_jsonb($2::bigint)) WHERE repository=$1")
+                .bind(repository.as_str()).bind(expired.unix_timestamp()).execute(&pool).await?;
+            terminal.changed = false;
+            poll_with_cache(
+                &terminal,
+                &store,
+                &repository,
+                &reviewers,
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+            assert!(
+                store
+                    .ingest_baseline(&repository)
+                    .await?
+                    .merged_baselines
+                    .is_empty()
+            );
+            let keys: Vec<String> = sqlx::query_scalar("SELECT resource_key FROM poll_cache_page")
+                .fetch_all(&pool)
+                .await?;
+            assert_eq!(
+                keys.into_iter().collect::<std::collections::BTreeSet<_>>(),
+                expected,
+                "expiry prunes stale compact-subject pages while preserving unchanged live pages"
+            );
+        }
+    }
+    pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn incomplete_poll_does_not_retain_validators_from_partial_pages()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    let reviewers = [RepoWatchAuthorLogin::try_new(String::from("reviewer"))?];
+    store.prepare_poll_cache(&repository, &reviewers).await?;
+    let mut incomplete = ConditionalPollFixture::new();
+    incomplete.pages.remove("/repos/example/project/pulls/1");
+    assert!(
+        poll_with_cache(
+            &incomplete,
+            &store,
+            &repository,
+            &reviewers,
+            EventProducer::Poll,
+            MERGED_RETENTION
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cache_page")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    assert!(
+        store
+            .ingest_baseline(&repository)
+            .await?
+            .observation
+            .is_none()
+    );
+    let complete = ConditionalPollFixture::new();
+    assert!(matches!(
+        poll_with_cache(
+            &complete,
+            &store,
+            &repository,
+            &reviewers,
+            EventProducer::Poll,
+            MERGED_RETENTION
+        )
+        .await?,
+        FrontierEventAdmission::Committed { .. }
+    ));
+    assert!(complete.requests.lock().expect("request log").iter().all(
+        |ConditionalRequest {
+             etag,
+             last_modified: modified,
+             ..
+         }| etag.is_none() && modified.is_none()
+    ));
+    pool.close().await;
+    core_pool.close().await;
+    container.stop().await?;
     Ok(())
 }

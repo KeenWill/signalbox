@@ -278,6 +278,14 @@ impl LifecycleEventSource {
         }
     }
 
+    /// Reads a session's durable terminal time, including unread events.
+    pub async fn session_terminal_at(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<OffsetDateTime>, OutboxDispatchError> {
+        self.reader.session_terminal_at(session).await
+    }
+
     /// Reads the next module-visible event without advancing its cursor.
     ///
     /// Core-only event families are acknowledged internally and skipped. A
@@ -741,4 +749,25 @@ mod tests {
         );
         assert!(SessionCommand::submit_input(core_interrupt).is_err());
     }
+}
+
+/// One repository's complete checked rule set delivered by core.
+#[derive(Clone, Copy, Debug)]
+pub struct RepositoryRuleSet<'a> {
+    pub repository: &'a RepositorySlug,
+    pub rules: &'a [RepoWatchRule],
+}
+
+impl<'a> RepositoryRuleSet<'a> {
+    pub const fn new(repository: &'a RepositorySlug, rules: &'a [RepoWatchRule]) -> Self {
+        Self { repository, rules }
+    }
+}
+
+/// Retained rule activation input; it confers no access to core storage.
+#[derive(Clone, Copy, Debug)]
+pub struct ReloadIntentInput<'a> {
+    pub command_id: DurableCommandId,
+    pub repositories: &'a [RepositoryRuleSet<'a>],
+    pub rule_set_digest: [u8; 32],
 }

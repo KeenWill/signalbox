@@ -238,7 +238,7 @@ impl PostgresRunnerRegistrationService {
                         && nudge.nudge(*session)
                             == signalbox_application::EligibilityNudgeOutcome::DroppedAtCapacity
                     {
-                        nudge.nudge_when_ready(*session).await;
+                        nudge.nudge_waiting_for_capacity(*session).await;
                     }
                     tracing::info!(
                         enrollment_id = %loss.enrollment().into_uuid(),
