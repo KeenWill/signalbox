@@ -340,3 +340,135 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
     drop(container);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn terminal_triggered_dispatches_do_not_retire_themselves() -> Result<(), Box<dyn Error>> {
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let source = signalbox_ownership_seam::LifecycleEventSource::new(core_pool.clone());
+    // Command, model and dispatch identities distinguish this fixture's actions.
+    let mut factory = FixtureSessionFactory {
+        next_command: 40001,
+        model: 50001,
+    };
+    let mut ids = FixedDispatchIds {
+        value: 60001,
+        calls: 0,
+    };
+    let mut codec = FixtureCommandCodec;
+    for (sequence, name, lifecycle, event_kind) in [
+        (
+            1,
+            "close-trigger/project",
+            RepoWatchPullRequestLifecycle::Closed,
+            RepoWatchEventKindNameV1::PullRequestClosed,
+        ),
+        (
+            2,
+            "merge-trigger/project",
+            RepoWatchPullRequestLifecycle::Merged,
+            RepoWatchEventKindNameV1::PullRequestMerged,
+        ),
+    ] {
+        let repository = RepositorySlug::try_new(name.to_owned())?;
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &pull_observation(&repository, RepoWatchPullRequestLifecycle::Open),
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+        let now = OffsetDateTime::now_utc();
+        let rule = RepoWatchRule::try_new(
+            RepoWatchRuleId::try_new(String::from("terminal"))?,
+            RepoWatchRuleVersion::V1,
+            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+                repository: Some(repository.clone()),
+                event_kinds: vec![event_kind],
+                ..RepoWatchMatcherV1Input::default()
+            }),
+            vec![RepoWatchRuleActionV1::DispatchSession {
+                template: SessionTemplateName::try_new(String::from("watch"))?,
+            }],
+            RepoWatchSingletonScope::PullRequest,
+            Duration::ZERO,
+        )?;
+        store
+            .reconcile_rules(
+                &[RepositoryRuleSet::new(
+                    &repository,
+                    std::slice::from_ref(&rule),
+                )],
+                now,
+            )
+            .await?;
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &pull_observation(&repository, lifecycle),
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+        assert!(
+            store
+                .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, now)
+                .await
+                .expect("terminal rule dispatch")
+        );
+        let pending = store.recover_pending_commands(&mut codec).await?;
+        let creation = pending
+            .iter()
+            .find(|p| p.repository() == &repository)
+            .expect("terminal-triggered creation");
+        let session = persist_creation(&core_pool, creation.command()).await?;
+        store
+            .react_to_lifecycle(
+                &LifecycleEvent::session_created_for_test(
+                    sequence,
+                    now,
+                    session,
+                    SessionCreated {
+                        cause: SessionCreationCause::ModuleDispatched {
+                            dispatch: ModuleDispatch::RepositoryWatch {
+                                dispatch: creation.dispatch(),
+                            },
+                        },
+                        ownership: SessionOwnership::Owned,
+                    },
+                ),
+                &mut factory,
+                &mut codec,
+                &source,
+            )
+            .await?;
+        let restarted = RepoWatchStore::new(pool.clone());
+        restarted
+            .react_to_pull_request_lifecycle(&mut factory, &mut codec, &source)
+            .await?;
+        let retirements: i64 = sqlx::query_scalar("SELECT count(*) FROM dispatch_ledger WHERE repository=$1 AND retirement_event_id IS NOT NULL")
+            .bind(repository.as_str()).fetch_one(&pool).await?;
+        assert_eq!(
+            retirements, 0,
+            "the dispatch's own terminal trigger cannot retire its session"
+        );
+        assert!(
+            restarted
+                .recover_pending_commands(&mut codec)
+                .await?
+                .is_empty()
+        );
+        assert!(!source.has_session_terminal_fact(session).await?);
+    }
+    pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}

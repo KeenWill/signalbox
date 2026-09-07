@@ -197,15 +197,16 @@ key.
 
 Goal commissioning or resumption releases the dispatched session's held start
 gate. Goal achievement or a user-stopped goal issues a parent-only sticky stop.
-Closing or merging a pull request issues a parent-only sticky stop for its live
-dispatched session, with `pull_request_closed` or `pull_request_merged` retained
-as the ledger reason; an already terminal session is left alone. Reactions check
-durable core terminal facts before recording retirement or submitting its stop,
-including facts still pending at the module cursor; a queued retirement whose
-session has ended is rejected locally as `session_already_terminal`. Reactions
-retain their original rule and action even after configuration removes the rule.
-The module commits lifecycle effects before advancing its application cursor;
-the daemon acknowledges the corresponding seam event afterward.
+A close or merge fact with a repository event ordinal after the dispatch event
+issues a parent-only sticky stop for its live dispatched session, with
+`pull_request_closed` or `pull_request_merged` retained as the ledger reason; an
+already terminal session is left alone. Reactions check durable core terminal
+facts before recording retirement or submitting its stop, including facts still
+pending at the module cursor; a queued retirement whose session has ended is
+rejected locally as `session_already_terminal`. Reactions retain their original
+rule and action even after configuration removes the rule. The module commits
+lifecycle effects before advancing its application cursor; the daemon
+acknowledges the corresponding seam event afterward.
 
 The command adapter copies complete resolved template defaults without initial
 input or repository credentials and stamps the module issuer on creation claims;

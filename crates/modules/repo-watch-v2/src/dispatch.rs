@@ -247,7 +247,7 @@ impl RepoWatchStore {
                  FROM gh_event AS fact
                  WHERE fact.repository = dispatched.repository
                    AND fact.pull_request_number = dispatched.pull_request_number
-                   AND fact.frontier_generation >= dispatched.frontier_generation
+                   AND fact.repository_event_ordinal > dispatched.repository_event_ordinal
                    AND fact.event_kind IN ('pull_request_closed', 'pull_request_merged')
                  ORDER BY fact.repository_event_ordinal LIMIT 1
              ) AS terminal ON true
