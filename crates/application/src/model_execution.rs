@@ -28,12 +28,9 @@ use std::{
 // blind to it would be multiplied by the same round count it is meant to
 // contain. It also sits far above any provider context window, so it cannot
 // refuse a turn a provider would accept.
-// numeric-bound: guard - prevents retained frontier content from exhausting daemon memory as rounds
-// multiply
 const MAX_RETAINED_FRONTIER_CONTENT_BYTES: usize = 256 * 1024 * 1024;
 
 // Worst-case compact JSON for maximum checked metadata, u64 length, and digest.
-// numeric-bound: guard - prevents a stub the retained-content sum excludes from growing unbounded
 const MAX_RENDERED_ATTACHMENT_STUB_BYTES: usize = 2_304;
 
 use signalbox_domain::{

@@ -153,23 +153,17 @@ impl InstructionDiscoverySnapshot {
     }
 }
 
-// numeric-bound: not-a-bound - names which fixed discovery-limit set was applied
 const DISCOVERY_LIMIT_SET_VERSION: u16 = 2;
 #[cfg(unix)]
 const VCS_METADATA_DIRECTORIES: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 #[cfg(unix)]
 const BUILD_AND_DEPENDENCY_DIRECTORIES: [&str; 5] =
     ["target", "node_modules", ".venv", "dist", "build"];
-// numeric-bound: guard - prevents a pathological workspace tree from walking the daemon forever
 const MAX_CLASSIFIED_ENTRIES: u64 = 100_000;
-// numeric-bound: guard - prevents an unusable workspace from exhausting memory with findings
 const MAX_FINDINGS: usize = 4_096;
-// numeric-bound: guard - prevents a runaway instruction tree from exhausting daemon memory
 const MAX_CANDIDATE_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
-// numeric-bound: guard - prevents a slow or adversarial filesystem from stalling discovery forever
 const MAX_ELAPSED: Duration = Duration::from_secs(30);
 #[cfg(unix)]
-// numeric-bound: guard - prevents concurrent scans from exhausting the blocking thread pool
 const MAX_FILESYSTEM_WORKERS: usize = 4;
 
 #[cfg(unix)]
