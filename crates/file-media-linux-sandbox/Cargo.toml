@@ -7,11 +7,9 @@ license = "MIT"
 repository = "https://github.com/KeenWill/signalbox"
 publish = false
 
-[workspace]
-
 [dependencies]
 libc = "0.2.186"
 
 [lints.rust]
-# This excluded crate is the separately governed Linux syscall boundary.
+# This crate is the separately governed Linux syscall boundary.
 unsafe_code = "allow"
