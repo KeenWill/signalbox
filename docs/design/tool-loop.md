@@ -48,15 +48,21 @@ An offered lease is already dispatched. On placement loss, side-effecting work
 receives the [runner contract's](../spec/runner-protocol.md) crash
 classification. Pure or idempotent work instead retains the lost attempt and
 requires a fresh physical attempt. When that retry needs a successor runner, all
-other requests first resolve and append their results; the staged replacement
-then installs the successor placement before the retry lease is offered. This
-recovery takeover is the exception to waiting for the lost offered request to
-resolve: that request remains recovery-pending until its fresh attempt resolves,
-and only then can the batch complete and prepare its continuation. Retry
-correlation crosses the placement boundary and therefore validates the lost
-attempt and successor placement generations without requiring their runner ids
-to match. An executor-dispatched attempt otherwise completes or receives its
-effect-class crash classification; placement loss never rewrites or cancels it.
+other requests first reach durable resolution, but none of the batch's result
+entries is projected yet. A distinct pre-continuation takeover transaction then
+locks the session, batch, retained lost attempt, and staged replacement;
+revalidates that every other request is resolved and that this request alone is
+recovery-pending; installs the successor placement; and consumes the staged
+replacement before a retry lease can be offered. It neither appends tool-result
+entries nor prepares a continuation. This recovery takeover is the exception to
+waiting for the lost offered request to resolve. The request remains
+recovery-pending until its fresh attempt resolves; only then is the whole batch
+resolved, and the ordinary continuation transaction projects every result in
+proposal order and prepares the next call. Retry correlation crosses the
+placement boundary and therefore validates the lost attempt and successor
+placement generations without requiring their runner ids to match. An
+executor-dispatched attempt otherwise completes or receives its effect-class
+crash classification; placement loss never rewrites or cancels it.
 
 A family declares an admissibility check for a condition it can evaluate before
 approval. Where a family declares one, that check takes precedence over the
@@ -160,12 +166,14 @@ resolution for every unresolved runner-locus request before dispatch, including
 earlier approved requests in a parked batch, then resumes batch evaluation.
 Side-effecting offered attempts receive effect-class crash classification. A
 pure or idempotent offered attempt lost with its placement retains that attempt;
-after every other request resolves, staged replacement installs the successor
-before a fresh physical attempt is offered there, without requiring the old and
-new runner ids to match. The request remains recovery-pending until that retry
-resolves, after which the batch may complete. Executor-dispatched attempts
-otherwise complete or receive effect-class crash classification; placement loss
-never rewrites or cancels them.
+after every other request resolves, a distinct pre-continuation takeover
+transaction installs the successor and consumes the staged replacement before a
+fresh physical attempt is offered there, without requiring the old and new
+runner ids to match. It projects no result and prepares no continuation. The
+request remains recovery-pending until that retry resolves; only then does the
+ordinary continuation transaction project the complete batch in proposal order.
+Executor-dispatched attempts otherwise complete or receive effect-class crash
+classification; placement loss never rewrites or cancels them.
 
 A request a declaring family marks inadmissible resolves before approval with no
 approval state, no judge call, no attempt row, and no executor work; it projects

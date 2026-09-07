@@ -57,6 +57,13 @@ placement. [Tool loop](tool-loop.md) owns lost-placement resolution. After every
 request resolves, replacement takes over in the
 [continuation transaction](../spec/tool-loop.md), after all tool results are
 appended and before the next call is prepared against the changed placement.
+The one exception is an offered pure or idempotent runner attempt that must be
+retried on the successor: after every other request resolves, the tool-loop
+design's distinct pre-continuation takeover transaction installs the successor
+and consumes the staged replacement while that request remains recovery-pending.
+That transaction projects no result and prepares no call; result projection and
+continuation remain deferred until the retry resolves and the whole batch is
+complete.
 When an interrupt or crash-loss reconciliation terminalizes the batch, that path
 completes or retires the staged replacement before terminalizing the turn. The
 command claims its identity immediately and provisioning authorization only when
