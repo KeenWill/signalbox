@@ -13,6 +13,7 @@ use super::frame::{
 #[derive(Debug)]
 pub(crate) enum Event {
     Ignored,
+    RateLimitsUpdated,
     ThreadStarted(String),
     AgentMessage {
         message: AgentMessage,
@@ -31,6 +32,7 @@ pub(crate) enum Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Initialize,
+    RateLimitsRead,
     ThreadStart,
     TurnStart,
     Running,
@@ -109,6 +111,7 @@ impl Client {
         }
         let (id, method) = match self.phase {
             Phase::Initialize => (1, "initialize"),
+            Phase::RateLimitsRead => (4, "account/rateLimits/read"),
             Phase::ThreadStart => (2, "thread/start"),
             Phase::TurnStart => (3, "turn/start"),
             Phase::Running | Phase::Closed => return Err(ProtocolError("unexpected response")),
@@ -125,6 +128,10 @@ impl Client {
         }
         if let Some(error) = object.get("error") {
             let error = decode(error)?;
+            if self.phase == Phase::RateLimitsRead {
+                self.start_thread();
+                return Ok(Event::Ignored);
+            }
             self.phase = Phase::Closed;
             return Ok(Event::Rejected { method, error });
         }
@@ -135,9 +142,15 @@ impl Client {
                     return Err(ProtocolError("initialize result must be an object"));
                 }
                 self.queue(json!({"method":"initialized"}));
-                self.queue(json!({"id":2,"method":"thread/start","params":self.thread_params}));
-                self.phase = Phase::ThreadStart;
+                self.queue(json!({"id":4,"method":"account/rateLimits/read"}));
+                self.phase = Phase::RateLimitsRead;
                 Ok(Event::Ignored)
+            }
+            Phase::RateLimitsRead => {
+                let response: super::frame::AccountRateLimitsUpdated = decode(result)?;
+                self.rate_limits.merge(response.rate_limits);
+                self.start_thread();
+                Ok(Event::RateLimitsUpdated)
             }
             Phase::ThreadStart => {
                 let response: ThreadStartResponse = decode(result)?;
@@ -165,6 +178,11 @@ impl Client {
         }
     }
 
+    fn start_thread(&mut self) {
+        self.queue(json!({"id":2,"method":"thread/start","params":self.thread_params}));
+        self.phase = Phase::ThreadStart;
+    }
+
     fn check_turn(&mut self, turn: &str) -> Result<(), ProtocolError> {
         if turn.is_empty() || self.turn_id.as_ref().is_some_and(|id| id != turn) {
             return Err(ProtocolError("turn id does not match the active turn"));
@@ -189,7 +207,7 @@ impl Client {
             "account/rateLimits/updated" => {
                 let event: super::frame::AccountRateLimitsUpdated = decode(params)?;
                 self.rate_limits.merge(event.rate_limits);
-                Ok(Event::Ignored)
+                Ok(Event::RateLimitsUpdated)
             }
             "item/agentMessage/delta" => {
                 let event: ItemTextDelta = decode(params)?;

@@ -287,6 +287,7 @@ pub(crate) struct RateLimits {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RateLimitWindow {
     pub(crate) used_percent: f64,
+    pub(crate) window_duration_mins: Option<i64>,
     pub(crate) resets_at: Option<i64>,
 }
 
@@ -298,6 +299,49 @@ impl RateLimits {
         if update.secondary.is_some() {
             self.secondary = update.secondary;
         }
+    }
+
+    pub(crate) fn capacity_snapshot(
+        &self,
+        observed_at: std::time::SystemTime,
+    ) -> Option<signalbox_model_runtime::RateLimitSnapshot> {
+        let mut windows = Vec::new();
+        for window in [self.primary.as_ref(), self.secondary.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            // The pinned wire protocol reports i32 percentages; do not truncate
+            // wider numeric shapes accepted by the retry-delay decoder.
+            let used_percent = window.used_percent as i32;
+            if f64::from(used_percent) != window.used_percent {
+                return None;
+            }
+            let resets_at = window.resets_at.and_then(|seconds| {
+                let duration = std::time::Duration::from_secs(seconds.unsigned_abs());
+                if seconds < 0 {
+                    std::time::UNIX_EPOCH.checked_sub(duration)
+                } else {
+                    std::time::UNIX_EPOCH.checked_add(duration)
+                }
+            });
+            let window_duration = window
+                .window_duration_mins
+                .and_then(|minutes| u64::try_from(minutes).ok())
+                .and_then(|minutes| minutes.checked_mul(60))
+                .map(std::time::Duration::from_secs);
+            windows.push(signalbox_model_runtime::RateLimitWindow {
+                remaining_percent: 100 - i64::from(used_percent),
+                window_duration,
+                resets_at,
+            });
+        }
+        if windows.is_empty() {
+            return None;
+        }
+        Some(signalbox_model_runtime::RateLimitSnapshot {
+            observed_at,
+            windows,
+        })
     }
 
     pub(crate) fn retry_after(&self, now: std::time::SystemTime) -> Option<std::time::Duration> {
