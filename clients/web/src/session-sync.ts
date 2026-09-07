@@ -120,6 +120,16 @@ export function startSessionSynchronization(
             publishSnapshot(snapshot, true)
           } else if (event.kind === 'provider_text_delta') {
             if (event.content.length === 0) continue
+            const activeCall = projection.snapshot?.active
+            if (
+              activeCall?.state.kind !== 'running' ||
+              activeCall.turn_id !== event.turn_id ||
+              activeCall.state.model_call_id !== event.model_call_id
+            ) {
+              clearDrafts()
+              publish({ phase: 'resyncing', snapshot: null, drafts: [] })
+              continue
+            }
             const key = `${event.turn_id}:${event.model_call_id}:${event.part_index}`
             const existing = drafts.get(key)
             const bytes = new TextEncoder().encode(event.content).byteLength
@@ -143,7 +153,12 @@ export function startSessionSynchronization(
               })
           } else if (event.kind === 'resync_required') {
             clearDrafts()
-            publish({ phase: 'resyncing', cursor: event.cursor, snapshot: null, drafts: [] })
+            publish({
+              phase: 'resyncing',
+              cursor: staleCursor(event.cursor) ? projection.cursor : event.cursor,
+              snapshot: null,
+              drafts: [],
+            })
           }
         }
       } catch {

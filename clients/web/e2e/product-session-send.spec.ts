@@ -616,64 +616,76 @@ test('keeps earlier text reachable after live appending evicts a text-page entry
   expect(reads).toEqual(['1', '9', '1', '9'])
 })
 
-test('keeps a paginated first page through an observation-only resync', async ({ page }) => {
-  const api = await sessionApi(page)
-  let resynchronize = () => {}
-  const ready = new Promise<void>((resolve) => {
-    resynchronize = resolve
-  })
-  const live = (observed: string) => ({
-    session_id: sessionId,
-    observed_through: observed,
-    active: null,
-    queued_turn_count: '0',
-    queued_turn_ids: [],
-    reconciliation: null,
-    runner: null,
-  })
-  let follows = 0
-  await page.route(`**/api/sessions/${sessionId}/follow`, async (route) => {
-    const initial = follows++ === 0
-    if (initial) await ready
-    const events = [
-      { kind: 'snapshot', snapshot: live(initial ? '43' : '44') },
-      ...(initial ? [{ kind: 'resync_required', cursor: '44' }] : []),
-    ]
-    await route.fulfill({
-      contentType: 'application/x-ndjson',
-      body: `${events.map((event) => JSON.stringify(event)).join('\n')}\n`,
+for (const growth of [false, true]) {
+  test(`keeps a paginated first page through ${growth ? 'tail-growing' : 'observation-only'} resync`, async ({
+    page,
+  }) => {
+    const api = await sessionApi(page)
+    let resynchronize = () => {}
+    const ready = new Promise<void>((resolve) => {
+      resynchronize = resolve
     })
-  })
-  let textReads = 0
-  await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
-    textReads++
-    if (textReads > 1) return route.fulfill({ status: 503, body: 'Historical reread unavailable' })
-    const item = {
-      address: { event_sequence: '41' },
-      kind: 'input_accepted',
-      projected_body_bytes: 128 + initialMessage.length,
-      body: { type: 'user_input', turn_id: turnId, text: excerpt(initialMessage), attachments: [] },
-    }
-    return route.fulfill({
-      json: {
-        session_id: sessionId,
-        items: [item],
-        projected_body_bytes: item.projected_body_bytes,
-        continuation: { type: 'more_at', address: { event_sequence: '43' } },
-      },
+    const live = (observed: string) => ({
+      session_id: sessionId,
+      observed_through: observed,
+      active: null,
+      queued_turn_count: '0',
+      queued_turn_ids: [],
+      reconciliation: null,
+      runner: null,
     })
+    let follows = 0
+    await page.route(`**/api/sessions/${sessionId}/follow`, async (route) => {
+      const initial = follows++ === 0
+      if (initial) await ready
+      const events = [
+        { kind: 'snapshot', snapshot: live(initial ? '43' : '44') },
+        ...(initial ? [{ kind: 'resync_required', cursor: '44' }] : []),
+      ]
+      await route.fulfill({
+        contentType: 'application/x-ndjson',
+        body: `${events.map((event) => JSON.stringify(event)).join('\n')}\n`,
+      })
+    })
+    let textReads = 0
+    await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
+      textReads++
+      if (textReads > 1)
+        return route.fulfill({ status: 503, body: 'Historical reread unavailable' })
+      const item = {
+        address: { event_sequence: '41' },
+        kind: 'input_accepted',
+        projected_body_bytes: 128 + initialMessage.length,
+        body: {
+          type: 'user_input',
+          turn_id: turnId,
+          text: excerpt(initialMessage),
+          attachments: [],
+        },
+      }
+      return route.fulfill({
+        json: {
+          session_id: sessionId,
+          items: [item],
+          projected_body_bytes: item.projected_body_bytes,
+          continuation: { type: 'more_at', address: { event_sequence: '43' } },
+        },
+      })
+    })
+    await openSession(page)
+    await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toBeVisible()
+    if (growth) api.grow()
+    else api.advanceObservation()
+    resynchronize()
+    await expect(
+      page
+        .getByRole('region', { name: sessionId, exact: true })
+        .getByRole('definition')
+        .filter({ hasText: /^44$/ }),
+    ).toBeVisible()
+    await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toBeVisible()
+    if (growth) expect(api.state.historyReads).toContain('after')
+    expect(textReads).toBe(1)
   })
-  await openSession(page)
-  await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toBeVisible()
-  api.advanceObservation()
-  resynchronize()
-  await expect(
-    page
-      .getByRole('region', { name: sessionId, exact: true })
-      .getByRole('definition')
-      .filter({ hasText: /^44$/ }),
-  ).toBeVisible()
-  await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toBeVisible()
-  expect(textReads).toBe(1)
-})
+}

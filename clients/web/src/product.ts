@@ -1245,6 +1245,13 @@ export async function readExtendedSessionTranscript(
     continuation === null
   if (reusableFirstPage && held.first === window.first && held.through === window.through)
     return held
+  if (
+    reusableFirstPage &&
+    held.first === window.first &&
+    BigInt(held.through) < BigInt(window.through) &&
+    held.page.continuation !== null
+  )
+    return { ...held, through: window.through }
   const append =
     reusableFirstPage &&
     BigInt(window.first) >= BigInt(held.first) &&

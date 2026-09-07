@@ -278,6 +278,10 @@ it.each(['describe', 'load'] as const)(
 )
 
 const draftSessionId = '00000000-0000-0000-0000-000000000993'
+const runningSnapshot = (sessionId = draftSessionId): WebSessionLiveSnapshot => ({
+  ...snapshot(sessionId),
+  active: { turn_id: sessionId, state: { kind: 'running', model_call_id: sessionId } },
+})
 const draft = (content: string, part_index = 0): WebSessionLiveStreamEvent => ({
   kind: 'provider_text_delta',
   turn_id: draftSessionId,
@@ -292,12 +296,12 @@ it('joins provider parts in arrival order and discards them on a replacement sna
     replace = resolve
   })
   vi.mocked(followSession).mockImplementation(async function* () {
-    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    yield { kind: 'snapshot', snapshot: runningSnapshot() }
     yield draft('First')
     yield draft('Second', 1)
     yield draft(' part')
     await replacement
-    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    yield { kind: 'snapshot', snapshot: runningSnapshot() }
   })
   const store = createAppStore()
   const queries = new QueryClient()
@@ -321,7 +325,7 @@ it.each([
 ])('requests resynchronization and clears every draft on $limit overflow', async ({ events }) => {
   let requested = false
   vi.mocked(followSession).mockImplementation(async function* (_sessionId, _signal, needsResync) {
-    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    yield { kind: 'snapshot', snapshot: runningSnapshot() }
     for (const event of events) yield event
     requested = needsResync?.() ?? false
   })
@@ -354,9 +358,9 @@ it('accounts for streamed bytes without encoding accumulated draft text again', 
   const fragmentCount = 4096
   const replacedDraftBytes = 65_536
   vi.mocked(followSession).mockImplementation(async function* () {
-    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    yield { kind: 'snapshot', snapshot: runningSnapshot() }
     yield draft('x'.repeat(replacedDraftBytes))
-    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    yield { kind: 'snapshot', snapshot: runningSnapshot() }
     for (let index = 0; index < fragmentCount; index++) yield draft('x')
   })
   const encode = vi.spyOn(TextEncoder.prototype, 'encode')
@@ -377,7 +381,7 @@ it('accounts for streamed bytes without encoding accumulated draft text again', 
 
 it('keeps the streamed prefix across a durable update for the same active call', async () => {
   const live = {
-    ...snapshot(draftSessionId),
+    ...runningSnapshot(),
     active: {
       turn_id: draftSessionId,
       state: { kind: 'running' as const, model_call_id: draftSessionId },
@@ -409,7 +413,7 @@ it('keeps the streamed prefix across a durable update for the same active call',
 it('publishes a full byte budget of one-byte fragments as one complete display update', async () => {
   const fragmentCount = 65_536
   vi.mocked(followSession).mockImplementation(async function* () {
-    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    yield { kind: 'snapshot', snapshot: runningSnapshot() }
     for (let index = 0; index < fragmentCount; index++) yield draft('x')
   })
   const store = createAppStore()
@@ -434,7 +438,7 @@ it.each(['turn', 'model call', 'completion'] as const)(
   async (change) => {
     const otherId = '00000000-0000-0000-0000-000000000994'
     const live = {
-      ...snapshot(draftSessionId),
+      ...runningSnapshot(),
       observed_through: '42',
       active:
         change === 'completion'
@@ -449,7 +453,7 @@ it.each(['turn', 'model call', 'completion'] as const)(
     }
     vi.mocked(readSessionLive).mockResolvedValue(live)
     vi.mocked(followSession).mockImplementation(async function* () {
-      yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+      yield { kind: 'snapshot', snapshot: runningSnapshot() }
       yield draft('Old call')
       yield {
         kind: 'durable',
@@ -471,7 +475,7 @@ it.each(['turn', 'model call', 'completion'] as const)(
 
 it('keeps retained byte accounting when a durable update preserves the active call', async () => {
   const live = {
-    ...snapshot(draftSessionId),
+    ...runningSnapshot(),
     active: {
       turn_id: draftSessionId,
       state: { kind: 'running' as const, model_call_id: draftSessionId },
@@ -507,7 +511,7 @@ it('cancels a pending draft publication when leaving the session', async () => {
     queued = resolve
   })
   vi.mocked(followSession).mockImplementation(async function* () {
-    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    yield { kind: 'snapshot', snapshot: runningSnapshot() }
     yield draft('Pending')
     queued()
   })
@@ -611,7 +615,7 @@ it.each([
       },
     })
     vi.mocked(followSession).mockImplementation(async function* () {
-      yield { kind: 'snapshot', snapshot: snapshot(sessionId) }
+      yield { kind: 'snapshot', snapshot: runningSnapshot(sessionId) }
       yield {
         kind: 'durable',
         cursor: '42',
@@ -622,12 +626,15 @@ it.each([
       for (let cursor = 43; cursor <= 1042; cursor++) {
         yield {
           kind: 'snapshot',
-          snapshot: { ...snapshot(sessionId), observed_through: String(cursor) },
+          snapshot: { ...runningSnapshot(sessionId), observed_through: String(cursor) },
         }
       }
       yield draft('Text while history stalls')
     })
-    vi.mocked(readSessionLive).mockResolvedValue({ ...snapshot(sessionId), observed_through: '42' })
+    vi.mocked(readSessionLive).mockResolvedValue({
+      ...runningSnapshot(sessionId),
+      observed_through: '42',
+    })
     const store = createAppStore()
     const stop = startSessionSynchronization(store, queries)
     store.dispatch(actions.sessionFollowRequested(sessionId))
@@ -661,3 +668,94 @@ it.each([
     }
   },
 )
+
+it.each([
+  { invalid: 'inactive turn', active: null },
+  {
+    invalid: 'missing model call',
+    active: { turn_id: draftSessionId, state: { kind: 'running' as const, model_call_id: null } },
+  },
+  {
+    invalid: 'different turn',
+    active: {
+      turn_id: '00000000-0000-0000-0000-000000000994',
+      state: { kind: 'running' as const, model_call_id: draftSessionId },
+    },
+  },
+  {
+    invalid: 'different model call',
+    active: {
+      turn_id: draftSessionId,
+      state: { kind: 'running' as const, model_call_id: '00000000-0000-0000-0000-000000000994' },
+    },
+  },
+  {
+    invalid: 'call awaiting recovery',
+    active: {
+      turn_id: draftSessionId,
+      state: { kind: 'awaiting_model_call_recovery' as const, model_call_id: draftSessionId },
+    },
+  },
+])('resynchronizes instead of rendering a provider delta for $invalid', async ({ active }) => {
+  let requested = false
+  vi.mocked(followSession).mockImplementation(async function* (_sessionId, _signal, needsResync) {
+    yield { kind: 'snapshot', snapshot: { ...runningSnapshot(), active } }
+    yield draft('Uncorrelated text')
+    requested = needsResync?.() ?? false
+  })
+  const store = createAppStore()
+  const queries = new QueryClient()
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(draftSessionId))
+  try {
+    await vi.waitFor(() => expect(requested).toBe(true))
+    expect(selectSessionSync(store.getState())).toMatchObject({
+      phase: 'resyncing',
+      snapshot: null,
+      drafts: [],
+    })
+  } finally {
+    stop()
+    queries.clear()
+  }
+})
+
+it('clears published transient state on resync while retaining a newer side-read cursor', async () => {
+  vi.mocked(followSession).mockImplementation(async function* () {
+    yield { kind: 'snapshot', snapshot: runningSnapshot() }
+    yield draft('Retained prefix')
+    yield {
+      kind: 'durable',
+      cursor: '42',
+      address: { event_sequence: '42' },
+      event_kind: 'input_accepted',
+    }
+    yield { kind: 'resync_required', cursor: '43' }
+  })
+  vi.mocked(readSessionLive).mockResolvedValue({ ...runningSnapshot(), observed_through: '50' })
+  const store = createAppStore()
+  const queries = new QueryClient()
+  let sawPublishedDraft = false
+  const unsubscribe = store.subscribe(() => {
+    const live = selectSessionSync(store.getState())
+    if (live.cursor === '50' && live.drafts[0]?.content === 'Retained prefix')
+      sawPublishedDraft = true
+  })
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(draftSessionId))
+  try {
+    await vi.waitFor(() =>
+      expect(selectSessionSync(store.getState())).toMatchObject({
+        phase: 'resyncing',
+        cursor: '50',
+        snapshot: null,
+        drafts: [],
+      }),
+    )
+    expect(sawPublishedDraft).toBe(true)
+  } finally {
+    stop()
+    unsubscribe()
+    queries.clear()
+  }
+})

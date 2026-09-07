@@ -6,16 +6,23 @@ const sessionId = '00000000-0000-0000-0000-000000000991'
 const live: WebSessionLiveSnapshot = {
   session_id: sessionId,
   observed_through: '41',
-  active: null,
+  active: { turn_id: sessionId, state: { kind: 'running', model_call_id: sessionId } },
   queued_turn_count: '0',
   queued_turn_ids: [],
-  reconciliation: { kind: 'model_call', turn_id: sessionId, model_call_id: sessionId },
+  reconciliation: null,
   runner: {
     state: 'pinned',
     runner_id: sessionId,
     placement_revision: '1',
     connection_health: 'suspect',
   },
+}
+
+const replacement: WebSessionLiveSnapshot = {
+  ...live,
+  observed_through: '42',
+  active: null,
+  reconciliation: { kind: 'model_call', turn_id: sessionId, model_call_id: sessionId },
 }
 
 test('shows bounded provider drafts and live facts, then replaces them on resync', async ({
@@ -27,17 +34,19 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
     if (message.type() === 'error') problems.push(message.text())
   })
   await page.addInitScript(
-    ({ live }) => {
+    ({ live, replacement }) => {
       const original = window.fetch
+      let follows = 0
       window.fetch = async (input, init) => {
         if (String(input).endsWith(`/sessions/${live.session_id}/follow`)) {
+          const snapshot = follows++ === 0 ? live : replacement
           const encoder = new TextEncoder()
           let listener: (event: Event) => void
           return new Response(
             new ReadableStream({
               start(controller) {
                 controller.enqueue(
-                  encoder.encode(`${JSON.stringify({ kind: 'snapshot', snapshot: live })}\n`),
+                  encoder.encode(`${JSON.stringify({ kind: 'snapshot', snapshot })}\n`),
                 )
                 listener = (event) =>
                   controller.enqueue(
@@ -56,7 +65,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
         return original(input, init)
       }
     },
-    { live },
+    { live, replacement },
   )
   await page.route('**/api/bootstrap', (route) =>
     route.fulfill({ json: webContractBootstrapFixture }),
@@ -76,7 +85,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
   })
   await page.route(`**/api/sessions/${sessionId}/live`, async (route) => {
     if (holdLive) await heldLive
-    await route.fulfill({ json: live })
+    await route.fulfill({ json: holdLive ? replacement : live })
   })
   await page.route(`**/api/sessions/${sessionId}/timeline?**`, (route) =>
     route.fulfill({
@@ -101,8 +110,8 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
         session_id: sessionId,
         first_address: { event_sequence: '41' },
         latest_address: { event_sequence: '41' },
-        observed_through: '41',
-        work: { active_turn_count: '0', queued_turn_count: '0' },
+        observed_through: holdLive ? '42' : '41',
+        work: { active_turn_count: holdLive ? '0' : '1', queued_turn_count: '0' },
         sizes: {
           item_count: '1',
           projected_text_bytes: '0',
@@ -137,7 +146,6 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
   await expect(page.getByRole('region', { name: 'Provider draft' })).toContainText(
     'I am checking the recorded work',
   )
-  await expect(page.getByText('Awaiting reconciliation · model call')).toBeVisible()
   await expect(page.getByText('Runner · pinned · suspect')).toBeVisible()
   if (testInfo.project.name === 'chromium' && process.platform === 'linux')
     await expect(page).toHaveScreenshot('provider-drafts.png', { animations: 'disabled' })
@@ -156,6 +164,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
   await expect(page.getByRole('region', { name: 'Provider draft' })).toHaveCount(0)
   await expect(page.getByText('Runner · pinned · suspect')).toHaveCount(0)
   releaseLive()
+  await expect(page.getByText('Awaiting reconciliation · model call')).toBeVisible()
   await expect(page.getByText('Following live session')).toBeVisible()
   expect(problems).toEqual([])
 })

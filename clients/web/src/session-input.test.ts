@@ -564,3 +564,31 @@ it('reuses a held first page with a server continuation when its window is uncha
   expect(reused.page.continuation).toEqual(page.continuation)
   expect(fetch).toHaveBeenCalledTimes(1)
 })
+
+it('retains the paginated first page and continuation when the tail grows', async () => {
+  const page = {
+    ...inputPage(8),
+    continuation: { type: 'more_at', address: { event_sequence: '9' } },
+  }
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json(page))
+    .mockRejectedValue(new Error('history should not be reread'))
+  vi.stubGlobal('fetch', fetch)
+  const held = await readExtendedSessionTranscript(
+    { sessionId, first: '1', through: '9' },
+    null,
+    limits,
+    null,
+  )
+  const extended = await readExtendedSessionTranscript(
+    { sessionId, first: '1', through: '10' },
+    null,
+    limits,
+    held,
+  )
+  expect(extended.page).toBe(held.page)
+  expect(extended.page.continuation).toEqual(page.continuation)
+  expect(extended.through).toBe('10')
+  expect(fetch).toHaveBeenCalledTimes(1)
+})
