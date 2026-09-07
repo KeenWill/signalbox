@@ -153,6 +153,7 @@ mod review_orchestration;
 mod runner_recovery;
 mod session_configuration;
 mod session_metadata;
+mod spawn_session;
 mod stop_turn;
 mod streaming;
 mod tool_decisions;

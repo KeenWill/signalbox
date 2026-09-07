@@ -2735,3 +2735,137 @@ async fn delegation_cascade_rejects_unrelated_disposition_source() -> Result<(),
     drop(container);
     Ok(())
 }
+
+/// A spawn commits its child and receipt exactly once under executable authority.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_spawn_replays_its_atomic_child_after_parent_placement_changes()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        ChildRelationshipPolicy, SessionPlacement, SessionPlacementPath, SessionPlacementVersion,
+        UpdateSessionPlacement,
+    };
+    use signalbox_persistence::{
+        session_delegation::SpawnSessionCandidates, session_placement::SessionPlacementRepository,
+    };
+    const SPAWN_FIXTURE_SEED: u128 = 0x46_0200;
+    const TASK: &str = "Inspect the delegated workspace";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let arguments =
+        serde_json::json!({"task": TASK, "relationship": {"kind": "background"}}).to_string();
+    let (parent, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        SPAWN_FIXTURE_SEED,
+        &[("spawn_session", &arguments)],
+        InitialToolApproval::PolicyAuto,
+    )
+    .await?;
+    let placement = SessionPlacementRepository::new(pool.clone());
+    placement
+        .handle(UpdateSessionPlacement::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            parent.session,
+            SessionPlacementVersion::INITIAL,
+            SessionPlacement::scoped(SessionPlacementPath::try_new(
+                "projects.review.parent".into(),
+            )?)?,
+        ))
+        .await?;
+    let tools = PostgresToolLoopRepository::new(pool.clone());
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    tools
+        .prepare_next_attempt(
+            parent.session,
+            parent.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?
+        .expect("spawn is next");
+    tools
+        .authorize_attempt(parent.session, parent.turn, attempt)
+        .await?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    let candidates = SpawnSessionCandidates {
+        child: SessionId::from_uuid(Uuid::nil()),
+        turn: TurnId::from_uuid(Uuid::now_v7()),
+        entry: SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+    };
+    let recorded = repository
+        .record_process_spawn(
+            parent.session,
+            parent.turn,
+            requests[0],
+            TASK.into(),
+            ChildRelationshipPolicy::Background,
+            candidates,
+        )
+        .await?;
+    let ProcessDelegationOutcome::Applied((_, relation)) = &recorded else {
+        panic!("spawn must commit: {recorded:?}");
+    };
+    assert_eq!(relation.child(), candidates.child);
+    assert_eq!(relation.child_turn(), candidates.turn);
+    let child_placement = placement
+        .load_current(candidates.child)
+        .await?
+        .expect("child placement exists");
+    assert_eq!(
+        child_placement.placement().path().unwrap().as_str(),
+        "projects.review.00000000000000000000000000000000"
+    );
+    let parent_placement = placement.load_current(parent.session).await?.unwrap();
+    placement
+        .handle(UpdateSessionPlacement::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            parent.session,
+            parent_placement.version(),
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    let replay = repository
+        .record_process_spawn(
+            parent.session,
+            parent.turn,
+            requests[0],
+            TASK.into(),
+            ChildRelationshipPolicy::Background,
+            SpawnSessionCandidates {
+                child: SessionId::from_uuid(Uuid::now_v7()),
+                ..candidates
+            },
+        )
+        .await?;
+    assert_eq!(replay, recorded, "a retry must preserve the stored child");
+    let conflict = repository
+        .record_process_spawn(
+            parent.session,
+            parent.turn,
+            requests[0],
+            String::new(),
+            ChildRelationshipPolicy::Background,
+            candidates,
+        )
+        .await?;
+    assert_eq!(
+        conflict,
+        ProcessDelegationOutcome::InvalidRequest,
+        "a stored tool identity cannot create a child for a different task"
+    );
+    assert_eq!(
+        placement.load_current(candidates.child).await?,
+        Some(child_placement)
+    );
+    let receipt: String =
+        sqlx::query_scalar("SELECT result_text FROM tool_attempt WHERE attempt_id = $1")
+            .bind(attempt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&receipt)?,
+        serde_json::json!({"result":"session_spawned", "tool_request_id":requests[0].as_uuid().to_string(), "child_session_id":candidates.child.as_uuid().to_string(), "relationship":{"kind":"background"}})
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

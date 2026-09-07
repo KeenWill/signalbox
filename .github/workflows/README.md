@@ -14,8 +14,10 @@ file in the same pull request.
 
 Both self-hosted scale sets are managed outside of this repo.
 
-`bazel.yml` runs the migrated Rust targets on `signalbox` using the routing
-expression below. Cargo's required checks still cover the full workspace.
+`rust.yml` calls `bazel.yml` for ordinary Rust tests on `signalbox` and all
+manifest PostgreSQL suites on `signalbox-docker`, using the routing expression
+below. `validate` requires the reusable workflow to succeed. The web job uses
+`signalbox` with the same routing rule and declared browser runtimes and fonts.
 
 ## The routing rule
 
@@ -43,9 +45,8 @@ runs-on: ${{ github.event_name == 'pull_request'
   reopening or re-running a bot pull request would otherwise mask the bot and
   route its code to self-hosted hardware.
 
-`scripts/postgres_integration_suites.py` fails `validate-checks` when the
-postgres-integration shards do not share one identical runner-selection string,
-so shards cannot drift from each other.
+`scripts/postgres_integration_suites.py` checks that PostgreSQL jobs consume the
+manifest matrix, use the Docker pool, and remain binding on `validate`.
 
 ## Jobs pinned to a self-hosted pool
 
@@ -63,13 +64,12 @@ while the tool-eval and tool-smoke jobs are report-only:
 ## Jobs pinned to GitHub-hosted runners
 
 The runner image has no `sudo` (pods run with `no-new-privileges`), no Nix, no
-`gh` CLI, and no Playwright system dependencies. Jobs needing any of those stay
-hosted for now, although this may change over time.
+`gh` CLI, or host-provided Playwright system dependencies. Jobs needing host
+facilities stay hosted for now, although this may change over time.
 
 | Job                                               | Why                                                   |
 | ------------------------------------------------- | ----------------------------------------------------- |
 | `rust.yml` `workspace-tests`                      | privileged cgroup delegation via `sudo`               |
-| `web.yml` `web`                                   | `sudo` for `playwright install --with-deps`           |
 | `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`             |
 | `devenv-lock.yml` `relock`                        | Nix                                                   |
 | `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix) |

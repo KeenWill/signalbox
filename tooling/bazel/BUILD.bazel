@@ -1,4 +1,7 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("@rules_rust//rust:defs.bzl", "rust_test")
 load(":native_runtime.bzl", "native_runtime")
+load(":testing.bzl", "json_preserve_order")
 
 native_runtime(
     name = "native_runtime",
@@ -9,7 +12,54 @@ native_runtime(
 
 exports_files([
     "check_generated.py",
+    "extract_playwright.py",
+    "web_public.py",
     "check_markdown.py",
+    "patches/build-script-lints.patch",
     "patches/deno-embedded-javascript.patch",
+    "patches/coverage-subprocesses.patch",
+    "patches/serde-json-suite-order.patch",
+    "patches/rustfmt-crate-roots.patch",
     "patches/v8-build-output.patch",
 ])
+
+rust_test(
+    name = "sharding_fixture",
+    srcs = ["sharding_fixture.rs"],
+    edition = "2024",
+    tags = ["manual"],
+)
+
+py_test(
+    name = "sharding_test",
+    srcs = ["test_sharding.py"],
+    data = [
+        ":native_runtime",
+        ":sharding_fixture",
+    ],
+    env = {
+        "SHARD_WRAPPER": "$(rootpath :native_runtime)",
+        "SHARD_FIXTURE": "$(rootpath :sharding_fixture)",
+    },
+    main = "test_sharding.py",
+    visibility = ["//:__pkg__"],
+)
+
+json_preserve_order(
+    name = "json_preserve_order",
+    build_setting_default = True,
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "sorted_json",
+    flag_values = {":json_preserve_order": "false"},
+    visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "web_public_tool",
+    srcs = ["web_public.py"],
+    main = "web_public.py",
+    visibility = ["//clients/web:__pkg__"],
+)

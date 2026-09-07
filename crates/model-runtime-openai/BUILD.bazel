@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 rust_package()
 
@@ -37,8 +37,8 @@ rust_doc_test(
 
 rust_integration_test(
     name = "live_smoke",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     crate_root = "tests/live_smoke.rs",
     data = glob(
         ["tests/**"],
@@ -51,3 +51,5 @@ rust_integration_test(
         "//crates/model-runtime-openai:signalbox_model_runtime_openai",
     ],
 )
+
+rust_quality_tests(documented_crates = [":signalbox_model_runtime_openai"])

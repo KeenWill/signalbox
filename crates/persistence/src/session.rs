@@ -146,6 +146,16 @@ pub(crate) async fn load_session_from_connection(
             creation.model_settings AS create_command_model_settings,
             imported_creation.storage_version AS imported_create_storage_version,
             imported_creation.model_settings AS imported_create_command_model_settings,
+            (SELECT parent_defaults.model_settings
+               FROM session_delegation AS delegated
+               CROSS JOIN LATERAL turn_origin_effective_model_configuration(
+                   delegated.parent_turn_id, delegated.parent_session_id) AS frozen
+               JOIN session_defaults_version AS parent_defaults
+                 ON parent_defaults.session_id = delegated.parent_session_id
+                AND parent_defaults.version = frozen.defaults_version
+              WHERE delegated.child_session_id = s.session_id
+                AND delegated.spawning_tool_request_id = s.spawning_tool_request_id
+            ) AS delegated_create_model_settings,
             s.imported_conversation_id AS stored_conversation_id,
             s.imported_frontier_entry_id AS stored_frontier_entry_id,
             s.imported_frontier_position AS stored_frontier_position,
@@ -178,6 +188,8 @@ pub(crate) async fn load_session_from_connection(
             ,placement.root_global_read_intent AS current_placement_root_intent
             ,placement_native_creation.command_id AS current_native_creation_command_id
             ,placement_imported_creation.command_id AS current_imported_creation_command_id
+            ,placement_delegated_creation.spawning_tool_request_id
+                AS current_delegated_creation_request_id
             ,placement_update.command_id AS current_placement_update_command_id
             ,EXISTS (
                 SELECT 1
@@ -225,6 +237,13 @@ pub(crate) async fn load_session_from_connection(
           AND placement_imported_creation.result_kind = 'applied'
           AND placement.placement_path IS NULL
           AND NOT placement.root_global_read_intent
+         LEFT JOIN session_delegation AS placement_delegated_creation
+           ON placement_delegated_creation.child_session_id = placement.session_id
+          AND placement_delegated_creation.spawning_tool_request_id =
+                placement.provenance_tool_request_id
+          AND placement_delegated_creation.spawning_tool_request_id = s.spawning_tool_request_id
+          AND s.creation_cause = 'delegated'
+          AND placement.provenance_command_id IS NULL
          LEFT JOIN update_session_placement_command AS placement_update
            ON placement_update.command_id = placement.provenance_command_id
           AND placement_update.session_id = placement.session_id
@@ -380,6 +399,19 @@ fn authenticate_defaults_settings_version(
     let stored_model_settings: Value = required(row, "model_settings")?;
     let model_settings = model_settings_from_json(stored_model_settings.clone())
         .map_err(|_| SessionCorruption::Inconsistent("model settings"))?;
+    if defaults_version == SessionConfigurationDefaultsVersion::first()
+        && ancestry == "none"
+        && required::<String>(row, "stored_cause")? == "delegated"
+    {
+        let inherited: Value = required(row, "delegated_create_model_settings")?;
+        if inherited != stored_model_settings {
+            return Err(SessionCorruption::Inconsistent(
+                "delegated defaults model settings disagree with parent",
+            )
+            .into());
+        }
+        return Ok(());
+    }
     if defaults_version != SessionConfigurationDefaultsVersion::first()
         && model_settings == signalbox_domain::ValidatedModelSettings::provider_defaults()
         && row
@@ -467,6 +499,7 @@ fn decode_current_placement(
         })?;
     let native_creation: Option<Uuid> = row.try_get("current_native_creation_command_id")?;
     let imported_creation: Option<Uuid> = row.try_get("current_imported_creation_command_id")?;
+    let delegated_creation: Option<Uuid> = row.try_get("current_delegated_creation_request_id")?;
     let update: Option<Uuid> = row.try_get("current_placement_update_command_id")?;
     let receipt_is_valid = match event_kind {
         SessionPlacementEventKind::Created => {
@@ -475,10 +508,13 @@ fn decode_current_placement(
                 && update.is_none()
                 && match creation_family {
                     PlacementCreationFamily::Native => {
-                        native_creation.is_some() && imported_creation.is_none()
+                        (native_creation.is_some() ^ delegated_creation.is_some())
+                            && imported_creation.is_none()
                     }
                     PlacementCreationFamily::ImportedConversation => {
-                        imported_creation.is_some() && native_creation.is_none()
+                        imported_creation.is_some()
+                            && native_creation.is_none()
+                            && delegated_creation.is_none()
                     }
                 }
         }
@@ -487,6 +523,7 @@ fn decode_current_placement(
                 && update.is_some()
                 && native_creation.is_none()
                 && imported_creation.is_none()
+                && delegated_creation.is_none()
         }
     };
     if !receipt_is_valid {

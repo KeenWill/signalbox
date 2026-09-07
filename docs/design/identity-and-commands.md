@@ -6,19 +6,14 @@ This design is not built; it extends
 ## Goal
 
 Build the items the identity and command subsystem has committed to but lacks:
-registry kinds and typed records for runner recovery and configuration reload,
-production generators for the four identity types that lack one, and the
-optional runner placement the two creation payloads lack. `Actor` gains a
-program arm that submit-input records, and create-session adoption stays an
-explicit maintainer choice, so a program-driven turn is never recorded as
-user-issued.
+registry kinds and typed records for runner recovery, production generators for
+the four identity types that lack one, and the optional runner placement the two
+creation payloads lack. `Actor` gains a program arm that submit-input records,
+and create-session adoption stays an explicit maintainer choice, so a
+program-driven turn is never recorded as user-issued.
 
 ## Design
 
-`reload_configuration` gains a registry kind and typed relational request and
-result record families keyed by command identifier. The request records retain
-the checked snapshot; [process protocol](process-protocol.md) owns the payloads
-and outcomes.
 
 `ProviderTargetEvidenceId` gains a UUIDv7 generator with the durable
 provider-target evidence that
@@ -67,9 +62,6 @@ that adds the field states how each earlier version reconstitutes.
   it.
 - Imported-creation version 4 and create-session version 5 stay unwritten; no
   writer uses either number and the decoders keep rejecting them.
-- Configuration reload may span claim and terminal-result transactions; every other
-  new kind is one claim-and-terminal-result transaction.
-  [Process protocol](process-protocol.md) owns reload startup recovery.
 
 ## Acceptance criteria
 

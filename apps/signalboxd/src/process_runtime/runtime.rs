@@ -4,6 +4,7 @@ use super::*;
 /// durable and streaming fan-outs, and one guarded Unix listener.
 #[derive(Debug)]
 pub struct ProcessRuntime {
+    configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     recovery_reporter: Option<FatalRecoveryReporter>,
     oauth_service: Option<Arc<crate::OauthCredentialService>>,
     listener: LocalProcessListener,
@@ -71,6 +72,7 @@ impl ProcessRuntime {
         let (monitor_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         let (runner_recovery, _) = watch::channel(());
         Self {
+            configuration_reload: None,
             recovery_reporter: None,
             oauth_service: None,
             listener,
@@ -91,6 +93,15 @@ impl ProcessRuntime {
                 runner_recovery,
             },
         }
+    }
+
+    /// Shares the daemon's serial configuration reload and atomic catalog holder.
+    pub fn with_configuration_reload(
+        mut self,
+        reload: crate::configuration_reload::ConfigurationReload,
+    ) -> Self {
+        self.configuration_reload = Some(reload);
+        self
     }
 
     /// Wires the goal-mode disposition that arms automatic resumption when an adopt
@@ -201,6 +212,7 @@ impl ProcessRuntime {
             shutdown.clone(),
         );
         let connection_dependencies = ConnectionDependencies {
+            configuration_reload: self.configuration_reload,
             recovery_reporter: self.recovery_reporter,
             oauth_service: self.oauth_service,
             pool: self.pool.clone(),
@@ -311,7 +323,9 @@ pub(super) async fn dispatch_updates(
                         )
                     {
                         let nudge = eligibility_nudge.clone();
-                        tokio::spawn(async move { nudge.nudge_when_ready(session).await });
+                        tokio::spawn(
+                            async move { nudge.nudge_waiting_for_capacity(session).await },
+                        );
                     }
                     let _ = fanouts.monitor.send(ProcessMonitorUpdate::Durable {
                         cursor: event.sequence(),

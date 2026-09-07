@@ -311,9 +311,14 @@ fn production_constructor_matches_the_complete_mapped_catalog() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy(SYNTHETIC_GOAL_DATABASE_URL)
         .expect("synthetic production pool is valid");
+    let (eligibility_nudge, _work_source) =
+        signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
     let tools = DaemonTools::try_new_production(
         || SystemTime::UNIX_EPOCH,
         pool,
+        eligibility_nudge,
         MappedDaemonCredentialInputs {
             web_search: FileCredentialAccess::new(
                 support.path().join(SYNTHETIC_WEB_SEARCH_CREDENTIAL_PATH),

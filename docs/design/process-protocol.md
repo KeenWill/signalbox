@@ -2,18 +2,16 @@
 
 This design is not built; it extends
 [process-protocol.md](../spec/process-protocol.md) with the wire surfaces the
-owner has committed and the daemon and terminal client do not implement, apart
-from the terminal client's existing `spawn_session` half.
+owner has committed and the daemon and terminal client do not implement.
 
 ## Goal
 
 Future implementation of these surfaces under protocol version 1 must pair each
 daemon handler with its terminal-client consumer in the same change:
-credential-exclusion administration, configuration reload, program-run
-cancellation, runner placement facts, `spawn_session`, cascade metadata on stop
-receipts, and the typed projection of credential-pool exhaustion and of the
-credential-availability wait. The terminal client already sends `spawn_session`
-and validates its receipt, so that surface needs only its daemon transaction.
+credential-exclusion administration, program-run
+cancellation, runner placement facts, cascade metadata on stop receipts, and the
+typed projection of credential-pool exhaustion and of the
+credential-availability wait.
 
 ## Design
 
@@ -50,43 +48,6 @@ record an earlier command already cleared is `already_cleared`. Success returns
 durable. An equal `command_id` replay returns its stored receipt before current
 state is evaluated. Both operations are authorized as every other request is:
 reaching the owner-private socket is the authority.
-
-Configuration reload is one `reload_configuration { command_id }` request
-carrying a user-global command identity. An equal command retry reports busy
-while pending or replays its stored result without re-reading configuration.
-Reloads, including startup replay, run serially from configuration read through
-the terminal result. Core first commits the reload command with a complete
-checked snapshot of every reloadable section, the rule-set digest, and the prior
-snapshot for refusal recovery as durable intent. The replacement snapshot
-contains the model catalog, session-template catalog, and repository-watch
-configuration, including rules, convergence targets, template, interval,
-credential path, webhook listener settings, and hook map. Reload pauses sweep
-admission and stops and joins active sweep attempts and affected ingestion tasks
-before rule activation and event-tail capture. Only after that activation
-commits does core reconcile convergence targets from the retained intent. On a
-stale or conflicting rule-revision rejection, recovery first validates the prior
-snapshot against the current startup-only sections. If invalid, it terminalizes
-the intent with `configuration_reload_failed` without resuming workers, and
-startup recovery fails. Otherwise it resumes ingestion and sweep admission under
-the prior snapshot before terminalizing the intent with
-`configuration_reload_failed`, without replacing the running configuration.
-Other failures after either stops leave the intent pending until recovery
-installs the replacement snapshot and resumes them before terminalizing the
-claim. The [reload-intent input](ownership-seam.md) delivers rule activation
-only, and the module activates the rules atomically and idempotently by command
-identity and digest. The activation transaction captures each repository's
-current event tail and retains it for idempotent replay. Before replay activates
-any retained effects, startup validates the retained reloadable snapshot
-together with the on-disk startup-only sections; incompatibility fails startup
-and leaves the intent pending. Startup replays any undelivered intent from its
-retained payload even if the configuration files changed, before terminalizing
-its claim. Success returns
-`configuration_reloaded { command_id, reloaded_sections }`, whose sections are
-an array of the closed values `model_catalog`, `session_templates`, and
-`repo_watch`. Failure returns
-`configuration_reload_failed { command_id, phase, reason }`, sanitized as
-startup logs are. Which sections reload and the validate-then-swap rule belong
-to [configuration-and-credentials.md](../spec/configuration-and-credentials.md).
 
 Program-run cancellation is the request
 `cancel_program_run { run_id, command_id }` and the receipt
@@ -132,13 +93,6 @@ later runner facts: a new fact adds a state and its members to this event kind,
 never a second kind. A snapshot's session summary carries the same runner
 object, with connection health present exactly for a pinned placement.
 
-`spawn_session` carries a bounded `task` and the closed relationship object and
-returns `session_spawned { tool_request_id, child_session_id, relationship }`.
-The placement-owned creation transaction that implements the parent-directory
-default creates the child; it preserves the exact-request and authority rules of
-the delegation contracts on the spec page, and the task string fits both the
-delegation-content ceiling and its complete normalized JSON argument envelope.
-
 A successful cascade receipt for `stop_goal` or `stop_turn` carries the selected
 `descendant_scope` and the exact count of recorded descendant dispositions, so a
 zero-child choice and an unperformed cascade cannot be confused. An equal
@@ -180,13 +134,10 @@ call-free terminal attempt. The endings these shapes project belong to
 
 ## Compatibility constraints
 
-`spawn_session` and `session_spawned` are admitted version-1 variants: the
-daemon decodes `spawn_session` and rejects it without mutation, and no daemon
-path produces `session_spawned`. `runner_state_transition` is an admitted
-version-1 event variant that the daemon projects when the outbox carries a
-runner state transition. Every other request and message above is outside the
-closed inventories in `crates/process-protocol` until the daemon and client
-implement its surface together.
+`runner_state_transition` is an admitted version-1 event variant that the daemon
+projects when the outbox carries a runner state transition. Every other request
+and message above is outside the closed inventories in `crates/process-protocol`
+until the daemon and client implement its surface together.
 
 No response code is reserved for an authorization failure, because client
 identity, authentication, authorization, and revocation are undecided.

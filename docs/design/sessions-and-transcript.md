@@ -6,7 +6,7 @@ when the work lands.
 
 ## Goal
 
-Ten capabilities extend the session and transcript subsystem. Instruction-aware
+Nine capabilities extend the session and transcript subsystem. Instruction-aware
 defaults replacement keeps a session's model selection compatible with its
 admitted workspace instructions. Program creation causes let registered programs
 create sessions under the [program substrate](../spec/program-substrate.md). The
@@ -15,9 +15,9 @@ referenced blob facts from a durable relation. Search producers publish
 attachment and derived-text classes through the projection-writer port. A
 relocation boundary entry records every session move in the transcript.
 Delegation result sealing consumes a durable reconstituted terminal result. A
-spawned child defaults into its parent's directory. A static eligible-failure
-producer terminalizes a turn at eligibility, and a wait-transition failure
-producer terminalizes a turn whose predecessor model call already issued.
+static eligible-failure producer terminalizes a turn at eligibility, and a
+wait-transition failure producer terminalizes a turn whose predecessor model
+call already issued.
 
 ## Design
 
@@ -69,13 +69,6 @@ yields one sealed projection of an ended call and its turn. Result sealing
 consumes that projection and never accepts parallel raw identities or semantic
 entries as proof of a terminal outcome.
 
-Parent-directory default. A spawned child is placed in its parent's directory. A
-pathless parent yields a pathless child, and a child of a parent in the root
-directory carries the parent's acknowledged global-read root rather than
-deriving a new one-segment path. The derived placement carries only the path and
-does not copy the parent's complete placement. The session-placement surface
-implements it.
-
 Static eligible failure. A turn that fails at eligibility, before any attempt
 exists, is terminalized by one transaction that commits its origin entries and
 its failed marker together and emits the turn-failed update event atomically,
@@ -113,10 +106,9 @@ contract supplies. No present writer emits a relocation entry, a
 placement-frontier pointer, or an entry for a queued turn; the semantic payload
 set stays closed until a migration widens it. No present surface exposes
 terminal-result reconstitution, and no new delegation path may seal a result
-from raw identities. No present delegation or placement surface derives the
-parent-directory default. The static eligible-failure and wait-transition
-failure paths have no producer, and every present failed-turn producer keeps
-emitting the turn-failed event atomically with the marker.
+from raw identities. The static eligible-failure and wait-transition failure
+paths have no producer, and every present failed-turn producer keeps emitting
+the turn-failed event atomically with the marker.
 
 ## Acceptance criteria
 
@@ -138,12 +130,11 @@ reads a frontier containing it, each fail-closed case is rejected, and the entry
 carries no runner, workspace, credential, or tool content. Replacing a runner
 lost before the session pinned it appends no entry and returns the placement to
 unpinned at the successor revision. Delegation result sealing reads one sealed
-projection and has no raw-identity path. A spawned child sits in its parent's
-directory, is pathless when its parent is, and copies no other placement axis. A
-turn that fails at eligibility carries its origin entries, one for an accepted
-input, every coalesced delivery in sequence for a delegation wake, and the
-checked delegated-task entry for a delegated child's first turn, and one failed
-marker committed together with a turn-failed event and no attempt row. A turn
-released from a wait with an exhausted pool and an already-issued predecessor
-call carries one failed marker committed with a fresh call-free ended attempt, a
-turn-failed event, and no terminal model call.
+projection and has no raw-identity path. A turn that fails at eligibility
+carries its origin entries, one for an accepted input, every coalesced delivery
+in sequence for a delegation wake, and the checked delegated-task entry for a
+delegated child's first turn, and one failed marker committed together with a
+turn-failed event and no attempt row. A turn released from a wait with an
+exhausted pool and an already-issued predecessor call carries one failed marker
+committed with a fresh call-free ended attempt, a turn-failed event, and no
+terminal model call.
