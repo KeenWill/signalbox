@@ -23,6 +23,7 @@
 | program_journal | 25 | 0 | 0 | [program_journal](program_journal.md) |
 | provider_evidence | 5 | 0 | 0 | [provider_evidence](provider_evidence.md) |
 | queue_order | 5 | 0 | 1 | [queue_order](queue_order.md) |
+| rate_limit | 2 | 0 | 0 | [rate_limit](rate_limit.md) |
 | replace_session_defaults | 13 | 0 | 0 | [replace_session_defaults](replace_session_defaults.md) |
 | repo_watch | 43 | 0 | 0 | [repo_watch](repo_watch.md) |
 | review_workflow | 83 | 0 | 1 | [review_workflow](review_workflow.md) |
