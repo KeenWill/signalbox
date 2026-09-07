@@ -1,6 +1,7 @@
 import type { QueryClient } from '@tanstack/react-query'
 import type { WebSessionLiveSnapshot } from './generated/web-contract.mjs'
 import { followSession, readSessionLive } from './product'
+import { extendSessionWorkspace } from './session-workspace'
 import { type AppDispatch, actions, type RootState, type SessionSyncState } from './state'
 
 // Hard safety ceilings: retained transient provider text is bounded independently of history.
@@ -83,11 +84,24 @@ export function startSessionSynchronization(
         drafts: draftProjection(),
       })
     }
-    const refresh = () =>
-      queryClient.invalidateQueries({
-        queryKey: ['production', 'session-workspace', sessionId],
-        exact: true,
-      })
+    let pendingHistoryCursor: string | null = null
+    let extendingHistory = false
+    const extendHistory = (cursor: string) => {
+      if (pendingHistoryCursor === null || BigInt(cursor) > BigInt(pendingHistoryCursor))
+        pendingHistoryCursor = cursor
+      if (extendingHistory) return
+      extendingHistory = true
+      void (async () => {
+        while (!controller.signal.aborted && pendingHistoryCursor !== null) {
+          const observed = pendingHistoryCursor
+          pendingHistoryCursor = null
+          await extendSessionWorkspace(queryClient, sessionId, observed, controller.signal).catch(
+            () => undefined,
+          )
+        }
+        extendingHistory = false
+      })()
+    }
     void (async () => {
       try {
         for await (const event of followSession(
@@ -98,14 +112,24 @@ export function startSessionSynchronization(
           if (controller.signal.aborted) return
           if (event.kind === 'snapshot') {
             publishSnapshot(event.snapshot, false)
-            await refresh()
+            extendHistory(event.snapshot.observed_through)
           } else if (event.kind === 'durable') {
             publish({ cursor: event.cursor })
-            await refresh()
+            extendHistory(event.cursor)
             const snapshot = await readSessionLive(sessionId, controller.signal)
             publishSnapshot(snapshot, true)
           } else if (event.kind === 'provider_text_delta') {
             if (event.content.length === 0) continue
+            const activeCall = projection.snapshot?.active
+            if (
+              activeCall?.state.kind !== 'running' ||
+              activeCall.turn_id !== event.turn_id ||
+              activeCall.state.model_call_id !== event.model_call_id
+            ) {
+              clearDrafts()
+              publish({ phase: 'resyncing', snapshot: null, drafts: [] })
+              continue
+            }
             const key = `${event.turn_id}:${event.model_call_id}:${event.part_index}`
             const existing = drafts.get(key)
             const bytes = new TextEncoder().encode(event.content).byteLength
@@ -129,7 +153,12 @@ export function startSessionSynchronization(
               })
           } else if (event.kind === 'resync_required') {
             clearDrafts()
-            publish({ phase: 'resyncing', cursor: event.cursor, snapshot: null, drafts: [] })
+            publish({
+              phase: 'resyncing',
+              cursor: staleCursor(event.cursor) ? projection.cursor : event.cursor,
+              snapshot: null,
+              drafts: [],
+            })
           }
         }
       } catch {

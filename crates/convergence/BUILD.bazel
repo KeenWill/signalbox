@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 filegroup(
     name = "fixtures",
@@ -71,3 +71,8 @@ rust_integration_test(
         "//crates/test-bin:signalbox_test_bin",
     ],
 )
+
+rust_quality_tests(documented_crates = [
+    ":signalbox_convergence",
+    ":signalbox-converge",
+])
