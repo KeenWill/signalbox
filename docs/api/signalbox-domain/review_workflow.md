@@ -2,208 +2,6 @@
 
 # review_workflow
 
-## ReviewFindingStatus
-
-```rust
-pub enum ReviewFindingStatus {
-    Open,
-    Accepted,
-    Rejected,
-    Duplicate,
-    Superseded,
-    Stale,
-    Posted,
-    Fixed,
-    BlockedWithReason,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## ReviewFindingEventType
-
-```rust
-pub enum ReviewFindingEventType {
-    Accepted,
-    Rejected,
-    Duplicate,
-    Superseded,
-    Stale,
-    Posted,
-    Fixed,
-    BlockedWithReason,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## ReviewFindingEventResultKind
-
-```rust
-pub enum ReviewFindingEventResultKind {
-    Accepted,
-    Rejected {
-        reason: ReviewText,
-    },
-    Duplicate {
-        canonical: ReviewReferencedFindingEvidence,
-    },
-    Superseded {
-        successor: ReviewReferencedFindingEvidence,
-    },
-    Stale,
-    Posted {
-        link: ReviewExternalLinkId,
-    },
-    Fixed,
-    BlockedWithReason {
-        reason: ReviewText,
-        link: option::Option<ReviewExternalLinkId>,
-    },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewFindingEventResultKind {
-    pub const fn event_type(&self) -> ReviewFindingEventType;
-}
-```
-
-## ReviewFindingEventResult
-
-```rust
-pub struct ReviewFindingEventResult {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewFindingEventResult {
-    pub fn new(
-        finding: ReviewFindingRef,
-        ordinal: ReviewEventOrdinal,
-        kind: ReviewFindingEventResultKind,
-    ) -> Self;
-    pub const fn finding(&self) -> ReviewFindingRef;
-    pub const fn ordinal(&self) -> ReviewEventOrdinal;
-    pub const fn event_type(&self) -> ReviewFindingEventType;
-    pub const fn kind(&self) -> &ReviewFindingEventResultKind;
-}
-```
-
-## ReviewProducedFindings
-
-```rust
-pub struct ReviewProducedFindings {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewProducedFindings {
-    pub fn try_new(
-        findings: vec::Vec<ReviewFindingRef>,
-    ) -> result::Result<Self, ReviewProducedFindingsError>;
-    pub fn findings(&self) -> &[ReviewFindingRef];
-    pub fn contains(&self, finding: ReviewFindingRef) -> bool;
-}
-```
-
-## ReviewProducedFindingsError
-
-```rust
-pub enum ReviewProducedFindingsError {
-    TooMany { actual: usize, maximum: usize },
-    Duplicate { finding: ReviewFindingRef },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewExternalLinkAttachmentResult
-
-```rust
-pub struct ReviewExternalLinkAttachmentResult {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkAttachmentResult {
-    pub const fn new(
-        link: ReviewExternalLinkId,
-        external_object: ReviewKey,
-        finding_event: option::Option<ReviewFindingEventResult>,
-    ) -> Self;
-    pub const fn link(&self) -> ReviewExternalLinkId;
-    pub const fn external_object(&self) -> &ReviewKey;
-    pub const fn finding_event(&self) -> option::Option<&ReviewFindingEventResult>;
-}
-```
-
-## ReviewExternalLinkObservationResult
-
-```rust
-pub struct ReviewExternalLinkObservationResult {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkObservationResult {
-    pub const fn new(
-        link: ReviewExternalLinkId,
-        ordinal: ReviewEventOrdinal,
-        state: ReviewExternalObjectState,
-    ) -> Self;
-    pub const fn link(self) -> ReviewExternalLinkId;
-    pub const fn ordinal(self) -> ReviewEventOrdinal;
-    pub const fn state(self) -> ReviewExternalObjectState;
-}
-```
-
-## ReviewExternalLinkNoChangeResult
-
-```rust
-pub struct ReviewExternalLinkNoChangeResult {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkNoChangeResult {
-    pub const fn new(
-        link: ReviewExternalLinkId,
-        observed_through: ReviewEventOrdinal,
-        state: ReviewExternalObjectState,
-    ) -> Self;
-    pub const fn link(self) -> ReviewExternalLinkId;
-    pub const fn observed_through(self) -> ReviewEventOrdinal;
-    pub const fn state(self) -> ReviewExternalObjectState;
-}
-```
-
-## ReviewExternalLinkPublicationBlockedResult
-
-```rust
-pub struct ReviewExternalLinkPublicationBlockedResult {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkPublicationBlockedResult {
-    pub const fn new(link: ReviewExternalLinkId, reason: ReviewText) -> Self;
-    pub const fn link(&self) -> ReviewExternalLinkId;
-    pub const fn reason(&self) -> &ReviewText;
-}
-```
-
-## ReviewPassResult
-
-```rust
-pub enum ReviewPassResult {
-    ProducedFindings(ReviewProducedFindings),
-    FindingEvent(ReviewFindingEventResult),
-    ExternalLinkAttachment(ReviewExternalLinkAttachmentResult),
-    ExternalLinkObservation(ReviewExternalLinkObservationResult),
-    ExternalLinkNoChange(ReviewExternalLinkNoChangeResult),
-    ExternalLinkPublicationBlocked(ReviewExternalLinkPublicationBlockedResult),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewReferencedFindingEvidence
-
-```rust
-pub struct ReviewReferencedFindingEvidence {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewReferencedFindingEvidence {
-    pub fn try_from_finding(finding: &ReviewFinding) -> option::Option<Self>;
-    pub fn try_reconstitute(
-        reference: ReviewFindingRef,
-        status: ReviewFindingStatus,
-        producing_pass: &ReviewPassEvidence,
-        producing_run: ReviewRunEvidence,
-    ) -> option::Option<Self>;
-    pub const fn reference(self) -> ReviewFindingRef;
-    pub const fn status(self) -> ReviewFindingStatus;
-    pub const fn producer_policy(self) -> ReviewPolicy;
-    pub const fn producing_pass(self) -> ReviewPassRef;
-}
-```
-
 ## ReviewWorkflowKind
 
 ```rust
@@ -1180,6 +978,208 @@ pub enum ReviewExternalLinkTransitionFailure {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewFindingStatus
+
+```rust
+pub enum ReviewFindingStatus {
+    Open,
+    Accepted,
+    Rejected,
+    Duplicate,
+    Superseded,
+    Stale,
+    Posted,
+    Fixed,
+    BlockedWithReason,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## ReviewFindingEventType
+
+```rust
+pub enum ReviewFindingEventType {
+    Accepted,
+    Rejected,
+    Duplicate,
+    Superseded,
+    Stale,
+    Posted,
+    Fixed,
+    BlockedWithReason,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## ReviewFindingEventResultKind
+
+```rust
+pub enum ReviewFindingEventResultKind {
+    Accepted,
+    Rejected {
+        reason: ReviewText,
+    },
+    Duplicate {
+        canonical: ReviewReferencedFindingEvidence,
+    },
+    Superseded {
+        successor: ReviewReferencedFindingEvidence,
+    },
+    Stale,
+    Posted {
+        link: ReviewExternalLinkId,
+    },
+    Fixed,
+    BlockedWithReason {
+        reason: ReviewText,
+        link: option::Option<ReviewExternalLinkId>,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewFindingEventResultKind {
+    pub const fn event_type(&self) -> ReviewFindingEventType;
+}
+```
+
+## ReviewFindingEventResult
+
+```rust
+pub struct ReviewFindingEventResult {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewFindingEventResult {
+    pub fn new(
+        finding: ReviewFindingRef,
+        ordinal: ReviewEventOrdinal,
+        kind: ReviewFindingEventResultKind,
+    ) -> Self;
+    pub const fn finding(&self) -> ReviewFindingRef;
+    pub const fn ordinal(&self) -> ReviewEventOrdinal;
+    pub const fn event_type(&self) -> ReviewFindingEventType;
+    pub const fn kind(&self) -> &ReviewFindingEventResultKind;
+}
+```
+
+## ReviewProducedFindings
+
+```rust
+pub struct ReviewProducedFindings {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewProducedFindings {
+    pub fn try_new(
+        findings: vec::Vec<ReviewFindingRef>,
+    ) -> result::Result<Self, ReviewProducedFindingsError>;
+    pub fn findings(&self) -> &[ReviewFindingRef];
+    pub fn contains(&self, finding: ReviewFindingRef) -> bool;
+}
+```
+
+## ReviewProducedFindingsError
+
+```rust
+pub enum ReviewProducedFindingsError {
+    TooMany { actual: usize, maximum: usize },
+    Duplicate { finding: ReviewFindingRef },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewExternalLinkAttachmentResult
+
+```rust
+pub struct ReviewExternalLinkAttachmentResult {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLinkAttachmentResult {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        external_object: ReviewKey,
+        finding_event: option::Option<ReviewFindingEventResult>,
+    ) -> Self;
+    pub const fn link(&self) -> ReviewExternalLinkId;
+    pub const fn external_object(&self) -> &ReviewKey;
+    pub const fn finding_event(&self) -> option::Option<&ReviewFindingEventResult>;
+}
+```
+
+## ReviewExternalLinkObservationResult
+
+```rust
+pub struct ReviewExternalLinkObservationResult {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLinkObservationResult {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        ordinal: ReviewEventOrdinal,
+        state: ReviewExternalObjectState,
+    ) -> Self;
+    pub const fn link(self) -> ReviewExternalLinkId;
+    pub const fn ordinal(self) -> ReviewEventOrdinal;
+    pub const fn state(self) -> ReviewExternalObjectState;
+}
+```
+
+## ReviewExternalLinkNoChangeResult
+
+```rust
+pub struct ReviewExternalLinkNoChangeResult {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLinkNoChangeResult {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        observed_through: ReviewEventOrdinal,
+        state: ReviewExternalObjectState,
+    ) -> Self;
+    pub const fn link(self) -> ReviewExternalLinkId;
+    pub const fn observed_through(self) -> ReviewEventOrdinal;
+    pub const fn state(self) -> ReviewExternalObjectState;
+}
+```
+
+## ReviewExternalLinkPublicationBlockedResult
+
+```rust
+pub struct ReviewExternalLinkPublicationBlockedResult {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLinkPublicationBlockedResult {
+    pub const fn new(link: ReviewExternalLinkId, reason: ReviewText) -> Self;
+    pub const fn link(&self) -> ReviewExternalLinkId;
+    pub const fn reason(&self) -> &ReviewText;
+}
+```
+
+## ReviewPassResult
+
+```rust
+pub enum ReviewPassResult {
+    ProducedFindings(ReviewProducedFindings),
+    FindingEvent(ReviewFindingEventResult),
+    ExternalLinkAttachment(ReviewExternalLinkAttachmentResult),
+    ExternalLinkObservation(ReviewExternalLinkObservationResult),
+    ExternalLinkNoChange(ReviewExternalLinkNoChangeResult),
+    ExternalLinkPublicationBlocked(ReviewExternalLinkPublicationBlockedResult),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewReferencedFindingEvidence
+
+```rust
+pub struct ReviewReferencedFindingEvidence {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewReferencedFindingEvidence {
+    pub fn try_from_finding(finding: &ReviewFinding) -> option::Option<Self>;
+    pub fn try_reconstitute(
+        reference: ReviewFindingRef,
+        status: ReviewFindingStatus,
+        producing_pass: &ReviewPassEvidence,
+        producing_run: ReviewRunEvidence,
+    ) -> option::Option<Self>;
+    pub const fn reference(self) -> ReviewFindingRef;
+    pub const fn status(self) -> ReviewFindingStatus;
+    pub const fn producer_policy(self) -> ReviewPolicy;
+    pub const fn producing_pass(self) -> ReviewPassRef;
+}
 ```
 
 ## ReviewPolicyVersion
