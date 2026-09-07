@@ -443,6 +443,16 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
     let fixture = parked_batch(&pool).await?;
     lose_batch(&fixture).await?;
     let repository = if target_available {
+        sqlx::raw_sql("ALTER TABLE model_call DISABLE TRIGGER ALL;")
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE model_call SET usage_input_tokens = 1 WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .execute(&pool)
+            .await?;
+        sqlx::raw_sql("ALTER TABLE model_call ENABLE TRIGGER ALL;")
+            .execute(&pool)
+            .await?;
         model_repository(&pool)
     } else {
         sqlx::raw_sql("ALTER TABLE model_call DISABLE TRIGGER ALL;")
@@ -473,6 +483,7 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
         .expect("batch is available for continuation");
     let continuation_call = ModelCallId::from_uuid(Uuid::now_v7());
     let result = SemanticTranscriptEntryId::from_uuid(Uuid::now_v7());
+    let result_frontier = ContextFrontierId::from_uuid(Uuid::now_v7());
     let outcome = repository
         .tool_loop_repository()
         .prepare_continuation(
@@ -481,7 +492,7 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
             batch.producing_call(),
             signalbox_application::ToolContinuationIdentities::new(
                 vec![result],
-                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                result_frontier,
                 continuation_call,
                 signalbox_domain::FailedModelCallTurnIdentities::new(
                     SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
@@ -506,6 +517,43 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
     let payload: String = sqlx::query_scalar("SELECT payload_kind FROM semantic_transcript_entry WHERE source_session_id = $1 AND semantic_entry_id = $2")
         .bind(fixture.session.into_uuid()).bind(result.into_uuid()).fetch_one(&pool).await?;
     assert_eq!(payload, "tool_inadmissible");
+    let target = signalbox_domain::ResolvedProviderTarget::naming(
+        signalbox_domain::ProviderModelIdentity::from_uuid(uuid(0xa159)),
+    );
+    let before_result = repository
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            signalbox_domain::FastMode::Disabled,
+            false,
+            batch.yielded_snapshot().frontier().snapshot(),
+        )
+        .await?
+        .expect("the producing call reported input usage");
+    let after_result = repository
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            signalbox_domain::FastMode::Disabled,
+            false,
+            result_frontier,
+        )
+        .await?
+        .expect("the committed result has a reported usage baseline");
+    let result_bytes = u64::try_from("placement_lost".len())?;
+    if target_available {
+        assert_eq!(
+            after_result.projected_unreported_content_bytes(),
+            before_result.projected_unreported_content_bytes() + result_bytes
+        );
+    } else {
+        assert!(after_result.projected_unreported_content_bytes() >= result_bytes);
+        assert_eq!(
+            after_result.projected_unreported_content_bytes(),
+            before_result.projected_unreported_content_bytes()
+        );
+    }
+
     let dispatcher = OutboxDispatcher::new(pool.clone());
     let mut projected = Vec::new();
     loop {
