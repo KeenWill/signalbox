@@ -223,10 +223,10 @@ impl Client {
         match method {
             "account/rateLimits/updated" => {
                 let event: super::frame::AccountRateLimitsUpdated = decode(params)?;
-                if self.rate_limits_read == RateLimitsRead::Pending
-                    && (event.rate_limits.primary.is_some()
-                        || event.rate_limits.secondary.is_some())
-                {
+                if event.rate_limits.primary.is_none() && event.rate_limits.secondary.is_none() {
+                    return Ok(Event::Ignored);
+                }
+                if self.rate_limits_read == RateLimitsRead::Pending {
                     self.rate_limits_read = RateLimitsRead::Superseded;
                 }
                 self.rate_limits.merge(event.rate_limits);

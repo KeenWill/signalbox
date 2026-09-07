@@ -68,6 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
         Some(
             "capacity_read"
+            | "capacity_empty_update"
             | "capacity_sparse"
             | "capacity_failure"
             | "capacity_read_late"
@@ -182,6 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     match scenario.as_str() {
         "capacity_read"
+        | "capacity_empty_update"
         | "capacity_fractional"
         | "capacity_read_error"
         | "capacity_sparse"
@@ -190,6 +192,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | "capacity_read_after_completion"
         | "capacity_read_stale"
         | "capacity_read_stale_after_completion" => {
+            if scenario == "capacity_empty_update" {
+                emit_value(
+                    json!({"method":"account/rateLimits/updated","params":{"rateLimits":{}}}),
+                );
+                emit_value(
+                    json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":null,"secondary":null}}}),
+                );
+            }
             if matches!(
                 scenario.as_str(),
                 "capacity_read_stale" | "capacity_read_stale_after_completion"

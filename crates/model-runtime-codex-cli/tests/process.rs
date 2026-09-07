@@ -506,6 +506,28 @@ async fn fractional_usage_emits_both_capacity_windows() {
 }
 
 #[tokio::test]
+async fn empty_capacity_notifications_do_not_reemit_cached_windows() {
+    let scenario = "capacity_empty_update";
+    let result = execute_scenario(
+        scenario,
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    completed(&result.evidence);
+    // A populated read is followed by notifications with omitted and null windows.
+    let [(correlation, snapshot)] = result.rate_limits.as_slice() else {
+        panic!("only the account read emits capacity; empty notifications cannot restamp it");
+    };
+    assert_eq!(correlation, scenario);
+    assert_eq!(snapshot.windows.len(), 2);
+    // The read reports primary 27% used and secondary 61% used.
+    assert_eq!(snapshot.windows[0].remaining_percent, 73);
+    assert_eq!(snapshot.windows[1].remaining_percent, 39);
+}
+
+#[tokio::test]
 async fn sparse_capacity_update_preserves_the_account_reads_primary_window() {
     let scenario = "capacity_sparse";
     let result = execute_scenario(
