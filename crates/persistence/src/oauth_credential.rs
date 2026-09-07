@@ -1,5 +1,15 @@
 //! Durable OAuth administration claims and receipts (docs/spec/identity-and-commands.md).
 
+mod deletion;
+mod provisioning;
+mod refresh;
+pub(crate) use provisioning::lock_pool_members;
+pub use provisioning::{
+    OauthAuthorization, OauthExchange, OauthProgress, OauthRegistration, OauthStartOutcome,
+};
+pub(crate) use refresh::quarantined_profiles;
+pub use refresh::{OauthDispatchLease, OauthQuarantineCause, OauthStoredAuthorization};
+
 use crate::command_registry::{self, CommandKind};
 use signalbox_domain::DurableCommandId;
 use sqlx::{PgConnection, PgPool, Row};
@@ -189,11 +199,11 @@ pub enum OauthCredentialHandlingOutcome {
 #[derive(Debug, signalbox_derive::OperatorError)]
 pub enum OauthCredentialRepositoryError {
     /// Database operation failed.
-    #[error("OAuth administration database failure: {field_0}")]
-    Database(#[source] sqlx::Error),
+    #[error("OAuth administration database failure")]
+    Database,
     /// The terminal transaction may have committed; equal replay resolves it.
-    #[error("OAuth administration commit is ambiguous: {field_0}")]
-    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("OAuth administration commit is ambiguous")]
+    CommitAmbiguous,
     /// Stored records violate their closed relational shape.
     #[error("OAuth administration record is inconsistent")]
     Corruption,
@@ -203,8 +213,8 @@ pub enum OauthCredentialRepositoryError {
 }
 
 impl From<sqlx::Error> for OauthCredentialRepositoryError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
+    fn from(_error: sqlx::Error) -> Self {
+        Self::Database
     }
 }
 
@@ -226,37 +236,11 @@ impl OauthCredentialRepository {
         command: &OauthCredentialCommand,
         evaluate: impl FnOnce() -> OauthCredentialOutcome,
     ) -> Result<OauthCredentialHandlingOutcome, OauthCredentialRepositoryError> {
-        if command.profile.is_empty()
-            || command.profile.len() > 256
-            || command.profile.trim() != command.profile
-            || command.profile.contains('\0')
-        {
-            return Err(OauthCredentialRepositoryError::InvalidProfile);
-        }
         let mut tx = self.pool.begin().await?;
-        if let Some(kind) = inspect(&mut tx, command.command_id).await? {
-            return existing(&mut tx, command, kind).await;
+        if let Some(existing) = claim(&mut tx, command).await? {
+            return Ok(existing);
         }
-        let issuer = command_registry::issuer_columns(signalbox_domain::CommandPrincipal::Operator);
-        let claimed = sqlx::query(
-            "INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind, issuer_module)
-             VALUES ($1, $2, 1, transaction_timestamp(), $3, $4) ON CONFLICT DO NOTHING",
-        ).bind(command.command_id.into_uuid())
-            .bind(crate::mapping::durable_command_kind_to_str(command.operation.kind()))
-            .bind(issuer.0).bind(issuer.1)
-            .execute(&mut *tx).await?.rows_affected() == 1;
-        if !claimed {
-            let kind = inspect(&mut tx, command.command_id)
-                .await?
-                .ok_or(OauthCredentialRepositoryError::Corruption)?;
-            return existing(&mut tx, command, kind).await;
-        }
-        // Table identifiers come exclusively from the closed operation; values are bound.
-        let (request_table, result_table) = command.operation.tables();
-        sqlx::query(sqlx::AssertSqlSafe(format!("INSERT INTO {request_table} (command_id, command_kind, storage_version, profile) VALUES ($1, $2, 1, $3)").as_str()))
-            .bind(command.command_id.into_uuid())
-            .bind(crate::mapping::durable_command_kind_to_str(command.operation.kind()))
-            .bind(&command.profile).execute(&mut *tx).await?;
+        let (_, result_table) = command.operation.tables();
         let outcome = evaluate();
         let (kind, reason) = outcome.columns();
         sqlx::query(sqlx::AssertSqlSafe(
@@ -270,13 +254,50 @@ impl OauthCredentialRepository {
         .await?;
         tx.commit().await.map_err(|error| {
             if crate::commit_failure_is_ambiguous(&error) {
-                OauthCredentialRepositoryError::CommitAmbiguous(error)
+                OauthCredentialRepositoryError::CommitAmbiguous
             } else {
-                OauthCredentialRepositoryError::Database(error)
+                OauthCredentialRepositoryError::Database
             }
         })?;
         Ok(OauthCredentialHandlingOutcome::Recorded(outcome))
     }
+}
+
+async fn claim(
+    connection: &mut PgConnection,
+    command: &OauthCredentialCommand,
+) -> Result<Option<OauthCredentialHandlingOutcome>, OauthCredentialRepositoryError> {
+    if command.profile.is_empty()
+        || command.profile.len() > 256
+        || command.profile.trim() != command.profile
+        || command.profile.contains('\0')
+    {
+        return Err(OauthCredentialRepositoryError::InvalidProfile);
+    }
+    if let Some(kind) = inspect(connection, command.command_id).await? {
+        return existing(connection, command, kind).await.map(Some);
+    }
+    let issuer = command_registry::issuer_columns(signalbox_domain::CommandPrincipal::Operator);
+    let claimed = sqlx::query(
+            "INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind, issuer_module)
+             VALUES ($1, $2, 1, transaction_timestamp(), $3, $4) ON CONFLICT DO NOTHING",
+        ).bind(command.command_id.into_uuid())
+            .bind(crate::mapping::durable_command_kind_to_str(command.operation.kind()))
+            .bind(issuer.0).bind(issuer.1)
+            .execute(&mut *connection).await?.rows_affected() == 1;
+    if !claimed {
+        let kind = inspect(connection, command.command_id)
+            .await?
+            .ok_or(OauthCredentialRepositoryError::Corruption)?;
+        return existing(connection, command, kind).await.map(Some);
+    }
+    // Table identifiers come exclusively from the closed operation; values are bound.
+    let (request_table, _) = command.operation.tables();
+    sqlx::query(sqlx::AssertSqlSafe(format!("INSERT INTO {request_table} (command_id, command_kind, storage_version, profile) VALUES ($1, $2, 1, $3)").as_str()))
+            .bind(command.command_id.into_uuid())
+            .bind(crate::mapping::durable_command_kind_to_str(command.operation.kind()))
+            .bind(&command.profile).execute(&mut *connection).await?;
+    Ok(None)
 }
 
 async fn inspect(
@@ -286,8 +307,8 @@ async fn inspect(
     command_registry::inspect(connection, id)
         .await
         .map_err(|error| match error {
-            command_registry::RegistryInspectionError::Database(error) => {
-                OauthCredentialRepositoryError::Database(error)
+            command_registry::RegistryInspectionError::Database(_) => {
+                OauthCredentialRepositoryError::Database
             }
             command_registry::RegistryInspectionError::Corruption(_) => {
                 OauthCredentialRepositoryError::Corruption

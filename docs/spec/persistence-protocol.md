@@ -589,13 +589,41 @@ from the tool-loop continuation origin, and stores its predecessor call,
 qualifying cause, and non-acceptance evidence atomically. What these rows mean
 is owned by [credential-availability](credential-availability.md).
 
+Runner replacement and abandonment commit the placement move, terminal command
+result, and one runner-state-transition event per affected session atomically.
+Pinned replacement also appends its reference-only placement entry and checked
+frontier; pre-pin replacement returns to unpinned without an entry. The
+placement snapshot writer does not produce these recovery transitions. A
+same-runner replacement reports a working-directory change only when the
+successor interpreted directory differs from the lost pinned directory.
+Replacement provisioning retains its immutable authorization and ready receipt
+across transactions. A typed provisioning refusal and its exact detail commit
+with the command rejection before acknowledgement; equal replay rereads that
+evidence. Rejected staging workspaces retain exact manifest and connection-epoch
+cleanup authority, and a release receipt records completion only under that
+authority.
+
+OAuth provisioning locks its profile and every retained pool co-member in
+reference order, rereads membership, and retries acquisition if membership grew.
+Pool-policy insertion locks every member in the same order. Authorization
+commits take a shared catalog lock; registration replacement takes its exclusive
+counterpart.
+
+OAuth refresh marks the current authorization generation under the profile row
+lock before exchange; replacement of returned tokens and marker clearing commit
+atomically, and recovery rereads the generation and marker. Delivery quarantine
+and its typed failure evidence commit together. Dispatch retains the row lock
+through copying tokens to the child's scratch home. Pool selection locks its
+OAuth profiles before reading quarantine and retains those locks through
+checkpointing. Deletion takes that lock, advances the profile generation,
+removes authorization and cached access, and commits its receipt together while
+retaining registration and history.
+
 ## Planned
 
-- Runner replacement and abandonment transactions:
-  [persistence-protocol design](../design/persistence-protocol.md).
 - Retiring an unacknowledged workspace release:
   [persistence-protocol design](../design/persistence-protocol.md).
-- Runner operation-failure evidence stored before acknowledgement:
+- General runner operation-failure evidence stored before acknowledgement:
   [persistence-protocol design](../design/persistence-protocol.md).
 - Runner placement in imported-create command records, for which storage version
   4 is reserved:
@@ -606,5 +634,5 @@ is owned by [credential-availability](credential-availability.md).
   [persistence-protocol design](../design/persistence-protocol.md).
 - A producer for the session-state-changed outbox event:
   [persistence-protocol design](../design/persistence-protocol.md).
-- Daemon-owned OAuth material storage:
+- OAuth refresh member-availability wakeups:
   [persistence-protocol design](../design/persistence-protocol.md).

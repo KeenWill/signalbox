@@ -4,18 +4,33 @@ Signalbox's build tools compile its crates and verify their contracts.
 
 ## Overview
 
-Cargo runs the full-workspace CI checks. Bazel builds the Rust workspace
-libraries and binaries with all features enabled, including fixture binaries,
-and runs their unit tests and migrated integration targets through native Rust
-actions. Separate Bazel PostgreSQL suites run the persistence and program-host
-integration binaries with a shared image digest declared as a compilation input.
-File-media format and registry conformance tests use native Bazel targets;
-process-isolation tests retain their provisioned Cargo job.
+Bazel checks workspace Rust formatting, Clippy, and documentation with warnings
+denied. Bazel builds the Rust workspace libraries and binaries with all features
+enabled, including fixture binaries, and runs their unit tests, standalone
+integration targets, and library doctests through native Rust actions. Generated
+JavaScript contract tests use a declared Node.js toolchain. Compile-fail
+diagnostic fixtures use host Cargo and always execute. Bazel PostgreSQL suites
+run the ignored tests selected by the suite manifest, with its features, skips,
+binary partitions, and shard counts. Each manifest shard runs on its own CI
+worker. Their compilation is cacheable; database tests always execute. Daemon
+PostgreSQL targets use sorted JSON maps. The Rust workflow binds the Bazel
+results to `validate` under its change-scope gate. File-media format and
+registry conformance tests use native Bazel targets; process-isolation tests
+retain their provisioned Cargo job.
+
+Coverage runs through Bazel for the workspace and the persistence, daemon, and
+terminal-client PostgreSQL selections. It is report-only, with no threshold.
+
+The web client's lint, typecheck, unit tests, production build, and
+three-browser Playwright checks run as Bazel targets. Packages resolve from the
+npm lockfile; browser runtimes and fonts are checksum-pinned test inputs. These
+results are cacheable without changing the screenshot goldens or their
+tolerances.
 
 ## Design decisions
 
-The checker job runs its eight Python suites through Bazel with declared Python
-and Rustfmt toolchains. Suites using host Git or shell utilities always execute.
+The checker job runs its Python suites through Bazel with declared Python and
+Rustfmt toolchains. Suites using host Git or shell utilities always execute.
 Markdown formatting uses a Bazel test with declared files, formatter packages,
 and configuration. Web-contract and model-projection generation run as native
 Bazel actions with declared output trees and snapshot-comparison tests. The

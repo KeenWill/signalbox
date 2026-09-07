@@ -93,6 +93,7 @@ pub struct ModelCallExecutionReconstitutionInput {
     calls: Vec<ModelCallReconstitutionInput>,
     tool_result_correlations: Vec<ToolResultAttemptCorrelation>,
     tool_denial_correlations: Vec<ToolApprovalResolution>,
+    tool_inadmissible_correlations: Vec<crate::ToolRequest>,
     uncommitted_tool_result_projection: Option<PreparedToolResultProjection>,
     availability_successor: bool,
 }
@@ -121,6 +122,7 @@ impl ModelCallExecutionReconstitutionInput {
             calls,
             tool_result_correlations: Vec::new(),
             tool_denial_correlations: Vec::new(),
+            tool_inadmissible_correlations: Vec::new(),
             uncommitted_tool_result_projection: None,
             availability_successor: false,
         }
@@ -143,6 +145,15 @@ impl ModelCallExecutionReconstitutionInput {
     }
 
     /// Supplies the exact durable denial resolution for every denied request
+    /// Supplies request-level terminal evidence for inadmissible result entries.
+    pub fn with_tool_inadmissible_correlations(
+        mut self,
+        requests: Vec<crate::ToolRequest>,
+    ) -> Self {
+        self.tool_inadmissible_correlations = requests;
+        self
+    }
+
     /// referenced by the current frontier.
     pub fn with_tool_denial_correlations(
         mut self,
@@ -595,6 +606,7 @@ impl ModelCallExecution {
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
                 | SemanticTranscriptEntryPayload::ToolClosed { .. }
                 | SemanticTranscriptEntryPayload::TurnCompleted { .. }
                 | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
@@ -1466,6 +1478,7 @@ fn reconstitute(
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
             | SemanticTranscriptEntryPayload::ToolClosed { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
@@ -1723,6 +1736,27 @@ fn reconstitute(
             ModelCallExecutionReconstitutionFailure::ToolDenialCorrelationMismatch,
         ));
     }
+    let mut tool_inadmissible_correlations = BTreeSet::new();
+    for request in &input.tool_inadmissible_correlations {
+        if request.inadmissible_reason().is_none()
+            || !tool_inadmissible_correlations.insert(request.id())
+            || !input.frontier_entries.iter().any(|entry| {
+                entry.source_session() == request.session()
+                    && entry.payload()
+                        == &SemanticTranscriptEntryPayload::ToolInadmissible {
+                            request: request.id(),
+                        }
+            })
+        {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::ToolResultCorrelationMismatch,
+            ));
+        }
+    }
+    if input.frontier_entries.iter().any(|entry| matches!(entry.payload(), SemanticTranscriptEntryPayload::ToolInadmissible { request } if !tool_inadmissible_correlations.contains(request))) {
+        return Err(fail(input, ModelCallExecutionReconstitutionFailure::ToolResultCorrelationMismatch));
+    }
     let running_tool_round =
         frontier_contains_tool_round(&input.starting_snapshot, &input.frontier_entries);
     let running_tool_continuation = match frontier_closes_latest_tool_round(
@@ -1730,6 +1764,7 @@ fn reconstitute(
         &input.frontier_entries,
         &tool_result_correlations,
         &tool_denial_correlations,
+        &tool_inadmissible_correlations,
     ) {
         Ok(closed) => closed,
         Err(()) => {
@@ -1839,6 +1874,7 @@ fn frontier_closes_latest_tool_round(
     frontier_entries: &[SemanticTranscriptEntry],
     tool_result_correlations: &BTreeMap<crate::ToolAttemptId, ToolResultAttemptCorrelation>,
     tool_denial_correlations: &BTreeSet<crate::ToolRequestId>,
+    tool_inadmissible_correlations: &BTreeSet<crate::ToolRequestId>,
 ) -> Result<bool, ()> {
     let suffix = &frontier_entries[starting_snapshot.entry_count()..];
     let Some((last_tool_use, producing_call)) =
@@ -1882,6 +1918,7 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
             | SemanticTranscriptEntryPayload::ToolClosed { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
@@ -1915,6 +1952,11 @@ fn frontier_closes_latest_tool_round(
                 mode: DelegationWaitMode::Foreground,
                 ..
             } => awaiting_request == request,
+            SemanticTranscriptEntryPayload::ToolInadmissible {
+                request: result_request,
+            } => {
+                result_request == request && tool_inadmissible_correlations.contains(result_request)
+            }
             SemanticTranscriptEntryPayload::ToolClosed { .. } => false,
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::DelegatedTask { .. }
@@ -1967,6 +2009,7 @@ fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> 
         | SemanticTranscriptEntryPayload::Imported { .. }
         | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
         | SemanticTranscriptEntryPayload::ToolDenied { .. }
+        | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
         | SemanticTranscriptEntryPayload::ToolClosed { .. }
         | SemanticTranscriptEntryPayload::TurnCompleted { .. }
         | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
@@ -1987,6 +2030,7 @@ fn frontier_contains_tool_round(
                 SemanticTranscriptEntryPayload::AssistantToolUse { .. }
                     | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                     | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                    | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
                     | SemanticTranscriptEntryPayload::ToolClosed { .. }
             )
         })

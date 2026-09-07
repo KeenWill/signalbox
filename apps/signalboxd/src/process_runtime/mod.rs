@@ -304,7 +304,9 @@ impl ContextCompactionModel for UnavailableContextCompactionModel {
 
 #[derive(Clone, Debug)]
 struct ConnectionServices {
+    configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     recovery_reporter: Option<FatalRecoveryReporter>,
+    oauth_service: Option<Arc<crate::OauthCredentialService>>,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
@@ -364,6 +366,7 @@ use runtime::{nudge_delegation_wake, observe_outbox_metrics_once};
 mod connection;
 pub use connection::shared_snapshot_reader_budget;
 use connection::*;
+mod reload;
 mod request;
 use request::handle_request;
 mod delegation;

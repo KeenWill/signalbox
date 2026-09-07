@@ -24,12 +24,18 @@ export interface VisibleRange {
   end: number
 }
 
+export interface ProviderDraft {
+  key: string
+  content: string
+}
+
 export interface SessionSyncState {
   sessionId: string | null
   attempt: number
   phase: 'idle' | 'connecting' | 'live' | 'resyncing' | 'failed'
   snapshot: WebSessionLiveSnapshot | null
   cursor: string | null
+  drafts: readonly ProviderDraft[]
 }
 
 // Hard safety ceiling: unresolved identities cannot be evicted to admit new messages.
@@ -61,7 +67,14 @@ interface AppState extends BrowserPreferences {
 const initialState: AppState = {
   ...loadBrowserPreferences(),
   overlay: null,
-  sessionSync: { sessionId: null, attempt: 0, phase: 'idle', snapshot: null, cursor: null },
+  sessionSync: {
+    sessionId: null,
+    attempt: 0,
+    phase: 'idle',
+    snapshot: null,
+    cursor: null,
+    drafts: [],
+  },
   pendingSessionInputs: {},
   attentionSync: 'idle',
   selectedTimeline: null,
@@ -90,6 +103,7 @@ const appSlice = createSlice({
         phase: action.payload === null ? 'idle' : 'connecting',
         snapshot: null,
         cursor: null,
+        drafts: [],
       }
     },
     sessionFollowReconnectRequested(state) {
@@ -97,6 +111,7 @@ const appSlice = createSlice({
       state.sessionSync.attempt += 1
       state.sessionSync.phase = 'connecting'
       state.sessionSync.snapshot = null
+      state.sessionSync.drafts = []
     },
     sessionFollowUpdated(state, action: { payload: SessionSyncState }) {
       if (
@@ -105,6 +120,7 @@ const appSlice = createSlice({
       )
         state.sessionSync = {
           ...action.payload,
+          drafts: action.payload.drafts.map((draft) => ({ ...draft })),
           snapshot:
             action.payload.snapshot === null
               ? null

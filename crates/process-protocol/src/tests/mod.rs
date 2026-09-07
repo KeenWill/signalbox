@@ -15,6 +15,7 @@ mod metadata_listing_and_conversations;
 mod oauth;
 mod operator_status;
 mod reconciliation_and_delegation_events;
+mod reload_configuration;
 mod review;
 mod scalars_and_rejection;
 mod server_message_family;

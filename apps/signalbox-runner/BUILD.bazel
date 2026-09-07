@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_COMPILE_DATA = ["//:config/signalbox-runner.example.toml"]
 
@@ -32,3 +32,13 @@ rust_unit_test(
     name = "signalbox_runner_unit_tests",
     crate = ":signalbox-runner",
 )
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_runner",
+)
+
+rust_quality_tests(documented_crates = [
+    ":signalbox_runner",
+    ":signalbox-runner",
+])

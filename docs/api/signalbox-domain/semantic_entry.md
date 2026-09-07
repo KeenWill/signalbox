@@ -128,6 +128,9 @@ pub enum SemanticTranscriptEntryPayload {
     ToolDenied {
         request: ToolRequestId,
     },
+    ToolInadmissible {
+        request: ToolRequestId,
+    },
     ToolClosed {
         request: ToolRequestId,
     },

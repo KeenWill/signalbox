@@ -267,6 +267,7 @@ impl RunnerEnrollment {
                 profiles,
                 workspaces: advertisement.workspaces,
                 sandboxes: advertisement.sandboxes,
+                default_working_directory: advertisement.default_working_directory,
                 repositories: advertisement.repositories,
                 revision,
                 current_revision: Arc::clone(&self.registration_revision),
@@ -421,6 +422,7 @@ pub struct ValidatedRunnerRegistration {
     profiles: BTreeMap<CredentialProfileName, CredentialProfilePolicy>,
     workspaces: BTreeSet<WorkspaceCapability>,
     sandboxes: BTreeSet<RunnerSandboxProfile>,
+    default_working_directory: Option<crate::RunnerWorkingDirectory>,
     repositories: BTreeMap<WorkspaceRepositoryKey, RunnerRepositoryEntry>,
     revision: RunnerGeneration,
     pub(super) current_revision: Arc<AtomicU64>,
@@ -438,6 +440,7 @@ impl PartialEq for ValidatedRunnerRegistration {
             && self.profiles == other.profiles
             && self.workspaces == other.workspaces
             && self.sandboxes == other.sandboxes
+            && self.default_working_directory == other.default_working_directory
             && self.repositories == other.repositories
             && self.revision == other.revision
     }
@@ -533,6 +536,10 @@ impl ValidatedRunnerRegistration {
     pub fn sandboxes(&self) -> impl Iterator<Item = RunnerSandboxProfile> + '_ {
         self.sandboxes.iter().copied()
     }
+    /// Returns the default directory reported by this exact registration.
+    pub fn default_working_directory(&self) -> Option<&crate::RunnerWorkingDirectory> {
+        self.default_working_directory.as_ref()
+    }
 
     /// Iterates the advertised repository entries in key order.
     pub fn repositories(&self) -> impl Iterator<Item = &RunnerRepositoryEntry> {
@@ -559,7 +566,8 @@ impl ValidatedRunnerRegistration {
             input.workspaces.clone(),
             input.sandboxes.clone(),
             input.repositories.clone(),
-        );
+        )
+        .with_default_working_directory(input.default_working_directory.clone());
         let stored_tool_count = input.tools.len();
         let stored_tools: BTreeMap<_, _> = input
             .tools
@@ -634,4 +642,6 @@ pub struct ValidatedRunnerRegistrationReconstitutionInput {
     pub sandboxes: BTreeSet<RunnerSandboxProfile>,
     /// The exact advertised repository entries.
     pub repositories: Vec<RunnerRepositoryEntry>,
+    /// The default directory reported with this registration.
+    pub default_working_directory: Option<crate::RunnerWorkingDirectory>,
 }

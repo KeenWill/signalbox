@@ -213,7 +213,9 @@ fn reconstitute_batch(
     }
     let mut approvals = BTreeMap::new();
     for approval in &input.approvals {
-        if !request_ids.contains(&approval.request())
+        if requests.iter().any(|request| {
+            request.id() == approval.request() && request.inadmissible_reason().is_some()
+        }) || !request_ids.contains(&approval.request())
             || approvals
                 .insert(approval.request(), approval.clone())
                 .is_some()
@@ -235,15 +237,13 @@ fn reconstitute_batch(
             ToolBatchReconstitutionFailure::ApprovalInventoryMismatch,
         ));
     }
-    if let Some(first_undecided) = requests
-        .iter()
-        .position(|request| !approvals.contains_key(&request.id()))
-        && requests.iter().skip(first_undecided + 1).any(|request| {
-            approvals
-                .get(&request.id())
-                .is_some_and(|approval| approval.source().requires_ordered_prefix())
-        })
-    {
+    if let Some(first_undecided) = requests.iter().position(|request| {
+        request.inadmissible_reason().is_none() && !approvals.contains_key(&request.id())
+    }) && requests.iter().skip(first_undecided + 1).any(|request| {
+        approvals
+            .get(&request.id())
+            .is_some_and(|approval| approval.source().requires_ordered_prefix())
+    }) {
         return Err(fail(
             input,
             ToolBatchReconstitutionFailure::ApprovalInventoryMismatch,
@@ -390,7 +390,9 @@ fn reconstitute_batch(
     }
     let earliest_undecided = requests
         .iter()
-        .find(|request| !approvals.contains_key(&request.id()))
+        .find(|request| {
+            request.inadmissible_reason().is_none() && !approvals.contains_key(&request.id())
+        })
         .map(ToolRequest::id);
     let ambiguous_attempts = attempts
         .values()

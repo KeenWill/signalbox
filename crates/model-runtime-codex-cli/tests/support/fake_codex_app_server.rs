@@ -53,18 +53,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write("fake-codex-block-stdin-ready", "ready\n")?;
         std::thread::sleep(Duration::from_secs(60));
     }
+    let selected =
+        std::env::args().find_map(|arg| arg.strip_prefix("--fixture=").map(str::to_owned));
     let initialize = read_frame()?;
     assert_eq!(initialize["method"], "initialize");
     emit_value(json!({"id":1,"result":{}}));
     assert_eq!(read_frame()?["method"], "initialized");
+    let read_limits = read_frame()?;
+    assert_eq!(read_limits["method"], "account/rateLimits/read");
+    let rate_limits = match selected.as_deref() {
+        Some("capacity_fractional") => json!({
+            "primary":{"usedPercent":99.5,"windowDurationMins":300,"resetsAt":1800000700},
+            "secondary":{"usedPercent":105.25,"windowDurationMins":10080,"resetsAt":1800001400}
+        }),
+        Some(
+            "capacity_read"
+            | "capacity_empty_update"
+            | "capacity_sparse"
+            | "capacity_failure"
+            | "capacity_read_late"
+            | "capacity_read_after_completion"
+            | "capacity_read_stale"
+            | "capacity_read_stale_after_completion",
+        ) => json!({
+            "primary":{"usedPercent":27,"windowDurationMins":300,"resetsAt":1800000700},
+            "secondary":{"usedPercent":61,"windowDurationMins":10080,"resetsAt":1800001400}
+        }),
+        _ => json!({}),
+    };
+    if selected.as_deref() == Some("capacity_read_error") {
+        emit_value(
+            json!({"id":read_limits["id"],"error":{"code":-32600,"message":"rate limits unavailable"}}),
+        );
+    } else if !matches!(
+        selected.as_deref(),
+        Some(
+            "capacity_read_pending"
+                | "capacity_read_late"
+                | "capacity_read_after_completion"
+                | "capacity_read_stale"
+                | "capacity_read_stale_after_completion"
+        )
+    ) {
+        emit_value(json!({"id":read_limits["id"],"result":{"rateLimits":rate_limits}}));
+    }
     let thread = read_frame()?;
     assert_eq!(thread["method"], "thread/start");
     assert_eq!(thread["params"]["ephemeral"], true);
     assert_eq!(thread["params"]["sandbox"], "read-only");
     assert_eq!(thread["params"]["approvalPolicy"], "never");
     std::fs::write("fake-codex-thread", thread["params"].to_string())?;
-    let selected =
-        std::env::args().find_map(|arg| arg.strip_prefix("--fixture=").map(str::to_owned));
     let thread_id = if selected.as_deref() == Some("credential_prefix_thread_id_before_text") {
         fixtures::CREDENTIAL_PREFIX_THREAD_ID
     } else {
@@ -144,6 +182,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
     match scenario.as_str() {
+        "capacity_read"
+        | "capacity_empty_update"
+        | "capacity_fractional"
+        | "capacity_read_error"
+        | "capacity_sparse"
+        | "capacity_read_pending"
+        | "capacity_read_late"
+        | "capacity_read_after_completion"
+        | "capacity_read_stale"
+        | "capacity_read_stale_after_completion" => {
+            if scenario == "capacity_empty_update" {
+                emit_value(
+                    json!({"method":"account/rateLimits/updated","params":{"rateLimits":{}}}),
+                );
+                emit_value(
+                    json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":null,"secondary":null}}}),
+                );
+            }
+            if matches!(
+                scenario.as_str(),
+                "capacity_read_stale" | "capacity_read_stale_after_completion"
+            ) {
+                emit_value(
+                    json!({"method":"account/rateLimits/updated","params":{"rateLimits":{
+                        "primary":{"usedPercent":96,"windowDurationMins":300,"resetsAt":1800001800},
+                        "secondary":{"usedPercent":93,"windowDurationMins":10080,"resetsAt":1800002400}
+                    }}}),
+                );
+            }
+            if scenario == "capacity_read_stale" {
+                emit_value(json!({"id":read_limits["id"],"result":{"rateLimits":rate_limits}}));
+            }
+            if scenario == "capacity_read_late" {
+                emit_value(
+                    json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":null,"secondary":null}}}),
+                );
+                emit_value(json!({"id":read_limits["id"],"result":{"rateLimits":rate_limits}}));
+            }
+            if scenario == "capacity_sparse" {
+                emit_value(
+                    json!({"method":"account/rateLimits/updated","params":{"rateLimits":{
+                        "primary":null,"secondary":{"usedPercent":88,"windowDurationMins":10080,"resetsAt":1800001600}
+                    }}}),
+                );
+            }
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+            if matches!(
+                scenario.as_str(),
+                "capacity_read_after_completion" | "capacity_read_stale_after_completion"
+            ) {
+                emit_value(json!({"id":read_limits["id"],"result":{"rateLimits":rate_limits}}));
+            }
+        }
+        "capacity_failure" => {
+            emit_value(
+                json!({"method":"account/rateLimits/updated","params":{"rateLimits":{
+                    "primary":{"usedPercent":105,"windowDurationMins":300,"resetsAt":1800001700},"secondary":null
+                }}}),
+            );
+            failed("terminal rejection");
+        }
         "rate_snapshot_past" | "quota_snapshot_past" => {
             emit_value(
                 json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":100,"resetsAt":1}}}}),
