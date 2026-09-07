@@ -20,6 +20,9 @@ where
     let mut services = services.clone();
     if let Some(reload) = &services.configuration_reload {
         let catalogs = reload.catalogs();
+        if let Some(model) = reload.compaction_model(catalogs.models.clone()) {
+            services.context_compaction_model = model;
+        }
         services.model_configuration = catalogs.models;
         services.template_configuration = catalogs.templates;
     }

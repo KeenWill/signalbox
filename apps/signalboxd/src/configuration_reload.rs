@@ -6,14 +6,18 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use signalbox_module_repo_watch_v2::{RepositoryRuleSet, repository_rule_set_digest};
+use signalbox_module_repo_watch_v2::{
+    ReloadIntentInput, RepositoryRuleSet, RuleReconciliationAdmission, repository_rule_set_digest,
+};
 use signalbox_persistence::reload_configuration::{
     ReloadClaim, ReloadConfiguration, ReloadConfigurationRepository, ReloadIntent, ReloadLookup,
     ReloadPhase, ReloadRepositoryError, ReloadResult,
 };
 use tokio::sync::Mutex;
 
+use crate::repo_watch_runtime::RepositoryWatchRuntime;
 use crate::{HubModelConfiguration, SessionTemplateConfiguration};
+use signalbox_persistence::convergence_sweep::PostgresConvergenceSweepStore;
 
 // The design admits these catalog sections; all other model-document keys are startup-only.
 const RELOADABLE_KEYS: [&str; 4] = ["models", "serving_targets", "aliases", "repository_watch"];
@@ -52,7 +56,7 @@ impl ConfigurationCatalogs {
 }
 
 /// One daemon-wide reload mutex and one atomically replaced catalog pair.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ConfigurationReload {
     current: Arc<RwLock<ConfigurationCatalogs>>,
     serial: Arc<Mutex<()>>,
@@ -61,6 +65,18 @@ pub struct ConfigurationReload {
     template_path: PathBuf,
     home: Option<PathBuf>,
     startup: toml::Table,
+    watch: Option<RepositoryWatchRuntime>,
+    runtime_factory: Option<crate::model_catalog_runtime::ModelRuntimeFactory>,
+    github_tool_credential: Option<PathBuf>,
+    convergence: PostgresConvergenceSweepStore,
+}
+
+impl std::fmt::Debug for ConfigurationReload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConfigurationReload")
+            .finish_non_exhaustive()
+    }
 }
 
 impl ConfigurationReload {
@@ -80,12 +96,256 @@ impl ConfigurationReload {
                 templates: Arc::new(templates),
             })),
             serial: Arc::new(Mutex::new(())),
-            repository: ReloadConfigurationRepository::new(pool),
+            repository: ReloadConfigurationRepository::new(pool.clone()),
+            convergence: PostgresConvergenceSweepStore::new(pool),
+            watch: None,
+            runtime_factory: None,
+            github_tool_credential: None,
             model_path,
             template_path,
             home,
             startup,
         })
+    }
+
+    /// Validates execution composition before admitting a replacement catalog.
+    pub fn with_runtime_factory(
+        mut self,
+        factory: crate::model_catalog_runtime::ModelRuntimeFactory,
+    ) -> Self {
+        self.runtime_factory = Some(factory);
+        self
+    }
+
+    pub(crate) fn compaction_model(
+        &self,
+        models: Arc<HubModelConfiguration>,
+    ) -> Option<Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel>> {
+        self.runtime_factory.map(|factory| {
+            Arc::new(
+                crate::model_catalog_runtime::CatalogContextCompactionModel::new(models, factory),
+            ) as _
+        })
+    }
+
+    pub fn with_github_tool_credential(mut self, path: PathBuf) -> Self {
+        self.github_tool_credential = Some(path);
+        self
+    }
+
+    fn validate_runtime(&self, catalogs: &ConfigurationCatalogs) -> Result<(), ReloadResult> {
+        if let Some(tool_credential) = &self.github_tool_credential
+            && catalogs.models.repository_watch().is_some_and(|watch| {
+                watch.repositories().iter().any(|repository| {
+                    crate::repo_watch_credentials::credential_files_conflict(
+                        tool_credential,
+                        repository.credential_file(),
+                    )
+                })
+            })
+        {
+            return Err(failure(
+                ReloadPhase::Validate,
+                "repository-watch credential conflicts with GitHub tool credential",
+            ));
+        }
+        if let Some(factory) = self.runtime_factory {
+            factory
+                .build(&catalogs.models)
+                .map_err(|_| failure(ReloadPhase::Validate, "model runtime composition failed"))?;
+        }
+        Ok(())
+    }
+
+    /// Attaches the idle repository-watch supervisor before startup recovery.
+    pub fn with_repository_watch(mut self, watch: RepositoryWatchRuntime) -> Self {
+        self.watch = Some(watch);
+        self
+    }
+
+    /// Delivers pending snapshots before ordinary on-disk rule activation or client admission.
+    pub async fn recover(&self) -> Result<(), ReloadRepositoryError> {
+        let _serial = self.serial.lock().await;
+        let pending = self.repository.pending().await?;
+        if pending.is_empty() {
+            if let Some(watch) = &self.watch {
+                let catalogs = self.catalogs();
+                let prepared = watch.prepare_reload(catalogs.clone()).await.map_err(|_| {
+                    ReloadRepositoryError::Corruption("reload worker preparation failed")
+                })?;
+                watch
+                    .reload_configuration(catalogs.models.repository_watch().cloned())
+                    .await
+                    .map_err(|_| {
+                        ReloadRepositoryError::Corruption("startup rule activation failed")
+                    })?;
+                self.reconcile(&catalogs).await?;
+                watch.install_reload(prepared).await;
+            }
+        } else {
+            for (request, intent) in pending {
+                let replacement = self.restore(&intent.replacement_snapshot).map_err(|_| {
+                    ReloadRepositoryError::Corruption(
+                        "retained reload is incompatible with startup configuration",
+                    )
+                })?;
+                self.deliver(request, &intent, replacement, true).await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn restore(&self, snapshot: &str) -> Result<ConfigurationCatalogs, ReloadResult> {
+        let snapshot: RetainedSnapshot = serde_json::from_str(snapshot)
+            .map_err(|_| failure(ReloadPhase::Validate, "retained snapshot cannot be decoded"))?;
+        let mut source = self
+            .catalogs()
+            .models
+            .source()
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| failure(ReloadPhase::Validate, "startup source is invalid"))?;
+        source
+            .as_table_mut()
+            .retain(|key, _| !RELOADABLE_KEYS.contains(&key));
+        let reloadable = snapshot
+            .model_catalog
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| failure(ReloadPhase::Validate, "retained model snapshot is invalid"))?;
+        for (key, value) in reloadable.iter() {
+            if !RELOADABLE_KEYS.contains(&key) {
+                return Err(failure(
+                    ReloadPhase::Validate,
+                    "snapshot contains startup-only configuration",
+                ));
+            }
+            source.insert(key, value.clone());
+        }
+        let models = HubModelConfiguration::parse(&source.to_string())
+            .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
+        let templates =
+            SessionTemplateConfiguration::parse_snapshot(&snapshot.session_templates, &models)
+                .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
+        let catalogs = ConfigurationCatalogs {
+            models: Arc::new(models),
+            templates: Arc::new(templates),
+        };
+        validate_catalogs(&catalogs)?;
+        self.validate_runtime(&catalogs)?;
+        Ok(catalogs)
+    }
+
+    async fn reconcile(
+        &self,
+        catalogs: &ConfigurationCatalogs,
+    ) -> Result<(), ReloadRepositoryError> {
+        let targets = catalogs
+            .models
+            .repository_watch()
+            .filter(|watch| watch.enabled() && watch.convergence_sweep().is_some())
+            .into_iter()
+            .flat_map(|watch| watch.repositories())
+            .flat_map(|repository| {
+                repository
+                    .convergence_pull_requests()
+                    .iter()
+                    .map(|number| (repository.repository().clone(), *number))
+            })
+            .collect::<Vec<_>>();
+        let restored = self
+            .convergence
+            .reconcile_configured_targets(&targets)
+            .await
+            .map_err(|_| {
+                ReloadRepositoryError::Corruption("reload convergence reconciliation failed")
+            })?;
+        if let Some(watch) = &self.watch {
+            watch.nudge_restored(restored).await;
+        }
+        Ok(())
+    }
+
+    async fn deliver(
+        &self,
+        request: ReloadConfiguration,
+        intent: &ReloadIntent,
+        replacement: ConfigurationCatalogs,
+        recovering: bool,
+    ) -> Result<ReloadLookup, ReloadRepositoryError> {
+        if let Some(watch) = &self.watch {
+            let prepared = match watch.prepare_reload(replacement.clone()).await {
+                Ok(prepared) => prepared,
+                Err(_) if recovering => {
+                    return Err(ReloadRepositoryError::Corruption(
+                        "reload worker preparation failed",
+                    ));
+                }
+                Err(_) => {
+                    let result = failure(
+                        ReloadPhase::Install,
+                        "repository-watch listener or worker preparation failed",
+                    );
+                    self.repository.finish(request, &result).await?;
+                    return Ok(ReloadLookup::Recorded(result));
+                }
+            };
+            let configuration = replacement
+                .models
+                .repository_watch()
+                .filter(|watch| watch.enabled());
+            let sets = configuration
+                .into_iter()
+                .flat_map(|watch| {
+                    watch.repositories().iter().map(move |repository| {
+                        RepositoryRuleSet::new(repository.repository(), watch.rules())
+                    })
+                })
+                .collect::<Vec<_>>();
+            let activation = watch
+                .activate_reload(ReloadIntentInput {
+                    command_id: request.command_id,
+                    repositories: &sets,
+                    rule_set_digest: intent.rule_set_digest,
+                })
+                .await
+                .map_err(|_| ReloadRepositoryError::Corruption("reload rule activation failed"))?;
+            if !matches!(activation, RuleReconciliationAdmission::Applied { .. }) {
+                drop(prepared);
+                let refusal = failure(
+                    ReloadPhase::Activate,
+                    "repository-watch rule revision was rejected",
+                );
+                let prior = match self.restore(&intent.prior_snapshot) {
+                    Ok(prior) => prior,
+                    Err(_) => {
+                        self.repository.finish(request, &refusal).await?;
+                        return Err(ReloadRepositoryError::Corruption(
+                            "prior reload snapshot is incompatible with startup configuration",
+                        ));
+                    }
+                };
+                let prepared = watch.prepare_reload(prior.clone()).await.map_err(|_| {
+                    ReloadRepositoryError::Corruption("prior reload worker preparation failed")
+                })?;
+                self.reconcile(&prior).await?;
+                watch.install_reload(prepared).await;
+                *self
+                    .current
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = prior;
+                self.repository.finish(request, &refusal).await?;
+                return Ok(ReloadLookup::Recorded(refusal));
+            }
+            self.reconcile(&replacement).await?;
+            watch.install_reload(prepared).await;
+        }
+        *self
+            .current
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = replacement;
+        self.repository
+            .finish(request, &ReloadResult::Reloaded)
+            .await?;
+        Ok(ReloadLookup::Recorded(ReloadResult::Reloaded))
     }
 
     /// Clones the complete pair under one short read lock.
@@ -160,14 +420,7 @@ impl ConfigurationReload {
         if let ReloadClaim::Settled(outcome) = claimed {
             return Ok(outcome);
         }
-        *self
-            .current
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = replacement;
-        self.repository
-            .finish(request, &ReloadResult::Reloaded)
-            .await?;
-        Ok(ReloadLookup::Recorded(ReloadResult::Reloaded))
+        self.deliver(request, &intent, replacement, false).await
     }
 
     fn read_replacement(&self) -> Result<ConfigurationCatalogs, ReloadResult> {
@@ -199,30 +452,37 @@ impl ConfigurationReload {
                     };
                     failure(phase, &error.to_string())
                 })?;
-        if let Some(watch) = models.repository_watch() {
-            watch
-                .validate_convergence_template(templates.summaries().map(|(name, _)| name))
-                .map_err(|_| {
-                    failure(ReloadPhase::Validate, "convergence template is unavailable")
-                })?;
-            if watch.enabled()
-                && watch
-                    .rules()
-                    .iter()
-                    .flat_map(|rule| rule.actions())
-                    .any(|action| templates.resolve(action.template()).is_none())
-            {
-                return Err(failure(
-                    ReloadPhase::Validate,
-                    "repository-watch rule template is unavailable",
-                ));
-            }
-        }
-        Ok(ConfigurationCatalogs {
+        let catalogs = ConfigurationCatalogs {
             models: Arc::new(models),
             templates: Arc::new(templates),
-        })
+        };
+        validate_catalogs(&catalogs)?;
+        self.validate_runtime(&catalogs)?;
+        Ok(catalogs)
     }
+}
+
+fn validate_catalogs(catalogs: &ConfigurationCatalogs) -> Result<(), ReloadResult> {
+    let models = &catalogs.models;
+    let templates = &catalogs.templates;
+    if let Some(watch) = models.repository_watch() {
+        watch
+            .validate_convergence_template(templates.summaries().map(|(name, _)| name))
+            .map_err(|_| failure(ReloadPhase::Validate, "convergence template is unavailable"))?;
+        if watch.enabled()
+            && watch
+                .rules()
+                .iter()
+                .flat_map(|rule| rule.actions())
+                .any(|action| templates.resolve(action.template()).is_none())
+        {
+            return Err(failure(
+                ReloadPhase::Validate,
+                "repository-watch rule template is unavailable",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn startup_sections(models: &HubModelConfiguration) -> Result<toml::Table, ReloadResult> {

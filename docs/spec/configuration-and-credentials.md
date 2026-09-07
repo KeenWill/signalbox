@@ -699,12 +699,26 @@ validation of nonempty reviewer identities after bot-suffix normalization.
 Convergence reads and the sweep require this policy; other code-host operations
 do not use it.
 
+Each request and execution pass uses one immutable catalog snapshot.
+
+A reload that adds, edits, or removes `repository_watch.rules` commits
+activations and deactivations in the [reconciliation transaction](repo-watch.md)
+that records each activation's repository event tail, inside the reload
+boundary. A reload pauses sweep admission and stops and joins active sweep
+attempts before re-running convergence configured-target reconciliation after
+rule activation and event-tail capture commit, inside the reload boundary, using
+an empty effective target set when repository watch is disabled; sweep admission
+resumes under the replacement snapshot on success or the prior snapshot on
+rule-revision rejection only if that snapshot validates against the current
+startup-only sections, as [reload recovery](process-protocol.md) requires.
+Enabling convergence while repository watch is enabled composes the sweep task;
+disabling either terminates the task. A running sweep reads the new targets,
+template, interval, and credential path at its next attempt.
+
 ## Planned
 
 - Input-modality declarations on model and serving-target records, and the blob
   catalog they feed: [design](../design/configuration-and-credentials.md).
-- Repository-watch reload activation and startup replay:
-  [design](../design/configuration-and-credentials.md).
 - Dated rate windows on a model entry; the present grammar admits one flat rate,
   which is one window across all time:
   [design](../design/configuration-and-credentials.md).

@@ -1,5 +1,10 @@
 //! Repository-scoped credentials resolved at the external-I/O boundary.
 
+use std::{
+    env, fs,
+    path::{Component, Path, PathBuf},
+};
+
 use std::{error::Error, fmt};
 
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
@@ -82,6 +87,89 @@ impl fmt::Display for RepositoryWatchClientLoadError {
 }
 
 impl Error for RepositoryWatchClientLoadError {}
+
+/// Compares credential references using normalized paths, symlinks, and file identity.
+pub fn credential_files_conflict(left: &Path, right: &Path) -> bool {
+    let left = resolved_file_reference(left);
+    let right = resolved_file_reference(right);
+    left == right || same_file_identity(&left, &right)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_left: &Path, _right: &Path) -> bool {
+    false
+}
+
+fn resolved_file_reference(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut resolved = normalize_file_reference(&absolute);
+    for _ in 0..40 {
+        let mut prefix = PathBuf::new();
+        let mut components = resolved.components();
+        let mut replacement = None;
+        while let Some(component) = components.next() {
+            prefix.push(component.as_os_str());
+            let Ok(metadata) = fs::symlink_metadata(&prefix) else {
+                return resolved;
+            };
+            if !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let Ok(target) = fs::read_link(&prefix) else {
+                return resolved;
+            };
+            let mut target = if target.is_absolute() {
+                target
+            } else {
+                prefix
+                    .parent()
+                    .map_or(target.clone(), |parent| parent.join(target))
+            };
+            target.extend(components.map(|remaining| remaining.as_os_str()));
+            replacement = Some(normalize_file_reference(&target));
+            break;
+        }
+        let Some(replacement) = replacement else {
+            return fs::canonicalize(&resolved).unwrap_or(resolved);
+        };
+        resolved = replacement;
+    }
+    resolved
+}
+
+fn normalize_file_reference(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !path.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+    }
+    normalized
+}
 
 #[cfg(test)]
 mod tests {

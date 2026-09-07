@@ -521,6 +521,7 @@ impl From<GoalRepositoryError> for PostgresGoalPassDispositionError {
 pub struct PostgresGoalPassDisposition {
     repository: GoalRepository,
     model_configuration: HubModelConfiguration,
+    configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     eligibility_nudge: InProcessEligibilityNudge,
     numeric_bounds: GoalModeNumericBounds,
 }
@@ -536,9 +537,18 @@ impl PostgresGoalPassDisposition {
         Self {
             repository: GoalRepository::new(pool),
             model_configuration,
+            configuration_reload: None,
             eligibility_nudge,
             numeric_bounds,
         }
+    }
+
+    pub fn with_configuration_reload(
+        mut self,
+        reload: crate::configuration_reload::ConfigurationReload,
+    ) -> Self {
+        self.configuration_reload = Some(reload);
+        self
     }
 
     /// Reconciles automatic-resume timers lost with a prior daemon process.
@@ -935,10 +945,15 @@ impl PostgresGoalPassDisposition {
         // command apply to that block or to nothing: without it a lineage that
         // reached an operator-required block in that window would be resumed by
         // a command that answered a different failure.
+        let models = self
+            .configuration_reload
+            .as_ref()
+            .map(|reload| reload.catalogs().models)
+            .unwrap_or_else(|| std::sync::Arc::new(self.model_configuration.clone()));
         let outcome = self
             .repository
             .handle_expected_user_command(command, Some(candidates), blocked, |alias| {
-                self.model_configuration.resolve_alias(alias)
+                models.resolve_alias(alias)
             })
             .await;
         match outcome {

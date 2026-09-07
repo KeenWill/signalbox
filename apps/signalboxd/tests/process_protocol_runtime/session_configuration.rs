@@ -842,13 +842,79 @@ async fn reload_configuration_swaps_request_catalogs_and_replays_without_reading
         pool.clone(),
         nudge,
         InProcessToolDispatchGate::default(),
-        models,
+        models.clone(),
         templates,
     )
-    .with_configuration_reload(reload);
+    .with_configuration_reload(reload.clone());
     let (shutdown, receiver) = watch::channel(false);
     let task = tokio::spawn(runtime.run(receiver));
     let mut connection = Connection::connect(socket.socket()).await?;
+    let scripted = RecordingCountedScriptedModel::following(
+        [completed_script(
+            "fixture-model-added",
+            "reloaded model reply",
+            TokenUsage::unreported(),
+        )],
+        [4],
+    );
+    let probe = scripted.clone();
+    let pass_pool = pool.clone();
+    let compose = move |models: &HubModelConfiguration| {
+        let catalog = models.runtime_model_catalog();
+        let provider = RuntimeModelCallProvider::new(scripted.clone(), catalog.clone(), None);
+        let repository = PostgresModelCallRepository::new(
+            pass_pool.clone(),
+            models.target_catalog(),
+            ModelCallCredentialReference::new("reload-recording-fixture"),
+        )
+        .with_session_credentials(models.credential_family_catalog());
+        let execution = signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository.clone(),
+                InProcessAttemptDispatchGate::default(),
+                provider.clone(),
+                None,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(pass_pool.clone(), None, Vec::new()),
+        );
+        let compaction: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+            Arc::new(RuntimeContextCompactionModel::new(
+                ScriptedModel::<ModelCallId>::following([]),
+                catalog.clone(),
+            ));
+        Ok::<_, signalboxd::model_catalog_runtime::ModelRuntimeBuildError>(
+            ContextGuardedTurnPass::new(
+                StartEligibleTurnRepository::new(pass_pool.clone()),
+                repository,
+                provider,
+                NoToolCatalog,
+                catalog,
+                models.clone(),
+                compaction,
+                execution,
+            )
+            .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+                pass_pool.clone(),
+                None,
+                Vec::new(),
+            )),
+        )
+    };
+    let baseline = compose(&models)?;
+    let mut pass = signalboxd::model_catalog_runtime::CatalogEligibilityPass::new(
+        reload.clone(),
+        compose,
+        baseline,
+    );
+    let selections = model_source["models"]
+        .as_array_of_tables_mut()
+        .expect("model tables");
+    let mut added = selections.iter().next().expect("existing model").clone();
+    let added_selection = CanonicalUuid::from_uuid(Uuid::from_u128(0x4101));
+    added["selection_id"] = toml_edit::value(added_selection.into_uuid().to_string());
+    added["target_id"] = toml_edit::value(Uuid::from_u128(0x4102).to_string());
+    added["provider_model"] = toml_edit::value("fixture-model-added");
+    selections.push(added);
     model_source.remove("aliases");
     fs::write(&model_path, model_source.to_string())?;
     let command_id = command()?;
@@ -884,6 +950,35 @@ async fn reload_configuration_swaps_request_catalogs_and_replays_without_reading
             alias_count: CanonicalU64::new(0)
         }
     );
+    let mut execution_connection = Connection::connect(socket.socket()).await?;
+    let (session, _) = create_direct_session_with_settings(
+        &mut execution_connection,
+        added_selection,
+        ModelSettingsOverlay::inherit_all(),
+    )
+    .await?;
+    let (_, turn) = submit_first_input(
+        &mut execution_connection,
+        session,
+        "Use the reloaded model.".to_owned(),
+    )
+    .await?;
+    pass.run(SessionId::from_uuid(session.into_uuid())).await?;
+    assert_eq!(probe.counted_operations().len(), 1);
+    assert_eq!(probe.prepared_operations().len(), 1);
+    assert_eq!(
+        probe.prepared_operations()[0].resolved_target.as_str(),
+        "fixture-model-added"
+    );
+    let state: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(state, "terminal");
+    drop(execution_connection);
     drop(connection);
     shutdown.send(true)?;
     task.await??;

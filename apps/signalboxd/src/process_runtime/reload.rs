@@ -2,7 +2,7 @@
 
 use super::*;
 use signalbox_persistence::reload_configuration::{
-    ReloadConfiguration, ReloadLookup, ReloadPhase, ReloadResult,
+    ReloadConfiguration, ReloadLookup, ReloadPhase, ReloadRepositoryError, ReloadResult,
 };
 use signalbox_process_protocol::{CommandId, ConfigurationReloadPhase, ReloadedSection};
 
@@ -70,7 +70,12 @@ pub(super) async fn handle_reload<Writer: AsyncWrite + Unpin>(
             )
             .await
         }
-        Ok(ReloadLookup::Unclaimed) | Err(_) => {
+        outcome @ (Ok(ReloadLookup::Unclaimed) | Err(_)) => {
+            let code = match outcome {
+                Err(ReloadRepositoryError::CommitAmbiguous(_)) => ErrorCode::CommitAmbiguous,
+                Err(ReloadRepositoryError::Database(_)) => ErrorCode::Unavailable,
+                _ => ErrorCode::Internal,
+            };
             tracing::error!(
                 cause = "configuration_reload_persistence_failed",
                 "configuration reload needs recovery"
@@ -82,7 +87,7 @@ pub(super) async fn handle_reload<Writer: AsyncWrite + Unpin>(
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Unavailable),
+                ProtocolError::without_detail(code),
             )
             .await
         }
