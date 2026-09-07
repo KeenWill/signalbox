@@ -82,6 +82,27 @@ async fn spawn_session_requires_dispatch_and_replays_its_child() -> Result<(), B
         matches!(recorded.message(), ServerMessage::SessionSpawned { tool_request_id: recorded_request, relationship: DelegationPolicy::Background {}, .. } if *recorded_request == tool_request_id),
         "spawn must return its correlated child: {recorded:?}"
     );
+    let ServerMessage::SessionSpawned {
+        child_session_id, ..
+    } = recorded.message()
+    else {
+        panic!("spawn returns its child");
+    };
+    let sessions = signalbox_persistence::session::SessionRepository::new(runtime.pool.clone());
+    let child_id = SessionId::from_uuid(child_session_id.into_uuid());
+    let child = sessions
+        .load_session(child_id)
+        .await?
+        .expect("spawned child loads for eligibility");
+    let parent = sessions.load_session(session).await?.expect("parent loads");
+    assert_eq!(child.id(), child_id);
+    assert_eq!(
+        child.current_placement().placement(),
+        &parent
+            .current_placement()
+            .placement()
+            .delegated_child(child_id)
+    );
     connection
         .request_version(ProtocolVersion::One, 5, request)
         .await?;
