@@ -129,6 +129,22 @@ mod tests {
         assert!(decoded_response(&evidence));
     }
     #[test]
+    fn a_typed_refusal_with_usage_passes_compatibility() {
+        let fixture = completion();
+        let evidence = TerminalEvidence::Refused(signalbox_model_runtime::RefusalEvidence {
+            reason: signalbox_model_runtime::RefusalReason::ContentPolicy,
+            exchange: fixture.exchange,
+            message_id: fixture.message_id,
+            reported_model: fixture.reported_model,
+            content: Vec::new(),
+            usage: fixture.usage,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
+        assert!(decoded_response(&evidence));
+    }
+
+    #[test]
     fn missing_usage_fails_compatibility() {
         let evidence = TerminalEvidence::Completed(CompletionEvidence {
             usage: TokenUsage::unreported(),

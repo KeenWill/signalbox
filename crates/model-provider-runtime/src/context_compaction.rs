@@ -222,6 +222,7 @@ where
                     AssistantPart::Thinking { .. }
                     | AssistantPart::RedactedThinking { .. }
                     | AssistantPart::ProviderCompaction { .. }
+                    | AssistantPart::ProviderReasoning { .. }
                     | AssistantPart::ToolCall(_)
                     | AssistantPart::SuppressedToolCall(_) => {
                         return Err(ContextCompactionModelError::NonTextSummary);

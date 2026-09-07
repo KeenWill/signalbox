@@ -531,6 +531,9 @@ fn wire_message(
             MessagePart::RedactedThinking { data } => Ok(WireRequestBlock::Known(
                 WireKnownRequestBlock::RedactedThinking { data: data.clone() },
             )),
+            MessagePart::ProviderReasoning { .. } => Err(PreparationFailure::UnsupportedOperation {
+                detail: "Anthropic cannot replay another provider's reasoning items".to_string(),
+            }),
             MessagePart::ProviderCompaction { block_json } => {
                 if !replay_provider_compaction {
                     return Err(PreparationFailure::UnsupportedOperation {

@@ -172,6 +172,19 @@ impl fmt::Debug for ModelAttachmentStub {
     }
 }
 
+/// Durable identity and credential facts for one retained reasoning item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderReasoningProvenance {
+    /// Source-qualified semantic entry carrying the item.
+    pub source: SemanticTranscriptEntryRef,
+    /// Outcome-authoritative call that produced the item.
+    pub producing_call: ModelCallId,
+    /// Effective serving target pinned on the producing call.
+    pub producing_target: signalbox_domain::ResolvedProviderTarget,
+    /// Non-secret credential reference pinned on the producing call.
+    pub producing_credential: ModelCallCredentialReference,
+}
+
 /// Application rendering of one semantic frontier entry as a provider message.
 ///
 /// The source-qualified semantic entry, rather than a native turn assumption,
@@ -242,6 +255,15 @@ pub enum ModelConversationMessage {
         producing_call: ModelCallId,
         /// Exact assistant-owned text.
         content: AssistantText,
+    },
+    /// One complete provider reasoning item rendered for replay.
+    ProviderReasoning {
+        /// The source-qualified semantic entry.
+        source: SemanticTranscriptEntryRef,
+        /// The outcome-authoritative producing call.
+        producing_call: ModelCallId,
+        /// The complete retained provider item.
+        item: signalbox_domain::ProviderReasoningItem,
     },
     /// One opaque provider-produced compaction block rendered with the assistant role.
     ProviderCompaction {
@@ -528,6 +550,16 @@ fn render_frontier_messages<'a>(
                 producing_call: *producing_call,
                 block: block.clone(),
             }),
+            SemanticTranscriptEntryPayload::ProviderReasoning {
+                producing_call,
+                item,
+            } => {
+                messages.push(ModelConversationMessage::ProviderReasoning {
+                    source,
+                    producing_call: *producing_call,
+                    item: item.clone(),
+                });
+            }
             SemanticTranscriptEntryPayload::AssistantToolUse {
                 producing_call,
                 request,
@@ -773,6 +805,7 @@ fn projected_frontier_content_bytes<'a>(
             SemanticTranscriptEntryPayload::ProviderCompaction { block, .. } => {
                 block.as_json().len()
             }
+            SemanticTranscriptEntryPayload::ProviderReasoning { item, .. } => item.as_json().len(),
             // Identity-only payloads carry no content of their own. Tool
             // payloads name evidence rather than carrying it, and that
             // evidence is summed below.
@@ -827,6 +860,7 @@ pub struct PreparedModelOperation {
     credential_reference: ModelCallCredentialReference,
     system_prompt: Option<SessionSystemPrompt>,
     messages: Box<[ModelConversationMessage]>,
+    reasoning_provenance: Box<[ProviderReasoningProvenance]>,
     tools: Box<[ToolDefinition]>,
 }
 
@@ -841,6 +875,7 @@ impl PreparedModelOperation {
         system_prompt: Option<SessionSystemPrompt>,
         tools: Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
+        reasoning_provenance: &[ProviderReasoningProvenance],
     ) -> Result<Self, ModelFrontierRenderingError> {
         Self::render_within(
             request,
@@ -848,6 +883,7 @@ impl PreparedModelOperation {
             system_prompt,
             tools,
             tool_entries,
+            reasoning_provenance,
             MAX_RETAINED_FRONTIER_CONTENT_BYTES,
         )
     }
@@ -867,6 +903,7 @@ impl PreparedModelOperation {
         system_prompt: Option<SessionSystemPrompt>,
         tools: Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
+        reasoning_provenance: &[ProviderReasoningProvenance],
         retained_frontier_content_limit: usize,
     ) -> Result<Self, ModelFrontierRenderingError> {
         // Borrowed, not copied: an owning collection of the frontier would
@@ -915,11 +952,44 @@ impl PreparedModelOperation {
             |digest| request.attachment_byte_length(digest),
             projected_tool_entries,
         )?;
+        let mut provenance_by_source = BTreeMap::new();
+        for provenance in reasoning_provenance {
+            if provenance_by_source
+                .insert(provenance.source, provenance)
+                .is_some()
+            {
+                return Err(
+                    ModelFrontierRenderingError::MissingOrMismatchedReasoningProvenance {
+                        entry: provenance.source,
+                    },
+                );
+            }
+        }
+        let mut retained_provenance = Vec::new();
+        for message in &messages {
+            if let ModelConversationMessage::ProviderReasoning {
+                source,
+                producing_call,
+                ..
+            } = message
+            {
+                let provenance = provenance_by_source
+                    .get(source)
+                    .filter(|provenance| provenance.producing_call == *producing_call)
+                    .ok_or(
+                        ModelFrontierRenderingError::MissingOrMismatchedReasoningProvenance {
+                            entry: *source,
+                        },
+                    )?;
+                retained_provenance.push((**provenance).clone());
+            }
+        }
         Ok(Self {
             request,
             credential_reference,
             system_prompt,
             messages,
+            reasoning_provenance: retained_provenance.into_boxed_slice(),
             tools,
         })
     }
@@ -927,6 +997,11 @@ impl PreparedModelOperation {
     /// Borrows the checked durable request facts.
     pub const fn request(&self) -> &PreparedModelCallRequest {
         &self.request
+    }
+
+    /// Borrows the producing-call facts for the projected reasoning items.
+    pub fn reasoning_provenance(&self) -> &[ProviderReasoningProvenance] {
+        &self.reasoning_provenance
     }
 
     /// Borrows the exact durable credential reference pinned with the call.
@@ -970,6 +1045,12 @@ impl PreparedModelOperation {
 /// A checked frontier could not be projected into the current text-only input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelFrontierRenderingError {
+    /// A projected reasoning item lacks one exact producing-call fact record.
+    #[error("missing or mismatched provider reasoning provenance")]
+    MissingOrMismatchedReasoningProvenance {
+        /// The source-qualified item whose provenance is inconsistent.
+        entry: SemanticTranscriptEntryRef,
+    },
     #[error("model frontier origin content is missing")]
     /// A frontier origin was missing its reconstituted accepted-input content.
     MissingOriginContent {
@@ -1074,6 +1155,8 @@ pub enum PrepareModelCallOutcome {
         system_prompt: Option<SessionSystemPrompt>,
         /// Exact durable authority for every tool-related frontier entry.
         tool_entries: Box<[ResolvedToolConversationEntry]>,
+        /// Durable producing-target and credential facts for retained reasoning.
+        reasoning_provenance: Box<[ProviderReasoningProvenance]>,
     },
     /// Immutable target resolution failed and the turn closed atomically.
     TargetUnavailable(Box<FailedModelCallTurn>),
@@ -1989,6 +2072,7 @@ where
                     recorded_user_overrides,
                     system_prompt,
                     tool_entries,
+                    reasoning_provenance,
                 }) => {
                     break (
                         request,
@@ -1997,6 +2081,7 @@ where
                         recorded_user_overrides,
                         system_prompt,
                         tool_entries,
+                        reasoning_provenance,
                     );
                 }
                 Ok(PrepareModelCallOutcome::TargetUnavailable(failed)) => {
@@ -2024,6 +2109,7 @@ where
             recorded_user_overrides,
             system_prompt,
             tool_entries,
+            reasoning_provenance,
         ) = prepared;
         let call = prepared.call().id();
         let attempt = prepared.attempt();
@@ -2036,6 +2122,7 @@ where
             system_prompt,
             advertised_tools.clone(),
             &tool_entries,
+            &reasoning_provenance,
             self.retained_frontier_content_limit,
         ) {
             Ok(operation) => operation,
@@ -2419,7 +2506,8 @@ where
                     self.ids.next_context_frontier_id(),
                 ))
             }
-            ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
+            ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. }
+            | ModelCallTerminalObservation::CompletedWithProviderReasoning { response } => {
                 let assistant_entries = (0..response.len())
                     .map(|_| self.ids.next_semantic_entry_id())
                     .collect();
@@ -2443,6 +2531,11 @@ where
                         }
                         AssistantResponsePart::ProviderCompaction(_) => {
                             continuing.push(ToolResponsePartIdentity::provider_compaction(
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                        AssistantResponsePart::ProviderReasoning(_) => {
+                            continuing.push(ToolResponsePartIdentity::provider_reasoning(
                                 self.ids.next_semantic_entry_id(),
                             ));
                         }
@@ -2478,6 +2571,11 @@ where
                         }
                         AssistantResponsePart::ProviderCompaction(_) => {
                             stopped.push(StoppedToolResponsePartIdentity::provider_compaction(
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                        AssistantResponsePart::ProviderReasoning(_) => {
+                            stopped.push(StoppedToolResponsePartIdentity::provider_reasoning(
                                 self.ids.next_semantic_entry_id(),
                             ));
                         }
@@ -2567,9 +2665,9 @@ where
             .parts()
             .iter()
             .filter_map(|part| match part {
-                AssistantResponsePart::Text(_) | AssistantResponsePart::ProviderCompaction(_) => {
-                    None
-                }
+                AssistantResponsePart::Text(_)
+                | AssistantResponsePart::ProviderCompaction(_)
+                | AssistantResponsePart::ProviderReasoning(_) => None,
                 AssistantResponsePart::ToolCall(proposal) => {
                     if proposal.is_suppressed() {
                         return Some(InitialToolApproval::RuntimeSafetyDeny);
@@ -3139,6 +3237,36 @@ mod tests {
     }
 
     #[test]
+    fn durable_reasoning_projection_preserves_source_call_bytes_and_content_cost() {
+        let raw = r#"{ "type":"reasoning", "id":"rs_fixture", "summary":[], "encrypted_content":"opaque" }"#;
+        let source = SemanticTranscriptEntryRef::from_source(
+            identity(40, SessionId::from_uuid),
+            identity(41, SemanticTranscriptEntryId::from_uuid),
+        );
+        let producing_call = identity(42, ModelCallId::from_uuid);
+        let item = signalbox_domain::ProviderReasoningItem::try_new(raw.to_string())
+            .expect("durable fixture");
+        let payload = SemanticTranscriptEntryPayload::ProviderReasoning {
+            producing_call,
+            item: item.clone(),
+        };
+        let messages = render_frontier_messages([(source, &payload)], |_| None, |_| None, [])
+            .expect("reasoning renders");
+        assert_eq!(
+            messages.as_ref(),
+            &[ModelConversationMessage::ProviderReasoning {
+                source,
+                producing_call,
+                item
+            }]
+        );
+        assert_eq!(
+            projected_frontier_content_bytes([(source, &payload)], |_| None, []),
+            raw.len()
+        );
+    }
+
+    #[test]
     fn delegation_task_message_and_background_result_render_as_typed_inputs() {
         let child = identity(40, SessionId::from_uuid);
         let parent = identity(41, SessionId::from_uuid);
@@ -3285,6 +3413,7 @@ mod tests {
 
     fn ready(request: PreparedModelCallRequest) -> PrepareModelCallOutcome {
         PrepareModelCallOutcome::Ready {
+            reasoning_provenance: Box::new([]),
             request: Box::new(request),
             credential_reference: credential_reference(),
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
@@ -3301,6 +3430,7 @@ mod tests {
         tool_entries: Box<[ResolvedToolConversationEntry]>,
     ) -> PrepareModelCallOutcome {
         PrepareModelCallOutcome::Ready {
+            reasoning_provenance: Box::new([]),
             request: Box::new(request),
             credential_reference: credential_reference(),
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
@@ -4580,6 +4710,7 @@ mod tests {
             None,
             Box::new([]),
             &[],
+            &[],
         )
         .expect("the baseline origin-only frontier renders");
         assert_eq!(operation.credential_reference(), &credential_reference);
@@ -4618,6 +4749,7 @@ mod tests {
             Some(prompt.clone()),
             Box::new([]),
             &[],
+            &[],
         )
         .expect("the baseline origin-only frontier renders");
         assert_eq!(prompted.system_prompt(), Some(prompt.as_str()));
@@ -4627,6 +4759,7 @@ mod tests {
             credential_reference(),
             None,
             Box::new([]),
+            &[],
             &[],
         )
         .expect("the baseline origin-only frontier renders");
@@ -5857,6 +5990,7 @@ mod tests {
             FixedIds::baseline(),
             FakePrepare {
                 outcomes: [Ok(PrepareModelCallOutcome::Ready {
+                    reasoning_provenance: Box::new([]),
                     request: Box::new(request.clone()),
                     credential_reference: credential_reference(),
                     dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
@@ -6321,6 +6455,7 @@ mod tests {
                 ModelConversationMessage::ContextSummary { content, .. }
                 | ModelConversationMessage::Assistant { content, .. } => content.as_str().len(),
                 ModelConversationMessage::ProviderCompaction { block, .. } => block.as_json().len(),
+                ModelConversationMessage::ProviderReasoning { item, .. } => item.as_json().len(),
                 // Mirrors `user_content_text_bytes`: attachment stubs carry a
                 // fixed-width digest and bounded declarations held under
                 // `MAX_RENDERED_ATTACHMENT_STUB_BYTES`, so they sit outside the
@@ -6409,6 +6544,7 @@ mod tests {
             None,
             Box::new([]),
             &tool_entries,
+            &[],
         )
         .expect("the fixture frontier renders");
         let rendered = rendered_content_bytes(operation.messages());
@@ -6672,6 +6808,7 @@ mod tests {
             None,
             Box::new([]),
             &plain_entries,
+            &[],
             plain_bytes,
         )
         .expect("the text-free frontier renders at its own byte count");
@@ -6684,6 +6821,7 @@ mod tests {
             None,
             Box::new([]),
             &tool_entries,
+            &[],
             plain_bytes,
         )
         .expect_err("an assistant-text-heavy frontier is refused");
@@ -6713,6 +6851,7 @@ mod tests {
                     None,
                     Box::new([]),
                     &unrenderable,
+                    &[],
                     MAX_RETAINED_FRONTIER_CONTENT_BYTES,
                 ),
                 Err(ModelFrontierRenderingError::DuplicateToolEvidence { .. })
@@ -6727,6 +6866,7 @@ mod tests {
                     None,
                     Box::new([]),
                     &unrenderable,
+                    &[],
                     plain_bytes,
                 ),
                 Err(ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded { .. })
@@ -6760,6 +6900,7 @@ mod tests {
                     None,
                     Box::new([]),
                     &unrenderable,
+                    &[],
                     MAX_RETAINED_FRONTIER_CONTENT_BYTES,
                 ),
                 Err(ModelFrontierRenderingError::DuplicateToolEvidence { .. })
@@ -6772,6 +6913,7 @@ mod tests {
             None,
             Box::new([]),
             &unrenderable,
+            &[],
             0,
         )
         .expect_err("an over-bound frontier is refused");

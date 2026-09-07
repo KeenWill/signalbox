@@ -72,6 +72,15 @@ pub enum MessagePart {
         /// The opaque provider payload.
         data: String,
     },
+    /// One complete encrypted provider reasoning item retained for exact replay.
+    ProviderReasoning {
+        /// The complete provider output item as raw JSON.
+        item_json: String,
+        /// Effective runtime target used by the producing call.
+        producing_target: crate::ResolvedTarget,
+        /// Non-secret credential reference pinned by the producing call.
+        producing_credential: crate::CredentialReference,
+    },
     /// An opaque provider-produced compaction block replayed unchanged.
     ProviderCompaction {
         /// The complete provider content block as raw JSON.
@@ -106,6 +115,11 @@ pub enum AssistantPart {
     RedactedThinking {
         /// The opaque provider payload, retained verbatim.
         data: String,
+    },
+    /// One complete encrypted provider reasoning item retained for exact replay.
+    ProviderReasoning {
+        /// The complete provider output item as raw JSON.
+        item_json: String,
     },
     /// An opaque provider-produced compaction block, retained for replay.
     ProviderCompaction {

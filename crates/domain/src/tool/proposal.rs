@@ -2,7 +2,7 @@
 
 use super::arguments::{NormalizedToolArguments, ToolArgumentsKind};
 use super::name::ToolName;
-use crate::{AssistantText, ProviderCompactionBlock};
+use crate::{AssistantText, ProviderCompactionBlock, ProviderReasoningItem};
 
 pub(crate) const MAX_TOOL_REQUESTS_PER_RESPONSE: usize = 32;
 pub(super) const SUPPRESSED_TOOL_ARGUMENTS: &str = r#"{"redacted":"[redacted]"}"#;
@@ -82,6 +82,8 @@ pub enum AssistantResponsePart {
     Text(AssistantText),
     /// One opaque provider-produced compaction block.
     ProviderCompaction(ProviderCompactionBlock),
+    /// One complete provider reasoning item retained for replay.
+    ProviderReasoning(ProviderReasoningItem),
     /// One normalized logical tool proposal.
     ToolCall(ToolCallProposal),
 }
