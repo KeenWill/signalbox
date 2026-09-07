@@ -31,7 +31,8 @@ pub trait ModelRuntime<C> {
     /// capability produced by preparation and consumed by execution.
     type Prepared: Send;
 
-    /// Prepares a complete request capability without provider traffic.
+    /// Prepares without provider traffic except OAuth delivery exchanges with the
+    /// authorization server.
     ///
     /// The cancellation signal is work-first: a preparation result already
     /// available in the same poll wins over cancellation.

@@ -139,6 +139,9 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
                 }
                 Ok(outcome)
             }
+            Err(error @ signalbox_persistence::oauth_credential::OauthCredentialRepositoryError::CommitAmbiguous) => {
+                recover_failed_oauth_exchange(Err(error), services.recovery_reporter.as_ref())
+            }
             Err(error) => Err(error),
         }
     };
