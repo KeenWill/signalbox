@@ -14,6 +14,7 @@ for fixture in tooling/codex-cli/schema/*.json; do
     *) schema_path="v2/${name}" ;;
   esac
   curl --fail --silent --show-error --location \
+    --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 60 \
     "https://raw.githubusercontent.com/KeenWill/codex/${release}/codex-rs/app-server-protocol/schema/json/${schema_path}" \
     --output "${schema_dir}/${name}"
 done
