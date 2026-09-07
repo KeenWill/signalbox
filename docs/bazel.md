@@ -43,13 +43,15 @@ The runtime launcher applies to the current unit-test binaries. Tests that
 invoke host programs or external services need those inputs declared before
 their results can join the shared cache.
 
-The PostgreSQL pilot builds the persistence dependency closure and runs the
-search-path restore tests with a digest-pinned PostgreSQL image. Migrations and
+The PostgreSQL suite builds the persistence dependency closure and runs its 16
+PostgreSQL test binaries with a digest-pinned PostgreSQL image. Migrations and
 the example configuration are declared compilation inputs. With Docker:
 
 ```bash
-bazel test --test_env=DOCKER_HOST=unix:///var/run/docker.sock //crates/persistence:search_path_postgres
+bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //crates/persistence:postgres_tests
 ```
 
-The target is manual so `//:bazel_tests` remains the unit suite. The additive
-`bazel-postgres` CI job runs the pilot; Cargo retains the full PostgreSQL gate.
+Each test binary has its own cached result. PostgreSQL targets are manual so
+`//:bazel_tests` remains the unit suite. The additive `bazel-postgres` CI job
+runs one binary at a time, with 16 test threads per binary; Cargo retains the
+full PostgreSQL gate.
