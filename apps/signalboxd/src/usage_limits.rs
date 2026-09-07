@@ -400,6 +400,7 @@ where
         let completed = matches!(
             observation.observation(),
             ModelCallTerminalObservation::Completed { .. }
+                | ModelCallTerminalObservation::CompletedWithProviderReasoning { .. }
                 | ModelCallTerminalObservation::CompletedWithProviderCompaction { .. }
                 | ModelCallTerminalObservation::CompletedWithTools { .. }
         );
