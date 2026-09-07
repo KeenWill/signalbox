@@ -1472,6 +1472,7 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
     match classified.observation {
         ModelCallTerminalObservation::Completed { .. }
         | ModelCallTerminalObservation::CompletedWithProviderCompaction { .. }
+        | ModelCallTerminalObservation::CompletedWithProviderReasoning { .. }
         | ModelCallTerminalObservation::CompletedWithTools { .. } => {
             tracing::debug!(
                 cause_code = classified.cause.as_str(),
@@ -2088,6 +2089,7 @@ fn classify_terminal(
                         .filter_map(|part| match part {
                             AssistantResponsePart::Text(text) => Some(text),
                             AssistantResponsePart::ProviderCompaction(_)
+                            | AssistantResponsePart::ProviderReasoning(_)
                             | AssistantResponsePart::ToolCall(_) => None,
                         })
                         .collect();

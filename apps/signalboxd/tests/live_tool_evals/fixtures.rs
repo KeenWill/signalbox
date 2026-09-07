@@ -1708,6 +1708,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::User { .. }
                 | ProcessTranscriptEntry::Assistant { .. }
                 | ProcessTranscriptEntry::ProviderCompaction { .. }
+                | ProcessTranscriptEntry::ProviderReasoning { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }
                 | ProcessTranscriptEntry::TurnFailed { .. }
@@ -1750,6 +1751,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::User { .. }
                 | ProcessTranscriptEntry::Assistant { .. }
                 | ProcessTranscriptEntry::ProviderCompaction { .. }
+                | ProcessTranscriptEntry::ProviderReasoning { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
                 | ProcessTranscriptEntry::ToolDenied { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }

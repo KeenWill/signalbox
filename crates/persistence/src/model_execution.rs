@@ -928,6 +928,8 @@ impl PostgresModelCallRepository {
                                         COALESCE(octet_length(entry.context_summary_value), 0)
                                     WHEN 'assistant_text' THEN
                                         COALESCE(octet_length(entry.assistant_text_value), 0)
+                                    WHEN 'provider_reasoning' THEN
+                                        COALESCE(octet_length(entry.assistant_text_value), 0)
                                     WHEN 'provider_compaction' THEN
                                         CASE WHEN $5::boolean THEN
                                             COALESCE(octet_length(entry.assistant_text_value), 0)
@@ -2857,12 +2859,14 @@ async fn delegated_observation_result_matches(
                 Err(_) => ExpectedDelegatedChildResult::ResultUnavailable,
             }
         }
-        ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
+        ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. }
+        | ModelCallTerminalObservation::CompletedWithProviderReasoning { response } => {
             let assistant_text = response
                 .iter()
                 .filter_map(|part| match part {
                     AssistantResponsePart::Text(text) => Some(text.clone()),
-                    AssistantResponsePart::ProviderCompaction(_) => None,
+                    AssistantResponsePart::ProviderCompaction(_)
+                    | AssistantResponsePart::ProviderReasoning(_) => None,
                     AssistantResponsePart::ToolCall(_) => None,
                 })
                 .collect::<Vec<_>>();
@@ -4112,7 +4116,8 @@ async fn terminal_observation_closure_matches(
                 .collect::<Vec<_>>();
             completed_terminal_closure_matches(connection, session, observation, &response).await
         }
-        ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
+        ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. }
+        | ModelCallTerminalObservation::CompletedWithProviderReasoning { response } => {
             completed_terminal_closure_matches(connection, session, observation, response).await
         }
         ModelCallTerminalObservation::CompletedWithTools { response, .. } => {
@@ -4256,6 +4261,15 @@ async fn tool_round_terminal_closure_matches(
                 }
                 AssistantResponsePart::ProviderCompaction(expected) => {
                     payload_kind.as_deref() == Some("provider_compaction")
+                        && assistant_text.as_deref() == Some(expected.as_json())
+                        && producing_call == Some(call)
+                        && request.is_none()
+                        && tool_name.is_none()
+                        && arguments_kind.is_none()
+                        && arguments_text.is_none()
+                }
+                AssistantResponsePart::ProviderReasoning(expected) => {
+                    payload_kind.as_deref() == Some("provider_reasoning")
                         && assistant_text.as_deref() == Some(expected.as_json())
                         && producing_call == Some(call)
                         && request.is_none()
@@ -4977,6 +4991,10 @@ fn completed_terminal_frontier_matches(
                 }
                 AssistantResponsePart::ProviderCompaction(block) => {
                     stored.payload_kind == "provider_compaction"
+                        && stored.assistant_text.as_deref() == Some(block.as_json())
+                }
+                AssistantResponsePart::ProviderReasoning(block) => {
+                    stored.payload_kind == "provider_reasoning"
                         && stored.assistant_text.as_deref() == Some(block.as_json())
                 }
                 AssistantResponsePart::ToolCall(_) => false,
@@ -6426,6 +6444,7 @@ async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
+            | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -7835,6 +7854,7 @@ async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
+            | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
@@ -7936,6 +7956,7 @@ async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
+            | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
@@ -9582,6 +9603,25 @@ async fn persist_tool_round_authority(
                 .execute(&mut *connection)
                 .await?;
             }
+            SemanticTranscriptEntryPayload::ProviderReasoning {
+                producing_call,
+                item,
+            } => {
+                sqlx::query(
+                    "INSERT INTO semantic_transcript_entry
+                        (source_session_id, semantic_entry_id, payload_kind,
+                         assistant_text_value, producing_model_call_id,
+                         assistant_response_part_ordinal)
+                     VALUES ($1, $2, 'provider_reasoning', $3, $4, $5)",
+                )
+                .bind(session_id_to_uuid(entry.source_session()))
+                .bind(entry.identity().into_uuid())
+                .bind(item.as_json())
+                .bind(producing_call.into_uuid())
+                .bind(Decimal::from(response_part_ordinal))
+                .execute(&mut *connection)
+                .await?;
+            }
             SemanticTranscriptEntryPayload::AssistantToolUse {
                 producing_call,
                 request,
@@ -9796,6 +9836,25 @@ async fn persist_completed(
                 .bind(session_id_to_uuid(entry.source_session()))
                 .bind(entry.identity().into_uuid())
                 .bind(block.as_json())
+                .bind(producing_call.into_uuid())
+                .bind(ordinal)
+                .execute(&mut *connection)
+                .await?;
+            }
+            SemanticTranscriptEntryPayload::ProviderReasoning {
+                producing_call,
+                item,
+            } => {
+                sqlx::query(
+                    "INSERT INTO semantic_transcript_entry
+                        (source_session_id, semantic_entry_id, payload_kind,
+                         assistant_text_value, producing_model_call_id,
+                         assistant_response_part_ordinal)
+                     VALUES ($1, $2, 'provider_reasoning', $3, $4, $5)",
+                )
+                .bind(session_id_to_uuid(entry.source_session()))
+                .bind(entry.identity().into_uuid())
+                .bind(item.as_json())
                 .bind(producing_call.into_uuid())
                 .bind(ordinal)
                 .execute(&mut *connection)
@@ -10995,6 +11054,7 @@ fn preview_entry_content_bytes(
         | SemanticTranscriptEntryPayload::TurnFailed { .. }
         | SemanticTranscriptEntryPayload::AssistantText { .. }
         | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
+        | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
         | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
         | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
         | SemanticTranscriptEntryPayload::ToolDenied { .. }

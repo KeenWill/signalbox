@@ -678,7 +678,7 @@ pub(crate) fn completed_turn_with_provider_reasoning_fixture(
     let execution = in_flight_execution();
     let observation = correlated_observation(
         &execution,
-        ModelCallTerminalObservation::CompletedWithProviderCompaction {
+        ModelCallTerminalObservation::CompletedWithProviderReasoning {
             response: vec![
                 AssistantResponsePart::ProviderReasoning(
                     crate::ProviderReasoningItem::try_new(
@@ -690,8 +690,6 @@ pub(crate) fn completed_turn_with_provider_reasoning_fixture(
                     crate::AssistantText::try_new(value.to_owned()).expect("nonempty fixture text"),
                 ),
             ],
-            retained_input_tokens: 23,
-            retained_output_tokens: 5,
         },
     );
     let outcome = execution

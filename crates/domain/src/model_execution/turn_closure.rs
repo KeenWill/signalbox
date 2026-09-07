@@ -82,7 +82,8 @@ pub(super) fn apply_terminal_observation(
             )?;
             Ok(ModelCallTerminalOutcome::Completed(completed))
         }
-        ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
+        ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. }
+        | ModelCallTerminalObservation::CompletedWithProviderReasoning { response } => {
             let ModelCallTerminalIdentities::Completed(identities) = identities else {
                 return Err(ModelCallClosureError::IdentityShapeMismatch);
             };

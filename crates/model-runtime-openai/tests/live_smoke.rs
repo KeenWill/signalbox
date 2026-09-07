@@ -70,7 +70,7 @@ async fn the_openai_api_completes_one_exchange() {
     );
 }
 
-fn decoded_response(evidence: &TerminalEvidence, observations: &[Observation<String>]) -> bool {
+fn decoded_response(evidence: &TerminalEvidence, _observations: &[Observation<String>]) -> bool {
     let (exchange, model, usage) = match evidence {
         TerminalEvidence::Completed(completion)
             if matches!(
@@ -84,14 +84,8 @@ fn decoded_response(evidence: &TerminalEvidence, observations: &[Observation<Str
                 &completion.usage,
             )
         }
-        TerminalEvidence::ProviderError(error)
-            if error.kind == ProviderErrorKind::Unrecognized
-                && error.native == NativeErrorFacts::default()
-                && observations
-                    .iter()
-                    .any(|o| o.fact == ObservationFact::FinishReported(FinishReason::Refusal)) =>
-        {
-            (&error.exchange, &error.reported_model, &error.usage)
+        TerminalEvidence::Refused(refusal) => {
+            (&refusal.exchange, &refusal.reported_model, &refusal.usage)
         }
         _ => return false,
     };
@@ -135,6 +129,22 @@ mod tests {
         });
         assert!(decoded_response(&evidence, &[]));
     }
+    #[test]
+    fn a_typed_refusal_with_usage_passes_compatibility() {
+        let fixture = completion();
+        let evidence = TerminalEvidence::Refused(signalbox_model_runtime::RefusalEvidence {
+            reason: signalbox_model_runtime::RefusalReason::ContentPolicy,
+            exchange: fixture.exchange,
+            message_id: fixture.message_id,
+            reported_model: fixture.reported_model,
+            content: Vec::new(),
+            usage: fixture.usage,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
+        assert!(decoded_response(&evidence, &[]));
+    }
+
     #[test]
     fn missing_usage_fails_compatibility() {
         let evidence = TerminalEvidence::Completed(CompletionEvidence {

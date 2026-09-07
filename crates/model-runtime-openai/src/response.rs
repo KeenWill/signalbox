@@ -355,7 +355,12 @@ pub(crate) fn decode_response<C: Clone>(
             usage,
         }),
         None => TerminalEvidence::Refused(RefusalEvidence {
-            reason: if response.incomplete_details.as_ref().map(|details| details.reason.as_str()) == Some("content_filter") {
+            reason: if response
+                .incomplete_details
+                .as_ref()
+                .map(|details| details.reason.as_str())
+                == Some("content_filter")
+            {
                 signalbox_model_runtime::RefusalReason::ContentPolicy
             } else {
                 signalbox_model_runtime::RefusalReason::Unspecified
@@ -923,8 +928,26 @@ mod tests {
             panic!("refusal is distinct from completion");
         };
         assert_eq!(
+            result.reason,
+            signalbox_model_runtime::RefusalReason::Unspecified
+        );
+        assert_eq!(
             result.content,
             vec![AssistantPart::Text("declined".to_string())]
+        );
+    }
+
+    #[test]
+    fn content_filter_retains_its_typed_refusal_reason() {
+        let mut value = response();
+        value["status"] = json!("incomplete");
+        value["incomplete_details"] = json!({"reason":"content_filter"});
+        let (TerminalEvidence::Refused(result), _) = decode(value) else {
+            panic!("content filtering is refusal evidence");
+        };
+        assert_eq!(
+            result.reason,
+            signalbox_model_runtime::RefusalReason::ContentPolicy
         );
     }
 

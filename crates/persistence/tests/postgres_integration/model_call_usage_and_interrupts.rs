@@ -19,7 +19,7 @@ async fn completed_provider_reasoning_retains_order_and_projects_a_marker()
     let observation = authorized
         .observation_correlation()
         .bind_terminal_observation(
-            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+            ModelCallTerminalObservation::CompletedWithProviderReasoning {
                 response: vec![
                     AssistantResponsePart::Text(
                         AssistantText::try_new(String::from("before"))
@@ -31,8 +31,6 @@ async fn completed_provider_reasoning_retains_order_and_projects_a_marker()
                             .expect("nonempty fixture text"),
                     ),
                 ],
-                retained_input_tokens: 19,
-                retained_output_tokens: 3,
             },
         );
     repository
@@ -57,6 +55,13 @@ async fn completed_provider_reasoning_retains_order_and_projects_a_marker()
             .await?,
         RetainedModelCallObservationStatus::AlreadyCommitted,
     );
+    let retained: (Option<Decimal>, Option<Decimal>) = sqlx::query_as(
+        "SELECT retained_input_tokens, retained_output_tokens FROM model_call WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retained, (None, None));
     let stored: Vec<(String, String, Decimal, Option<Decimal>)> = sqlx::query_as(
         "SELECT payload_kind, assistant_text_value, assistant_response_part_ordinal,
                 assistant_response_text_start_bytes
@@ -151,7 +156,7 @@ async fn steered_completion_accepts_interleaved_provider_reasoning() -> Result<(
     let observation = authorized
         .observation_correlation()
         .bind_terminal_observation(
-            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+            ModelCallTerminalObservation::CompletedWithProviderReasoning {
                 response: vec![
                     AssistantResponsePart::Text(
                         AssistantText::try_new(String::from("before"))
@@ -163,8 +168,6 @@ async fn steered_completion_accepts_interleaved_provider_reasoning() -> Result<(
                             .expect("nonempty fixture text"),
                     ),
                 ],
-                retained_input_tokens: 19,
-                retained_output_tokens: 3,
             },
         );
     let outcome = repository

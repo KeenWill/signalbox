@@ -455,6 +455,9 @@ pub enum ModelCallTerminalObservation {
     Completed {
         assistant_text: vec::Vec<AssistantText>,
     },
+    CompletedWithProviderReasoning {
+        response: vec::Vec<AssistantResponsePart>,
+    },
     CompletedWithProviderCompaction {
         response: vec::Vec<AssistantResponsePart>,
         retained_input_tokens: u64,
