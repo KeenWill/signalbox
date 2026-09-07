@@ -109,6 +109,7 @@ pub enum GoalTransitionOutcome {
 }
 
 /// Durable progress of a session's goal recovery cycles across its lineage.
+#[cfg(feature = "test-support")]
 #[derive(signalbox_derive::Accessors, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GoalRecoveryProgress {
     /// Returns the number of durable resume events.
@@ -590,6 +591,7 @@ impl GoalRepository {
     }
 
     /// Reads durable resume, execution-failure block, and turn counts in one snapshot.
+    #[cfg(feature = "test-support")]
     pub async fn recovery_progress(
         &self,
         session: SessionId,

@@ -46,8 +46,10 @@ pub enum GoalTransitionOutcome {
 ## GoalRecoveryProgress
 
 ```rust
+#[cfg(feature = "test-support")]
 pub struct GoalRecoveryProgress {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+#[cfg(feature = "test-support")]
 impl goal::GoalRecoveryProgress {
     pub const fn resumptions(self) -> i64;
     pub const fn execution_failure_blocks(self) -> i64;
@@ -174,6 +176,7 @@ impl goal::GoalRepository {
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<option::Option<signalbox_domain::Goal>, goal::GoalRepositoryError>;
+    #[cfg(feature = "test-support")]
     pub async fn recovery_progress(
         &self,
         session: signalbox_domain::SessionId,
