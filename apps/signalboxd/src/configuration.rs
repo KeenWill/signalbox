@@ -631,6 +631,7 @@ pub struct RepositoryWatchConfiguration {
     repositories: Box<[WatchedRepositoryConfiguration]>,
     rules: Box<[RepoWatchRule]>,
     webhook: Option<RepositoryWatchWebhookConfiguration>,
+    webhook_retention: Duration,
     convergence_sweep: Option<ConvergenceSweepConfiguration>,
 }
 
@@ -658,6 +659,10 @@ impl ConvergenceSweepConfiguration {
 }
 
 impl RepositoryWatchConfiguration {
+    pub(crate) const fn webhook_retention(&self) -> Duration {
+        self.webhook_retention
+    }
+
     /// Returns whether repository polling, webhook wakes, and dispatch are enabled.
     pub const fn enabled(&self) -> bool {
         self.enabled
@@ -733,6 +738,10 @@ pub struct NumericBoundsConfiguration {
 }
 
 const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
+    (
+        "repository_watch_webhook_retention",
+        NumericBoundKind::Duration,
+    ),
     ("fenced_pool_min_connections", NumericBoundKind::Integer),
     (
         "fenced_pool_floor_reconciliation_interval",
@@ -953,7 +962,17 @@ impl NumericBoundsConfiguration {
             };
             values.insert(*name, value);
         }
-        Ok(Self { values })
+        let configuration = Self { values };
+        if configuration
+            .duration("repository_watch_webhook_retention")
+            .flatten()
+            .is_none_or(|duration| duration.is_zero())
+        {
+            return Err(HubModelConfigurationError::InvalidNumericBound {
+                field: "repository_watch_webhook_retention",
+            });
+        }
+        Ok(configuration)
     }
 
     /// Returns one integer policy, with inner `None` denoting configured `"none"`.
@@ -2563,8 +2582,15 @@ fn parse_repository_watch_configuration(
     {
         return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
     }
+    let webhook_retention = numeric_bounds
+        .duration("repository_watch_webhook_retention")
+        .flatten()
+        .ok_or(HubModelConfigurationError::InvalidNumericBound {
+            field: "repository_watch_webhook_retention",
+        })?;
     Ok(RepositoryWatchConfiguration {
         enabled,
+        webhook_retention,
         signal_reviewers: signal_reviewers.into_boxed_slice(),
         repositories: repositories.into_boxed_slice(),
         rules: rules.into_boxed_slice(),
@@ -4697,6 +4723,7 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
 version = 1
 
 [numeric_bounds]
+repository_watch_webhook_retention = "604800s"
 fenced_pool_min_connections = 48
 fenced_pool_floor_reconciliation_interval = "5s"
 fenced_pool_floor_reconciliation_attempt_bound = "30s"
@@ -4899,7 +4926,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     }
 
     #[test]
-    fn configuration_admits_none_for_each_numeric_bound_kind() {
+    fn configuration_admits_none_for_optional_integer_and_duration_bounds() {
         let unbounded = CONFIGURATION
             .replace(
                 "max_message_utf8_bytes = 1048576",
@@ -4911,7 +4938,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             );
 
         let configuration = HubModelConfiguration::parse(&unbounded)
-            .expect("the exact none spelling is admitted for every bound kind");
+            .expect("the exact none spelling is admitted for optional bounds");
 
         assert_eq!(
             configuration
@@ -4924,6 +4951,33 @@ selection_id = "10000000-0000-4000-8000-000000000001"
                 .numeric_bounds()
                 .duration("turn_liveness_scan_interval"),
             Some(None)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_retention_is_required_and_must_be_positive_and_finite() {
+        const FIELD: &str = "repository_watch_webhook_retention";
+        const ENTRY: &str = "repository_watch_webhook_retention = \"604800s\"";
+        let missing = CONFIGURATION.replace(ENTRY, "");
+        assert_eq!(
+            HubModelConfiguration::parse(&missing).expect_err("required retention"),
+            HubModelConfigurationError::MissingNumericBounds {
+                fields: vec![FIELD]
+            }
+        );
+        for invalid in ["none", "0s"] {
+            let configuration = CONFIGURATION.replace(ENTRY, &format!("{FIELD} = {invalid:?}"));
+            assert_eq!(
+                HubModelConfiguration::parse(&configuration).expect_err("finite positive expiry"),
+                HubModelConfigurationError::InvalidNumericBound { field: FIELD }
+            );
+        }
+        assert_eq!(
+            HubModelConfiguration::parse(CONFIGURATION)
+                .expect("seven-day retention")
+                .numeric_bounds()
+                .duration(FIELD),
+            Some(Some(Duration::from_secs(7 * 24 * 60 * 60)))
         );
     }
 

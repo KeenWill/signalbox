@@ -133,7 +133,7 @@ pub struct WebhookDelivery<'a> {
     pub body: &'a [u8],
     /// Admission time.
     pub received_at: OffsetDateTime,
-    /// Row-specific TTL boundary; no global retention window is selected.
+    /// Caller-selected row-specific expiry boundary.
     pub expires_at: OffsetDateTime,
 }
 
