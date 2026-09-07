@@ -41,6 +41,9 @@ goal turn that still lacks its goal disposition. A pass activates a turn and
 then drives its model call through the execution ports owned by
 [model-call-execution](model-call-execution.md) and [tool-loop](tool-loop.md).
 
+Connection-loss propagation retains a post-commit eligibility hint when the
+nudge channel is full and retries when capacity becomes available.
+
 Every component deadline covers one physical operation. A running turn with no
 model call, tool attempt, or durable wait outstanding is reached by none of them
 and would hold its slot forever. A turn-liveness watchdog
