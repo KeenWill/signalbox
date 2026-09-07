@@ -177,7 +177,7 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 _ => StopStickiness::Sticky,
             };
             Some((stop, sticky))
-        } else if checkout.head.as_ref() == Some(context.head_sha()) {
+        } else if checkout.removed || checkout.head.as_ref() == Some(context.head_sha()) {
             None
         } else if let Some(repository) = self
             .configuration

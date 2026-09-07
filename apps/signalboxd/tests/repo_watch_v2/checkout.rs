@@ -980,8 +980,8 @@ async fn disabled_runtime_scavenges_checkouts_without_submitting_pending_command
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn startup_scavenges_a_terminal_checkout_before_its_path_was_recorded()
--> Result<(), Box<dyn Error>> {
+async fn pending_replay_preserves_cleanup_of_an_unrecorded_checkout() -> Result<(), Box<dyn Error>>
+{
     use signalboxd::repo_watch_dispatch::scavenge_checkouts;
 
     let mut fixture = CheckoutFixture::new().await?;
@@ -1020,6 +1020,21 @@ async fn startup_scavenges_a_terminal_checkout_before_its_path_was_recorded()
         .await
         .expect("repeated cleanup is idempotent");
     assert!(restarted.checkout_removal_candidates().await?.is_empty());
+    let steps = fixture.runner.steps.lock().expect("Git steps").clone();
+    fixture.submit_without_lifecycle_settlement().await;
+    assert_eq!(*fixture.runner.steps.lock().expect("Git steps"), steps);
+    assert!(
+        !root.exists(),
+        "pending replay must not recreate the checkout"
+    );
+    let flags: (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT submission_pending, checkout_removed, checkout_path IS NULL,
+                created_session_id IS NULL FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.module)
+    .await?;
+    assert_eq!(flags, (false, true, true, true));
     Ok(())
 }
 

@@ -26,6 +26,7 @@ impl CheckoutRetirementReason {
 pub struct DispatchCheckout {
     pub event: RepoWatchEvent,
     pub head: Option<CommitSha>,
+    pub removed: bool,
     pub stop_command: Option<DurableCommandId>,
     pub retired_reason: Option<CheckoutRetirementReason>,
     pub location: Option<CheckoutLocation>,
@@ -42,6 +43,7 @@ struct CheckoutRow {
     event_id: Uuid,
     normalized_payload: Vec<u8>,
     checkout_head_sha: Option<String>,
+    checkout_removed: bool,
     checkout_stop_command_id: Option<Uuid>,
     checkout_retired_reason: Option<String>,
     checkout_workspace_root: Option<Vec<u8>>,
@@ -99,12 +101,13 @@ impl RepoWatchStore {
         command: DurableCommandId,
     ) -> Result<Option<DispatchCheckout>, StoreError> {
         let row: Option<CheckoutRow> = sqlx::query_as(
-            "SELECT event.event_id, event.normalized_payload, ledger.checkout_head_sha, ledger.checkout_stop_command_id, ledger.checkout_retired_reason, ledger.checkout_workspace_root, ledger.checkout_session_id
+            "SELECT event.event_id, event.normalized_payload, ledger.checkout_head_sha, ledger.checkout_removed, ledger.checkout_stop_command_id, ledger.checkout_retired_reason, ledger.checkout_workspace_root, ledger.checkout_session_id
              FROM dispatch_ledger AS ledger JOIN gh_event AS event ON event.event_id = ledger.event_id
              WHERE ledger.command_id = $1 AND ledger.command_kind = 'create_session'")
             .bind(command.into_uuid()).fetch_optional(&self.pool).await?;
         row.map(|row| {
             Ok(DispatchCheckout {
+                removed: row.checkout_removed,
                 location: match (row.checkout_session_id, row.checkout_workspace_root) {
                     (Some(session), Some(workspace_root)) => Some(CheckoutLocation {
                         session: SessionId::from_uuid(session),
