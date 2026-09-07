@@ -67,7 +67,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             | "capacity_sparse"
             | "capacity_failure"
             | "capacity_read_late"
-            | "capacity_read_after_completion",
+            | "capacity_read_after_completion"
+            | "capacity_read_stale"
+            | "capacity_read_stale_after_completion",
         ) => json!({
             "primary":{"usedPercent":27,"windowDurationMins":300,"resetsAt":1800000700},
             "secondary":{"usedPercent":61,"windowDurationMins":10080,"resetsAt":1800001400}
@@ -80,7 +82,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     } else if !matches!(
         selected.as_deref(),
-        Some("capacity_read_pending" | "capacity_read_late" | "capacity_read_after_completion")
+        Some(
+            "capacity_read_pending"
+                | "capacity_read_late"
+                | "capacity_read_after_completion"
+                | "capacity_read_stale"
+                | "capacity_read_stale_after_completion"
+        )
     ) {
         emit_value(json!({"id":read_limits["id"],"result":{"rateLimits":rate_limits}}));
     }
@@ -174,8 +182,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | "capacity_sparse"
         | "capacity_read_pending"
         | "capacity_read_late"
-        | "capacity_read_after_completion" => {
+        | "capacity_read_after_completion"
+        | "capacity_read_stale"
+        | "capacity_read_stale_after_completion" => {
+            if matches!(
+                scenario.as_str(),
+                "capacity_read_stale" | "capacity_read_stale_after_completion"
+            ) {
+                emit_value(
+                    json!({"method":"account/rateLimits/updated","params":{"rateLimits":{
+                        "primary":{"usedPercent":96,"windowDurationMins":300,"resetsAt":1800001800},
+                        "secondary":{"usedPercent":93,"windowDurationMins":10080,"resetsAt":1800002400}
+                    }}}),
+                );
+            }
+            if scenario == "capacity_read_stale" {
+                emit_value(json!({"id":read_limits["id"],"result":{"rateLimits":rate_limits}}));
+            }
             if scenario == "capacity_read_late" {
+                emit_value(
+                    json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":null,"secondary":null}}}),
+                );
                 emit_value(json!({"id":read_limits["id"],"result":{"rateLimits":rate_limits}}));
             }
             if scenario == "capacity_sparse" {
@@ -190,7 +217,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fixtures::BUFFERED_ANSWER
             ));
             completed();
-            if scenario == "capacity_read_after_completion" {
+            if matches!(
+                scenario.as_str(),
+                "capacity_read_after_completion" | "capacity_read_stale_after_completion"
+            ) {
                 emit_value(json!({"id":read_limits["id"],"result":{"rateLimits":rate_limits}}));
             }
         }

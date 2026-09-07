@@ -38,9 +38,16 @@ enum Phase {
     Closed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RateLimitsRead {
+    NotPending,
+    Pending,
+    Superseded,
+}
+
 pub(crate) struct Client {
     phase: Phase,
-    rate_limits_read_pending: bool,
+    rate_limits_read: RateLimitsRead,
     thread_params: Value,
     turn_params: Value,
     outbound: VecDeque<Vec<u8>>,
@@ -59,7 +66,7 @@ impl Client {
         thread_params["approvalPolicy"] = json!("never");
         let mut client = Self {
             phase: Phase::Initialize,
-            rate_limits_read_pending: false,
+            rate_limits_read: RateLimitsRead::NotPending,
             thread_params,
             turn_params,
             outbound: VecDeque::new(),
@@ -96,19 +103,22 @@ impl Client {
         // reply drained after the turn closes.
         if !object.contains_key("method")
             && object.get("id").and_then(Value::as_u64) == Some(4)
-            && self.rate_limits_read_pending
+            && self.rate_limits_read != RateLimitsRead::NotPending
         {
             if object.contains_key("error") == object.contains_key("result") {
                 return Err(ProtocolError(
                     "response requires exactly one result or error",
                 ));
             }
-            self.rate_limits_read_pending = false;
+            let read = std::mem::replace(&mut self.rate_limits_read, RateLimitsRead::NotPending);
             if let Some(error) = object.get("error") {
                 let _: RpcError = decode(error)?;
                 return Ok(Event::Ignored);
             }
             let response: super::frame::AccountRateLimitsUpdated = decode(&object["result"])?;
+            if read == RateLimitsRead::Superseded {
+                return Ok(Event::Ignored);
+            }
             self.rate_limits.merge(response.rate_limits);
             return Ok(Event::RateLimitsUpdated);
         }
@@ -159,7 +169,7 @@ impl Client {
                 }
                 self.queue(json!({"method":"initialized"}));
                 self.queue(json!({"id":4,"method":"account/rateLimits/read"}));
-                self.rate_limits_read_pending = true;
+                self.rate_limits_read = RateLimitsRead::Pending;
                 self.queue(json!({"id":2,"method":"thread/start","params":self.thread_params}));
                 self.phase = Phase::ThreadStart;
                 Ok(Event::Ignored)
@@ -213,6 +223,12 @@ impl Client {
         match method {
             "account/rateLimits/updated" => {
                 let event: super::frame::AccountRateLimitsUpdated = decode(params)?;
+                if self.rate_limits_read == RateLimitsRead::Pending
+                    && (event.rate_limits.primary.is_some()
+                        || event.rate_limits.secondary.is_some())
+                {
+                    self.rate_limits_read = RateLimitsRead::Superseded;
+                }
                 self.rate_limits.merge(event.rate_limits);
                 Ok(Event::RateLimitsUpdated)
             }

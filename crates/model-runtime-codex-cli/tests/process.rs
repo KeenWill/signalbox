@@ -560,10 +560,49 @@ async fn delayed_capacity_reply_preserves_model_completion() {
             panic!("{scenario}: the delayed read emits one snapshot");
         };
         assert_eq!(correlation, scenario);
-        // The delayed response reports primary 27% used and secondary 61% used.
+        // The delayed response reports primary 27% used and secondary 61% used;
+        // an earlier empty notification in capacity_read_late does not supersede it.
         assert_eq!(snapshot.windows[0].remaining_percent, 73, "{scenario}");
         assert_eq!(snapshot.windows[1].remaining_percent, 39, "{scenario}");
         assert_eq!(result.spawns, 1);
+    }
+}
+
+#[tokio::test]
+async fn a_capacity_notification_supersedes_an_outstanding_read() {
+    for scenario in [
+        "capacity_read_stale",
+        "capacity_read_stale_after_completion",
+    ] {
+        let result = execute_scenario(
+            scenario,
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        completed(&result.evidence);
+        let [(correlation, snapshot)] = result.rate_limits.as_slice() else {
+            panic!("{scenario}: the notification is the only emitted capacity snapshot");
+        };
+        assert_eq!(correlation, scenario);
+        // The read reports 27%/61% used after a notification reports 96%/93%.
+        assert_eq!(
+            snapshot.windows,
+            vec![
+                signalbox_model_runtime::RateLimitWindow {
+                    remaining_percent: 4,
+                    window_duration: Some(Duration::from_secs(18000)),
+                    resets_at: Some(UNIX_EPOCH + Duration::from_secs(1800001800)),
+                },
+                signalbox_model_runtime::RateLimitWindow {
+                    remaining_percent: 7,
+                    window_duration: Some(Duration::from_secs(604800)),
+                    resets_at: Some(UNIX_EPOCH + Duration::from_secs(1800002400)),
+                },
+            ],
+            "{scenario}"
+        );
     }
 }
 
