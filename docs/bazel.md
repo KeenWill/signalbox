@@ -99,3 +99,12 @@ The importer conformance corpus runs in `//:rust_integration_tests`. Its JSONL
 inputs, golden files, and Cargo configuration are declared separately. Golden
 paths remain absolute under Cargo and are anchored in the test runfiles under
 Bazel.
+
+`bazel test //:generated_artifact_tests` builds the web-contract and model
+projection generators, runs them into declared output trees, and compares the
+results with checked-in snapshots in the checker CI job. Both generation actions
+and comparisons use the shared cache. The output trees are available from
+`bazel build //:web_contract_output //:model_projection_output`.
+
+The generator CLIs also accept an optional output directory after their existing
+arguments. Omitting it retains their Cargo regeneration behavior.

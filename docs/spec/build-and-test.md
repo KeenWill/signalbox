@@ -17,7 +17,8 @@ process-isolation tests retain their provisioned Cargo job.
 The checker job runs its eight Python suites through Bazel with declared Python
 and Rustfmt toolchains. Suites using host Git or shell utilities always execute.
 Markdown formatting uses a Bazel test with declared files, formatter packages,
-and configuration.
+and configuration. Web-contract and model-projection generation run as native
+Bazel actions with declared output trees and snapshot-comparison tests.
 
 Native Bazel actions track Rust sources, dependencies, and test executables for
 content-based reuse within a compatible native environment.
