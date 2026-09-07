@@ -3497,11 +3497,26 @@ async fn exhausted_automatic_reconciliation_is_visible_to_the_operator()
         .read_transcript(parked.session)
         .await?
         .expect("the parked session remains process-readable");
-    let attempt_history: (i64, i64) = sqlx::query_as(
-        "SELECT count(*),
-                count(*) FILTER (WHERE outcome_kind = 'infrastructure_failure')
-           FROM automatic_reconciliation_attempt
-          WHERE turn_id = $1",
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct ExhaustedAttempts {
+        attempts: i64,
+        infrastructure_failures: i64,
+        state_kind: String,
+        has_exhaustion_time: bool,
+    }
+    let attempt_history: ExhaustedAttempts = sqlx::query_as(
+        "SELECT
+                (SELECT count(*)
+                   FROM automatic_reconciliation_attempt AS attempt
+                  WHERE attempt.turn_id = recovery.turn_id) AS attempts,
+                (SELECT count(*)
+                   FROM automatic_reconciliation_attempt AS attempt
+                  WHERE attempt.turn_id = recovery.turn_id
+                    AND attempt.outcome_kind = 'infrastructure_failure') AS infrastructure_failures,
+                recovery.state_kind,
+                recovery.exhausted_at IS NOT NULL AS has_exhaustion_time
+           FROM automatic_reconciliation AS recovery
+          WHERE recovery.turn_id = $1",
     )
     .bind(parked.turn.into_uuid())
     .fetch_one(&pool)
@@ -3516,7 +3531,15 @@ async fn exhausted_automatic_reconciliation_is_visible_to_the_operator()
         AutomaticReconciliationOperation::ModelCall(parked.call)
     );
     assert_eq!(automatic_recovery_status(&snapshot), (5, true));
-    assert_eq!(attempt_history, (5, 5));
+    assert_eq!(
+        attempt_history,
+        ExhaustedAttempts {
+            attempts: 5,
+            infrastructure_failures: 5,
+            state_kind: String::from("exhausted"),
+            has_exhaustion_time: true,
+        }
+    );
 
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x203));
     let operator = SubmitInputRepository::new(pool.clone())
@@ -4673,6 +4696,128 @@ async fn target_unavailable_reclassifies_steering() -> Result<(), Box<dyn Error>
     assert_eq!(durable_shape, (0, 1, 1, 1, 1));
 
     pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S04: the daemon stopping with a claimed reconciliation leaves one durable
+/// in-flight attempt. On restart that attempt is classified once, the next
+/// ordinal applies once, and the transition is never double-applied.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn restart_mid_recovery_neither_loses_nor_double_applies_the_attempt()
+-> Result<(), Box<dyn Error>> {
+    const RESTART_SEED: u128 = 0xd800; // numeric-bound: test - restart-mid-recovery identity namespace
+    const FIRST_ATTEMPT: u32 = 1; // numeric-bound: test - first claimed recovery ordinal
+    const SECOND_ATTEMPT: u32 = 2; // numeric-bound: test - post-restart recovery ordinal
+    const CONNECTION_LIMIT: u32 = 5; // numeric-bound: test - restarted fixture pool capacity
+
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let parked = park_restart_ambiguity(&pool, RESTART_SEED).await?;
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone()).with_policy(
+        Some(5),
+        Some(Duration::from_secs(120)),
+        Some(Duration::from_secs(1800)),
+    );
+    let first_batch = repository.claim_due().await?;
+    let first = first_batch.claimed()[0];
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct ClaimedAttempt {
+        state_kind: String,
+        attempt_count: i32,
+        attempting: i64,
+    }
+    let before_restart: ClaimedAttempt = sqlx::query_as(
+        "SELECT recovery.state_kind, recovery.attempt_count,
+                (SELECT count(*)
+                   FROM automatic_reconciliation_attempt AS attempt
+                  WHERE attempt.turn_id = recovery.turn_id
+                    AND attempt.outcome_kind = 'attempting') AS attempting
+           FROM automatic_reconciliation AS recovery
+          WHERE recovery.turn_id = $1",
+    )
+    .bind(parked.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE automatic_reconciliation
+            SET next_attempt_at = statement_timestamp()
+          WHERE turn_id = $1",
+    )
+    .bind(parked.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    assert_eq!(first_batch.claimed().len(), 1);
+    assert_eq!(first.attempt().get(), FIRST_ATTEMPT);
+    assert_eq!(
+        before_restart,
+        ClaimedAttempt {
+            state_kind: String::from("attempting"),
+            attempt_count: 1,
+            attempting: 1
+        }
+    );
+
+    drop(repository);
+    pool.close().await;
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(CONNECTION_LIMIT)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let restarted = PostgresAutomaticReconciliationRepository::new(restarted_pool.clone())
+        .with_policy(
+            Some(5),
+            Some(Duration::from_secs(120)),
+            Some(Duration::from_secs(1800)),
+        );
+    let second_batch = restarted.claim_due().await?;
+    let second = second_batch.claimed()[0];
+    let outcome = restarted.reconcile(second).await?;
+    let after_application = restarted.claim_due().await?;
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct AppliedRecovery {
+        state_kind: String,
+        attempt_count: i32,
+        outcomes: Vec<String>,
+        reconciliation_events: i64,
+    }
+    let durable: AppliedRecovery = sqlx::query_as(
+        "SELECT recovery.state_kind, recovery.attempt_count,
+                array_agg(attempt.outcome_kind ORDER BY attempt.attempt_ordinal) AS outcomes,
+                (SELECT count(*)
+                   FROM turn_terminal_outbox_event AS event
+                  WHERE event.turn_id = recovery.turn_id
+                    AND event.disposition_kind = 'reconciliation_required') AS reconciliation_events
+           FROM automatic_reconciliation AS recovery
+           JOIN automatic_reconciliation_attempt AS attempt
+             ON attempt.turn_id = recovery.turn_id
+          WHERE recovery.turn_id = $1
+          GROUP BY recovery.turn_id",
+    )
+    .bind(parked.turn.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+
+    assert_eq!(second_batch.claimed().len(), 1);
+    assert_eq!(second.attempt().get(), SECOND_ATTEMPT);
+    assert_eq!(outcome, AutomaticReconciliationOutcome::Reconciled);
+    assert_eq!(after_application.claimed(), &[]);
+    assert_eq!(after_application.exhausted(), &[]);
+    assert_eq!(
+        durable,
+        AppliedRecovery {
+            state_kind: String::from("reconciled"),
+            attempt_count: 2,
+            outcomes: vec![
+                String::from("infrastructure_failure"),
+                String::from("reconciled"),
+            ],
+            reconciliation_events: 1,
+        }
+    );
+
+    restarted_pool.close().await;
     drop(container);
     Ok(())
 }
