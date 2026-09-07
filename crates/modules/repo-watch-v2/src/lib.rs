@@ -142,7 +142,9 @@ pub struct WebhookDelivery<'a> {
 pub enum WebhookAdmission {
     /// The delivery was new.
     Inserted,
-    /// The exact delivery was already retained.
+    /// The exact delivery is retained but still needs processing.
+    PendingReplay,
+    /// The exact delivery already has a terminal disposition.
     Replayed,
     /// The provider identity was already bound to different bytes or metadata.
     ConflictingReuse,
@@ -625,6 +627,12 @@ pub struct RepoWatchStore {
     pool: PgPool,
 }
 
+#[derive(sqlx::FromRow)]
+struct WebhookReplayRecord {
+    equal: bool,
+    pending: bool,
+}
+
 impl RepoWatchStore {
     /// Uses a pool already confined to the repository-watch role and schema.
     pub const fn new(module_pool: PgPool) -> Self {
@@ -681,14 +689,16 @@ impl RepoWatchStore {
             return Ok(WebhookAdmission::Inserted);
         }
 
-        let equal: bool = sqlx::query_scalar(
+        let replay = sqlx::query_as::<_, WebhookReplayRecord>(
             "SELECT delivery.repository = $3
                     AND delivery.event_kind = $4
                     AND delivery.action IS NOT DISTINCT FROM $5
                     AND delivery.body_digest = $6
-                    AND body.body = $7
+                    AND body.body = $7 AS equal,
+                    settlement.disposition = 'pending' AS pending
                FROM webhook_delivery AS delivery
                JOIN webhook_body AS body USING (hook_id, delivery_id)
+               JOIN webhook_disposition AS settlement USING (hook_id, delivery_id)
               WHERE delivery.hook_id = $1 AND delivery.delivery_id = $2",
         )
         .bind(hook_id)
@@ -701,10 +711,12 @@ impl RepoWatchStore {
         .fetch_one(&mut *transaction)
         .await?;
         transaction.rollback().await?;
-        Ok(if equal {
-            WebhookAdmission::Replayed
-        } else {
+        Ok(if !replay.equal {
             WebhookAdmission::ConflictingReuse
+        } else if replay.pending {
+            WebhookAdmission::PendingReplay
+        } else {
+            WebhookAdmission::Replayed
         })
     }
 

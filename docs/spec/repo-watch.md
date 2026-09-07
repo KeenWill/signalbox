@@ -123,9 +123,11 @@ is a replay; different content is a conflict. Settlement changes a pending
 disposition exactly once. The authenticated listener admits exact payload bytes
 before waking the repository task. Primary intake settles as applied after the
 wake; shadow intake settles as ignored without a wake. Equal delivery replays
-return HTTP 202, conflicting identity reuse returns HTTP 409, and storage
-failures return HTTP 503. A frontier release supplies its observed generation
-and is stale after any intervening frontier commit.
+return HTTP 202. A settled replay neither wakes ingestion nor changes its
+disposition, including after a mode reload; a pending replay resumes intake.
+Conflicting identity reuse returns HTTP 409, and storage failures return HTTP
+503\. A frontier release supplies its observed generation and is stale after any
+intervening frontier commit.
 
 The module's repository task serializes polling and webhook wakes. Poll
 intervals are start-to-start; a wake received during an attempt waits for that

@@ -276,9 +276,9 @@ async fn delivery(
         let Some(expires_at) = received_at.checked_add(retention) else {
             return StatusCode::SERVICE_UNAVAILABLE;
         };
-        return admit_and_wake(
-            hook,
-            WebhookDelivery {
+        let Ok(admission) = hook
+            .store
+            .admit_webhook(WebhookDelivery {
                 repository: &hook.repository,
                 hook_id,
                 delivery_id,
@@ -287,19 +287,25 @@ async fn delivery(
                 body: &body,
                 received_at,
                 expires_at,
-            },
-        )
-        .await;
+            })
+            .await
+        else {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        };
+        return settle_and_wake(hook, hook_id, delivery_id, admission).await;
     }
 }
 
-async fn admit_and_wake(hook: &Hook, delivery: WebhookDelivery<'_>) -> StatusCode {
-    let hook_id = delivery.hook_id;
-    let delivery_id = delivery.delivery_id;
-    match hook.store.admit_webhook(delivery).await {
-        Ok(WebhookAdmission::Inserted | WebhookAdmission::Replayed) => {}
-        Ok(WebhookAdmission::ConflictingReuse) => return StatusCode::CONFLICT,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE,
+async fn settle_and_wake(
+    hook: &Hook,
+    hook_id: u64,
+    delivery_id: Uuid,
+    admission: WebhookAdmission,
+) -> StatusCode {
+    match admission {
+        WebhookAdmission::Inserted | WebhookAdmission::PendingReplay => {}
+        WebhookAdmission::Replayed => return StatusCode::ACCEPTED,
+        WebhookAdmission::ConflictingReuse => return StatusCode::CONFLICT,
     }
     let disposition = match hook.mode {
         RepositoryWatchWebhookMode::Primary => {
@@ -323,6 +329,45 @@ async fn admit_and_wake(hook: &Hook, delivery: WebhookDelivery<'_>) -> StatusCod
 mod tests {
     use super::*;
     use futures_util::FutureExt;
+
+    #[tokio::test]
+    async fn settled_replays_do_not_wake_primary_ingestion_or_rewrite_settlement() {
+        const FIXTURE_HOOK_ID: u64 = 17;
+        let directory = tempfile::tempdir().expect("credential directory");
+        let reference = CredentialReference::new("repository-watch:example/project:webhook");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+        pool.close().await;
+        let wake = Arc::new(Notify::new());
+        let hook = Hook {
+            store: RepoWatchStore::new(pool),
+            retention: Duration::from_secs(7 * 24 * 60 * 60),
+            repository: RepositorySlug::try_new(String::from("example/project"))
+                .expect("repository slug"),
+            credentials: FileCredentialAccess::new(
+                directory.path().join("unused-secret"),
+                reference.clone(),
+            ),
+            reference,
+            mode: RepositoryWatchWebhookMode::Primary,
+            wake: wake.clone(),
+        };
+        assert_eq!(
+            settle_and_wake(
+                &hook,
+                FIXTURE_HOOK_ID,
+                Uuid::now_v7(),
+                WebhookAdmission::Replayed
+            )
+            .await,
+            StatusCode::ACCEPTED,
+            "terminal replay does not require another settlement write"
+        );
+        assert!(
+            wake.notified().now_or_never().is_none(),
+            "terminal replay cannot wake primary ingestion"
+        );
+    }
 
     #[tokio::test]
     async fn empty_resolved_secrets_reject_signed_deliveries_without_waking_the_repository() {

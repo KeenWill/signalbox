@@ -1710,7 +1710,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     replay.expires_at += Duration::from_secs(1);
     assert_eq!(
         store.admit_webhook(replay).await?,
-        WebhookAdmission::Replayed
+        WebhookAdmission::PendingReplay
     );
 
     let mut conflict = delivery();
@@ -1728,6 +1728,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 observed_at + Duration::from_secs(1),
             )
             .await?
+    );
+    assert_eq!(
+        store.admit_webhook(delivery()).await?,
+        WebhookAdmission::Replayed
     );
     assert!(store.advance_core_event(0, 4).await?);
     assert!(store.advance_core_event(4, 9).await?);
@@ -2956,6 +2960,75 @@ system_prompt = "Inspect repository activity."
         shadow_retention,
         2 * 24 * 60 * 60,
         "reload changes the configured retention"
+    );
+    hook.mode = "primary";
+    runtime
+        .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+        .await
+        .expect("switch settled shadow delivery to primary intake");
+    assert_eq!(
+        webhook_delivery_status(&hook, b"replacement-hook-secret", &shadow).await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    let retained_shadow = || WebhookDelivery {
+        repository: &repository,
+        hook_id: hook.id,
+        delivery_id: shadow.id,
+        event: shadow.event,
+        action: Some("opened"),
+        body: shadow.body.as_bytes(),
+        received_at: retained.received_at,
+        expires_at: retained.expires_at,
+    };
+    assert_eq!(
+        store.admit_webhook(retained_shadow()).await?,
+        WebhookAdmission::Replayed
+    );
+    let replayed_disposition: String = sqlx::query_scalar(
+        "SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(hook.id))
+    .bind(shadow.id)
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(replayed_disposition, "ignored");
+
+    let pending = RuntimeWebhookDelivery {
+        id: Uuid::now_v7(),
+        ..shadow
+    };
+    assert_eq!(
+        store
+            .admit_webhook(WebhookDelivery {
+                delivery_id: pending.id,
+                ..retained_shadow()
+            })
+            .await?,
+        WebhookAdmission::Inserted
+    );
+    assert_eq!(
+        store
+            .admit_webhook(WebhookDelivery {
+                delivery_id: pending.id,
+                ..retained_shadow()
+            })
+            .await?,
+        WebhookAdmission::PendingReplay
+    );
+    assert_eq!(
+        webhook_delivery_status(&hook, b"replacement-hook-secret", &pending).await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    let pending_disposition: String = sqlx::query_scalar(
+        "SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(hook.id))
+    .bind(pending.id)
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(
+        pending_disposition, "applied",
+        "pending replay completes primary intake"
     );
     module_pool.close().await;
     assert_eq!(
