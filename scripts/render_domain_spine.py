@@ -24,7 +24,8 @@ def configuration(source_root=None):
     return tomllib.loads(((source_root or ROOT) / 'docs/api/crates.toml').read_text())
 
 
-def build_json(crate, *, workspace=ROOT, target=None):
+def build_json(crate, *, workspace=ROOT, target=None, toolchain=None):
+    toolchain = toolchain or configuration()['rustdoc_toolchain']
     target = target or Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
     target = target.resolve()
     # Cargo rejects feature selection for this dependency outside the workspace.
@@ -35,7 +36,7 @@ def build_json(crate, *, workspace=ROOT, target=None):
     }:
         features += ['--features', 'tokio/macros']
     subprocess.run([
-        'cargo', '+' + configuration()['rustdoc_toolchain'], 'rustdoc', '--locked', '--manifest-path',
+        'cargo', '+' + toolchain, 'rustdoc', '--locked', '--manifest-path',
         str(workspace / 'Cargo.toml'), '--target-dir', str(target),
         '-p', crate, '--lib', *features, '--',
         '-Z', 'unstable-options', '--output-format', 'json',
@@ -637,7 +638,8 @@ def main():
     parser.add_argument('--output-dir', type=Path, help='Write API pages to this directory')
     args = parser.parse_args()
     paths = {}
-    for crate in configuration(args.source_root)['crates']:
+    selected_configuration = configuration(args.source_root)
+    for crate in selected_configuration['crates']:
         if args.json_dir:
             filename = f"{crate.replace('-', '_')}.json"
             candidates = [directory / filename for directory in args.json_dir
@@ -646,7 +648,8 @@ def main():
                 raise ValueError(f'{crate}: expected one rustdoc JSON input, found {len(candidates)}')
             paths[crate] = candidates[0]
         else:
-            paths[crate] = build_json(crate, workspace=args.source_root)
+            paths[crate] = build_json(crate, workspace=args.source_root,
+                                      toolchain=selected_configuration['rustdoc_toolchain'])
     public_exports = {}
     for path in paths.values():
         renderer = Renderer(json.loads(path.read_text()), source_root=args.source_root)
