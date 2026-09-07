@@ -86,6 +86,11 @@ pub enum ToolResponsePartIdentity {
         /// Fresh semantic-entry identity.
         entry: SemanticTranscriptEntryId,
     },
+    /// One semantic provider-reasoning entry.
+    ProviderReasoning {
+        /// Fresh semantic-entry identity.
+        entry: SemanticTranscriptEntryId,
+    },
     /// One logical request plus its reference-only semantic entry.
     ToolCall {
         /// Fresh semantic-entry identity.
@@ -106,6 +111,11 @@ impl ToolResponsePartIdentity {
     /// Constructs a provider-compaction-part identity.
     pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self {
         Self::ProviderCompaction { entry }
+    }
+
+    /// Constructs a provider-reasoning-part identity.
+    pub const fn provider_reasoning(entry: SemanticTranscriptEntryId) -> Self {
+        Self::ProviderReasoning { entry }
     }
 
     /// Constructs a tool-part identity and explicit initial policy outcome.
@@ -175,6 +185,11 @@ pub enum StoppedToolResponsePartIdentity {
         /// Fresh semantic-entry identity.
         entry: SemanticTranscriptEntryId,
     },
+    /// One semantic provider-reasoning entry.
+    ProviderReasoning {
+        /// Fresh semantic-entry identity.
+        entry: SemanticTranscriptEntryId,
+    },
     /// One request, tool-use entry, and turn-closed result entry.
     ToolCall {
         /// Fresh assistant tool-use entry identity.
@@ -197,6 +212,11 @@ impl StoppedToolResponsePartIdentity {
     /// Constructs one provider-compaction identity.
     pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self {
         Self::ProviderCompaction { entry }
+    }
+
+    /// Constructs one provider-reasoning identity.
+    pub const fn provider_reasoning(entry: SemanticTranscriptEntryId) -> Self {
+        Self::ProviderReasoning { entry }
     }
 
     /// Constructs one closed tool-proposal identity group.

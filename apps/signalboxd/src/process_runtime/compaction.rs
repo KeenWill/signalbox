@@ -854,6 +854,11 @@ pub(super) fn transcript_entry_reference(
             entry,
             ..
         }
+        | ProcessTranscriptEntry::ProviderReasoning {
+            source_session,
+            entry,
+            ..
+        }
         | ProcessTranscriptEntry::AssistantToolUse {
             source_session,
             entry,
@@ -1091,6 +1096,19 @@ pub(super) async fn context_compaction_entry_value(
             "source_session_id": source_session_id,
             "entry_id": entry_id,
             "type": "provider_compaction",
+            "turn_id": turn.into_uuid().hyphenated().to_string(),
+            "model_call_id": model_call.into_uuid().hyphenated().to_string(),
+        }),
+        ProcessTranscriptEntry::ProviderReasoning {
+            entry_index,
+            turn,
+            model_call,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "provider_reasoning",
             "turn_id": turn.into_uuid().hyphenated().to_string(),
             "model_call_id": model_call.into_uuid().hyphenated().to_string(),
         }),

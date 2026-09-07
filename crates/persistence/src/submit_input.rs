@@ -32,9 +32,10 @@ use signalbox_domain::{
     NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
     OriginConfigurationReconstitutionInput, OriginModelSettingsError, ParentTerminationKind,
     PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
-    ProviderCompactionBlock, ProviderModelIdentity, ReconstitutedSubmitInput,
-    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-    ResolvedProviderTarget, RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
+    ProviderCompactionBlock, ProviderModelIdentity, ProviderReasoningItem,
+    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, RunnerGeneration, RunnerId,
+    SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -1928,39 +1929,44 @@ async fn prospective_attachment_frontier_exceeds_bound(
         Err(ModelCallRepositoryError::NoLiveExecution) => {
             if let Some(active) = scheduling.active_turn_execution() {
                 let mut distinct = BTreeSet::new();
-                let mut origins = if matches!(
-                    active.phase(),
-                    signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
-                ) {
-                    let snapshot =
-                        load_runner_recovery_source_snapshot(connection, session, active.turn())
-                            .await
-                            .map_err(map_tool_loop_error)?
-                            .ok_or(SubmitInputCorruption::Inconsistent(
-                                "runner recovery prospective attachment frontier missing",
-                            ))?;
-                    let complete_entries = snapshot
-                        .ordered_entries()
-                        .map(|reference| scheduling.semantic_entry(reference).cloned())
-                        .collect::<Option<Vec<_>>>()
+                let mut origins =
+                    if matches!(
+                        active.phase(),
+                        signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+                    ) {
+                        let snapshot = load_runner_recovery_source_snapshot(
+                            connection,
+                            session,
+                            active.turn(),
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
                         .ok_or(SubmitInputCorruption::Inconsistent(
-                            "runner recovery prospective attachment frontier entry missing",
+                            "runner recovery prospective attachment frontier missing",
                         ))?;
-                    let projection =
-                        ContextFrontierProjection::from_complete_entries(&complete_entries)
-                            .map_err(|_| {
-                                SubmitInputCorruption::Inconsistent(
-                                    "runner recovery prospective attachment frontier projection",
-                                )
-                            })?;
-                    let entries_by_reference = complete_entries
-                        .iter()
-                        .map(|entry| (entry.reference(), entry))
-                        .collect::<BTreeMap<_, _>>();
-                    projection
-                        .ordered_entries()
-                        .filter_map(
-                            |reference| match entries_by_reference[&reference].payload() {
+                        let complete_entries = snapshot
+                            .ordered_entries()
+                            .map(|reference| scheduling.semantic_entry(reference).cloned())
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or(SubmitInputCorruption::Inconsistent(
+                                "runner recovery prospective attachment frontier entry missing",
+                            ))?;
+                        let projection = ContextFrontierProjection::from_complete_entries(
+                            &complete_entries,
+                        )
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "runner recovery prospective attachment frontier projection",
+                            )
+                        })?;
+                        let entries_by_reference = complete_entries
+                            .iter()
+                            .map(|entry| (entry.reference(), entry))
+                            .collect::<BTreeMap<_, _>>();
+                        projection
+                            .ordered_entries()
+                            .filter_map(|reference| {
+                                match entries_by_reference[&reference].payload() {
                                 InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
                                     accepted_input,
                                 }
@@ -1987,29 +1993,24 @@ async fn prospective_attachment_frontier_exceeds_bound(
                                 }
                                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
-                                | InitialSemanticTranscriptEntryPayload::ProviderCompaction {
-                                    ..
-                                }
-                                | InitialSemanticTranscriptEntryPayload::AssistantToolUse {
-                                    ..
-                                }
-                                | InitialSemanticTranscriptEntryPayload::ToolExecutionResult {
-                                    ..
-                                }
+                                | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
+                                | InitialSemanticTranscriptEntryPayload::ProviderReasoning { .. }
+                                | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                                | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
                                 | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. }
                                 | InitialSemanticTranscriptEntryPayload::Imported { .. } => None,
-                            },
-                        )
-                        .collect::<Vec<_>>()
-                } else {
-                    scheduling.active_rendered_frontier_origins().ok_or(
-                        SubmitInputCorruption::Inconsistent(
-                            "active prospective attachment frontier missing",
-                        ),
-                    )?
-                };
+                            }
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        scheduling.active_rendered_frontier_origins().ok_or(
+                            SubmitInputCorruption::Inconsistent(
+                                "active prospective attachment frontier missing",
+                            ),
+                        )?
+                    };
                 distinct.extend(origins.iter().copied());
                 origins.extend(
                     active
@@ -2387,6 +2388,7 @@ async fn delegated_parked_attachment_frontier_origins(
                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
                 | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
+                | InitialSemanticTranscriptEntryPayload::ProviderReasoning { .. }
                 | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -4865,7 +4867,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
         "SELECT DISTINCT producing_model_call_id
            FROM semantic_transcript_entry
           WHERE source_session_id = $1
-            AND payload_kind IN ('assistant_text', 'provider_compaction', 'assistant_tool_use')
+            AND payload_kind IN ('assistant_text', 'provider_compaction', 'provider_reasoning', 'assistant_tool_use')
           ORDER BY producing_model_call_id",
     )
     .bind(session_id_to_uuid(session_id))
@@ -6101,6 +6103,23 @@ async fn load_scheduling_projection_with_semantic_frontiers(
                 })?,
             },
             (
+                "provider_reasoning",
+                None,
+                None,
+                None,
+                None,
+                Some(item),
+                Some(call),
+                None,
+                None,
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::ProviderReasoning {
+                producing_call: ModelCallId::from_uuid(call),
+                item: ProviderReasoningItem::try_new(item)
+                    .map_err(|_| SubmitInputCorruption::Inconsistent("provider reasoning item"))?,
+            },
+            (
                 "assistant_tool_use",
                 None,
                 None,
@@ -6183,6 +6202,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
                 | "turn_cancelled"
                 | "assistant_text"
                 | "provider_compaction"
+                | "provider_reasoning"
                 | "assistant_tool_use"
                 | "tool_execution_result"
                 | "tool_denied"

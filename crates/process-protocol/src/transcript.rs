@@ -863,6 +863,13 @@ pub enum TranscriptEntry {
         /// Producing model call.
         model_call_id: CanonicalUuid,
     },
+    /// Provider reasoning was retained; opaque replay bytes stay internal.
+    ProviderReasoning {
+        /// Owning turn.
+        turn_id: CanonicalUuid,
+        /// Producing model call.
+        model_call_id: CanonicalUuid,
+    },
     /// Assistant proposed one durable tool request.
     AssistantToolUse {
         /// Owning turn.

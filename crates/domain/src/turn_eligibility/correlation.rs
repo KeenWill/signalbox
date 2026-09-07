@@ -404,6 +404,10 @@ pub(super) fn completed_terminal_matches(
                             producing_call,
                             ..
                         }
+                        | InitialSemanticTranscriptEntryPayload::ProviderReasoning {
+                            producing_call,
+                            ..
+                        }
                     ) if *producing_call == completing_call
                 )
         })
@@ -597,6 +601,10 @@ fn tool_round_producing_call_in_window(
                         producing_call, ..
                     }) if producing_call == *call_id => {}
                     Some(SemanticTranscriptEntryPayload::ProviderCompaction {
+                        producing_call,
+                        ..
+                    }) if producing_call == *call_id => {}
+                    Some(SemanticTranscriptEntryPayload::ProviderReasoning {
                         producing_call,
                         ..
                     }) if producing_call == *call_id => {}

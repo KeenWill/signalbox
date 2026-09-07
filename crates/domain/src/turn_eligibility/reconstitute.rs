@@ -427,6 +427,7 @@ fn reconstitute_inner(
             | InitialSemanticTranscriptEntryPayload::ProviderCompaction {
                 producing_call, ..
             }
+            | InitialSemanticTranscriptEntryPayload::ProviderReasoning { producing_call, .. }
             | InitialSemanticTranscriptEntryPayload::AssistantToolUse { producing_call, .. } => {
                 assistant_by_call
                     .entry(*producing_call)
@@ -1911,6 +1912,10 @@ fn reconstitute_inner(
                                             ..
                                         } => *producing_call == tool_batch.producing_call,
                                         SemanticTranscriptEntryPayload::ProviderCompaction {
+                                            producing_call,
+                                            ..
+                                        } => *producing_call == tool_batch.producing_call,
+                                        SemanticTranscriptEntryPayload::ProviderReasoning {
                                             producing_call,
                                             ..
                                         } => *producing_call == tool_batch.producing_call,

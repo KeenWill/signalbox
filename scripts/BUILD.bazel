@@ -1,5 +1,5 @@
 load("@python_deps//:requirements.bzl", "requirement")
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 
 [
     py_library(
@@ -20,6 +20,16 @@ py_library(
         "render_domain_spine.py",
     ],
     imports = ["."],
+)
+
+py_binary(
+    name = "render_api",
+    srcs = ["render_domain_spine.py"],
+    data = ["@rules_rust//rust/toolchain:current_rustfmt_toolchain"],
+    env = {"RUSTFMT": "$(execpath @rules_rust//rust/toolchain:current_rustfmt_toolchain)"},
+    main = "render_domain_spine.py",
+    visibility = ["//visibility:public"],
+    deps = [":domain_spine"],
 )
 
 py_library(

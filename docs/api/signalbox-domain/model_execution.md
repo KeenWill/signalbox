@@ -466,6 +466,9 @@ pub enum ModelCallTerminalObservation {
     Completed {
         assistant_text: vec::Vec<AssistantText>,
     },
+    CompletedWithProviderReasoning {
+        response: vec::Vec<AssistantResponsePart>,
+    },
     CompletedWithProviderCompaction {
         response: vec::Vec<AssistantResponsePart>,
         retained_input_tokens: u64,
@@ -593,6 +596,9 @@ pub enum ToolResponsePartIdentity {
     ProviderCompaction {
         entry: SemanticTranscriptEntryId,
     },
+    ProviderReasoning {
+        entry: SemanticTranscriptEntryId,
+    },
     ToolCall {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -603,6 +609,7 @@ pub enum ToolResponsePartIdentity {
 impl ToolResponsePartIdentity {
     pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self;
+    pub const fn provider_reasoning(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn tool_call(
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -638,6 +645,9 @@ pub enum StoppedToolResponsePartIdentity {
     ProviderCompaction {
         entry: SemanticTranscriptEntryId,
     },
+    ProviderReasoning {
+        entry: SemanticTranscriptEntryId,
+    },
     ToolCall {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -649,6 +659,7 @@ pub enum StoppedToolResponsePartIdentity {
 impl StoppedToolResponsePartIdentity {
     pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self;
+    pub const fn provider_reasoning(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn tool_call(
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -1033,6 +1044,7 @@ impl AmbiguousModelCallTurn {
 
 ```rust
 pub enum ModelCallClosureError {
+    UnexpectedProviderCompaction,
     IdentityShapeMismatch,
     CallStateMismatch,
     ObservationCorrelationMismatch,

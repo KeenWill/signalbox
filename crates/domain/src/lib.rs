@@ -257,8 +257,9 @@ pub use runner::{
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
-    AssistantText, ProviderCompactionBlock, ProviderCompactionBlockError, SemanticTranscriptEntry,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
+    AssistantText, ProviderCompactionBlock, ProviderCompactionBlockError, ProviderReasoningItem,
+    ProviderReasoningItemError, SemanticTranscriptEntry, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput,
 };
 pub use session::{
     CreateSession, CreateSessionAppliedResult, CreateSessionFromImportedFrontier,

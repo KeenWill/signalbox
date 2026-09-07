@@ -1226,7 +1226,8 @@ impl OperationTracker {
                 | MessagePart::ToolCall(_)
                 | MessagePart::Thinking { .. }
                 | MessagePart::RedactedThinking { .. }
-                | MessagePart::ProviderCompaction { .. } => None,
+                | MessagePart::ProviderCompaction { .. }
+                | MessagePart::ProviderReasoning { .. } => None,
             })
         });
         self.record_new_results(tool_results);
@@ -1708,6 +1709,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::User { .. }
                 | ProcessTranscriptEntry::Assistant { .. }
                 | ProcessTranscriptEntry::ProviderCompaction { .. }
+                | ProcessTranscriptEntry::ProviderReasoning { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }
                 | ProcessTranscriptEntry::TurnFailed { .. }
@@ -1751,6 +1753,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::User { .. }
                 | ProcessTranscriptEntry::Assistant { .. }
                 | ProcessTranscriptEntry::ProviderCompaction { .. }
+                | ProcessTranscriptEntry::ProviderReasoning { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
                 | ProcessTranscriptEntry::ToolDenied { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }

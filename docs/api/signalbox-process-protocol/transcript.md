@@ -270,6 +270,10 @@ pub enum TranscriptEntry {
         turn_id: CanonicalUuid,
         model_call_id: CanonicalUuid,
     },
+    ProviderReasoning {
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+    },
     AssistantToolUse {
         turn_id: CanonicalUuid,
         model_call_id: CanonicalUuid,

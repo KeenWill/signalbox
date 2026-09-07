@@ -28,7 +28,7 @@
 | repo_watch | 43 | 0 | 0 | [repo_watch](repo_watch.md) |
 | review_workflow | 83 | 0 | 1 | [review_workflow](review_workflow.md) |
 | runner | 80 | 0 | 0 | [runner](runner.md) |
-| semantic_entry | 6 | 0 | 0 | [semantic_entry](semantic_entry.md) |
+| semantic_entry | 8 | 0 | 0 | [semantic_entry](semantic_entry.md) |
 | session | 22 | 0 | 0 | [session](session.md) |
 | session_delegation | 37 | 0 | 3 | [session_delegation](session_delegation.md) |
 | session_lifecycle | 23 | 0 | 0 | [session_lifecycle](session_lifecycle.md) |

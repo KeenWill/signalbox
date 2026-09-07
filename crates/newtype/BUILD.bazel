@@ -1,17 +1,7 @@
-load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tooling/bazel:package.bzl", "rust_package")
 
-cargo_toml_env_vars(
-    name = "cargo_environment",
-    src = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
-
-extract_cargo_lints(
-    name = "cargo_lints",
-    manifest = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
+rust_package(exports = [])
 
 rust_library(
     name = "signalbox_newtype",
@@ -34,10 +24,4 @@ rust_test(
         "--forbid=unsafe_code",
         "--deny=warnings",
     ],
-)
-
-filegroup(
-    name = "rust_sources",
-    srcs = glob(["**/*.rs"]),
-    visibility = ["//:__pkg__"],
 )

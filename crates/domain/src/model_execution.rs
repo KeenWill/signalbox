@@ -591,6 +591,7 @@ impl ModelCallExecution {
                 | SemanticTranscriptEntryPayload::Imported { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
                 | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
+                | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | SemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -1461,6 +1462,7 @@ fn reconstitute(
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
+            | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -1868,6 +1870,7 @@ fn frontier_closes_latest_tool_round(
             SemanticTranscriptEntryPayload::AssistantToolUse { request, .. } => Some(*request),
             SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
+            | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
             | SemanticTranscriptEntryPayload::DelegatedTask { .. }
             | SemanticTranscriptEntryPayload::DelegationMessage { .. }
             | SemanticTranscriptEntryPayload::DelegationResult { .. }
@@ -1927,6 +1930,7 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
+            | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
@@ -1948,6 +1952,7 @@ fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> 
     match entry.payload() {
         SemanticTranscriptEntryPayload::AssistantText { producing_call, .. }
         | SemanticTranscriptEntryPayload::ProviderCompaction { producing_call, .. }
+        | SemanticTranscriptEntryPayload::ProviderReasoning { producing_call, .. }
         | SemanticTranscriptEntryPayload::AssistantToolUse { producing_call, .. } => {
             Some(*producing_call)
         }
@@ -2032,6 +2037,12 @@ fn complete_turn(
                     SemanticTranscriptEntryPayload::ProviderCompaction {
                         producing_call: call.id(),
                         block,
+                    }
+                }
+                AssistantResponsePart::ProviderReasoning(item) => {
+                    SemanticTranscriptEntryPayload::ProviderReasoning {
+                        producing_call: call.id(),
+                        item,
                     }
                 }
                 AssistantResponsePart::ToolCall(_) => {
@@ -2221,7 +2232,8 @@ fn close_cancelled_turn(
 #[cfg(test)]
 pub(crate) use tests::{
     cancelled_turn_fixture, completed_turn_fixture,
-    completed_turn_with_provider_compaction_fixture, failed_turn_fixture,
+    completed_turn_with_provider_compaction_fixture,
+    completed_turn_with_provider_reasoning_fixture, failed_turn_fixture,
 };
 
 #[cfg(test)]

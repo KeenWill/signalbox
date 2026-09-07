@@ -2090,6 +2090,7 @@ pub(crate) fn completed_tool_result_entry_indices(
             | ProcessTranscriptEntry::User { .. }
             | ProcessTranscriptEntry::Assistant { .. }
             | ProcessTranscriptEntry::ProviderCompaction { .. }
+            | ProcessTranscriptEntry::ProviderReasoning { .. }
             | ProcessTranscriptEntry::AssistantToolUse { .. }
             | ProcessTranscriptEntry::ToolDenied { .. }
             | ProcessTranscriptEntry::ToolClosed { .. }

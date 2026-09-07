@@ -254,10 +254,16 @@ impl SnapshotSelection {
             ) => turn_id == *entry_turn && model_call_id == *entry_call,
             (
                 Self::Cancelled { turn_id, .. },
-                SnapshotEntryKind::Marker(TranscriptEntry::ProviderCompaction {
-                    turn_id: entry_turn,
-                    model_call_id: entry_call,
-                }),
+                SnapshotEntryKind::Marker(
+                    TranscriptEntry::ProviderCompaction {
+                        turn_id: entry_turn,
+                        model_call_id: entry_call,
+                    }
+                    | TranscriptEntry::ProviderReasoning {
+                        turn_id: entry_turn,
+                        model_call_id: entry_call,
+                    },
+                ),
             ) => turn_id == *entry_turn && context.cancelled_model_call == Some(*entry_call),
             (
                 Self::ToolBatchProposed {
@@ -289,10 +295,16 @@ impl SnapshotSelection {
                     turn_id,
                     model_call_id,
                 },
-                SnapshotEntryKind::Marker(TranscriptEntry::ProviderCompaction {
-                    turn_id: entry_turn,
-                    model_call_id: entry_call,
-                }),
+                SnapshotEntryKind::Marker(
+                    TranscriptEntry::ProviderCompaction {
+                        turn_id: entry_turn,
+                        model_call_id: entry_call,
+                    }
+                    | TranscriptEntry::ProviderReasoning {
+                        turn_id: entry_turn,
+                        model_call_id: entry_call,
+                    },
+                ),
             ) => turn_id == *entry_turn && model_call_id == *entry_call,
             (
                 Self::ToolBatchResults { .. }
@@ -405,6 +417,7 @@ impl SnapshotSelection {
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::ModelIdentityChanged { .. }
                     | TranscriptEntry::ProviderCompaction { .. }
+                    | TranscriptEntry::ProviderReasoning { .. }
                     | TranscriptEntry::DelegatedTask { .. }
                     | TranscriptEntry::DelegationMessage { .. }
                     | TranscriptEntry::DelegationResult { .. }

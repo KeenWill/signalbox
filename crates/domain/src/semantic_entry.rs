@@ -92,6 +92,50 @@ impl ProviderCompactionBlock {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderCompactionBlockError;
 
+/// One complete provider reasoning item retained as exact JSON text.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ProviderReasoningItem(String);
+
+impl ProviderReasoningItem {
+    /// Checks the reasoning discriminator, non-empty identity, and encrypted content.
+    pub fn try_new(value: String) -> Result<Self, ProviderReasoningItemError> {
+        let mut deserializer = serde_json::Deserializer::from_str(&value);
+        deserializer.disable_recursion_limit();
+        let parsed =
+            serde_json::Value::deserialize(serde_stacker::Deserializer::new(&mut deserializer))
+                .map_err(|_| ProviderReasoningItemError)?;
+        deserializer.end().map_err(|_| ProviderReasoningItemError)?;
+        if !parsed.is_object()
+            || parsed.get("type").and_then(serde_json::Value::as_str) != Some("reasoning")
+            || !parsed
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+            || !matches!(
+                parsed.get("encrypted_content"),
+                Some(serde_json::Value::String(_))
+            )
+        {
+            return Err(ProviderReasoningItemError);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the exact provider JSON without re-serialization.
+    pub fn as_json(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the exact provider JSON without re-serialization.
+    pub fn into_json(self) -> String {
+        self.0
+    }
+}
+
+/// A stored reasoning item lacks its discriminator, identity, or encrypted content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderReasoningItemError;
+
 /// The complete semantic transcript-entry payload set.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum SemanticTranscriptEntryPayload {
@@ -182,6 +226,13 @@ pub enum SemanticTranscriptEntryPayload {
         producing_call: ModelCallId,
         /// The complete block retained for exact replay.
         block: ProviderCompactionBlock,
+    },
+    /// One complete provider reasoning item with producing-call provenance.
+    ProviderReasoning {
+        /// The outcome-authoritative call that supplied this item.
+        producing_call: ModelCallId,
+        /// The complete item retained for exact replay.
+        item: ProviderReasoningItem,
     },
     /// One logical tool request named by a definitive assistant response.
     AssistantToolUse {
@@ -462,5 +513,66 @@ mod tests {
             entry.payload(),
             SemanticTranscriptEntryPayload::TurnCompleted { turn: actual } if *actual == turn
         ));
+    }
+    #[test]
+    fn reasoning_item_preserves_the_exact_original_json() {
+        let raw = " { \"type\": \"reasoning\", \"id\": \"rs_fixture\", \"summary\": [], \"encrypted_content\": \"opaque\" } ";
+        let item = ProviderReasoningItem::try_new(raw.to_string()).unwrap();
+        assert_eq!(item.as_json(), raw);
+        assert_eq!(item.into_json(), raw);
+    }
+
+    #[test]
+    fn reasoning_item_rejects_trailing_json() {
+        assert!(
+            ProviderReasoningItem::try_new(
+                r#"{"type":"reasoning","id":"rs_fixture","encrypted_content":"opaque"} {}"#
+                    .to_string()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reasoning_item_rejects_non_objects() {
+        assert!(ProviderReasoningItem::try_new("[]".to_string()).is_err());
+    }
+
+    #[test]
+    fn reasoning_item_rejects_a_different_type() {
+        assert!(
+            ProviderReasoningItem::try_new(
+                r#"{"type":"compaction","id":"rs_fixture","encrypted_content":"opaque"}"#
+                    .to_string()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reasoning_item_requires_a_nonempty_id() {
+        for raw in [
+            r#"{"type":"reasoning","encrypted_content":"opaque"}"#,
+            r#"{"type":"reasoning","id":"","encrypted_content":"opaque"}"#,
+        ] {
+            assert!(
+                ProviderReasoningItem::try_new(raw.to_string()).is_err(),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn reasoning_item_requires_nonnull_encrypted_content() {
+        for raw in [
+            r#"{"type":"reasoning","id":"rs_fixture"}"#,
+            r#"{"type":"reasoning","id":"rs_fixture","encrypted_content":null}"#,
+            r#"{"type":"reasoning","id":"rs_fixture","encrypted_content":3}"#,
+        ] {
+            assert!(
+                ProviderReasoningItem::try_new(raw.to_string()).is_err(),
+                "{raw}"
+            );
+        }
     }
 }

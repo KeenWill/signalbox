@@ -97,6 +97,12 @@ physical iteration rather than that multi-iteration billing sum. The
 tool-continuation guard likewise excludes replaced pre-compaction input from its
 retained-context baseline when the next request replays the block.
 
+A later call omits a provider reasoning item from its request projection unless
+the effective target is served by OpenAI, declares the same configured reasoning
+replay family as the producing call's effective OpenAI target, and uses the same
+pinned credential reference. The omission is per part, an emptied message is
+dropped, and this projection neither removes nor rewrites the durable entry.
+
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five
 composed roles: prepare, capability, authorize-send, provider, and
@@ -120,14 +126,15 @@ call from durable evidence.
 
 The runtime bridge in `crates/model-provider-runtime` maps the runtime's typed
 terminal evidence to exactly one disposition: completed text, provider
-compaction blocks, and tool-call content to `Completed`, refusal to `Refused`, a
-provider error or other proof of non-acceptance to `KnownFailed`, cancellation
-before send or confirmed cancellation to `Cancelled`, and loss after possible
-acceptance to `Ambiguous`. The requested selection, the pinned resolved target,
-and the provider-reported identity are three separate facts, and the bridge is
-the one place that relates the third to the second. Exactly one of three
-relations holds: exact, alias concretion (the configured spelling followed by a
-dated snapshot qualifier), or different lineage.
+compaction blocks, provider reasoning items, and tool-call content to
+`Completed`, refusal to `Refused`, a provider error or other proof of
+non-acceptance to `KnownFailed`, cancellation before send or confirmed
+cancellation to `Cancelled`, and loss after possible acceptance to `Ambiguous`.
+The requested selection, the pinned resolved target, and the provider-reported
+identity are three separate facts, and the bridge is the one place that relates
+the third to the second. Exactly one of three relations holds: exact, alias
+concretion (the configured spelling followed by a dated snapshot qualifier), or
+different lineage.
 
 `apply_terminal_observation` derives one of seven outcomes from fresh state, and
 persistence commits the outcome atomically with its outbox rows. Ambiguity parks
@@ -414,51 +421,51 @@ physical cancellation is an unstopped known failure, and a stop-requested
 attempt whose call ends known-failed still fails and cannot admit a successor,
 because the physical result has not proven cancellation.
 
-`Completed` admits only text, provider-compaction, and tool-call parts. A
-provider-compaction part must be a complete validated `compaction` object, must
-contain no prepared credential, and its durable representation is replayed
-unchanged while only a non-text marker crosses the process protocol. A buffered
-object retains the provider's exact bytes; a streamed object is reconstructed
-structurally from its validated start and delta fields before those complete
-durable bytes are fixed. Empty text and empty thinking blocks are dropped, while
-thinking with text and redacted thinking fail the adapter stage closed as
-unsupported material, because no durable semantic representation exists for
-either. Tool content and a tool-use finish must agree; either one without the
-other is a known failure. An Anthropic response that contains provider
-compaction carries the final physical iteration's retained input count,
-including cache axes, and output count, and persists both on the model call
-separately from the all-iteration usage retained for billing. A completed
-response retains compaction among its ordered assistant parts; a refused
-response retains only its compaction parts and omits ordinary refusal text. The
-context guard uses those retained-iteration measures as its post-compaction
-baseline; it never treats billed iteration input or aggregate multi-iteration
-output as model-visible retained usage. A retained baseline is eligible only
-when its call used the same effective target the next request will use after
-applying fast-mode target mapping. A prepared call retains that effective
-target, its credential family, and its context ceiling, output reservation, and
-provider-compaction replay decision. Send authorization and availability-
-successor preparation admit a current target only when its configured family
-matches the retained family and its limits preserve the retained input allowance
-and replay decision; missing preparation evidence fails closed. Refusal output
-remains discarded from that baseline even when its final-iteration count is
-retained as evidence, and projected-content headroom excludes opaque compaction
-bytes when the effective target will omit the block. The dedicated compaction
-call rejects every tool and suppressed-tool part and accepts a summary only from
-a completion that ended by end turn or stop sequence, because its completion
-must be whole summary text. Classification is an adapter contract consuming the
-full-request-send boundary; the daemon never reinterprets SDK errors by
-retryability or exception type. The identity relation applies to every identity
-the exchange reported, early observations and terminal evidence alike, because
-it is timing-sensitive. Different lineage is a substitution: the provider served
-a model the daemon never authorized, and it is never collapsed into the alias
-case or into an ordinary provider failure. When the Anthropic adapter sees the
-server-side fallback block, the response can never complete as the resolved
-target's output, whatever the block names; a block naming the configured target
-itself classifies as ambiguity rather than substitution, because no durable
-marker-only evidence exists to carry a substitution. Every classified outcome
-and every fail-closed bridge defect carries a stable sanitized cause code
-alongside the shared operator failure class defined in
-[runtime-substrate](runtime-substrate.md).
+`Completed` admits only text, provider-compaction, provider-reasoning, and
+tool-call parts. A provider-compaction part must be a complete validated
+`compaction` object, must contain no prepared credential, and its durable
+representation is replayed unchanged while only a non-text marker crosses the
+process protocol. A buffered object retains the provider's exact bytes; a
+streamed object is reconstructed structurally from its validated start and delta
+fields before those complete durable bytes are fixed. Empty text and empty
+thinking blocks are dropped, while thinking with text and redacted thinking fail
+the adapter stage closed as unsupported material, because no durable semantic
+representation exists for either. Tool content and a tool-use finish must agree;
+either one without the other is a known failure. An Anthropic response that
+contains provider compaction carries the final physical iteration's retained
+input count, including cache axes, and output count, and persists both on the
+model call separately from the all-iteration usage retained for billing. A
+completed response retains compaction among its ordered assistant parts; a
+refused response retains only its compaction parts and omits ordinary refusal
+text. The context guard uses those retained-iteration measures as its
+post-compaction baseline; it never treats billed iteration input or aggregate
+multi-iteration output as model-visible retained usage. A retained baseline is
+eligible only when its call used the same effective target the next request will
+use after applying fast-mode target mapping. A prepared call retains that
+effective target, its credential family, and its context ceiling, output
+reservation, and provider-compaction replay decision. Send authorization and
+availability- successor preparation admit a current target only when its
+configured family matches the retained family and its limits preserve the
+retained input allowance and replay decision; missing preparation evidence fails
+closed. Refusal output remains discarded from that baseline even when its
+final-iteration count is retained as evidence, and projected-content headroom
+excludes opaque compaction bytes when the effective target will omit the block.
+The dedicated compaction call rejects every tool and suppressed-tool part and
+accepts a summary only from a completion that ended by end turn or stop
+sequence, because its completion must be whole summary text. Classification is
+an adapter contract consuming the full-request-send boundary; the daemon never
+reinterprets SDK errors by retryability or exception type. The identity relation
+applies to every identity the exchange reported, early observations and terminal
+evidence alike, because it is timing-sensitive. Different lineage is a
+substitution: the provider served a model the daemon never authorized, and it is
+never collapsed into the alias case or into an ordinary provider failure. When
+the Anthropic adapter sees the server-side fallback block, the response can
+never complete as the resolved target's output, whatever the block names; a
+block naming the configured target itself classifies as ambiguity rather than
+substitution, because no durable marker-only evidence exists to carry a
+substitution. Every classified outcome and every fail-closed bridge defect
+carries a stable sanitized cause code alongside the shared operator failure
+class defined in [runtime-substrate](runtime-substrate.md).
 
 A model-call transaction that both appends an outbox event and locks shared
 credential-pool action heads first takes one global transaction-scoped ordering

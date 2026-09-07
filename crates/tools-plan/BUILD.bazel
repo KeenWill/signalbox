@@ -1,63 +1,26 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
 
-exports_files(["Cargo.toml"])
-
-cargo_toml_env_vars(
-    name = "cargo_environment",
-    src = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
-
-extract_cargo_lints(
-    name = "cargo_lints",
-    manifest = "Cargo.toml",
-    workspace = "//:Cargo.toml",
-)
+rust_package()
 
 rust_library(
     name = "signalbox_tools_plan",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
+    proc_macro_deps = ["//crates/derive:signalbox_derive"],
     deps = [
         "//crates/application:signalbox_application",
         "//crates/domain:signalbox_domain",
         "//crates/newtype:signalbox_newtype",
         "//crates/tool-contract:signalbox_tool_contract",
-    ] + all_crate_deps(normal = True),
-)
-
-rust_test(
-    name = "unit_tests",
-    size = "large",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["--test-threads=16"],
-    crate = ":signalbox_tools_plan",
-    crate_features = [],
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--deny=warnings",
-        "--forbid=unsafe_code",
     ],
-    deps = [] + all_crate_deps(normal_dev = True),
 )
 
-filegroup(
-    name = "rust_sources",
-    srcs = glob(["**/*.rs"]),
-    visibility = ["//:__pkg__"],
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_tools_plan",
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_tools_plan",
 )

@@ -10,6 +10,19 @@
   "customManagers": [
     {
       "customType": "regex",
+      "managerFilePatterns": [
+        "/^MODULE\\.bazel$/",
+        "/^docs\\/api\\/crates\\.toml$/"
+      ],
+      "matchStrings": [
+        "(?:RUSTDOC_TOOLCHAIN|rustdoc_toolchain) = \"(?<currentValue>nightly-[^\"]+)\""
+      ],
+      "depNameTemplate": "rust-doc-toolchain",
+      "datasourceTemplate": "rust-version",
+      "versioningTemplate": "rust-release-channel"
+    },
+    {
+      "customType": "regex",
       "managerFilePatterns": ["/^tooling\\/postgres_test_image\\.rs$/"],
       "matchStrings": ["POSTGRES_IMAGE_TAG: &str =\\s*\"(?<currentValue>[^\"@]+)@(?<currentDigest>sha256:[a-f0-9]+)\""],
       "depNameTemplate": "postgres",
@@ -26,7 +39,7 @@
     },
     {
       "customType": "regex",
-      "managerFilePatterns": ["/^\\.github/workflows/bazel\\.yml$/"],
+      "managerFilePatterns": ["/^\\.github/workflows/(?:bazel|rust)\\.yml$/"],
       "matchStrings": ["bazelisk-version: (?<currentValue>[0-9.]+)"],
       "depNameTemplate": "bazelbuild/bazelisk",
       "datasourceTemplate": "github-releases",
@@ -78,6 +91,15 @@
   // Codex tracks fork releases and their asset checksums together. Claude Code
   // still uses its npm manifest; clients/web is a Node dependency tree.
   "packageRules": [
+    {
+      "matchDatasources": [
+        "rust-version"
+      ],
+      "matchPackageNames": [
+        "rust-doc-toolchain"
+      ],
+      "groupName": "Rust documentation toolchain"
+    },
     {
       "matchPackageNames": ["KeenWill/codex"],
       "groupName": "Codex CLI",
