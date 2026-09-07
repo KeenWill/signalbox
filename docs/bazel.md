@@ -11,10 +11,12 @@ bazel build //:rust_build
 bazel test //:bazel_tests
 ```
 
-Bazel builds every workspace production library and binary on x86-64 Linux. The
-current unit suite runs the newtype, domain, and blob-store tests. The
-blob-store target enables `test-support`. Cargo commands and CI cover the full
-workspace. See [Build and test](spec/build-and-test.md).
+Bazel builds the workspace libraries and binaries on x86-64 Linux with all
+features enabled, including test-support surfaces and fixture binaries, matching
+Cargo's all-features CI build. These targets do not validate default-feature
+release artifacts. The current unit suite runs the newtype, domain, and
+blob-store tests. Cargo commands and CI cover the full workspace. See
+[Build and test](spec/build-and-test.md).
 
 `crate_universe` reads the workspace Cargo manifests and `Cargo.lock` to
 generate third-party dependency targets. Change dependencies with Cargo as
@@ -26,12 +28,12 @@ policy. This lets the importer treat all in-repository crates as first-party
 packages rather than generating machine-specific external path dependencies.
 
 The Linux build downloads a pinned GCC toolchain and sysroot. V8 uses a
-checksum-pinned archive matching its Cargo lockfile version; its Bazel patch
-keeps native build outputs inside the declared output directory. Refresh the
-archive URL, checksum and annotation version together when updating V8. Unit
-tests run through a pinned Ubuntu loader and runtime, included as Bazel test
-inputs. Clients require compatible x86-64 Linux kernels. To select an accessible
-cache:
+checksum-pinned archive selected from `Cargo.lock`; Bazel resolves each new
+release and records its digest in `MODULE.bazel.lock`. Commit that lockfile
+after dependency updates. The V8 patch keeps native build outputs inside the
+declared output directory. Unit tests run through a pinned Ubuntu loader and
+runtime, included as Bazel test inputs. Clients require compatible x86-64 Linux
+kernels. To select an accessible cache:
 
 ```bash
 bazel test --remote_cache=grpc://CACHE_HOST:9092 //:bazel_tests
