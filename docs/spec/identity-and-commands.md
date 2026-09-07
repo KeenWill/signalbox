@@ -190,6 +190,10 @@ what errors and logs may contain is in [process-protocol](process-protocol.md).
 
 ## Planned
 
+- Registry kinds and typed request/result records for OAuth provisioning,
+  re-provisioning, and deletion: [design](../design/identity-and-commands.md).
+- Registry kind and typed request/result records for configuration reload:
+  [design](../design/identity-and-commands.md).
 - Registry kinds and typed records for the runner recovery commands (replace,
   abandon, promote): [design](../design/identity-and-commands.md).
 - A production generator for `ProviderTargetEvidenceId`:

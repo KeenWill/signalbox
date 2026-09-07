@@ -1,10 +1,14 @@
 # Tool loop design
 
-This design is not built; it extends [tool-loop](../spec/tool-loop.md) with
-three capabilities: pre-approval admissibility, the instruction admission
-effect, and child creation by `spawn_session`.
+This design is not built; it extends [tool-loop](../spec/tool-loop.md) with four
+capabilities: pre-approval lost-placement resolution, pre-approval
+admissibility, the instruction admission effect, and child creation by
+`spawn_session`.
 
 ## Goal
+
+Lost-placement resolution prevents approval parking for unavailable runner
+requests.
 
 Pre-approval admissibility lets a tool family refuse a request on evidence
 available before any approval decision, so no judge or user is asked about a
@@ -116,6 +120,9 @@ The spawn port rejects execution unconditionally today. That rejection stays
 until the creation transaction exists, and no other surface creates the child.
 
 ## Acceptance criteria
+
+A runner-locus request on a lost placement records a retryable failure without
+approval parking and counts toward batch completion.
 
 A request a declaring family marks inadmissible resolves before approval with no
 approval state, no judge call, no attempt row, and no executor work; it projects

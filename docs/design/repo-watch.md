@@ -17,7 +17,8 @@ repository polling tasks.
 
 On reload, the repository-watch runtime starts a polling task for each added
 repository, stops each removed repository's task, and replaces a repository's
-task when its poll interval or polling credential file changes.
+task when its poll interval, polling credential file, or
+`repository_watch.signal_reviewers` changes.
 
 Adding `[repository_watch.webhook]` on reload composes the listener; removing it
 stops the listener.

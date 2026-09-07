@@ -30,24 +30,27 @@ Invalid fields fail as `device_endpoint_rejected` before progress is emitted.
 Each request ends with
 `oauth_credential_receipt { command_id, profile, outcome }`, whose outcome is
 `provisioned`, `already_provisioned`, `reprovisioned`, `deleted`,
-`already_deleted`, `abandoned`, `superseded`, or `failed { reason }`, where
-`reason` is one of the fieldless values `device_endpoint_rejected`,
-`access_denied` for operator denial, `polling_expired`,
-`token_response_without_identity`, or `account_independence_failed`. Initial
-provisioning returns `already_provisioned` without starting an exchange when the
-profile holds authorization. Only re-provisioning replaces authorization; it
-clears every OAuth delivery-origin quarantine, including refresh and
-tuple-mismatch quarantines, only on success. Deletion ends its delivery-origin
-quarantine and removes stored authorization and cached access tokens, preventing
-future dispatches while retaining the configured registration and referenced
-history; a child already holding a copied token finishes its invocation. Each
-profile retains a generation that every deletion advances. Provisioning and
-re-provisioning commit authorization and advance that generation atomically only
-when their starting generation is current; otherwise the transaction records
-`superseded` without storing authorization. An equal request with the same
-`command_id` reports busy while pending or returns its stored receipt without
-repeating the exchange or deletion; conflicting reuse is rejected. Startup
-terminalizes each pending provisioning or re-provisioning claim with an
+`already_deleted`, `not_provisioned`, `abandoned`, `superseded`, or
+`failed { reason }`, where `reason` is one of the fieldless values
+`device_endpoint_rejected`, `access_denied` for operator denial,
+`polling_expired`, `token_endpoint_failed`, `token_response_without_identity`,
+or `account_independence_failed`. Initial provisioning returns
+`already_provisioned` without starting an exchange when the profile holds
+authorization. Re-provisioning returns `not_provisioned` without starting an
+exchange when no authorization is stored. Only re-provisioning replaces
+authorization; it clears every OAuth delivery-origin quarantine, including
+refresh and tuple-mismatch quarantines, only on success. Deletion ends its
+delivery-origin quarantine and removes stored authorization and cached access
+tokens, preventing future dispatches while retaining the configured registration
+and referenced history; a child already holding a copied token finishes its
+invocation. Each profile retains a generation that every deletion advances.
+Provisioning and re-provisioning commit authorization and advance that
+generation atomically only when their starting generation is current and, for
+re-provisioning, authorization is still stored; otherwise the transaction
+records `superseded` without storing authorization. An equal request with the
+same `command_id` reports busy while pending or returns its stored receipt
+without repeating the exchange or deletion; conflicting reuse is rejected.
+Startup terminalizes each pending provisioning or re-provisioning claim with an
 `abandoned` receipt; another provisioning attempt requires a new `command_id`.
 The credential mutation and terminal receipt commit atomically under the command
 claim protocol in [identity and commands](../spec/identity-and-commands.md).
@@ -98,12 +101,14 @@ convergence targets from the retained intent; the
 [reload-intent input](ownership-seam.md) delivers rule activation only, and the
 module activates the rules atomically and idempotently by command identity and
 digest. The activation transaction captures each repository's current event tail
-and retains it for idempotent replay. Startup replays any undelivered intent
-from its retained payload even if the configuration files changed, before
-terminalizing its claim. Success returns
-`configuration_reloaded { command_id, reloaded_sections }`, whose sections are
-an array of the closed values `model_catalog`, `session_templates`, and
-`repo_watch`. Failure returns
+and retains it for idempotent replay. Before replay activates any retained
+effects, startup validates the retained reloadable snapshot together with the
+on-disk startup-only sections; incompatibility fails startup and leaves the
+intent pending. Startup replays any undelivered intent from its retained payload
+even if the configuration files changed, before terminalizing its claim. Success
+returns `configuration_reloaded { command_id, reloaded_sections }`, whose
+sections are an array of the closed values `model_catalog`, `session_templates`,
+and `repo_watch`. Failure returns
 `configuration_reload_failed { command_id, phase, reason }`, sanitized as
 startup logs are, and leaves the running configuration unchanged. Which sections
 reload and the validate-then-swap rule belong to
