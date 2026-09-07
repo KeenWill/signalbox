@@ -50,10 +50,7 @@ it('keeps one stream across unrelated state changes and rejects an obsolete stre
   await vi.waitFor(() => expect(selectSessionSync(store.getState()).phase).toBe('live'))
   store.dispatch(actions.timelineSelected('41'))
   expect(followSession).toHaveBeenCalledTimes(1)
-  expect(refreshed).toHaveBeenCalledWith({
-    queryKey: ['production', 'session-workspace', first],
-    exact: true,
-  })
+  expect(refreshed).not.toHaveBeenCalled()
   store.dispatch(actions.sessionFollowRequested(second))
   await vi.waitFor(() => expect(selectSessionSync(store.getState()).phase).toBe('failed'))
   expect(phases).toContain('resyncing')
@@ -132,5 +129,28 @@ it('retains the newer live cursor when a buffered event is followed by a failed 
   ).toBe(true)
   stop()
   unsubscribe()
+  queries.clear()
+})
+
+it('reloads the workspace once after resynchronization, not on ordinary snapshots', async () => {
+  const sessionId = '00000000-0000-0000-0000-000000000991'
+  vi.mocked(followSession).mockImplementation(async function* () {
+    yield { kind: 'snapshot', snapshot: snapshot(sessionId) }
+    yield { kind: 'snapshot', snapshot: { ...snapshot(sessionId), observed_through: '42' } }
+    yield { kind: 'resync_required', cursor: '43' }
+    yield { kind: 'snapshot', snapshot: { ...snapshot(sessionId), observed_through: '43' } }
+    yield { kind: 'snapshot', snapshot: { ...snapshot(sessionId), observed_through: '44' } }
+  })
+  const store = createAppStore()
+  const queries = new QueryClient()
+  const refreshed = vi.spyOn(queries, 'invalidateQueries')
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(sessionId))
+  await vi.waitFor(() => expect(selectSessionSync(store.getState()).cursor).toBe('44'))
+  expect(refreshed).toHaveBeenCalledExactlyOnceWith({
+    queryKey: ['production', 'session-workspace', sessionId],
+    exact: true,
+  })
+  stop()
   queries.clear()
 })

@@ -3,6 +3,7 @@ import type { WebTimelineDetailContinuation } from './generated/web-contract.mjs
 import {
   followSession,
   MAX_SESSION_MESSAGE_LENGTH,
+  readExtendedSessionTranscript,
   readSessionTranscript as readTranscript,
   submitSessionInput,
 } from './product'
@@ -411,4 +412,90 @@ it.each([
       body: { ...body, address: { event_sequence: '1' } },
     }),
   ).rejects.toThrow('body continuation')
+})
+
+it('reads only new transcript addresses and keeps appended text within the item bound', async () => {
+  const initial = inputPage(8)
+  const addition = inputPage(1)
+  addition.items[0]!.address.event_sequence = '9'
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json(initial))
+    .mockResolvedValueOnce(Response.json(addition))
+  vi.stubGlobal('fetch', fetch)
+  const held = await readExtendedSessionTranscript(
+    { sessionId, first: '1', through: '8' },
+    null,
+    limits,
+    null,
+  )
+  const extended = await readExtendedSessionTranscript(
+    { sessionId, first: '1', through: '9' },
+    null,
+    limits,
+    held,
+  )
+  expect(fetch.mock.calls[1]?.[0]).toContain('first=9&through=9')
+  expect(extended.page.items.map((item) => item.address.event_sequence)).toEqual([
+    '2',
+    '3',
+    '4',
+    '5',
+    '6',
+    '7',
+    '8',
+    '9',
+  ])
+  expect(extended.page.projected_body_bytes).toBe(8 * 129)
+  const unchanged = await readExtendedSessionTranscript(
+    { sessionId, first: '1', through: '9' },
+    null,
+    limits,
+    extended,
+  )
+  expect(unchanged).toBe(extended)
+  const shifted = await readExtendedSessionTranscript(
+    { sessionId, first: '3', through: '9' },
+    null,
+    limits,
+    extended,
+  )
+  expect(shifted.page.items.map((item) => item.address.event_sequence)).toEqual([
+    '3',
+    '4',
+    '5',
+    '6',
+    '7',
+    '8',
+    '9',
+  ])
+  expect(fetch).toHaveBeenCalledTimes(2)
+})
+
+it('bounds appended transcript bytes even when the item count is small', async () => {
+  const initial = inputPage(1, 60_000)
+  const addition = inputPage(1, 10_000)
+  addition.items[0]!.address.event_sequence = '2'
+  vi.stubGlobal(
+    'fetch',
+    vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(initial))
+      .mockResolvedValueOnce(Response.json(addition)),
+  )
+  const held = await readExtendedSessionTranscript(
+    { sessionId, first: '1', through: '1' },
+    null,
+    limits,
+    null,
+  )
+  const extended = await readExtendedSessionTranscript(
+    { sessionId, first: '1', through: '2' },
+    null,
+    limits,
+    held,
+  )
+  expect(extended.page.items).toHaveLength(1)
+  expect(extended.page.items[0]?.address.event_sequence).toBe('2')
+  expect(extended.page.projected_body_bytes).toBe(10_128)
 })

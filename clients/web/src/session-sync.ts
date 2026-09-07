@@ -1,5 +1,6 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { followSession, readSessionLive } from './product'
+import { extendSessionWorkspace } from './session-workspace'
 import { type AppDispatch, actions, type RootState, type SessionSyncState } from './state'
 
 /** Owns the single selected session stream independently of React renders. */
@@ -39,6 +40,7 @@ export function startSessionSynchronization(
         queryKey: ['production', 'session-workspace', sessionId],
         exact: true,
       })
+    let resyncRequired = false
     void (async () => {
       try {
         for await (const event of followSession(sessionId, controller.signal)) {
@@ -49,13 +51,24 @@ export function startSessionSynchronization(
               snapshot: event.snapshot,
               cursor: event.snapshot.observed_through,
             })
-            await refresh()
+            if (resyncRequired) {
+              await refresh()
+              resyncRequired = false
+            } else {
+              await extendSessionWorkspace(
+                queryClient,
+                sessionId,
+                event.snapshot.observed_through,
+                controller.signal,
+              )
+            }
           } else if (event.kind === 'durable') {
             publish({ cursor: event.cursor })
-            await refresh()
+            await extendSessionWorkspace(queryClient, sessionId, event.cursor, controller.signal)
             const snapshot = await readSessionLive(sessionId, controller.signal)
             publish({ phase: 'live', snapshot, cursor: snapshot.observed_through })
           } else if (event.kind === 'resync_required') {
+            resyncRequired = true
             publish({ phase: 'resyncing', cursor: event.cursor })
           }
         }

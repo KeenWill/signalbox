@@ -1,10 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { type RefObject, useRef, useState } from 'react'
 import type {
   WebSessionTimelineDetailBody,
   WebTimelineDetailContinuation,
 } from './generated/web-contract.mjs'
-import { readSessionTranscript, type SessionTranscriptLimits } from './product'
+import {
+  type HeldSessionTranscript,
+  readExtendedSessionTranscript,
+  type SessionTranscriptLimits,
+} from './product'
 
 function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
   const excerpt =
@@ -32,10 +36,12 @@ interface SessionTranscriptTextProps {
 }
 
 export function SessionTranscriptText(props: SessionTranscriptTextProps) {
+  const held = useRef<HeldSessionTranscript | null>(null)
   return (
     <TranscriptWindow
       key={`${props.sessionId}:${props.first}:${props.through}:${props.observed}`}
       {...props}
+      held={held}
     />
   )
 }
@@ -46,7 +52,8 @@ function TranscriptWindow({
   through,
   observed,
   limits,
-}: SessionTranscriptTextProps) {
+  held,
+}: SessionTranscriptTextProps & { held: RefObject<HeldSessionTranscript | null> }) {
   const [continuation, setContinuation] = useState<WebTimelineDetailContinuation | null>(null)
   const transcript = useQuery({
     queryKey: [
@@ -59,8 +66,17 @@ function TranscriptWindow({
       limits,
       continuation,
     ],
-    queryFn: ({ signal }) =>
-      readSessionTranscript(sessionId, first, through, continuation, limits, signal),
+    queryFn: async ({ signal }) => {
+      const next = await readExtendedSessionTranscript(
+        { sessionId, first, through },
+        continuation,
+        limits,
+        held.current,
+        signal,
+      )
+      if (!signal.aborted) held.current = next
+      return next.page
+    },
     gcTime: 0,
   })
   return (

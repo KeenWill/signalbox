@@ -17,6 +17,8 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
   const state = {
     grown: false,
     observed: false,
+    historyReads: [] as string[],
+    textReads: [] as string[],
     submissions: [] as Array<{ command_id: string; message: string }>,
   }
   let releaseFollow = () => {}
@@ -58,6 +60,7 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
       })
     }
     if (url.pathname.endsWith('/timeline-detail')) {
+      state.textReads.push(url.searchParams.get('first') ?? '')
       const items: WebSessionTimelineDetail[] = [
         {
           address: { event_sequence: '41' },
@@ -87,17 +90,22 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
             usage: {},
           },
         })
+      const selected = items.filter(
+        (item) =>
+          BigInt(item.address.event_sequence) >= BigInt(url.searchParams.get('first') ?? '0'),
+      )
       return route.fulfill({
         json: {
           session_id: selectedSessionId,
-          projected_body_bytes: items.reduce((sum, item) => sum + item.projected_body_bytes, 0),
-          items,
+          projected_body_bytes: selected.reduce((sum, item) => sum + item.projected_body_bytes, 0),
+          items: selected,
           continuation: null,
         },
       })
     }
     const latest = state.grown ? '44' : '43'
-    if (url.pathname.endsWith('/timeline'))
+    if (url.pathname.endsWith('/timeline')) {
+      state.historyReads.push(url.searchParams.get('anchor') ?? '')
       return route.fulfill({
         json: {
           session_id: selectedSessionId,
@@ -121,12 +129,19 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
                   },
                 ]
               : []),
-          ],
-          projected_structured_bytes: state.grown ? 241 : 156,
-          continuation_before: null,
+          ].filter(
+            (item) =>
+              url.searchParams.get('anchor') !== 'after' ||
+              BigInt(item.address.event_sequence) > BigInt(url.searchParams.get('address') ?? '0'),
+          ),
+          projected_structured_bytes:
+            url.searchParams.get('anchor') === 'after' ? 85 : state.grown ? 241 : 156,
+          continuation_before:
+            url.searchParams.get('anchor') === 'after' ? { event_sequence: '44' } : null,
           continuation_after: null,
         },
       })
+    }
     return route.fulfill({
       json: {
         session_id: selectedSessionId,
@@ -169,6 +184,8 @@ test('reads durable transcript growth and sends a message by keyboard', async ({
   await openSession(page)
   api.grow()
   await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
+  expect(api.state.historyReads).toEqual(['latest', 'after'])
+  expect(api.state.textReads).toEqual(['41', '44'])
   await page
     .getByRole('textbox', { name: 'Message to session' })
     .fill('Continue with the next step.')
@@ -217,11 +234,7 @@ test('retries an unconfirmed acceptance with the same command and text', async (
     route.fulfill({ status: 503, body: 'Timeline temporarily unavailable' }),
   )
   api.grow()
-  await expect(
-    page
-      .getByRole('alert')
-      .filter({ hasText: 'The daemon could not provide this bounded session window' }),
-  ).toBeVisible()
+  await expect(page.getByText('Live updates unavailable.')).toBeVisible()
   await page.getByRole('button', { name: 'Retry message' }).click()
   await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
   expect(attempts).toHaveLength(2)

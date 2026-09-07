@@ -1210,6 +1210,59 @@ export async function readSessionTranscript(
   return page
 }
 
+export interface HeldSessionTranscript {
+  sessionId: string
+  first: string
+  through: string
+  page: Awaited<ReturnType<typeof readSessionTranscript>>
+  continuation: WebTimelineDetailContinuation | null
+}
+
+export async function readExtendedSessionTranscript(
+  window: Pick<HeldSessionTranscript, 'sessionId' | 'first' | 'through'>,
+  continuation: WebTimelineDetailContinuation | null,
+  limits: SessionTranscriptLimits,
+  held: HeldSessionTranscript | null,
+  signal?: AbortSignal,
+): Promise<HeldSessionTranscript> {
+  const append =
+    held !== null &&
+    held.sessionId === window.sessionId &&
+    BigInt(window.first) >= BigInt(held.first) &&
+    BigInt(window.first) <= BigInt(held.through) &&
+    BigInt(held.through) <= BigInt(window.through) &&
+    held.continuation === null &&
+    held.page.continuation === null &&
+    continuation === null
+  if (append && held.first === window.first && held.through === window.through) return held
+  const page =
+    append && held.through === window.through
+      ? { ...held.page, items: [], projected_body_bytes: 0 }
+      : await readSessionTranscript(
+          window.sessionId,
+          append ? String(BigInt(held.through) + 1n) : window.first,
+          window.through,
+          continuation,
+          limits,
+          signal,
+        )
+  if (!append) return { ...window, page, continuation }
+  const items = [
+    ...held.page.items.filter(
+      (item) => BigInt(item.address.event_sequence) >= BigInt(window.first),
+    ),
+    ...page.items,
+  ]
+  let bytes = items.reduce((sum, item) => sum + item.projected_body_bytes, 0)
+  while (
+    items.length > Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items) ||
+    bytes > Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
+  ) {
+    bytes -= items.shift()?.projected_body_bytes ?? 0
+  }
+  return { ...window, continuation, page: { ...page, items, projected_body_bytes: bytes } }
+}
+
 export async function readSessionRates(sessionIds: readonly string[], signal?: AbortSignal) {
   if (sessionIds.length === 0) return decodeWebSessionRates({ sessions: [] })
   const query = new URLSearchParams(sessionIds.map((id) => ['session_id', id]))
