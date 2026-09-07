@@ -1,7 +1,7 @@
 load("@postgres_suites//:defs.bzl", "SUITES")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_COMPILE_DATA = [
     "//:config/session-templates.example.toml",
@@ -531,3 +531,10 @@ rust_integration_test(
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
 )
+
+rust_quality_tests(documented_crates = [
+    ":signalboxd_lib",
+    ":approval-judge-eval",
+    ":signalbox-debug",
+    ":signalboxd",
+])

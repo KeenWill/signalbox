@@ -2,7 +2,7 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@postgres_suites//:defs.bzl", "SUITES")
-load("@rules_rust//rust:defs.bzl", _rust_doc = "rust_doc", _rust_doc_test = "rust_doc_test", _rust_test = "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test", "rustfmt_test", _rust_doc = "rust_doc", _rust_doc_test = "rust_doc_test", _rust_test = "rust_test")
 load(":rust.bzl", "RUSTC_FLAGS")
 
 _TEST_ARGS = ["--test-threads=16"]
@@ -181,3 +181,25 @@ def rust_postgres_suite(name, binaries, json_preserve_order = True):
         tests = selected,
         tags = ["manual"],
     )
+
+def rust_quality_tests(documented_crates):
+    """Check each package's native Rust targets and documented Cargo entrypoints.
+
+    Args:
+        documented_crates: Crate labels Cargo includes in workspace documentation.
+    """
+    targets = [
+        ":" + name
+        for name, rule in native.existing_rules().items()
+        if rule["kind"] in ["rust_library", "rust_binary", "rust_proc_macro", "rust_test"]
+    ]
+    rust_clippy_test(name = "clippy", targets = targets, visibility = ["//:__pkg__"])
+    rustfmt_test(name = "rustfmt", targets = targets, visibility = ["//:__pkg__"])
+    for crate in documented_crates:
+        _rust_doc(
+            name = "rustdoc_" + crate[1:],
+            crate = crate,
+            crate_features = native.existing_rule(crate[1:]).get("crate_features", []),
+            rustdoc_flags = ["-D", "warnings"],
+            visibility = ["//:__pkg__"],
+        )

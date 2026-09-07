@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_proc_macro")
-load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 TEST_PROC_MACRO_DEPS = [":signalbox_derive"]
 
@@ -36,8 +36,8 @@ rust_doc_test(
 
 rust_integration_test(
     name = "compile_fail",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     crate_root = "tests/compile_fail.rs",
     data = ["Cargo.toml"] + glob(
         ["tests/**"],
@@ -57,3 +57,5 @@ rust_integration_test(
         "no-sandbox",
     ],
 )
+
+rust_quality_tests(documented_crates = [":signalbox_derive"])

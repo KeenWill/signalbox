@@ -5,3 +5,8 @@ test --run_under=//tooling/bazel:native_runtime
 try-import %workspace%/.bazelrc.local
 
 build:api --@rules_rust//rust/toolchain/channel=nightly
+
+build --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+
+# Clippy shares the workspace configuration with Cargo.
+build --@rules_rust//rust/settings:clippy.toml=//:clippy.toml

@@ -137,10 +137,17 @@ all 36 configured API crates, renders Markdown into `bazel-bin/api_pages`, and
 compares it with the committed API snapshots. Rustdoc, rendering, and the
 comparison are separate cacheable actions. The API configuration selects the
 pinned nightly toolchain; Renovate groups its Cargo renderer and Bazel pins. The
-required contract check uses this target. The optional baseline API digest runs
-separately and still uses Cargo to document historical revisions.
+required contract check uses this target. The report-only API digest reads
+current JSON from `//:api_json` and uses Cargo to document its historical event
+base.
 
 `//crates/web-contract:generated_roundtrip` runs the generated JavaScript
 contract tests with a pinned Node.js toolchain and declared JSON fixtures.
 Ordinary PostgreSQL selections reuse the ignored suites’ compiled binaries; the
 non-PostgreSQL suite does not execute their ignored tests.
+
+`//:rust_clippy_tests` runs Clippy with `clippy.toml` and warnings denied.
+`//:rust_format_tests` checks native workspace crate roots and their modules,
+matching Cargo formatting. `//:rust_documentation` builds Cargo's documentation
+entrypoints with warnings denied. These actions use the declared Rust toolchain
+and remote cache.

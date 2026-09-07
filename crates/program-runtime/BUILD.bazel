@@ -1,7 +1,7 @@
 load("@postgres_suites//:defs.bzl", "SUITES")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_postgres_test", "rust_selection_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_postgres_test", "rust_quality_tests", "rust_selection_test", "rust_unit_test")
 
 CRATE_FEATURES = SUITES["program-runtime"]["crate_features"]
 
@@ -63,3 +63,5 @@ rust_selection_test(
     args = ["--test-threads=4"],
     test = ":program_host_postgres",
 )
+
+rust_quality_tests(documented_crates = [":signalbox_program_runtime"])

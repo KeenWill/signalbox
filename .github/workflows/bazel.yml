@@ -32,7 +32,7 @@ jobs:
           if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
             cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
           fi
-          bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 "${cache_args[@]}" //:rust_build //:bazel_tests
+          bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 "${cache_args[@]}" //:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation
 
   postgres-matrix:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}

@@ -15,6 +15,7 @@ exports_files([
     "check_markdown.py",
     "patches/deno-embedded-javascript.patch",
     "patches/serde-json-suite-order.patch",
+    "patches/rustfmt-crate-roots.patch",
     "patches/v8-build-output.patch",
 ])
 
