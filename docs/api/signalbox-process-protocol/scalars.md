@@ -611,6 +611,7 @@ pub enum FrameValidationError {
     ModelSettingsShape,
     PlacementShape,
     DispatchFenceShape,
+    ConfigurationReloadShape,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for FrameValidationError {

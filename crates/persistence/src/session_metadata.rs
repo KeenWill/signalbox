@@ -237,6 +237,7 @@ impl SessionMetadataRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ReloadConfiguration
                 | CommandKind::SessionLifecycle
                 | CommandKind::ReplaceLostRunner
                 | CommandKind::AbandonLostRunner
@@ -598,6 +599,7 @@ async fn existing_or_conflicting(
         | CommandKind::RegisterWorkspace
         | CommandKind::MintGitRemote
         | CommandKind::WithdrawGitRemote
+        | CommandKind::ReloadConfiguration
         | CommandKind::SessionLifecycle
         | CommandKind::ReplaceLostRunner
         | CommandKind::AbandonLostRunner

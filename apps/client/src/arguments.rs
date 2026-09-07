@@ -53,6 +53,9 @@ pub(crate) enum SendDeliveryArgument {
 
 #[derive(Debug)]
 pub(crate) enum Command {
+    ReloadConfiguration {
+        command_id: Option<CommandId>,
+    },
     Runner(RunnerCommand),
 
     Credential(CredentialCommand),
@@ -441,6 +444,12 @@ pub(crate) struct CredentialTarget {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Re-read and validate the daemon configuration and reload its catalogs.
+    ReloadConfiguration {
+        /// Reuse an exact non-reserved durable command identity.
+        #[arg(long, value_name = "UUID", value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
     /// Recover a lost runner placement or promote its pending successor.
     Runner(RunnerArguments),
 
@@ -2011,6 +2020,9 @@ pub(crate) fn parse(
                 command_id: arguments.command_id,
             },
         }),
+        CliCommand::ReloadConfiguration { command_id } => {
+            Command::ReloadConfiguration { command_id }
+        }
         CliCommand::Status => Command::Status,
         CliCommand::List => Command::List,
         CliCommand::Templates => Command::Templates,
