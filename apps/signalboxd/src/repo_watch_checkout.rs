@@ -251,19 +251,37 @@ pub(crate) fn remove(
         Err(error) => return Err(error),
     };
     let name = path.file_name().ok_or(rustix::io::Errno::INVAL)?;
-    let directory = match rustix::fs::openat2(
-        &parent,
-        name,
-        DIRECTORY_FLAGS,
-        Mode::empty(),
-        rustix::fs::ResolveFlags::NO_XDEV,
-    ) {
+    let directory = match open_removal_directory(&parent, name) {
         Ok(directory) => directory,
         Err(rustix::io::Errno::NOENT) => return Ok(()),
         Err(error) => return Err(error),
     };
     remove_contents(&directory)?;
     remove_directory_entry(&parent, name, &directory)
+}
+
+fn open_removal_directory(
+    parent: &OwnedFd,
+    name: &std::ffi::OsStr,
+) -> Result<OwnedFd, rustix::io::Errno> {
+    let directory = rustix::fs::openat2(
+        parent,
+        name,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        rustix::fs::ResolveFlags::NO_XDEV,
+    )?;
+    let mode = Mode::from_raw_mode(rustix::fs::fstat(&directory)?.st_mode);
+    if !mode.contains(Mode::RWXU) {
+        // O_PATH pins unreadable directories; procfs addresses that inode for chmod.
+        rustix::fs::chmodat(
+            rustix::fs::CWD,
+            format!("/proc/self/fd/{}", directory.as_raw_fd()),
+            mode | Mode::RWXU,
+            rustix::fs::AtFlags::empty(),
+        )?;
+    }
+    openat(&directory, ".", DIRECTORY_FLAGS, Mode::empty())
 }
 
 fn remove_contents(directory: &OwnedFd) -> Result<(), rustix::io::Errno> {
@@ -277,20 +295,11 @@ fn remove_contents(directory: &OwnedFd) -> Result<(), rustix::io::Errno> {
         }
         let metadata = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
         if FileType::from_raw_mode(metadata.st_mode) == FileType::Directory {
-            let child = rustix::fs::openat2(
-                directory,
-                name,
-                DIRECTORY_FLAGS,
-                Mode::empty(),
-                rustix::fs::ResolveFlags::NO_XDEV,
-            )?;
-            remove_contents(&child)?;
             use std::os::unix::ffi::OsStrExt;
-            remove_directory_entry(
-                directory,
-                std::ffi::OsStr::from_bytes(name.to_bytes()),
-                &child,
-            )?;
+            let name = std::ffi::OsStr::from_bytes(name.to_bytes());
+            let child = open_removal_directory(directory, name)?;
+            remove_contents(&child)?;
+            remove_directory_entry(directory, name, &child)?;
         } else {
             // A tracked symlink is removed as an entry, never traversed.
             unlinkat(directory, name, AtFlags::empty())?;
@@ -316,7 +325,10 @@ fn remove_directory_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{os::unix::fs::MetadataExt, process::Command};
+    use std::{
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        process::Command,
+    };
 
     #[test]
     #[ignore = "requires private user and mount namespaces"]
@@ -365,6 +377,7 @@ mod tests {
                 "mount test filesystem"
             );
             std::fs::write(nested.join("keep"), b"mounted contents")?;
+            std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o500))?;
             if bind {
                 assert_eq!(
                     std::fs::metadata(&root)?.dev(),
@@ -372,6 +385,7 @@ mod tests {
                 );
             }
             assert_eq!(remove(&roots, session), Err(rustix::io::Errno::XDEV));
+            assert_eq!(std::fs::metadata(&nested)?.mode() & 0o777, 0o500);
             assert_eq!(std::fs::read(nested.join("keep"))?, b"mounted contents");
             assert!(Command::new("umount").arg(&nested).status()?.success());
         }

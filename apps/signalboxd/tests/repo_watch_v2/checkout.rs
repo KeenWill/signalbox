@@ -799,6 +799,55 @@ async fn terminal_session_removes_its_checkout_without_following_tracked_symlink
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn provisioned_checkout_requires_a_retained_location() -> Result<(), Box<dyn Error>> {
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.dispatch().await;
+    let error = sqlx::query(
+        "UPDATE dispatch_ledger SET checkout_workspace_root = NULL, checkout_session_id = NULL WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .execute(&fixture.module)
+    .await
+    .expect_err("provisioned checkout must retain its cleanup location");
+    assert_eq!(
+        error.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn cleanup_restores_owner_permissions_on_root_and_nested_directories()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let root = fixture.root(session);
+    let nested = root.join("unreadable");
+    std::fs::create_dir(&nested)?;
+    std::fs::write(nested.join("remove.txt"), "checkout contents")?;
+    std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o000))?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000))?;
+    fixture.stop(session).await;
+    scavenge_checkouts(&fixture.store, &fixture.core)
+        .await
+        .expect("cleanup traverses unreadable checkout directories");
+    assert!(!root.exists());
+    let removed: bool =
+        sqlx::query_scalar("SELECT checkout_removed FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    assert!(removed, "successful removal must settle on the ledger");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn disabled_runtime_scavenges_checkouts_without_submitting_pending_commands()
 -> Result<(), Box<dyn Error>> {
     use signalboxd::repo_watch_runtime::{RepositoryWatchRuntime, RepositoryWatchServices};
