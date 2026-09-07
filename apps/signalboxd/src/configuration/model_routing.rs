@@ -141,11 +141,10 @@ impl ModelAdapter {
     /// none. Anthropic maps `rate_limit_error` and `overloaded_error` but has no
     /// quota token, and OpenAI maps `rate_limit_exceeded`/`rate_limit_error` and
     /// `insufficient_quota` but reaches overload only by status. Codex
-    /// classifies the narrower cause from rendered failure prose only after its
-    /// machine-readable JSONL lifecycle closes the request as `turn.failed`;
-    /// that envelope proves non-acceptance. Claude Code exposes no equivalent
-    /// proof. Listing every pair
-    /// rather than matching on a group makes a later adapter state its own
+    /// uses a typed failed-turn closure with no retry or assistant activity
+    /// to prove non-acceptance for its eligible error variants. Claude Code
+    /// exposes no equivalent proof. Listing every pair rather than matching
+    /// on a group makes a later adapter state its own
     /// answer.
     pub(crate) const fn proves_non_acceptance(self, cause: AvailabilityCause) -> bool {
         match (self, cause) {

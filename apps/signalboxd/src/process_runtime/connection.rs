@@ -558,6 +558,9 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::ReadReviewOrchestration { .. }
         | ClientRequest::StopTurn { .. }
         | ClientRequest::DecideToolRequest { .. }
+        | ClientRequest::ProvisionOauthCredential { .. }
+        | ClientRequest::ReprovisionOauthCredential { .. }
+        | ClientRequest::DeleteOauthCredential { .. }
         | ClientRequest::OverrideDeniedToolRequest { .. } => false,
     }
 }
@@ -762,7 +765,10 @@ impl SnapshotReaderAdmission {
             | ClientRequest::RecordReviewPublicationOutcomes { .. }
             | ClientRequest::StopTurn { .. }
             | ClientRequest::DecideToolRequest { .. }
-            | ClientRequest::OverrideDeniedToolRequest { .. } => Self::NotRequired,
+            | ClientRequest::ProvisionOauthCredential { .. }
+        | ClientRequest::ReprovisionOauthCredential { .. }
+        | ClientRequest::DeleteOauthCredential { .. }
+        | ClientRequest::OverrideDeniedToolRequest { .. } => Self::NotRequired,
         }
     }
 }

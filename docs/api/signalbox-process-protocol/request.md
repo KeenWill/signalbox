@@ -9,6 +9,18 @@ pub enum ClientRequest {
     ReloadConfiguration {
         command_id: CommandId,
     },
+    ProvisionOauthCredential {
+        command_id: CommandId,
+        profile: string::String,
+    },
+    ReprovisionOauthCredential {
+        command_id: CommandId,
+        profile: string::String,
+    },
+    DeleteOauthCredential {
+        command_id: CommandId,
+        profile: string::String,
+    },
     CreateSession {
         command_id: CommandId,
         initial_model_selection: ModelSelection,

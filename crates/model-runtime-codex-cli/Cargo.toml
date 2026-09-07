@@ -51,6 +51,6 @@ tokio = { version = "1.53.0", default-features = false, features = [
 
 [[bin]]
 name = "signalbox-fake-codex-cli"
-path = "tests/support/fake_codex_cli.rs"
+path = "tests/support/fake_codex_app_server.rs"
 doc = false
 test = false

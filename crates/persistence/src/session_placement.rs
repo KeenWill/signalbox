@@ -105,6 +105,9 @@ impl SessionPlacementRepository {
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
                 | CommandKind::ReloadConfiguration
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential
                 | CommandKind::SessionLifecycle,
             ) => {
                 transaction.rollback().await?;
@@ -160,6 +163,9 @@ impl SessionPlacementRepository {
                     | CommandKind::MintGitRemote
                     | CommandKind::WithdrawGitRemote
                     | CommandKind::ReloadConfiguration
+                    | CommandKind::ProvisionOauthCredential
+                    | CommandKind::ReprovisionOauthCredential
+                    | CommandKind::DeleteOauthCredential
                     | CommandKind::SessionLifecycle,
                 ) => SessionPlacementRepositoryOutcome::ConflictingReuse { command_id },
                 None => {

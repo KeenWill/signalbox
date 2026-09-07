@@ -142,11 +142,10 @@ rejects `env_key` because it uses no child environment. Each
 `FileCredentialAccess` instance binds one consumer-scoped map of references to
 deployment paths, and a model adapter receives the complete file-profile catalog
 declared for it. `ambient` leaves login resolution to a CLI. `codex_home` names
-the login directory a Codex child receives as `CODEX_HOME`; a configured home is
-admitted only as an existing, readable, nonempty directory, and startup fails
-otherwise. Delivery replaces the child's inherited `CODEX_HOME` with the
-admitted path of the profile the operation's reference names and leaves every
-other profile's path absent.
+the Codex login directory; a configured home is admitted only as an existing,
+readable, nonempty directory, and startup fails otherwise. Delivery links the
+selected profile's `auth.json` into a private per-operation `CODEX_HOME` with an
+empty `config.toml`.
 
 A credential pool is the set of profiles that may substitute for one another for
 one model family. An `[[adapter_mappings]]` entry maps each family to exactly
@@ -374,8 +373,10 @@ An HTTP adapter proves non-acceptance only with a decoded native error envelope
 naming the cause in a pre-stream error response. An SSE error record never
 carries that proof, whatever token it holds, because by then the provider has
 begun processing the request. The Codex CLI proves non-acceptance instead
-through its machine-readable `turn.failed` closure, so a `codex_cli` pool admits
-`switch_now` on all three availability causes.
+through its typed failed `turn/completed` closure under the
+[runtime proof rule](runtime-substrate.md), so a `codex_cli` pool admits
+`switch_now` on all three availability causes; an unproven availability failure
+authorizes no successor.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
 observed it, and nothing ends one. It applies to every session except one that
