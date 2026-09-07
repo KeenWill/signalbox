@@ -69,7 +69,7 @@ facilities stay hosted for now, although this may change over time.
 
 | Job                                               | Why                                                   |
 | ------------------------------------------------- | ----------------------------------------------------- |
-| `rust.yml` `workspace-tests`                      | privileged cgroup delegation via `sudo`               |
+| `bazel.yml` `bazel-host-integration`              | privileged cgroup delegation via `sudo`               |
 | `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`             |
 | `devenv-lock.yml` `relock`                        | Nix                                                   |
 | `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix) |
