@@ -1,6 +1,11 @@
 //! Runtime composition from one accepted model-catalog snapshot per operation.
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use signalbox_application::{EligibilityPass, SchedulerPassExpiryHandler};
 use signalbox_domain::{SessionId, TurnId};
@@ -124,19 +129,51 @@ impl ModelRuntimeFactory {
 
 /// Composes an execution pass from the complete catalog at admission.
 #[derive(Clone)]
-pub struct CatalogEligibilityPass<F, P> {
+pub struct CatalogEligibilityPass<F> {
     catalogs: ConfigurationReload,
     compose: F,
-    baseline: P,
+    expiry_handlers: Arc<CatalogExpiryHandlers>,
 }
 
-impl<F, P> CatalogEligibilityPass<F, P> {
-    pub fn new(catalogs: ConfigurationReload, compose: F, baseline: P) -> Self {
+impl<F> CatalogEligibilityPass<F> {
+    pub fn new(catalogs: ConfigurationReload, compose: F) -> Self {
         Self {
             catalogs,
             compose,
-            baseline,
+            expiry_handlers: Arc::default(),
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CatalogExpiryHandlers(Mutex<HashMap<SessionId, Arc<dyn SchedulerPassExpiryHandler>>>);
+
+impl SchedulerPassExpiryHandler for CatalogExpiryHandlers {
+    fn occupancy_expired(&self, session: SessionId) {
+        let handler = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session)
+            .cloned();
+        if let Some(handler) = handler {
+            handler.occupancy_expired(session);
+        }
+    }
+}
+
+struct CatalogExpiryRegistration {
+    handlers: Arc<CatalogExpiryHandlers>,
+    session: SessionId,
+}
+
+impl Drop for CatalogExpiryRegistration {
+    fn drop(&mut self) {
+        self.handlers
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.session);
     }
 }
 
@@ -146,7 +183,7 @@ pub enum CatalogPassError<E> {
     Pass(E),
 }
 
-impl<F, P> EligibilityPass for CatalogEligibilityPass<F, P>
+impl<F, P> EligibilityPass for CatalogEligibilityPass<F>
 where
     F: Fn(&HubModelConfiguration) -> Result<P, ModelRuntimeBuildError>,
     P: EligibilityPass + Send + 'static,
@@ -167,15 +204,24 @@ where
         }
     }
     fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>> {
-        self.baseline.occupancy_expiry_handler()
+        Some(self.expiry_handlers.clone())
     }
     fn run(
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let pass = (self.compose)(&self.catalogs.catalogs().models);
+        let handlers = self.expiry_handlers.clone();
         async move {
             let mut pass = pass.map_err(CatalogPassError::Configuration)?;
+            let _registration = pass.occupancy_expiry_handler().map(|handler| {
+                handlers
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(session, handler);
+                CatalogExpiryRegistration { handlers, session }
+            });
             pass.run(session).await.map_err(CatalogPassError::Pass)
         }
     }
@@ -261,6 +307,141 @@ impl<E: signalbox_application::ClassifyOperatorFailure>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type ExpiryHandoffs = Arc<Mutex<Vec<(SessionId, Option<TurnId>)>>>;
+
+    #[derive(Debug)]
+    struct TrackedExpiry {
+        turn: Mutex<Option<TurnId>>,
+        handoffs: ExpiryHandoffs,
+    }
+
+    impl SchedulerPassExpiryHandler for TrackedExpiry {
+        fn occupancy_expired(&self, session: SessionId) {
+            self.handoffs
+                .lock()
+                .expect("handoffs")
+                .push((session, *self.turn.lock().expect("turn")));
+        }
+    }
+
+    struct TrackingPass {
+        handler: Arc<TrackedExpiry>,
+        turn: TurnId,
+        started: Arc<tokio::sync::Notify>,
+        complete: Arc<tokio::sync::Notify>,
+    }
+
+    impl EligibilityPass for TrackingPass {
+        type Error = std::convert::Infallible;
+
+        fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>> {
+            Some(self.handler.clone())
+        }
+
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let handler = self.handler.clone();
+            let turn = self.turn;
+            let started = self.started.clone();
+            let complete = self.complete.clone();
+            async move {
+                *handler.turn.lock().expect("turn") = Some(turn);
+                started.notify_one();
+                complete.notified().await;
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn occupancy_expiry_tracks_each_composed_pass_until_completion_or_cancellation() {
+        let models = crate::configuration::checked_in_example_configuration().expect("models");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .expect("lazy pool");
+        let catalogs = ConfigurationReload::new(
+            pool,
+            models,
+            crate::SessionTemplateConfiguration::default(),
+            "/unused/models.toml".into(),
+            "/unused/templates.toml".into(),
+            None,
+        )
+        .expect("catalogs");
+        // Distinct fixture identities expose cross-session or baseline-handler routing.
+        let first_session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+        let second_session = SessionId::from_uuid(uuid::Uuid::from_u128(2));
+        let first_turn = TurnId::from_uuid(uuid::Uuid::from_u128(3));
+        let second_turn = TurnId::from_uuid(uuid::Uuid::from_u128(4));
+        let handoffs = Arc::new(Mutex::new(Vec::new()));
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let second_started = Arc::new(tokio::sync::Notify::new());
+        let second_complete = Arc::new(tokio::sync::Notify::new());
+        let passes = Mutex::new(std::collections::VecDeque::from([
+            TrackingPass {
+                handler: Arc::new(TrackedExpiry {
+                    turn: Mutex::new(None),
+                    handoffs: handoffs.clone(),
+                }),
+                turn: first_turn,
+                started: first_started.clone(),
+                complete: Arc::default(),
+            },
+            TrackingPass {
+                handler: Arc::new(TrackedExpiry {
+                    turn: Mutex::new(None),
+                    handoffs: handoffs.clone(),
+                }),
+                turn: second_turn,
+                started: second_started.clone(),
+                complete: second_complete.clone(),
+            },
+        ]));
+        let mut pass = CatalogEligibilityPass::new(catalogs, move |_: &HubModelConfiguration| {
+            Ok(passes
+                .lock()
+                .expect("passes")
+                .pop_front()
+                .expect("composed pass"))
+        });
+        // Scheduler admission captures expiry before invoking run.
+        let first_expiry = pass.occupancy_expiry_handler().expect("expiry handler");
+        let first = tokio::spawn(pass.run(first_session));
+        first_started.notified().await;
+        let second_expiry = pass.occupancy_expiry_handler().expect("expiry handler");
+        let second = tokio::spawn(pass.run(second_session));
+        second_started.notified().await;
+        first_expiry.occupancy_expired(first_session);
+        second_expiry.occupancy_expired(second_session);
+        assert_eq!(
+            *handoffs.lock().expect("handoffs"),
+            [
+                (first_session, Some(first_turn)),
+                (second_session, Some(second_turn)),
+            ]
+        );
+        second_complete.notify_one();
+        second.await.expect("second task").expect("second pass");
+        first.abort();
+        assert!(
+            first
+                .await
+                .expect_err("first pass cancelled")
+                .is_cancelled()
+        );
+        first_expiry.occupancy_expired(first_session);
+        second_expiry.occupancy_expired(second_session);
+        assert_eq!(
+            *handoffs.lock().expect("handoffs"),
+            [
+                (first_session, Some(first_turn)),
+                (second_session, Some(second_turn)),
+            ]
+        );
+    }
 
     #[test]
     fn runtime_composition_preserves_the_adapter_timeout_cause() {

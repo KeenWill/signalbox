@@ -2349,7 +2349,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .execute(&module_pool)
     .await?;
     let invalidated = reopened.ingest_baseline(&compact_repository).await?;
-    assert!(invalidated.observation.is_none());
+    assert_eq!(invalidated.observation, at_expiry.observation);
     assert!(invalidated.merged_baselines.is_empty());
     assert_eq!(invalidated.generation, at_expiry.generation);
     assert_eq!(invalidated.frontier, at_expiry.frontier);
@@ -4103,6 +4103,92 @@ impl signalbox_module_repo_watch_v2::poll_cache::ConditionalObservationRead
             serde_json::json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}),
         )
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn undated_compact_entries_do_not_reopen_ordinary_pull_requests() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    let io = ConditionalPollFixture::new();
+    poll_with_cache(
+        &io,
+        &store,
+        &repository,
+        &[],
+        EventProducer::Poll,
+        MERGED_RETENTION,
+    )
+    .await?;
+    let initial = store.ingest_baseline(&repository).await?;
+    let head = initial
+        .observation
+        .as_ref()
+        .expect("ordinary predecessor")
+        .state()
+        .pull_requests()[0]
+        .context()
+        .head_sha();
+    // The two stored compact subjects are distinct from the fixture's open PR.
+    let undated = serde_json::json!({
+        "number": 2, "head_repository": repository.as_str(), "head_sha": head.as_str(),
+        "signal_reviewers": [], "labels": [], "mergeable_state": "unknown",
+        "completed_check_suites": [], "completed_check_runs": [], "review_ids": [],
+        "threads": [], "reactions": []
+    });
+    let mut dated = undated.clone();
+    dated["number"] = serde_json::json!(3);
+    let merged_at = OffsetDateTime::now_utc().unix_timestamp();
+    dated["merged_at"] = serde_json::json!(merged_at);
+    sqlx::query("UPDATE repository_state SET comparison_baseline = jsonb_set(comparison_baseline, '{merged_pull_requests}', $2::jsonb) WHERE repository = $1")
+        .bind(repository.as_str())
+        .bind(serde_json::json!([undated, dated]).to_string())
+        .execute(&pool).await?;
+    let reopened = RepoWatchStore::new(pool.clone());
+    let predecessor = reopened.ingest_baseline(&repository).await?;
+    assert_eq!(predecessor.observation, initial.observation);
+    assert_eq!(predecessor.frontier, initial.frontier);
+    assert_eq!(predecessor.generation, initial.generation);
+    assert_eq!(predecessor.merged_baselines.len(), 1);
+    assert_eq!(predecessor.merged_baselines[0].state.number().get(), 3);
+    assert_eq!(
+        predecessor.merged_baselines[0].merged_at.unix_timestamp(),
+        merged_at
+    );
+    let opened_before: i64 = sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE repository = $1 AND event_kind = 'pull_request_opened'")
+        .bind(repository.as_str()).fetch_one(&pool).await?;
+    assert!(matches!(
+        poll_with_cache(&io, &reopened, &repository, &[], EventProducer::Poll, MERGED_RETENTION).await?,
+        FrontierEventAdmission::Committed { events, .. } if events.is_empty()
+    ));
+    let opened_after: i64 = sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE repository = $1 AND event_kind = 'pull_request_opened'")
+        .bind(repository.as_str()).fetch_one(&pool).await?;
+    assert_eq!(
+        opened_after, opened_before,
+        "recovery does not emit another opened event"
+    );
+    let retained = reopened.ingest_baseline(&repository).await?;
+    assert_eq!(retained.observation, initial.observation);
+    assert_eq!(retained.merged_baselines, predecessor.merged_baselines);
+    let stored_count: i32 = sqlx::query_scalar("SELECT jsonb_array_length(comparison_baseline->'merged_pull_requests') FROM repository_state WHERE repository = $1")
+        .bind(repository.as_str()).fetch_one(&pool).await?;
+    assert_eq!(
+        stored_count, 1,
+        "the next commit removes only the undated compact entry"
+    );
+    pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 #[tokio::test]

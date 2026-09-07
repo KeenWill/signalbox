@@ -190,12 +190,6 @@ fn optional<T>(v: &Value, decode: impl FnOnce(&Value) -> Option<T>) -> Option<Op
     }
 }
 
-pub(crate) fn requires_refetch(value: &Value) -> bool {
-    value["merged_pull_requests"]
-        .as_array()
-        .is_some_and(|entries| entries.iter().any(|entry| entry.get("merged_at").is_none()))
-}
-
 pub(crate) fn merged_baselines(
     value: &Value,
 ) -> Option<Vec<crate::ingest::MergedPullRequestBaseline>> {

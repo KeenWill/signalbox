@@ -2047,16 +2047,9 @@ async fn run_hub(
             ),
         )
     };
-    let baseline_pass = compose_pass(&model_configuration).map_err(|error| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static(error.cause_code()),
-        )
-    })?;
     let activated_pass = signalboxd::model_catalog_runtime::CatalogEligibilityPass::new(
         configuration_reload.clone(),
         compose_pass,
-        baseline_pass,
     );
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),
