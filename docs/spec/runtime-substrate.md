@@ -357,15 +357,17 @@ withholding in every adapter.
 
 OpenAI response events other than failed terminals must carry a consistent
 response id and reported model, and indexed item events must carry consistent
-item ids. Completed output items reject subsequent deltas. A terminal response
-supplies completion content and its response id becomes the provider message id.
-A bare `error` event or an HTTP-200 response with `status: failed` supplies
-definitive provider-error evidence without non-acceptance proof. Failed status
-and error are classified before ancillary response fields. Claude Code CLI
-events stay bound to the initialized exchange: the first assistant event may
-name the provider-resolved model and every later assistant event must repeat
-that value, and a result carrying a different session id, or an assistant event
-carrying a different first message id, is a protocol violation.
+item ids. Completed output items reject subsequent deltas. Completed content
+must preserve its observed text/refusal type and match its accumulated delta
+bytes; repeated completed snapshots must agree. A terminal response supplies
+completion content and its response id becomes the provider message id. A bare
+`error` event or an HTTP-200 response with `status: failed` supplies definitive
+provider-error evidence without non-acceptance proof. Failed status and error
+are classified before ancillary response fields. Claude Code CLI events stay
+bound to the initialized exchange: the first assistant event may name the
+provider-resolved model and every later assistant event must repeat that value,
+and a result carrying a different session id, or an assistant event carrying a
+different first message id, is a protocol violation.
 
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
