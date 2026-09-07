@@ -9,6 +9,8 @@ libraries and binaries with all features enabled, including fixture binaries,
 and runs their unit tests and migrated integration targets through native Rust
 actions. Separate Bazel PostgreSQL suites run the persistence and program-host
 integration binaries with a shared image digest declared as a compilation input.
+File-media format and registry conformance tests use native Bazel targets;
+process-isolation tests retain their provisioned Cargo job.
 
 ## Design decisions
 
