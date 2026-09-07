@@ -12,6 +12,9 @@ image digest declared as a compilation input.
 
 ## Design decisions
 
+The checker job runs its eight Python suites through Bazel with declared Python
+and Rustfmt toolchains. Suites using host Git or shell utilities always execute.
+
 Native Bazel actions track Rust sources, dependencies, and test executables for
 content-based reuse within a compatible native environment.
 

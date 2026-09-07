@@ -163,27 +163,18 @@ jobs:
         run: |
           python3 -m venv --clear /tmp/mdformat-venv
           /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
-      - name: Test domain API digest
-        run: python3 scripts/test_domain_spine_digest.py
-      - name: Test domain API renderer
-        run: python3 scripts/test_render_domain_spine.py
-      - name: Test migration version checker
-        run: python3 scripts/test_check_migration_versions.py
-      - name: Test ownership-seam checker
-        run: python3 scripts/test_check_ownership_seam.py
-      - name: Test documentation consistency checker
-        run: /tmp/mdformat-venv/bin/python scripts/test_check_docs_consistency.py
-      - name: Test the PostgreSQL suite manifest reader
-        run: /tmp/mdformat-venv/bin/python scripts/test_postgres_integration_suites.py
-      - name: Test the lifecycle watchdog
-        run: python3 tooling/test_supervise_lifecycle.py
-      # Drives the sweep against a fake `docker` it puts first on PATH, so it
-      # neither needs nor touches the runner's daemon: what is under test is the
-      # selection and the failure classification, and a real daemon could not be
-      # asked on demand for the orphan ages, the mid-sweep removal, the refused
-      # inspection, or the daemon that never answers that the cases require.
-      - name: Test the orphaned-container sweep
-        run: python3 tooling/test_sweep_test_containers.py
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-version: 1.29.0
+      - name: Test checkers and maintenance scripts
+        env:
+          BAZEL_REMOTE_CACHE: ${{ vars.BAZEL_REMOTE_CACHE }}
+        run: |
+          cache_args=()
+          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
+            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
+          fi
+          bazel test --jobs=4 --local_test_jobs=1 "${cache_args[@]}" //:python_checker_tests
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check Markdown formatting

@@ -868,3 +868,9 @@ rust_test(
         "//crates/conversation-import-codex:signalbox_conversation_import_codex",
     ] + all_crate_deps(normal_dev = True),
 )
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
+)

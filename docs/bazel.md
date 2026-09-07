@@ -69,3 +69,13 @@ Each test binary has its own cached result. PostgreSQL targets are manual so
 `//:bazel_tests` remains the unit suite. The additive `bazel-postgres` CI job
 runs one binary at a time, with 16 test threads per binary; Cargo retains the
 full PostgreSQL gate.
+
+The checker job runs its eight Python suites with
+`bazel test //:python_checker_tests`. Bazel supplies Python 3.14, packages from
+`tooling/requirements-mdformat.txt`, and the shared Rustfmt toolchain. The Git
+fixture suite and two shell-script suites carry `external` because they execute
+host utilities; their results always run. The other five results are cacheable.
+
+The sweep's container-label check scans the declared workspace Rust source
+manifest inside test runfiles. Direct Python invocation continues to select
+tracked sources with Git.
