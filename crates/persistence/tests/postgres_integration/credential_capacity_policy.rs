@@ -707,3 +707,67 @@ async fn credential_exclusion_generations_are_scoped_to_pool_policy() -> Result<
     drop(container);
     Ok(())
 }
+
+/// Action rows remain effective when no exclusion generation has been recorded.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pool_actions_without_exclusion_generations_still_exclude_members()
+-> Result<(), Box<dyn Error>> {
+    for action in [
+        CredentialPoolRuntimeAction::Quarantine,
+        CredentialPoolRuntimeAction::AvoidNewSessions,
+    ] {
+        let (container, pool, _) = migrated_postgres().await?;
+        let call = prepare_capacity_call(
+            &pool,
+            0xf046_0500,
+            policy(vec![member(FIRST, 1)]).with_capacity_policy(
+                CredentialPoolRuntimeTieBreak::FirstListed,
+                Some(10),
+                action,
+            ),
+        )
+        .await?;
+        sqlx::query(
+            "ALTER TABLE credential_pool_member_action DISABLE TRIGGER credential_action_exclusion",
+        )
+        .execute(&pool)
+        .await?;
+        observe_capacity(call, snapshot(1, 80)).await?;
+        sqlx::query(
+            "ALTER TABLE credential_pool_member_action ENABLE TRIGGER credential_action_exclusion",
+        )
+        .execute(&pool)
+        .await?;
+        let actions: i64 = sqlx::query_scalar("SELECT count(*) FROM credential_pool_member_action")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(actions, 1);
+        let generations: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM credential_exclusion_state")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(generations, 0);
+        let next = prepare_capacity_call(
+            &pool,
+            0xf046_0600,
+            policy(vec![member(FIRST, 1), member(SECOND, 1)]),
+        )
+        .await?;
+        assert_eq!(
+            next.reference, SECOND,
+            "unprojected actions must still exclude their member"
+        );
+        let generations: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM credential_exclusion_state")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            generations, 0,
+            "selection does not backfill exclusion generations"
+        );
+        pool.close().await;
+        drop(container);
+    }
+    Ok(())
+}

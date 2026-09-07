@@ -7222,11 +7222,15 @@ async fn load_durable_pool_exclusions(
                 observed_session_id, observed_turn_id
            FROM credential_pool_member_action AS action
           WHERE consumed_turn_id IS NULL
-            AND EXISTS (SELECT 1 FROM credential_exclusion_state AS exclusion
-                        WHERE exclusion.action_id = action.action_id AND exclusion.active
-                          AND (exclusion.pool_policy_id = $1 OR exclusion.kind = 'profile_quarantine'))",
+            AND (EXISTS (SELECT 1 FROM credential_exclusion_state AS exclusion
+                         WHERE exclusion.action_id = action.action_id AND exclusion.active
+                           AND (exclusion.pool_policy_id = $1 OR exclusion.kind = 'profile_quarantine'))
+                 OR (NOT EXISTS (SELECT 1 FROM credential_exclusion_state AS exclusion
+                                 WHERE exclusion.action_id = action.action_id)
+                     AND (action.pool_name = $2 OR action.action_kind = 'quarantine')))",
     )
     .bind(policy_id)
+    .bind(policy.name())
     .fetch_all(&mut *connection)
     .await?;
     let mut pending_consumed_actions = Vec::new();
