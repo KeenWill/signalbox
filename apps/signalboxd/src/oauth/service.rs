@@ -121,7 +121,7 @@ impl OauthCredentialService {
             Err(error) => Err(error),
         };
         state.failure = result.as_ref().err().copied();
-        result.map(|()| OauthDeliveryOutcome::Delivered)
+        result
     }
 
     async fn prepare_locked(
@@ -132,7 +132,7 @@ impl OauthCredentialService {
         joined: bool,
         installer: &mut dyn OauthCredentialInstaller,
         mut cancellation: CancellationSignal,
-    ) -> Result<(), Failure> {
+    ) -> Result<OauthDeliveryOutcome, Failure> {
         let stored = lease.authorization().cloned().ok_or(Failure::Unavailable)?;
         if let Some(cause) = stored.quarantine {
             return Err(failure(cause));
@@ -187,12 +187,15 @@ impl OauthCredentialService {
             expires_at,
         } = match refreshed {
             Ok(value) => value,
-            Err(RefreshFailure::NonRotating) => {
+            Err(reason @ (RefreshFailure::NonRotating | RefreshFailure::CancelledBeforeSend)) => {
                 lease
                     .clear_refresh()
                     .await
                     .map_err(|_| Failure::Unavailable)?;
-                return Err(Failure::Unavailable);
+                return match reason {
+                    RefreshFailure::CancelledBeforeSend => Ok(OauthDeliveryOutcome::Cancelled),
+                    _ => Err(Failure::Unavailable),
+                };
             }
             Err(RefreshFailure::Ambiguous) => {
                 return quarantine(lease, Cause::RefreshAmbiguous).await;
@@ -228,7 +231,7 @@ impl OauthCredentialService {
             token: access_token,
             expires_at,
         });
-        Ok(())
+        Ok(OauthDeliveryOutcome::Delivered)
     }
 }
 
@@ -237,7 +240,7 @@ async fn install(
     stored: &OauthStoredAuthorization,
     access_token: CredentialValue,
     installer: &mut dyn OauthCredentialInstaller,
-) -> Result<(), Failure> {
+) -> Result<OauthDeliveryOutcome, Failure> {
     let material = OauthCredentialMaterial {
         access_token,
         identity_token: CredentialValue::new(
@@ -250,10 +253,14 @@ async fn install(
     if installer.install(material).is_err() {
         return quarantine(lease, Cause::CredentialHome).await;
     }
-    lease.commit().await.map_err(|_| Failure::Unavailable)
+    lease.commit().await.map_err(|_| Failure::Unavailable)?;
+    Ok(OauthDeliveryOutcome::Delivered)
 }
 
-async fn quarantine(lease: OauthDispatchLease, cause: Cause) -> Result<(), Failure> {
+async fn quarantine(
+    lease: OauthDispatchLease,
+    cause: Cause,
+) -> Result<OauthDeliveryOutcome, Failure> {
     lease
         .quarantine(cause)
         .await
@@ -488,6 +495,37 @@ mod tests {
         )
         .map_err(|_| "service construction")?;
         service.client = client;
+        {
+            // Cancellation after lease admission must clear the marker without consuming a POST.
+            let profile = &service.profiles["profile"];
+            let mut state = profile.access.lock().await;
+            let lease = service
+                .lease("profile")
+                .await
+                .map_err(|_| "initial lease")?;
+            let mut cancelled = Installer::default();
+            assert_eq!(
+                service
+                    .prepare_locked(
+                        ("profile", profile),
+                        lease,
+                        &mut state.access,
+                        false,
+                        &mut cancelled,
+                        CancellationSignal::already_cancelled(),
+                    )
+                    .await,
+                Ok(OauthDeliveryOutcome::Cancelled),
+            );
+            assert!(cancelled.0.is_none());
+            assert!(state.access.is_none());
+            let lease = repository.lock_dispatch("profile").await?.expect("profile");
+            let stored = lease.authorization().expect("retained authorization");
+            assert!(!stored.refresh_in_progress);
+            assert!(stored.quarantine.is_none());
+            assert_eq!(stored.authorization.refresh_token, "initial-refresh");
+            lease.commit().await?;
+        }
         let mut first = Installer::default();
         let mut second = Installer::default();
         let (a, b) = tokio::join!(
