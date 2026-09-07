@@ -617,7 +617,7 @@ mod tests {
 
     fn terminal() -> Value {
         json!({"type":"response.completed", "response":{"id":"resp_fixture","object":"response","model":"model-fixture","status":"completed",
-            "output":[{"type":"message","id":"msg_fixture","role":"assistant","content":[{"type":"output_text","text":"ready"}]}],
+            "output":[{"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ready"}]}],
             "usage":{"input_tokens":5,"output_tokens":2}}})
     }
     fn apply(
@@ -719,12 +719,12 @@ mod tests {
         let mut decoder = StreamDecoder::new(ExchangeFacts::default());
         let mut sink = Vec::new();
         let reasoning = json!({"type":"reasoning","id":"rs_fixture"});
-        let message = json!({"type":"message","id":"msg_fixture","role":"assistant","content":[
+        let message = json!({"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[
             {"type":"output_text","text":""},{"type":"output_text","text":"first"},
             {"type":"output_text","text":""},{"type":"output_text","text":"second"}
         ]});
         let call = json!({"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"});
-        let refusal = json!({"type":"message","id":"msg_refusal","role":"assistant","content":[{"type":"refusal","refusal":"declined"}]});
+        let refusal = json!({"type":"message","id":"msg_refusal","status":"completed","role":"assistant","content":[{"type":"refusal","refusal":"declined"}]});
         apply(
             &mut decoder,
             json!({"type":"response.output_item.added","output_index":0,"item":reasoning}),
@@ -917,7 +917,7 @@ mod tests {
                 .as_array_mut()
                 .unwrap()
                 .push(json!({"type":"output_text","text":"inserted"}));
-            event["response"]["output"].as_array_mut().unwrap().push(json!({"type":"message","id":"msg_second","role":"assistant","content":[{"type":"output_text","text":"second"}]}));
+            event["response"]["output"].as_array_mut().unwrap().push(json!({"type":"message","id":"msg_second","status":"completed","role":"assistant","content":[{"type":"output_text","text":"second"}]}));
             if !terminal_snapshot {
                 event = json!({"type":"response.output_item.done","output_index":0,"item":event["response"]["output"][0]});
             }
@@ -1069,7 +1069,7 @@ mod tests {
                     let mut sink = Vec::new();
                     let observed = if added {
                         json!({"type":"response.output_item.added","output_index":index,
-                            "item":{"type":"message","id":"msg_missing","role":"assistant","content":[]}})
+                            "item":{"type":"message","id":"msg_missing","status":"in_progress","role":"assistant","content":[]}})
                     } else {
                         json!({"type":"response.output_text.delta","output_index":index,
                             "content_index":0,"item_id":"msg_missing","delta":"missing"})
@@ -1274,6 +1274,60 @@ mod tests {
                         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
                             cause: LossCause::StreamProtocolViolation { .. },
                             tool_calls: ToolCallsAtLoss::Opened,
+                            ..
+                        })
+                    ));
+                    assert!(!sink.iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_message_content_requires_completed_item_status() {
+        for status in ["completed", "incomplete"] {
+            for item_status in [
+                None,
+                Some("in_progress"),
+                Some("incomplete"),
+                Some("future"),
+                Some("completed"),
+            ] {
+                let mut event = terminal();
+                event["type"] = json!(format!("response.{status}"));
+                event["response"]["status"] = json!(status);
+                event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                if let Some(item_status) = item_status {
+                    event["response"]["output"][0]["status"] = json!(item_status);
+                } else {
+                    event["response"]["output"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("status");
+                }
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                    panic!("terminal event must terminate");
+                };
+                if item_status == Some("completed") {
+                    let TerminalEvidence::Completed(result) = *evidence else {
+                        panic!("completed message content must decode");
+                    };
+                    assert_eq!(
+                        result.content,
+                        vec![signalbox_model_runtime::AssistantPart::Text(
+                            "ready".to_string()
+                        )]
+                    );
+                } else {
+                    assert!(matches!(
+                        *evidence,
+                        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            cause: LossCause::StreamProtocolViolation { .. },
                             ..
                         })
                     ));

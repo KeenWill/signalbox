@@ -208,6 +208,7 @@ async fn buffered_completion_end_to_end_sends_the_documented_request_shape() {
   "output": [
     {
       "type": "message",
+      "status": "completed",
       "id": "msg_fixture",
       "role": "assistant",
       "content": [
@@ -283,7 +284,7 @@ async fn streamed_completion_end_to_end_emits_deltas_and_gates_on_response_compl
 
 data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"hi"}
 
-data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl_loop_2","model":"model-exact-1","status":"completed","output":[{"type":"message","id":"msg_fixture","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":4,"output_tokens":2}}}
+data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl_loop_2","model":"model-exact-1","status":"completed","output":[{"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":4,"output_tokens":2}}}
 
 "#;
     let server = CannedServer::serving(vec![http_response(
@@ -330,7 +331,7 @@ async fn prepared_capability_keeps_its_originating_stream_settings() {
 
 data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"hi"}
 
-data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl_origin","model":"model-exact-1","status":"completed","output":[{"type":"message","id":"msg_fixture","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":1,"output_tokens":1}}}
+data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl_origin","model":"model-exact-1","status":"completed","output":[{"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":1,"output_tokens":1}}}
 
 "#;
     let server = CannedServer::serving(vec![http_response(
@@ -970,6 +971,7 @@ async fn execution_redacts_with_the_exact_credential_captured_by_preparation() {
   "output": [
     {
       "type": "message",
+      "status": "completed",
       "id": "msg_fixture",
       "role": "assistant",
       "content": [
@@ -1106,6 +1108,7 @@ async fn successful_content_reflecting_the_key_is_redacted() {
   "output": [
     {
       "type": "message",
+      "status": "completed",
       "id": "msg_fixture",
       "role": "assistant",
       "content": [
@@ -1146,7 +1149,7 @@ async fn streamed_observations_reflecting_the_key_are_redacted() {
 
 data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"key_loop"}
 
-data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl-key_loop","model":"model-key_loop","status":"completed","output":[{"type":"message","id":"msg_fixture","role":"assistant","content":[{"type":"output_text","text":"key_loop"}]}],"usage":{"input_tokens":4,"output_tokens":2}}}
+data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl-key_loop","model":"model-key_loop","status":"completed","output":[{"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"key_loop"}]}],"usage":{"input_tokens":4,"output_tokens":2}}}
 
 "#;
     let server = CannedServer::serving(vec![http_response(

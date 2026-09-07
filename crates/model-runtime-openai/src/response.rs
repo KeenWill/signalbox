@@ -84,6 +84,9 @@ fn convert_item(item: &WireOutputItem) -> Result<ConvertedItem, String> {
             refused: false,
         }),
         "message" => {
+            if item.status.as_deref() != Some("completed") {
+                return Err("output message item is not completed".to_string());
+            }
             if item.role.as_deref() != Some("assistant") {
                 return Err("output message must have assistant role".to_string());
             }
@@ -345,7 +348,7 @@ mod tests {
 
     fn response() -> Value {
         json!({"id":"resp_fixture", "object":"response", "model":"model-fixture", "status":"completed",
-            "output":[{"type":"message","id":"msg_fixture","role":"assistant","content":[{"type":"output_text","text":"ready"}]}],
+            "output":[{"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ready"}]}],
             "usage":{"input_tokens":19,"output_tokens":7,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":5}}})
     }
     fn decode(value: Value) -> (TerminalEvidence, Vec<Observation<String>>) {
@@ -534,6 +537,50 @@ mod tests {
     }
 
     #[test]
+    fn buffered_message_content_requires_completed_item_status() {
+        for status in ["completed", "incomplete"] {
+            for item_status in [
+                None,
+                Some("in_progress"),
+                Some("incomplete"),
+                Some("future"),
+                Some("completed"),
+            ] {
+                let mut value = response();
+                value["status"] = json!(status);
+                value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                if let Some(item_status) = item_status {
+                    value["output"][0]["status"] = json!(item_status);
+                } else {
+                    value["output"][0].as_object_mut().unwrap().remove("status");
+                }
+                let (evidence, observations) = decode(value);
+                if item_status == Some("completed") {
+                    let TerminalEvidence::Completed(result) = evidence else {
+                        panic!("completed message content must decode");
+                    };
+                    assert_eq!(
+                        result.content,
+                        vec![AssistantPart::Text("ready".to_string())]
+                    );
+                } else {
+                    assert!(matches!(
+                        evidence,
+                        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            cause: LossCause::ResponseUnintelligible { .. },
+                            ..
+                        })
+                    ));
+                    assert!(!observations.iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn failed_envelope_keeps_provider_error_when_output_is_not_an_array() {
         for output in [json!({}), json!("invalid"), json!(42)] {
             let mut value = response();
@@ -607,7 +654,7 @@ mod tests {
     fn every_buffered_output_item_requires_a_nonempty_id() {
         for status in ["completed", "incomplete"] {
             for item in [
-                json!({"type":"message","id":"msg_second","role":"assistant","content":[{"type":"output_text","text":"after"}]}),
+                json!({"type":"message","id":"msg_second","status":"completed","role":"assistant","content":[{"type":"output_text","text":"after"}]}),
                 json!({"type":"reasoning","id":"rs_fixture","summary":[]}),
                 json!({"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"}),
             ] {
@@ -656,7 +703,7 @@ mod tests {
         let mut value = response();
         value["output"] = json!([
             {"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"},
-            {"type":"message","id":"msg_fixture","role":"assistant","content":[{"type":"output_text","text":"after"}]}]);
+            {"type":"message","id":"msg_fixture","status":"completed","role":"assistant","content":[{"type":"output_text","text":"after"}]}]);
         let (TerminalEvidence::Completed(result), _) = decode(value) else {
             panic!("ordered response decodes");
         };
