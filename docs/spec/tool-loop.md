@@ -487,7 +487,8 @@ the same semantic entry and turn origin; a second child cannot attach to the
 request. There is no fixed active-child-count limit; admission checks the
 complete locked relationship inventory for request and child uniqueness.
 
-The daemon nudges the child for eligibility after its spawn commits.
+The daemon nudges the child for eligibility after its spawn commits, retaining
+the hint until a full nudge buffer has capacity.
 
 ## Planned
 

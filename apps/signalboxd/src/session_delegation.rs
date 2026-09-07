@@ -3,7 +3,8 @@
 use std::{error::Error, fmt, future::Future, time::Duration};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, EligibilityNudge, InProcessEligibilityNudge, OperatorFailureClass,
+    ClassifyOperatorFailure, EligibilityNudge, EligibilityNudgeOutcome, InProcessEligibilityNudge,
+    OperatorFailureClass,
 };
 use signalbox_domain::{
     DelegatedSpawnRequest, DelegationAwaitRequest, DelegationMessageId, DelegationMessageRequest,
@@ -44,6 +45,14 @@ impl DaemonSessionDelegationPort {
 }
 
 impl PostgresSessionDelegationPort {
+    pub(crate) fn nudge_spawned_child(&self, child: SessionId) {
+        if self.eligibility_nudge.nudge(child) == EligibilityNudgeOutcome::DroppedAtCapacity {
+            let nudge = self.eligibility_nudge.clone();
+            // Capacity waiting must not occupy the spawning scheduler pass.
+            tokio::spawn(async move { nudge.nudge_waiting_for_capacity(child).await });
+        }
+    }
+
     /// Shares the daemon pool with atomic delegation tool transactions.
     pub fn new(pool: PgPool, eligibility_nudge: InProcessEligibilityNudge) -> Self {
         Self {
@@ -308,7 +317,7 @@ impl SessionDelegationPort for PostgresSessionDelegationPort {
             RecordDelegationSpawnOutcome::Recorded(relation) => {
                 let receipt = SpawnSessionReceipt::from_relation(&request, &relation)
                     .ok_or(PostgresSessionDelegationPortError::Contract)?;
-                let _ = self.eligibility_nudge.nudge(receipt.child());
+                self.nudge_spawned_child(receipt.child());
                 Ok(SessionDelegationPortOutcome::Applied(receipt))
             }
             RecordDelegationSpawnOutcome::Rejected(_) => Ok(SessionDelegationPortOutcome::Rejected),

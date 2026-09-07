@@ -47,7 +47,7 @@ where
     {
         Ok(ProcessDelegationOutcome::Applied(receipt)) => {
             nudge_delegation_issuer(&services.eligibility_nudge, parent);
-            nudge_delegation_issuer(&services.eligibility_nudge, receipt.child());
+            port.nudge_spawned_child(receipt.child());
             write_message(
                 writer,
                 version,
