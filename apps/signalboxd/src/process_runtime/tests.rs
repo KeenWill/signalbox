@@ -306,6 +306,23 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn oauth_progress_write_failure_requests_recovery_for_the_pending_claim() -> Result<(), Box<dyn Error>> {
+        let (supervisor, signal) = FatalExecutionSupervisor::new(());
+        let reporter = supervisor.recovery_reporter();
+        let (mut writer, reader) = duplex(1_024);
+        drop(reader);
+        let message = ServerMessage::OauthCredentialAuthorization {
+            command_id: signalbox_process_protocol::CommandId::try_from_uuid(Uuid::now_v7())?,
+            profile: "oauth-profile".into(),
+            user_code: "OPERATOR-CODE".into(),
+            verification_uri: "https://authorization.example/verify".into(),
+        };
+        assert!(super::request::write_oauth_authorization(&mut writer, ProtocolVersion::One, RequestId::try_new(1)?, message, Some(&reporter)).await.is_err());
+        assert!(signal.is_triggered());
+        Ok(())
+    }
+
     fn capture_submit_input_model_execution_diagnostic(
         session_id: Uuid,
         error: &ModelCallRepositoryError,

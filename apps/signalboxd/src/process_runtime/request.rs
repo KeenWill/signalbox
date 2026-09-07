@@ -83,7 +83,14 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
                                         .await;
                                     }
                                     Ok(()) => {
-                                        write_message(writer, version, request_id, message).await?;
+                                        write_oauth_authorization(
+                                            writer,
+                                            version,
+                                            request_id,
+                                            message,
+                                            services.recovery_reporter.as_ref(),
+                                        )
+                                        .await?;
                                         client.poll(&registration, device).await
                                     }
                                 }
@@ -173,6 +180,22 @@ fn oauth_repository_error(
             ProtocolError::without_detail(ErrorCode::InvalidRequest)
         }
     }
+}
+
+pub(super) async fn write_oauth_authorization<Writer: AsyncWrite + Unpin>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    message: ServerMessage,
+    recovery_reporter: Option<&FatalRecoveryReporter>,
+) -> Result<(), ProcessConnectionError> {
+    let result = write_message(writer, version, request_id, message).await;
+    if result.is_err()
+        && let Some(reporter) = recovery_reporter
+    {
+        reporter.report_recovery_required();
+    }
+    result
 }
 
 fn wire_oauth_outcome(

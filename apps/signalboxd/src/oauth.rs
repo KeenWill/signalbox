@@ -27,6 +27,7 @@ impl OauthClient {
     fn from_builder(builder: reqwest::ClientBuilder) -> Result<Self, Failure> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = builder
+            .no_proxy()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
