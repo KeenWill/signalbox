@@ -735,6 +735,9 @@ disabled; inability to deliver the home is a typed pre-send failure. An
 access-token rejection during an invocation neither quarantines the profile nor
 permits automatic call retry. Delivery failure evidence and quarantine commit
 atomically and bypass pool trigger policy.
+||||||| 2741cbbef
+checks against every retained co-membership. OAuth configuration admission
+requires dispatch support.
 
 ## Planned
 
