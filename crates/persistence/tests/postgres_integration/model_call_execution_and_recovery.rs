@@ -1,7 +1,7 @@
 //! Model call execution transactions, startup scan classification, and steering reclassification
 //! after restart.
 
-use std::{collections::HashMap, num::NonZeroU32, time::Duration};
+use std::{collections::HashMap, num::NonZeroU32, sync::Arc, time::Duration};
 
 use crate::*;
 
@@ -935,11 +935,29 @@ async fn transient_failure_retries_same_credential_until_bound_then_rotates()
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 3));
     let target =
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 4)));
-    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(prepared(
+    let old_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 40),
+    ));
+    let new_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 41),
+    ));
+    let session_credentials = signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new(
+            "test-model-family",
+            "test-model-primary",
+        ),
+        signalbox_persistence::SessionModelCredential::new(
+            "other-model-family",
+            "other-model-primary",
+        ),
+    ])
+    .expect("both restart fixture credential families are valid");
+    CreateSessionRepository::new(pool.clone(), session_credentials)
+        .handle(prepared_with_fast_target(
             seed + 5,
             seed + 1,
-            ModelSelectionRequest::Direct(selection),
+            selection,
+            old_fast_target,
         ))
         .await?;
     SubmitInputRepository::new(pool.clone())
@@ -980,12 +998,25 @@ async fn transient_failure_retries_same_credential_until_bound_then_rotates()
         CredentialPoolRuntimeAction::SwitchNow,
         CredentialPoolRuntimeAction::Quarantine,
     );
+    let original_families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(target, old_fast_target)]))
+    .expect("the original fast target uses the pinned credential family");
     let mut repository = PostgresModelCallRepository::new(
         pool.clone(),
-        targets,
+        targets.clone(),
         ModelCallCredentialReference::new("unused-default"),
     )
-    .with_credential_pools(HashMap::from([(target, policy)]))
+    .with_session_credentials(original_families)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        target,
+        FastMode::Enabled,
+        10,
+        100,
+    )])
+    .with_credential_pools(HashMap::from([(old_fast_target, policy)]))
     .with_same_credential_attempt_bound(
         std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
     );
@@ -1021,6 +1052,112 @@ async fn transient_failure_retries_same_credential_until_bound_then_rotates()
     };
     assert!(!first_successor.backoff().is_zero());
     expire_availability_backoff(&pool, first_successor_attempt).await?;
+
+    let changed_family = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (
+            new_fast_target,
+            Arc::<str>::from("other-model-family"),
+            None,
+        ),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(target, new_fast_target)]))
+    .expect("the replacement target has a distinct credential family");
+    let changed_family_repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        ModelCallCredentialReference::new("unused-default"),
+    )
+    .with_session_credentials(changed_family)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        target,
+        FastMode::Enabled,
+        10,
+        100,
+    )]);
+    let error = changed_family_repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 190)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 191)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 192)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 193)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 194)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 195)),
+                )
+            },
+        )
+        .await
+        .expect_err("a successor cannot reuse a credential from another family");
+    assert!(matches!(
+        error,
+        ModelCallRepositoryError::InvalidTransition(
+            "availability successor serving configuration changed"
+        )
+    ));
+
+    let compatible_families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (new_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(target, new_fast_target)]))
+    .expect("the replacement target retains the pinned credential family");
+    let narrower_repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        ModelCallCredentialReference::new("unused-default"),
+    )
+    .with_session_credentials(compatible_families.clone())
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        target,
+        FastMode::Enabled,
+        10,
+        50,
+    )]);
+    let error = narrower_repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 196)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 197)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 198)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 199)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 200)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 201)),
+                )
+            },
+        )
+        .await
+        .expect_err("a successor cannot inherit headroom from a wider target");
+    assert!(matches!(
+        error,
+        ModelCallRepositoryError::InvalidTransition(
+            "availability successor serving configuration changed"
+        )
+    ));
+
+    let mut repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("unused-default"),
+    )
+    .with_session_credentials(compatible_families)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        target,
+        FastMode::Enabled,
+        10,
+        100,
+    )])
+    .with_same_credential_attempt_bound(
+        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
+    );
 
     let (second, second_reference) =
         prepare_and_authorize_pool_call(&repository, session, seed + 200).await?;
@@ -1636,7 +1773,7 @@ async fn model_call_transactions_complete_first_reply() -> Result<(), Box<dyn Er
             session,
             resolved_target,
             FastMode::Disabled,
-            false,
+            true,
             terminal_frontier,
         )
         .await?

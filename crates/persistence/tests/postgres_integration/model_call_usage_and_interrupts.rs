@@ -421,12 +421,11 @@ async fn steered_refusal_commits_ordered_provider_compaction_suffix() -> Result<
     Ok(())
 }
 
-/// Base and mapped-fast serving targets can have different compaction support.
-/// Retained counts therefore remain scoped to the effective mode that produced
-/// them even though both calls carry the same durable selected target.
+/// The historical mode label does not disqualify usage evidence when both
+/// modes resolve to the same effective serving target.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn latest_reported_usage_does_not_cross_effective_fast_mode_targets()
+async fn latest_reported_usage_crosses_fast_modes_for_the_same_effective_target()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x6d79;
@@ -484,8 +483,8 @@ async fn latest_reported_usage_does_not_cross_effective_fast_mode_targets()
                 terminal_frontier,
             )
             .await?
-            .is_none(),
-        "the fast-target fallback must not reuse base-target retained counts"
+            .is_some(),
+        "the historical fast-mode spelling cannot hide same-target usage evidence"
     );
     let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
@@ -493,6 +492,552 @@ async fn latest_reported_usage_does_not_cross_effective_fast_mode_targets()
         .into_parts();
     assert!(eligible.is_empty());
     assert!(!continuation);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn effective_target_baseline_rejects_changed_alternate_mapping() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d7a;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 3));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 4));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let selected_target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let old_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 30),
+    ));
+    let new_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 31),
+    ));
+
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared_with_fast_target(
+            seed + 7,
+            seed + 1,
+            selection,
+            old_fast_target,
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 8,
+                seed + 1,
+                "alternate target baseline",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 9)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 10),
+            starting_frontier: Uuid::from_u128(seed + 11),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        selected_target,
+    )])
+    .expect("one mapped-fast fixture target forms a catalog");
+    let old_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, old_fast_target)]))
+    .expect("the original alternate target has a credential family");
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(old_families);
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                session,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 12)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 14)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 16)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(session, call).await?
+    else {
+        panic!("the mapped-fast fixture call authorizes")
+    };
+    let stored_effective_target: Uuid = sqlx::query_scalar(
+        "SELECT effective_provider_model_identity_id
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored_effective_target,
+        old_fast_target.identity().into_uuid()
+    );
+
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"old fast summary","encrypted_content":"opaque"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22));
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation_with_usage(
+            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                response: vec![AssistantResponsePart::ProviderCompaction(compaction)],
+                retained_input_tokens: 19,
+                retained_output_tokens: 3,
+            },
+            ProviderReportedTokenUsage::unreported()
+                .with_input_tokens(Some(70))
+                .with_output_tokens(Some(3)),
+        );
+    repository
+        .apply_terminal_observation(
+            session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                terminal_frontier,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let equivalent_selected_target = ResolvedProviderTarget::naming(
+        ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 32)),
+    );
+    let equivalent_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (
+            equivalent_selected_target,
+            Arc::<str>::from("test-model-family"),
+            None,
+        ),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| {
+        catalog.with_fast_targets([
+            (selected_target, old_fast_target),
+            (equivalent_selected_target, old_fast_target),
+        ])
+    })
+    .expect("both selections share one effective target");
+    let equivalent_selection = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(equivalent_families);
+    assert!(
+        equivalent_selection
+            .latest_reported_usage(
+                session,
+                equivalent_selected_target,
+                FastMode::Enabled,
+                true,
+                terminal_frontier,
+            )
+            .await?
+            .is_some(),
+        "a different selection that maps to the same serving target reuses the baseline"
+    );
+
+    let new_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (new_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
+    .expect("the replacement alternate target has a credential family");
+    let restarted =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_session_credentials(new_families);
+    assert!(
+        restarted
+            .latest_reported_usage(
+                session,
+                selected_target,
+                FastMode::Enabled,
+                true,
+                terminal_frontier,
+            )
+            .await?
+            .is_none(),
+        "a replacement alternate target cannot reuse the old serving target's baseline"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A prepared call refreshes its serving-target attribution when current
+/// configuration does not contradict the frozen credential family or the
+/// headroom limits that admitted it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn effective_target_authorization_records_changed_mapping_after_restart()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d79;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 3));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 4));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let selected_target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let old_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 30),
+    ));
+    let new_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 31),
+    ));
+
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared_with_fast_target(
+            seed + 7,
+            seed + 1,
+            selection,
+            old_fast_target,
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 8,
+                seed + 1,
+                "prepared alternate target",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 9)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 10),
+            starting_frontier: Uuid::from_u128(seed + 11),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        selected_target,
+    )])
+    .expect("one mapped-fast fixture target forms a catalog");
+    let old_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, old_fast_target)]))
+    .expect("the original alternate target has a credential family");
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(old_families)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        100,
+    )]);
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                session,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 12)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 14)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 16)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+    let prepared_evidence: (
+        Option<String>,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<bool>,
+    ) = sqlx::query_as(
+        "SELECT prepared_credential_model_family,
+                    prepared_max_output_tokens,
+                    prepared_context_window_tokens,
+                    prepared_provider_compaction_replay
+               FROM model_call
+              WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        prepared_evidence,
+        (
+            Some("test-model-family".to_owned()),
+            Some(Decimal::from(10)),
+            Some(Decimal::from(100)),
+            Some(false),
+        )
+    );
+
+    let mutation = sqlx::query(
+        "UPDATE model_call
+            SET effective_provider_model_identity_id = $1
+          WHERE model_call_id = $2",
+    )
+    .bind(new_fast_target.identity().into_uuid())
+    .bind(call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a prepared call's effective target is immutable");
+    assert_eq!(
+        mutation.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let mutation = sqlx::query(
+        "UPDATE model_call
+            SET prepared_context_window_tokens = 99
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a prepared call's headroom evidence is immutable");
+    assert_eq!(
+        mutation.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let mut constraint_transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE model_call DISABLE TRIGGER model_call_changes_are_guarded")
+        .execute(&mut *constraint_transaction)
+        .await?;
+    let partial_limit = sqlx::query(
+        "UPDATE model_call
+            SET prepared_max_output_tokens = NULL
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .execute(&mut *constraint_transaction)
+    .await
+    .expect_err("partial prepared limit evidence violates its completeness constraint");
+    assert_eq!(
+        partial_limit
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("model_call_prepared_limit_evidence_complete")
+    );
+    constraint_transaction.rollback().await?;
+
+    let changed_same_target_family = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (
+            old_fast_target,
+            Arc::<str>::from("other-model-family"),
+            None,
+        ),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, old_fast_target)]))
+    .expect("the unchanged target has a different credential family after restart");
+    let changed_family = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(changed_same_target_family)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        100,
+    )]);
+    assert!(matches!(
+        changed_family.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
+    let unchanged_target_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, old_fast_target)]))
+    .expect("the unchanged target retains its credential family");
+    let narrower_same_target = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(unchanged_target_families.clone())
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        50,
+    )]);
+    assert!(matches!(
+        narrower_same_target.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
+    let changed_replay = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(unchanged_target_families)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        100,
+    )
+    .with_provider_compaction_replay()]);
+    assert!(matches!(
+        changed_replay.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
+    let different_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (
+            new_fast_target,
+            Arc::<str>::from("other-model-family"),
+            None,
+        ),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
+    .expect("the replacement alternate target has a distinct credential family");
+    let incompatible = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(different_families);
+    assert!(matches!(
+        incompatible.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+    let unchanged: (String, Uuid, String) = sqlx::query_as(
+        "SELECT state_kind, effective_provider_model_identity_id, credential_reference
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        unchanged,
+        (
+            "prepared".to_owned(),
+            old_fast_target.identity().into_uuid(),
+            "test-model-primary".to_owned(),
+        )
+    );
+
+    let narrower_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (new_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
+    .expect("both alternate targets share the fixture credential family");
+    let narrower = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(narrower_families)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        50,
+    )]);
+    assert!(matches!(
+        narrower.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
+    let new_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (new_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
+    .expect("the replacement alternate target has a credential family");
+    let restarted =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_session_credentials(new_families)
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                selected_target,
+                FastMode::Enabled,
+                10,
+                100,
+            )]);
+    assert!(matches!(
+        restarted.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::Authorized(_)
+    ));
+    let durable: (String, Uuid) = sqlx::query_as(
+        "SELECT state_kind, effective_provider_model_identity_id
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        durable,
+        (
+            "in_flight".to_owned(),
+            new_fast_target.identity().into_uuid()
+        )
+    );
 
     pool.close().await;
     drop(container);
@@ -784,6 +1329,70 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
     assert_eq!(
         retained.projected_unreported_content_bytes(),
         u64::try_from(retained_source_suffix.len() + suffix.len())?
+    );
+
+    let fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 0x50),
+    ));
+    let fast_targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+        target,
+    )])
+    .expect("one dedicated-compaction target forms a catalog");
+    let equivalent_selected_target = ResolvedProviderTarget::naming(
+        ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 0x51)),
+    );
+    let equivalent_families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (
+            equivalent_selected_target,
+            Arc::<str>::from("test-model-family"),
+            None,
+        ),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(equivalent_selected_target, target)]))
+    .expect("the alternate selection maps to the compaction serving target");
+    let equivalent_selection = PostgresModelCallRepository::new(
+        pool.clone(),
+        fast_targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(equivalent_families);
+    assert!(
+        equivalent_selection
+            .latest_reported_usage(
+                fixture.session,
+                equivalent_selected_target,
+                FastMode::Enabled,
+                false,
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
+            )
+            .await?
+            .is_some(),
+        "a dedicated compaction remains eligible through another selection for its serving target"
+    );
+
+    let fast_families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(target, fast_target)]))
+    .expect("the replacement fast target shares the fixture credential family");
+    let restarted =
+        PostgresModelCallRepository::new(pool.clone(), fast_targets, model_credential_reference())
+            .with_session_credentials(fast_families);
+    assert!(
+        restarted
+            .latest_reported_usage(
+                fixture.session,
+                target,
+                FastMode::Enabled,
+                false,
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
+            )
+            .await?
+            .is_none(),
+        "a dedicated compaction from another effective target is not a baseline"
     );
 
     let mutation_error = sqlx::query(
