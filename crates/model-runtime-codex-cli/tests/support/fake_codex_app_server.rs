@@ -62,7 +62,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let read_limits = read_frame()?;
     assert_eq!(read_limits["method"], "account/rateLimits/read");
     let rate_limits = match selected.as_deref() {
-        Some("capacity_read" | "capacity_sparse" | "capacity_failure") => json!({
+        Some(
+            "capacity_read"
+            | "capacity_sparse"
+            | "capacity_failure"
+            | "capacity_read_late"
+            | "capacity_read_after_completion",
+        ) => json!({
             "primary":{"usedPercent":27,"windowDurationMins":300,"resetsAt":1800000700},
             "secondary":{"usedPercent":61,"windowDurationMins":10080,"resetsAt":1800001400}
         }),
@@ -72,7 +78,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         emit_value(
             json!({"id":read_limits["id"],"error":{"code":-32600,"message":"rate limits unavailable"}}),
         );
-    } else {
+    } else if !matches!(
+        selected.as_deref(),
+        Some("capacity_read_pending" | "capacity_read_late" | "capacity_read_after_completion")
+    ) {
         emit_value(json!({"id":read_limits["id"],"result":{"rateLimits":rate_limits}}));
     }
     let thread = read_frame()?;
@@ -160,7 +169,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
     match scenario.as_str() {
-        "capacity_read" | "capacity_read_error" | "capacity_sparse" => {
+        "capacity_read"
+        | "capacity_read_error"
+        | "capacity_sparse"
+        | "capacity_read_pending"
+        | "capacity_read_late"
+        | "capacity_read_after_completion" => {
+            if scenario == "capacity_read_late" {
+                emit_value(json!({"id":read_limits["id"],"result":{"rateLimits":rate_limits}}));
+            }
             if scenario == "capacity_sparse" {
                 emit_value(
                     json!({"method":"account/rateLimits/updated","params":{"rateLimits":{
@@ -173,6 +190,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fixtures::BUFFERED_ANSWER
             ));
             completed();
+            if scenario == "capacity_read_after_completion" {
+                emit_value(json!({"id":read_limits["id"],"result":{"rateLimits":rate_limits}}));
+            }
         }
         "capacity_failure" => {
             emit_value(

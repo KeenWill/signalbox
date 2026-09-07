@@ -345,10 +345,12 @@ non-`stay` `on_headroom_low`; the other adapters reject them. The Codex adapter
 reads capacity with `account/rateLimits/read` after initialization and merges
 primary and secondary windows from `account/rateLimits/updated` into the current
 call's evidence. A null or absent window preserves its previous value within
-that call. A rejected read continues without new evidence. Members without
-retained evidence have unknown capacity: `least_used` falls back to configured
-order within equal priorities, reserves do not exclude them, and headroom
-actions do not fire.
+that call. Thread startup and turn execution do not wait for the capacity read;
+a rejected or unanswered read supplies no new evidence. A read reply received
+after turn completion still supplies capacity evidence. Members without retained
+evidence have unknown capacity: `least_used` falls back to configured order
+within equal priorities, reserves do not exclude them, and headroom actions do
+not fire.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under

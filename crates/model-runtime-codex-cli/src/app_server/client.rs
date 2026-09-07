@@ -32,7 +32,6 @@ pub(crate) enum Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Initialize,
-    RateLimitsRead,
     ThreadStart,
     TurnStart,
     Running,
@@ -41,6 +40,7 @@ enum Phase {
 
 pub(crate) struct Client {
     phase: Phase,
+    rate_limits_read_pending: bool,
     thread_params: Value,
     turn_params: Value,
     outbound: VecDeque<Vec<u8>>,
@@ -59,6 +59,7 @@ impl Client {
         thread_params["approvalPolicy"] = json!("never");
         let mut client = Self {
             phase: Phase::Initialize,
+            rate_limits_read_pending: false,
             thread_params,
             turn_params,
             outbound: VecDeque::new(),
@@ -91,6 +92,26 @@ impl Client {
         let object = value
             .as_object()
             .ok_or(ProtocolError("frame must be an object"))?;
+        // Capacity replies are independent of the model exchange, including a
+        // reply drained after the turn closes.
+        if !object.contains_key("method")
+            && object.get("id").and_then(Value::as_u64) == Some(4)
+            && self.rate_limits_read_pending
+        {
+            if object.contains_key("error") == object.contains_key("result") {
+                return Err(ProtocolError(
+                    "response requires exactly one result or error",
+                ));
+            }
+            self.rate_limits_read_pending = false;
+            if let Some(error) = object.get("error") {
+                let _: RpcError = decode(error)?;
+                return Ok(Event::Ignored);
+            }
+            let response: super::frame::AccountRateLimitsUpdated = decode(&object["result"])?;
+            self.rate_limits.merge(response.rate_limits);
+            return Ok(Event::RateLimitsUpdated);
+        }
         if self.is_terminal() {
             return Err(ProtocolError("frame follows terminal closure"));
         }
@@ -111,7 +132,6 @@ impl Client {
         }
         let (id, method) = match self.phase {
             Phase::Initialize => (1, "initialize"),
-            Phase::RateLimitsRead => (4, "account/rateLimits/read"),
             Phase::ThreadStart => (2, "thread/start"),
             Phase::TurnStart => (3, "turn/start"),
             Phase::Running | Phase::Closed => return Err(ProtocolError("unexpected response")),
@@ -128,10 +148,6 @@ impl Client {
         }
         if let Some(error) = object.get("error") {
             let error = decode(error)?;
-            if self.phase == Phase::RateLimitsRead {
-                self.start_thread();
-                return Ok(Event::Ignored);
-            }
             self.phase = Phase::Closed;
             return Ok(Event::Rejected { method, error });
         }
@@ -143,14 +159,10 @@ impl Client {
                 }
                 self.queue(json!({"method":"initialized"}));
                 self.queue(json!({"id":4,"method":"account/rateLimits/read"}));
-                self.phase = Phase::RateLimitsRead;
+                self.rate_limits_read_pending = true;
+                self.queue(json!({"id":2,"method":"thread/start","params":self.thread_params}));
+                self.phase = Phase::ThreadStart;
                 Ok(Event::Ignored)
-            }
-            Phase::RateLimitsRead => {
-                let response: super::frame::AccountRateLimitsUpdated = decode(result)?;
-                self.rate_limits.merge(response.rate_limits);
-                self.start_thread();
-                Ok(Event::RateLimitsUpdated)
             }
             Phase::ThreadStart => {
                 let response: ThreadStartResponse = decode(result)?;
@@ -176,11 +188,6 @@ impl Client {
             }
             Phase::Running | Phase::Closed => Err(ProtocolError("unexpected response")),
         }
-    }
-
-    fn start_thread(&mut self) {
-        self.queue(json!({"id":2,"method":"thread/start","params":self.thread_params}));
-        self.phase = Phase::ThreadStart;
     }
 
     fn check_turn(&mut self, turn: &str) -> Result<(), ProtocolError> {

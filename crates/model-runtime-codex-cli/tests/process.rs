@@ -531,6 +531,42 @@ async fn unavailable_account_read_continues_without_capacity() {
     assert_eq!(result.spawns, 1);
 }
 
+#[tokio::test]
+async fn unanswered_capacity_read_does_not_block_the_model_turn() {
+    let result = execute_scenario(
+        "capacity_read_pending",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    completed(&result.evidence);
+    assert!(result.rate_limits.is_empty());
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn delayed_capacity_reply_preserves_model_completion() {
+    for scenario in ["capacity_read_late", "capacity_read_after_completion"] {
+        let result = execute_scenario(
+            scenario,
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        completed(&result.evidence);
+        let [(correlation, snapshot)] = result.rate_limits.as_slice() else {
+            panic!("{scenario}: the delayed read emits one snapshot");
+        };
+        assert_eq!(correlation, scenario);
+        // The delayed response reports primary 27% used and secondary 61% used.
+        assert_eq!(snapshot.windows[0].remaining_percent, 73, "{scenario}");
+        assert_eq!(snapshot.windows[1].remaining_percent, 39, "{scenario}");
+        assert_eq!(result.spawns, 1);
+    }
+}
+
 /// One completed call crosses exactly one process-spawn
 /// dispatch boundary.
 #[tokio::test]
