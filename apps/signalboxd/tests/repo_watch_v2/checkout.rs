@@ -982,6 +982,23 @@ async fn disabled_runtime_scavenges_checkouts_without_submitting_pending_command
 #[ignore = "requires disposable PostgreSQL"]
 async fn startup_removes_a_prepared_directory_before_identity_retention()
 -> Result<(), Box<dyn Error>> {
+    assert_startup_removes_prepared_directory(PreparedLocation::Published).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn startup_removes_staging_before_ownership_retention() -> Result<(), Box<dyn Error>> {
+    assert_startup_removes_prepared_directory(PreparedLocation::Staged).await
+}
+
+enum PreparedLocation {
+    Published,
+    Staged,
+}
+
+async fn assert_startup_removes_prepared_directory(
+    location: PreparedLocation,
+) -> Result<(), Box<dyn Error>> {
     use signalbox_module_repo_watch_v2::dispatch::{CommandSubmission, SessionCommandSink};
     use signalboxd::repo_watch_dispatch::scavenge_checkouts;
     use std::os::unix::ffi::OsStrExt;
@@ -1019,12 +1036,20 @@ async fn startup_removes_a_prepared_directory_before_identity_retention()
                 .as_bytes(),
         )
         .await?;
-    let root = fixture.root(session);
+    let root = if matches!(location, PreparedLocation::Staged) {
+        fixture
+            .root(session)
+            .with_file_name(format!(".checkout-{}", pending[0].dispatch().into_uuid()))
+    } else {
+        fixture.root(session)
+    };
     std::fs::create_dir_all(&root)?;
-    sqlx::query("UPDATE dispatch_ledger SET checkout_created = true WHERE command_id = $1")
-        .bind(fixture.command.into_uuid())
-        .execute(&fixture.module)
-        .await?;
+    if matches!(location, PreparedLocation::Published) {
+        sqlx::query("UPDATE dispatch_ledger SET checkout_created = true WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .execute(&fixture.module)
+            .await?;
+    }
     let restarted = RepoWatchStore::new(fixture.module.clone());
     scavenge_checkouts(&restarted, &fixture.core)
         .await
@@ -1249,6 +1274,72 @@ async fn dispatch_never_adopts_or_removes_a_preexisting_directory() -> Result<()
          FROM dispatch_ledger WHERE command_id = $1",
     ).bind(fixture.command.into_uuid()).fetch_one(&fixture.module).await?;
     assert_eq!(flags, (false, true, true));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn cleanup_preserves_reused_inode_without_dispatch_marker() -> Result<(), Box<dyn Error>> {
+    assert_cleanup_preserves_reused_inode(ReusedMarker::Absent).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn cleanup_preserves_reused_inode_with_another_dispatch_marker() -> Result<(), Box<dyn Error>>
+{
+    assert_cleanup_preserves_reused_inode(ReusedMarker::AnotherDispatch).await
+}
+
+enum ReusedMarker {
+    Absent,
+    AnotherDispatch,
+}
+
+async fn assert_cleanup_preserves_reused_inode(marker: ReusedMarker) -> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let root = fixture.root(session);
+    let dispatch = fixture
+        .store
+        .dispatch_checkout(fixture.command)
+        .await?
+        .expect("checkout")
+        .dispatch;
+    assert_eq!(
+        std::fs::read_to_string(root.join(".git/signalbox-dispatch"))?,
+        dispatch.into_uuid().to_string()
+    );
+    std::fs::remove_dir_all(&root)?;
+    let unrelated = root.with_file_name("unrelated-checkout");
+    std::fs::create_dir_all(unrelated.join(".git"))?;
+    std::fs::write(unrelated.join("keep"), b"unrelated contents")?;
+    if matches!(marker, ReusedMarker::AnotherDispatch) {
+        std::fs::write(
+            unrelated.join(".git/signalbox-dispatch"),
+            Uuid::now_v7().to_string(),
+        )?;
+    }
+    let identity = std::fs::metadata(&unrelated)?;
+    // Model inode reuse deterministically instead of depending on allocator timing.
+    sqlx::query("UPDATE dispatch_ledger SET checkout_device = $2::bigint, checkout_inode = $3::bigint WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .bind(i64::try_from(identity.dev())?)
+        .bind(i64::try_from(identity.ino())?)
+        .execute(&fixture.module).await?;
+    fixture.stop(session).await;
+    let restarted = RepoWatchStore::new(fixture.module.clone());
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("missing checkout settled");
+    assert_eq!(
+        std::fs::read(unrelated.join("keep"))?,
+        b"unrelated contents"
+    );
+    assert!(restarted.checkout_removal_candidates().await?.is_empty());
     Ok(())
 }
 

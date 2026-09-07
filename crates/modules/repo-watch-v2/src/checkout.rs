@@ -3,7 +3,7 @@
 use crate::{RepoWatchStore, StoreError};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_ownership_seam::{
-    CommitSha, DurableCommandId, RepoWatchEvent, RepoWatchEventId, SessionId,
+    CommitSha, DurableCommandId, RepoWatchDispatchId, RepoWatchEvent, RepoWatchEventId, SessionId,
 };
 use uuid::Uuid;
 
@@ -25,6 +25,7 @@ impl CheckoutRetirementReason {
 
 /// The immutable triggering event and the checkout's durable settlement.
 pub struct DispatchCheckout {
+    pub dispatch: RepoWatchDispatchId,
     pub event: RepoWatchEvent,
     pub head: Option<CommitSha>,
     pub removed: bool,
@@ -48,6 +49,7 @@ pub struct CheckoutDirectoryIdentity {
 
 #[derive(sqlx::FromRow)]
 struct CheckoutRemovalRow {
+    dispatch_ref: Uuid,
     command_id: Uuid,
     checkout_created: bool,
     checkout_session_id: Uuid,
@@ -59,6 +61,7 @@ struct CheckoutRemovalRow {
 
 #[derive(sqlx::FromRow)]
 struct CheckoutRow {
+    dispatch_ref: Uuid,
     event_id: Uuid,
     normalized_payload: Vec<u8>,
     checkout_head_sha: Option<String>,
@@ -71,6 +74,7 @@ struct CheckoutRow {
 
 /// A checkout whose filesystem removal has not yet settled.
 pub struct CheckoutRemovalCandidate {
+    pub dispatch: RepoWatchDispatchId,
     pub command: DurableCommandId,
     pub created: bool,
     pub location: CheckoutLocation,
@@ -84,7 +88,7 @@ impl RepoWatchStore {
         &self,
     ) -> Result<Vec<CheckoutRemovalCandidate>, StoreError> {
         let rows: Vec<CheckoutRemovalRow> = sqlx::query_as(
-            "SELECT command_id, checkout_created, checkout_session_id, checkout_workspace_root, checkout_retired_reason, checkout_device, checkout_inode FROM dispatch_ledger
+            "SELECT dispatch_ref, command_id, checkout_created, checkout_session_id, checkout_workspace_root, checkout_retired_reason, checkout_device, checkout_inode FROM dispatch_ledger
              WHERE checkout_session_id IS NOT NULL AND NOT checkout_removed",
         )
         .fetch_all(&self.pool)
@@ -92,6 +96,7 @@ impl RepoWatchStore {
         rows.into_iter()
             .map(|row| {
                 Ok(CheckoutRemovalCandidate {
+                    dispatch: RepoWatchDispatchId::from_uuid(row.dispatch_ref),
                     command: DurableCommandId::from_uuid(row.command_id),
                     created: row.checkout_created,
                     location: CheckoutLocation {
@@ -127,12 +132,13 @@ impl RepoWatchStore {
         command: DurableCommandId,
     ) -> Result<Option<DispatchCheckout>, StoreError> {
         let row: Option<CheckoutRow> = sqlx::query_as(
-            "SELECT event.event_id, event.normalized_payload, ledger.checkout_head_sha, ledger.checkout_removed, ledger.checkout_stop_command_id, ledger.checkout_retired_reason, ledger.checkout_workspace_root, ledger.checkout_session_id
+            "SELECT ledger.dispatch_ref, event.event_id, event.normalized_payload, ledger.checkout_head_sha, ledger.checkout_removed, ledger.checkout_stop_command_id, ledger.checkout_retired_reason, ledger.checkout_workspace_root, ledger.checkout_session_id
              FROM dispatch_ledger AS ledger JOIN gh_event AS event ON event.event_id = ledger.event_id
              WHERE ledger.command_id = $1 AND ledger.command_kind = 'create_session'")
             .bind(command.into_uuid()).fetch_optional(&self.pool).await?;
         row.map(|row| {
             Ok(DispatchCheckout {
+                dispatch: RepoWatchDispatchId::from_uuid(row.dispatch_ref),
                 removed: row.checkout_removed,
                 location: match (row.checkout_session_id, row.checkout_workspace_root) {
                     (Some(session), Some(workspace_root)) => Some(CheckoutLocation {

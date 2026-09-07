@@ -4,7 +4,7 @@ use crate::{
     daemon_tools::SessionWorkspaceRoots, repo_watch_credentials::RepositoryWatchClientLoader,
 };
 use rustix::fs::{Mode, OFlags, mkdirat, openat};
-use signalbox_domain::{PullRequestEventContext, RepositorySlug, SessionId};
+use signalbox_domain::{PullRequestEventContext, RepoWatchDispatchId, RepositorySlug, SessionId};
 use signalbox_module_repo_watch_v2::checkout::CheckoutDirectoryIdentity;
 use signalbox_tools_exec::{
     ProcessEnvironment, ProcessOutcome, ProcessRequest, ProcessRunner, ProcessStatusProtocol,
@@ -71,6 +71,7 @@ impl CheckoutProvisioningFailed {
 
 pub(crate) struct CheckoutDirectory {
     path: PathBuf,
+    dispatch: RepoWatchDispatchId,
     parent: OwnedFd,
     staged_name: Option<OsString>,
     directory: OwnedFd,
@@ -90,6 +91,7 @@ impl Drop for CheckoutDirectory {
 pub(crate) fn prepare(
     roots: &SessionWorkspaceRoots,
     session: SessionId,
+    dispatch: RepoWatchDispatchId,
 ) -> Result<CheckoutDirectory, CheckoutProvisioningFailed> {
     let path = roots.derived_path(session);
     let parent = provision_parent(&path)
@@ -100,7 +102,7 @@ pub(crate) fn prepare(
     let (directory, staged_name) = match openat(&parent, name, DIRECTORY_FLAGS, Mode::empty()) {
         Ok(directory) => (directory, None),
         Err(rustix::io::Errno::NOENT) => {
-            let name = OsString::from(format!(".checkout-{}", uuid::Uuid::now_v7()));
+            let name = staging_name(dispatch);
             mkdirat(&parent, &name, Mode::RWXU)
                 .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
             let directory = openat(&parent, &name, DIRECTORY_FLAGS, Mode::empty())
@@ -113,6 +115,7 @@ pub(crate) fn prepare(
         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
     Ok(CheckoutDirectory {
         path,
+        dispatch,
         parent,
         created: staged_name.is_some(),
         staged_name,
@@ -194,6 +197,19 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
                 == rustix::fs::FileType::Directory => {}
         _ => return Err(CheckoutProvisioningFailed::at(CheckoutStep::Workspace)),
     }
+    let git_directory = openat(directory, ".git", DIRECTORY_FLAGS, Mode::empty())
+        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    let marker = openat(
+        &git_directory,
+        DISPATCH_MARKER,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    use std::io::Write;
+    std::fs::File::from(marker)
+        .write_all(checkout.dispatch.into_uuid().to_string().as_bytes())
+        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
     // Fetch the retained SHA explicitly: a branch may advance after observation,
     // and a fork's head need not be reachable from the watched repository's heads.
     let head_url = format!(
@@ -307,9 +323,17 @@ fn create_directory(
     openat(parent, name, DIRECTORY_FLAGS, Mode::empty())
 }
 
+const DISPATCH_MARKER: &str = "signalbox-dispatch";
+
+fn staging_name(dispatch: RepoWatchDispatchId) -> OsString {
+    format!(".checkout-{}", dispatch.into_uuid()).into()
+}
+
 pub(crate) fn remove(
     roots: &SessionWorkspaceRoots,
     session: SessionId,
+    dispatch: RepoWatchDispatchId,
+    created: bool,
     identity: Option<CheckoutDirectoryIdentity>,
 ) -> Result<(), rustix::io::Errno> {
     let path = roots.derived_path(session);
@@ -318,6 +342,16 @@ pub(crate) fn remove(
         Err(rustix::io::Errno::NOENT) => return Ok(()),
         Err(error) => return Err(error),
     };
+    // An unpublished staging directory is empty, even before ownership is retained.
+    let staged = staging_name(dispatch);
+    match pin_removal_directory(&parent, &staged) {
+        Ok(directory) => remove_directory_entry(&parent, &staged, &directory)?,
+        Err(rustix::io::Errno::NOENT) => {}
+        Err(error) => return Err(error),
+    }
+    if !created {
+        return Ok(());
+    }
     let name = path.file_name().ok_or(rustix::io::Errno::INVAL)?;
     let (name, directory) = match pin_removal_directory(&parent, name) {
         Ok(directory) => (name.to_owned(), directory),
@@ -325,7 +359,7 @@ pub(crate) fn remove(
             let Some(identity) = identity else {
                 return Ok(());
             };
-            let Some(found) = find_renamed_directory(&parent, identity)? else {
+            let Some(found) = find_renamed_directory(&parent, identity, dispatch)? else {
                 return Ok(());
             };
             found
@@ -339,13 +373,14 @@ pub(crate) fn remove(
         return Err(rustix::io::Errno::STALE);
     }
     let directory = read_removal_directory(&directory)?;
-    remove_contents(&directory)?;
+    remove_contents(&directory, &[".git", DISPATCH_MARKER])?;
     remove_directory_entry(&parent, &name, &directory)
 }
 
 fn find_renamed_directory(
     parent: &OwnedFd,
     identity: CheckoutDirectoryIdentity,
+    dispatch: RepoWatchDispatchId,
 ) -> Result<Option<(OsString, OwnedFd)>, rustix::io::Errno> {
     use rustix::fs::{AtFlags, Dir, FileType, statat};
     use std::os::unix::ffi::OsStrExt;
@@ -362,13 +397,44 @@ fn find_renamed_directory(
             && (stat.st_dev, stat.st_ino) == (identity.device, identity.inode)
         {
             let name = std::ffi::OsStr::from_bytes(name.to_bytes());
-            return Ok(Some((
-                name.to_owned(),
-                pin_removal_directory(parent, name)?,
-            )));
+            let directory = pin_removal_directory(parent, name)?;
+            let pinned = rustix::fs::fstat(&directory)?;
+            if (pinned.st_dev, pinned.st_ino) == (identity.device, identity.inode)
+                && marker_matches(&directory, dispatch)?
+            {
+                return Ok(Some((name.to_owned(), directory)));
+            }
         }
     }
     Ok(None)
+}
+
+fn marker_matches(
+    directory: &OwnedFd,
+    dispatch: RepoWatchDispatchId,
+) -> Result<bool, rustix::io::Errno> {
+    let marker = match rustix::fs::openat2(
+        directory,
+        format!(".git/{DISPATCH_MARKER}"),
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+        rustix::fs::ResolveFlags::NO_SYMLINKS | rustix::fs::ResolveFlags::NO_XDEV,
+    ) {
+        Ok(marker) => marker,
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    if rustix::fs::FileType::from_raw_mode(rustix::fs::fstat(&marker)?.st_mode)
+        != rustix::fs::FileType::RegularFile
+    {
+        return Ok(false);
+    }
+    // One extra byte distinguishes the exact UUID spelling from a longer file.
+    let mut contents = [0; uuid::fmt::Hyphenated::LENGTH + 1];
+    let count = rustix::io::read(&marker, &mut contents)?;
+    Ok(&contents[..count] == dispatch.into_uuid().to_string().as_bytes())
 }
 
 fn pin_removal_directory(
@@ -398,28 +464,46 @@ fn read_removal_directory(directory: &OwnedFd) -> Result<OwnedFd, rustix::io::Er
     openat(directory, ".", DIRECTORY_FLAGS, Mode::empty())
 }
 
-fn remove_contents(directory: &OwnedFd) -> Result<(), rustix::io::Errno> {
-    use rustix::fs::{AtFlags, Dir, FileType, statat, unlinkat};
+fn remove_contents(directory: &OwnedFd, marker_path: &[&str]) -> Result<(), rustix::io::Errno> {
+    use rustix::fs::Dir;
+    use std::os::unix::ffi::OsStrExt;
     let mut entries = Dir::new(rustix::io::dup(directory)?)?;
     while let Some(entry) = entries.read() {
         let entry = entry?;
         let name = entry.file_name();
-        if matches!(name.to_bytes(), b"." | b"..") {
+        if matches!(name.to_bytes(), b"." | b"..")
+            || marker_path
+                .first()
+                .is_some_and(|last| name.to_bytes() == last.as_bytes())
+        {
             continue;
         }
-        let metadata = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
-        if FileType::from_raw_mode(metadata.st_mode) == FileType::Directory {
-            use std::os::unix::ffi::OsStrExt;
-            let name = std::ffi::OsStr::from_bytes(name.to_bytes());
-            let child = read_removal_directory(&pin_removal_directory(directory, name)?)?;
-            remove_contents(&child)?;
-            remove_directory_entry(directory, name, &child)?;
-        } else {
-            // A tracked symlink is removed as an entry, never traversed.
-            unlinkat(directory, name, AtFlags::empty())?;
+        remove_entry(directory, std::ffi::OsStr::from_bytes(name.to_bytes()), &[])?;
+    }
+    if let Some((last, remaining)) = marker_path.split_first() {
+        match remove_entry(directory, std::ffi::OsStr::new(last), remaining) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+            Err(error) => return Err(error),
         }
     }
     Ok(())
+}
+
+fn remove_entry(
+    directory: &OwnedFd,
+    name: &std::ffi::OsStr,
+    marker_path: &[&str],
+) -> Result<(), rustix::io::Errno> {
+    use rustix::fs::{AtFlags, FileType, statat, unlinkat};
+    let metadata = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(metadata.st_mode) == FileType::Directory {
+        let child = read_removal_directory(&pin_removal_directory(directory, name)?)?;
+        remove_contents(&child, marker_path)?;
+        remove_directory_entry(directory, name, &child)
+    } else {
+        // A tracked symlink is removed as an entry, never traversed.
+        unlinkat(directory, name, AtFlags::empty())
+    }
 }
 
 fn remove_directory_entry(
@@ -443,6 +527,27 @@ mod tests {
         os::unix::fs::{MetadataExt, PermissionsExt},
         process::Command,
     };
+
+    #[test]
+    fn staging_is_recoverable_before_identity_retention() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temporary = tempfile::tempdir()?;
+        let roots = SessionWorkspaceRoots::try_new(&temporary.path().join("workspace"))?;
+        let session = SessionId::from_uuid(uuid::Uuid::now_v7());
+        let dispatch = RepoWatchDispatchId::from_uuid(uuid::Uuid::now_v7());
+        let checkout = prepare(&roots, session, dispatch).expect("prepare checkout");
+        let staged = roots
+            .derived_path(session)
+            .with_file_name(format!(".checkout-{}", dispatch.into_uuid()));
+        assert!(staged.is_dir());
+        let mut checkout = checkout;
+        checkout.staged_name = None; // Leave the entry as an interrupted process would.
+        drop(checkout);
+        remove(&roots, session, dispatch, false, None)?;
+        assert!(!staged.exists());
+        assert!(!roots.derived_path(session).exists());
+        Ok(())
+    }
 
     #[test]
     #[ignore = "requires private user and mount namespaces"]
@@ -474,10 +579,18 @@ mod tests {
         let temporary = tempfile::tempdir()?;
         let roots = SessionWorkspaceRoots::try_new(&temporary.path().join("workspace"))?;
         let session = SessionId::from_uuid(uuid::Uuid::now_v7());
-        let root = roots.derived_path(session);
+        let dispatch = RepoWatchDispatchId::from_uuid(uuid::Uuid::now_v7());
+        let root = roots
+            .derived_path(session)
+            .with_file_name("renamed-checkout");
         let nested = root.join("nested");
         let source = temporary.path().join("source");
         std::fs::create_dir_all(&nested)?;
+        std::fs::create_dir(root.join(".git"))?;
+        std::fs::write(
+            root.join(".git/signalbox-dispatch"),
+            dispatch.into_uuid().to_string(),
+        )?;
         std::fs::create_dir(&source)?;
         let metadata = std::fs::metadata(&root)?;
         let identity = Some(CheckoutDirectoryIdentity {
@@ -504,14 +617,19 @@ mod tests {
                 );
             }
             assert_eq!(
-                remove(&roots, session, identity),
+                remove(&roots, session, dispatch, true, identity),
                 Err(rustix::io::Errno::XDEV)
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join(".git/signalbox-dispatch"))?,
+                dispatch.into_uuid().to_string(),
+                "failed removal preserves ownership evidence for sibling recovery"
             );
             assert_eq!(std::fs::metadata(&nested)?.mode() & 0o777, 0o500);
             assert_eq!(std::fs::read(nested.join("keep"))?, b"mounted contents");
             assert!(Command::new("umount").arg(&nested).status()?.success());
         }
-        remove(&roots, session, identity)?;
+        remove(&roots, session, dispatch, true, identity)?;
         assert!(!root.exists());
         assert_eq!(std::fs::read(source.join("keep"))?, b"mounted contents");
         Ok(())

@@ -112,18 +112,17 @@ pub async fn scavenge_checkouts(
         if checkout.retired_reason.is_none() && !terminal.contains(&session.into_uuid()) {
             continue;
         }
-        if !checkout.created {
-            store
-                .settle_checkout_removal(checkout.command)
-                .await
-                .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
-            continue;
-        }
         let workspace_root = PathBuf::from(OsString::from_vec(checkout.location.workspace_root));
         let roots = crate::daemon_tools::SessionWorkspaceRoots::try_new(&workspace_root)
             .map_err(|_| RepositoryWatchCommandError::CheckoutRemovalFailed)?;
         let removal = tokio::task::spawn_blocking(move || {
-            crate::repo_watch_checkout::remove(&roots, session, checkout.identity)
+            crate::repo_watch_checkout::remove(
+                &roots,
+                session,
+                checkout.dispatch,
+                checkout.created,
+                checkout.identity,
+            )
         })
         .await;
         if !matches!(removal, Ok(Ok(()))) {
@@ -214,7 +213,7 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 let workspace_root = PathBuf::from(OsString::from_vec(location.workspace_root));
                 let roots = crate::daemon_tools::SessionWorkspaceRoots::try_new(&workspace_root)
                     .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
-                crate::repo_watch_checkout::prepare(&roots, location.session)
+                crate::repo_watch_checkout::prepare(&roots, location.session, checkout.dispatch)
             })();
             let provisioned = match prepared {
                 Ok(mut directory) => {
