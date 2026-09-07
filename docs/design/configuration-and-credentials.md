@@ -173,9 +173,6 @@ a nonempty NUL-free UTF-8 value of at most 65,536 bytes; empty, non-UTF-8,
 NUL-containing, or oversized content fails preparation as typed
 `CredentialUnusable` and spawns no child.
 
-Deletion acquires the profile row lock before removing authorization and cached
-tokens.
-
 Database restore transactionally quarantines every restored `oauth` profile
 before signalboxd may start against the restored state; an ordinary restart does
 not.

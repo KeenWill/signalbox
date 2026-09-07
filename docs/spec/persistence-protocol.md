@@ -601,7 +601,9 @@ atomically, and recovery rereads the generation and marker. Delivery quarantine
 and its typed failure evidence commit together. Dispatch retains the row lock
 through copying tokens to the child's scratch home. Pool selection locks its
 OAuth profiles before reading quarantine and retains those locks through
-checkpointing.
+checkpointing. Deletion takes that lock, advances the profile generation,
+removes authorization and cached access, and commits its receipt together while
+retaining registration and history.
 
 ## Planned
 

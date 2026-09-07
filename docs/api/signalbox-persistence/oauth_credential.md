@@ -111,6 +111,17 @@ impl oauth_credential::OauthCredentialRepository {
     >;
 }
 impl oauth_credential::OauthCredentialRepository {
+    pub async fn delete(
+        &self,
+        command: &oauth_credential::OauthCredentialCommand,
+        unretained_failure: oauth_credential::OauthCredentialFailure,
+        discard_access: impl function::FnOnce() + marker::Send,
+    ) -> result::Result<
+        oauth_credential::OauthCredentialHandlingOutcome,
+        oauth_credential::OauthCredentialRepositoryError,
+    >;
+}
+impl oauth_credential::OauthCredentialRepository {
     pub async fn replace_registrations(
         &self,
         registrations: &[(string::String, oauth_credential::OauthRegistration)],
@@ -206,6 +217,9 @@ impl fmt::Debug for oauth_credential::OauthAuthorization {
 ```rust
 pub struct OauthExchange {/* private */}
 // derives: clone::Clone, fmt::Debug
+impl oauth_credential::OauthExchange {
+    pub fn profile(&self) -> &str;
+}
 ```
 
 ## OauthStartOutcome
