@@ -15,6 +15,7 @@ use signalbox_persistence::{
     scheduler::PostgresEligibilitySweep,
     session_deadline::{
         PostgresSessionDeadlineRepository, SessionDeadlineBounds, SessionDeadlinePassOutcome,
+        SessionDeadlineRepositoryError,
     },
     session_lifecycle::SessionLifecycleRepository,
     session_lifecycle_command::{
@@ -23,6 +24,73 @@ use signalbox_persistence::{
 };
 
 const SEED: u128 = 0x11fe_9000;
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn deadline_query_failure_retains_the_statement_and_postgres_diagnostic()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    sqlx::query("ALTER TABLE session_deadline RENAME COLUMN expires_at TO unavailable_expiry")
+        .execute(&pool)
+        .await?;
+    let error = PostgresSessionDeadlineRepository::new(
+        pool.clone(),
+        SessionDeadlineBounds::new(None, None),
+    )
+    .expire_next()
+    .await
+    .expect_err("candidate selection requires the expiry column");
+
+    let SessionDeadlineRepositoryError::Database { query, source } = error else {
+        panic!("a failed SELECT retains its database diagnostic: {error:?}");
+    };
+    assert_eq!(query, "select_deadline_candidate");
+    let database = source.as_database_error().expect("PostgreSQL query error");
+    assert_eq!(database.code().as_deref(), Some("42703"));
+    assert_eq!(database.message(), "column \"expires_at\" does not exist");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn admission_deadline_materializes_the_configured_duration() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let creation = owned_creation(10, StartGate::Held);
+    let session = creation.applied_result().session();
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+    let repository = PostgresSessionDeadlineRepository::new(
+        pool.clone(),
+        SessionDeadlineBounds::new(Some(Duration::from_secs(3600)), None),
+    );
+
+    assert_eq!(
+        repository.expire_next().await?,
+        SessionDeadlinePassOutcome::Armed { session }
+    );
+    let expiry_matches: bool = sqlx::query_scalar(
+        "SELECT expires_at = armed_at + INTERVAL '1 hour' FROM session_deadline WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        expiry_matches,
+        "the deadline retains the configured hour of admission time"
+    );
+    assert_eq!(
+        repository.expire_next().await?,
+        SessionDeadlinePassOutcome::Idle
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
 
 fn owned_creation(seed: u128, gate: StartGate) -> PreparedCreateSession {
     CreateSession::new(

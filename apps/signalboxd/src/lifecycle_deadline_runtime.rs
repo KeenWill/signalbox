@@ -60,7 +60,7 @@ impl LifecycleDeadlineRuntime {
                                     "session waiting deadline parked the session");
                             }
                             Err(error) => {
-                                tracing::warn!(cause = %error,
+                                tracing::warn!(cause = %error, ?error,
                                     "session deadline pass produced no decision");
                                 break;
                             }

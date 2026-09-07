@@ -9,6 +9,8 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod deadline_runtime;
+
 use std::{
     collections::{HashSet, VecDeque},
     error::Error,
