@@ -66,6 +66,7 @@ mod lifecycle_metrics_runtime;
 mod local_socket;
 pub mod model_adapter;
 mod process_runtime;
+mod repo_watch_checkout;
 mod repo_watch_credentials;
 pub mod repo_watch_dispatch;
 pub mod repo_watch_runtime;

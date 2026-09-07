@@ -146,6 +146,14 @@ readable, nonempty directory, and startup fails otherwise. Delivery links the
 selected profile's `auth.json` into a private per-operation `CODEX_HOME` with an
 empty `config.toml`.
 
+A Codex home pool declares one `codex_cli` subscription profile with
+`delivery = "codex_home"` and a distinct `codex_home` directory per
+independently metered account, then lists those profile names as pool members.
+Equal member priorities let `least_used` compare their headroom under the pool's
+reserve and headroom action;
+[the configuration example](../../config/signalboxd.example.toml) provides a
+three-home pool that replaces its ambient profile and pool.
+
 A credential pool is the set of profiles that may substitute for one another for
 one model family. An `[[adapter_mappings]]` entry maps each family to exactly
 one pool, and every member of that pool carries the mapping's adapter. A pool's
@@ -342,9 +350,18 @@ than retained and inert: `round_robin` and a `switch_now` whose adapter cannot
 prove non-acceptance for that trigger's cause unless it is
 `on_credential_rejected`. Codex pools admit `least_used`, headroom reserves and
 non-`stay` `on_headroom_low`; the other adapters reject them. The Codex adapter
-emits no capacity snapshots, so members without retained evidence have unknown
-capacity: `least_used` falls back to configured order within equal priorities,
-reserves do not exclude them, and headroom actions do not fire.
+reads capacity with `account/rateLimits/read` after initialization and merges
+primary and secondary windows from `account/rateLimits/updated` into the current
+call's evidence. Remaining capacity rounds down to whole percentage points. A
+null or absent window preserves its previous value within that call; a
+notification with neither window emits no capacity evidence. Thread startup and
+turn execution do not wait for the capacity read; a rejected or unanswered read
+supplies no new evidence. A notification carrying a window supersedes an
+outstanding read, whose reply is consumed without emitting evidence. A read
+reply received after turn completion still supplies capacity evidence unless
+superseded. Members without retained evidence have unknown capacity:
+`least_used` falls back to configured order within equal priorities, reserves do
+not exclude them, and headroom actions do not fire.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under
@@ -553,7 +570,8 @@ authority is cloned into the workspace, Git, and execution suites. A
 nonexistent, non-directory, final-symlink, non-repository, linked, or externally
 administered configured root fails startup for the complete mapped composition.
 
-Provisioning a derived directory is deployment work. Only a reported absence at
+Repository-watch pull-request dispatch provisions its derived directory; other
+derived directories are provisioned by deployment. Only a reported absence at
 the derived path is unprovisioned, and such a session binds the configured root;
 a present non-directory, a symlink, or a path the daemon cannot classify is
 misprovisioned and fails closed. Which root a session bound is recorded on its
