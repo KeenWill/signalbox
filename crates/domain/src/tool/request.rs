@@ -18,6 +18,7 @@ pub struct ToolRequest {
     name: ToolName,
     arguments: NormalizedToolArguments,
     approval_posture: ToolApprovalPosture,
+    inadmissible_reason: Option<super::ToolInadmissibleReason>,
 }
 
 impl ToolRequest {
@@ -39,7 +40,13 @@ impl ToolRequest {
             name: proposal.name,
             arguments: proposal.arguments,
             approval_posture: approval.posture(),
+            inadmissible_reason: None,
         }
+    }
+
+    /// Returns the durable reason this request resolved without dispatch.
+    pub const fn inadmissible_reason(&self) -> Option<super::ToolInadmissibleReason> {
+        self.inadmissible_reason
     }
 
     /// Returns the logical request identity.
@@ -111,6 +118,7 @@ impl ToolRequestReconstitutionInput {
                 name,
                 arguments,
                 approval_posture: ToolApprovalPosture::Human,
+                inadmissible_reason: None,
             },
         }
     }
@@ -118,6 +126,15 @@ impl ToolRequestReconstitutionInput {
     /// Supplies the exact stored posture selected when this request landed.
     pub const fn with_approval_posture(mut self, posture: ToolApprovalPosture) -> Self {
         self.request.approval_posture = posture;
+        self
+    }
+
+    /// Supplies the stored request-level terminal resolution.
+    pub const fn with_inadmissible_reason(
+        mut self,
+        reason: Option<super::ToolInadmissibleReason>,
+    ) -> Self {
+        self.request.inadmissible_reason = reason;
         self
     }
 

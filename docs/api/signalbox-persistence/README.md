@@ -35,7 +35,7 @@
 | repo_watch_command | 1 | 0 | 0 | [repo_watch_command](repo_watch_command.md) |
 | review_orchestration | 11 | 0 | 0 | [review_orchestration](review_orchestration.md) |
 | review_workflow | 10 | 0 | 0 | [review_workflow](review_workflow.md) |
-| runner_protocol | 27 | 0 | 0 | [types](runner_protocol/types.md), [types-2](runner_protocol/types-2.md) |
+| runner_protocol | 28 | 0 | 0 | [types](runner_protocol/types.md), [types-2](runner_protocol/types-2.md) |
 | scheduler | 2 | 0 | 0 | [scheduler](scheduler.md) |
 | search | 3 | 0 | 0 | [search](search.md) |
 | session | 3 | 0 | 0 | [session](session.md) |

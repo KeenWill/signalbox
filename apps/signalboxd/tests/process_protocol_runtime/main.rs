@@ -148,6 +148,7 @@ mod input_admission;
 mod oauth;
 mod reconciliation;
 mod review_orchestration;
+mod runner_recovery;
 mod session_configuration;
 mod session_metadata;
 mod stop_turn;
