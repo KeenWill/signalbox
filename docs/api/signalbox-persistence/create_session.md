@@ -278,6 +278,7 @@ where
 }
 impl create_session::CreateSessionRepository {
     pub fn new(pool: sqlx_postgres::PgPool, credential_pin: SessionCredentialPin) -> Self;
+    pub fn with_principal(self, principal: session_lifecycle_command::CommandPrincipal) -> Self;
     pub async fn handle(
         &self,
         prepared: session::PreparedCreateSession,

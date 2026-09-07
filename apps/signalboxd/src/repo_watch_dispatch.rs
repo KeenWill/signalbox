@@ -130,7 +130,10 @@ impl SessionCommandSink for RepositoryWatchCommandSink {
                 let mut repository = CreateSessionRepository::new(
                     self.pool.clone(),
                     self.models.session_credential_pin(),
-                );
+                )
+                .with_principal(CommandPrincipal::Module {
+                    module: DispatchingModule::RepositoryWatch,
+                });
                 let outcome = CreateSessionTransaction::handle(&mut repository, prepared)
                     .await
                     .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;

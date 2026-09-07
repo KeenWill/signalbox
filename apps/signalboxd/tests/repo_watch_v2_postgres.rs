@@ -2190,6 +2190,15 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
         .execute(&core_pool)
         .await?;
     let pool = module_pool(&url).await?;
+    sqlx::query("CREATE FUNCTION reject_redundant_cursor_update() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.event_ordinal = OLD.event_ordinal THEN RAISE EXCEPTION 'redundant evaluation cursor update'; END IF; RETURN NEW; END $$")
+        .execute(&pool).await?;
+    sqlx::query(
+        "CREATE TRIGGER reject_redundant_cursor_update BEFORE UPDATE ON rule_evaluation_cursor
+        FOR EACH ROW EXECUTE FUNCTION reject_redundant_cursor_update()",
+    )
+    .execute(&pool)
+    .await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("dispatch/project"))?;
     let now = OffsetDateTime::now_utc();
@@ -2429,4 +2438,78 @@ impl signalbox_module_repo_watch_v2::dispatch::SessionCommandSink for SettlingTh
             Ok(signalbox_module_repo_watch_v2::dispatch::CommandSubmission::Accepted)
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn repository_watch_creation_records_its_module_issuer() -> Result<(), Box<dyn Error>> {
+    use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
+    use signalbox_module_repo_watch_v2::dispatch::{CommandSubmission, SessionCommandSink};
+    use signalbox_persistence::scheduler::PostgresEligibilitySweep;
+    use signalboxd::{HubModelConfiguration, repo_watch_dispatch::RepositoryWatchCommandSink};
+    use std::sync::Arc;
+
+    let (container, pool, _) = postgres().await?;
+    migrate(&pool).await?;
+    let models = HubModelConfiguration::parse(
+        &include_str!("../../../config/signalboxd.example.toml").replace(
+            "/usr/local/bin/signalbox-exec-supervisor",
+            std::env::current_exe()?.to_string_lossy().as_ref(),
+        ),
+    )?;
+    let (eligibility_nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    let mut sink = RepositoryWatchCommandSink {
+        pool: pool.clone(),
+        models: Arc::new(models),
+        eligibility_nudge,
+        tool_dispatch_gate: InProcessToolDispatchGate::default(),
+    };
+    let id = DurableCommandId::from_uuid(Uuid::now_v7());
+    let command = SessionCommand::create_session(
+        CreateSession::new(
+            id,
+            SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
+                dispatch: RepoWatchDispatchId::from_uuid(Uuid::now_v7()),
+            }),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(Uuid::now_v7()),
+            )),
+        )
+        .with_lifecycle(
+            StartGate::Held,
+            SessionOwnership::Owned,
+            Some(FinishCondition::ExternalGate),
+        ),
+    )
+    .expect("held seam command");
+    assert!(matches!(
+        sink.submit(command.clone()).await.expect("create session"),
+        CommandSubmission::Creation(CreateSessionOutcome::Applied(_))
+    ));
+    assert!(matches!(
+        sink.submit(command).await.expect("replay creation"),
+        CommandSubmission::Creation(CreateSessionOutcome::Applied(_))
+    ));
+    let issuer: (String, Option<String>) = sqlx::query_as(
+        "SELECT issuer_kind, issuer_module FROM durable_command WHERE command_id = $1",
+    )
+    .bind(id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        issuer,
+        (String::from("module"), Some(String::from("repo_watch")))
+    );
+    let held: bool = sqlx::query_scalar("SELECT start_gate_held FROM session_lifecycle")
+        .fetch_one(&pool)
+        .await?;
+    assert!(held);
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(inputs, 0);
+    pool.close().await;
+    drop(container);
+    Ok(())
 }

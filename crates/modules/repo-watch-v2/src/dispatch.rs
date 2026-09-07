@@ -129,8 +129,12 @@ impl RepoWatchStore {
                 .record_rule_commands(&batch, now, codec, &key, rule.cooldown())
                 .await
                 .map_err(EvaluationError::Store)?;
-            if matches!(outcome, DispatchAdmission::ConflictingReuse) {
-                return Err(EvaluationError::ConflictingDispatch);
+            match outcome {
+                DispatchAdmission::Inserted | DispatchAdmission::Suppressed => return Ok(true),
+                DispatchAdmission::ConflictingReuse => {
+                    return Err(EvaluationError::ConflictingDispatch);
+                }
+                DispatchAdmission::Replayed { .. } | DispatchAdmission::InactiveRule => {}
             }
         }
         sqlx::query("INSERT INTO rule_evaluation_cursor(repository, rule_id, rule_revision, event_ordinal)
@@ -294,6 +298,9 @@ fn stack_root(
     context: &signalbox_ownership_seam::PullRequestEventContext,
     observation: Option<&RepoWatchObservation>,
 ) -> signalbox_ownership_seam::PullRequestNumber {
+    if context.head_repository() != repository {
+        return context.number();
+    }
     let open = observation
         .into_iter()
         .flat_map(|o| o.state().pull_requests())
@@ -322,7 +329,10 @@ fn stack_root(
         if found.is_some() && candidate.head_repository() == repository {
             pending.extend(
                 open.iter()
-                    .filter(|p| p.base_branch() == candidate.head_branch())
+                    .filter(|p| {
+                        p.head_repository() == repository
+                            && p.base_branch() == candidate.head_branch()
+                    })
                     .map(|p| p.number()),
             );
         }
@@ -386,7 +396,7 @@ mod tests {
         // PR identities are arbitrary; matching branch names form the parent-child relation.
         let parent = context(1, "owner/project", "main", "parent");
         let child = context(2, "owner/project", "parent", "child");
-        let fork = context(3, "fork/project", "main", "child");
+        let fork = context(3, "fork/project", "parent", "child");
         let observation = RepoWatchObservation::new(
             Vec::new(),
             RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
