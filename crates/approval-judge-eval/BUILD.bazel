@@ -1,56 +1,35 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
 
 rust_package()
 
 rust_library(
     name = "signalbox_approval_judge_eval",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
     compile_data = ["corpora/seed-v1.json"],
-    crate_features = [],
     crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
+    proc_macro_deps = ["//crates/derive:signalbox_derive"],
     deps = [
         "//apps/signalboxd:signalboxd_lib",
         "//crates/domain:signalbox_domain",
         "//crates/model-provider-runtime:signalbox_model_provider_runtime",
         "//crates/model-runtime:signalbox_model_runtime",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_binary(
     name = "signalbox-approval-judge-eval",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
     compile_data = ["corpora/seed-v1.json"],
-    crate_features = [],
     crate_root = "src/main.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
+    proc_macro_deps = ["//crates/derive:signalbox_derive"],
     deps = [
         ":signalbox_approval_judge_eval",
         "//apps/signalboxd:signalboxd_lib",
         "//crates/domain:signalbox_domain",
         "//crates/model-provider-runtime:signalbox_model_provider_runtime",
         "//crates/model-runtime:signalbox_model_runtime",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_test(

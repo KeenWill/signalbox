@@ -1,26 +1,13 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_library", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_library")
 
 rust_package()
 
 rust_library(
     name = "signalbox_egress_transport",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
-    compile_data = [],
-    crate_features = [],
     crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
-    deps = [] + all_crate_deps(normal = True),
 )
 
 rust_test(

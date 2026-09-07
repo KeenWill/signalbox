@@ -1,7 +1,8 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_doc", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
 
 rust_package()
 
@@ -23,47 +24,22 @@ cargo_build_script(
 
 rust_library(
     name = "signalbox_model_runtime_codex_cli",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
-    compile_data = [],
-    crate_features = [],
     crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
     deps = [
         ":build_script",
         "//crates/model-runtime:signalbox_model_runtime",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_binary(
     name = "signalbox-fake-codex-cli",
     srcs = glob(["tests/support/**/*.rs"]),
-    aliases = aliases(),
-    compile_data = [],
-    crate_features = [],
     crate_root = "tests/support/fake_codex_cli.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = [] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
     deps = [
         ":build_script",
         ":signalbox_model_runtime_codex_cli",
         "//crates/model-runtime:signalbox_model_runtime",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_test(

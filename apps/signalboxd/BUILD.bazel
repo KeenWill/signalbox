@@ -1,13 +1,12 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
 
 rust_package()
 
 rust_library(
     name = "signalboxd_lib",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
     compile_data = [
         "//:config/session-templates.example.toml",
         "//:config/signalboxd.example.toml",
@@ -16,15 +15,7 @@ rust_library(
     crate_features = ["test-support"],
     crate_name = "signalboxd",
     crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
+    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"],
     deps = [
         "//crates/application:signalbox_application",
         "//crates/blob-store:signalbox_blob_store",
@@ -57,13 +48,11 @@ rust_library(
         "//crates/tools-web:signalbox_tools_web",
         "//crates/tools-workspace:signalbox_tools_workspace",
         "//crates/web-contract:signalbox_web_contract",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_binary(
     name = "approval-judge-eval",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
     compile_data = [
         "//:config/session-templates.example.toml",
         "//:config/signalboxd.example.toml",
@@ -71,15 +60,7 @@ rust_binary(
     ],
     crate_features = ["test-support"],
     crate_root = "src/bin/approval-judge-eval.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
+    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"],
     deps = [
         ":signalboxd_lib",
         "//crates/application:signalbox_application",
@@ -113,13 +94,11 @@ rust_binary(
         "//crates/tools-web:signalbox_tools_web",
         "//crates/tools-workspace:signalbox_tools_workspace",
         "//crates/web-contract:signalbox_web_contract",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_binary(
     name = "signalbox-debug",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
     compile_data = [
         "//:config/session-templates.example.toml",
         "//:config/signalboxd.example.toml",
@@ -127,15 +106,7 @@ rust_binary(
     ],
     crate_features = ["test-support"],
     crate_root = "src/bin/signalbox-debug.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
+    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"],
     deps = [
         ":signalboxd_lib",
         "//crates/application:signalbox_application",
@@ -169,13 +140,11 @@ rust_binary(
         "//crates/tools-web:signalbox_tools_web",
         "//crates/tools-workspace:signalbox_tools_workspace",
         "//crates/web-contract:signalbox_web_contract",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_binary(
     name = "signalboxd",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
     compile_data = [
         "//:config/session-templates.example.toml",
         "//:config/signalboxd.example.toml",
@@ -183,15 +152,7 @@ rust_binary(
     ],
     crate_features = ["test-support"],
     crate_root = "src/main.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
+    proc_macro_deps = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"],
     deps = [
         ":signalboxd_lib",
         "//crates/application:signalbox_application",
@@ -225,7 +186,7 @@ rust_binary(
         "//crates/tools-web:signalbox_tools_web",
         "//crates/tools-workspace:signalbox_tools_workspace",
         "//crates/web-contract:signalbox_web_contract",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_test(

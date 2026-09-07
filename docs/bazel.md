@@ -25,7 +25,10 @@ Cargo host tools use the same Rust version constant as compilation and rustfmt.
 
 Workspace packages call `rust_package()` from `tooling/bazel/package.bzl` for
 Cargo metadata, lint settings, and Rust source inputs. Extra exported fixtures
-are listed in its `exports` argument.
+are listed in its `exports` argument. The build macros in
+`tooling/bazel/rust.bzl` add Cargo-managed third-party dependencies and compiler
+defaults; their `deps` and `proc_macro_deps` arguments list first-party targets.
+Rule attributes can override shared defaults.
 
 The syscall crate is a Cargo workspace member with its own unsafe-code lint
 policy. This lets the importer treat all in-repository crates as first-party

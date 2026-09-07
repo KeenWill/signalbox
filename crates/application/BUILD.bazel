@@ -1,6 +1,7 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_library", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_library")
 
 CRATE_FEATURES = ["test-support"]
 
@@ -8,19 +9,9 @@ rust_package()
 
 rust_library(
     name = "signalbox_application",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
     crate_features = CRATE_FEATURES,
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
-    deps = ["//crates/domain:signalbox_domain"] + all_crate_deps(normal = True),
+    proc_macro_deps = ["//crates/derive:signalbox_derive"],
+    deps = ["//crates/domain:signalbox_domain"],
 )
 
 rust_test(

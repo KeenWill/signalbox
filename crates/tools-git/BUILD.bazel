@@ -1,13 +1,12 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_library", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_test")
 load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_library")
 
 rust_package()
 
 rust_library(
     name = "signalbox_tools_git",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
     compile_data = [
         "src/tests/fixtures/git-conformance/contended-lock",
         "src/tests/fixtures/git-conformance/contended-ref",
@@ -22,23 +21,14 @@ rust_library(
         "src/tests/fixtures/git-conformance/update-ref-before",
         "src/tests/fixtures/git-conformance/update-ref-lock-state",
     ],
-    crate_features = [],
     crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    lint_config = ":cargo_lints",
-    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
-    rustc_env_files = [":cargo_environment"],
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    visibility = ["//:__subpackages__"],
+    proc_macro_deps = ["//crates/derive:signalbox_derive"],
     deps = [
         "//crates/application:signalbox_application",
         "//crates/domain:signalbox_domain",
         "//crates/tool-contract:signalbox_tool_contract",
         "//crates/tools-workspace:signalbox_tools_workspace",
-    ] + all_crate_deps(normal = True),
+    ],
 )
 
 rust_test(
