@@ -2072,12 +2072,19 @@ async fn explicit_refusal_is_refusal_evidence() {
 }
 
 #[tokio::test]
-async fn credential_rejection_precedes_a_buffered_refusal() {
-    assert_error_scenario(
+async fn credential_rejection_precedes_a_buffered_refusal_without_non_acceptance_proof() {
+    let result = execute_scenario(
         "credential_precedence",
-        ProviderErrorKind::CredentialRejected,
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
     )
     .await;
+
+    let error = provider_error(&result.evidence);
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
+    assert!(!error.non_acceptance_proven);
+    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
