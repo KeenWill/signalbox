@@ -1266,16 +1266,18 @@ impl PostgresModelCallRepository {
         // too, so activation would abort before selection could reach the
         // admissible member. Selection consumes no displacement row and this
         // transaction rolls back, so nothing durable moves.
+        let serving_evidence = prepared_serving_evidence(
+            self.credential_families.as_ref(),
+            &self.continuation_usage_limits,
+            request.call().target(),
+            fast_mode,
+        );
         let selected = select_runtime_pool_credential(
             &mut transaction,
             session_id,
             execution.turn(),
             execution.current_attempt().id(),
-            serving_pool_target(
-                self.credential_families.as_ref(),
-                request.call().target(),
-                fast_mode,
-            ),
+            serving_evidence,
             credential_reference.clone(),
             &self.credential_pools,
         )
@@ -1345,16 +1347,18 @@ impl PostgresModelCallRepository {
             self.credential_families.as_ref(),
         )
         .await?;
+        let serving_evidence = prepared_serving_evidence(
+            self.credential_families.as_ref(),
+            &self.continuation_usage_limits,
+            prepared.call().target(),
+            fast_mode,
+        );
         let selected = select_runtime_pool_credential(
             connection,
             prepared.session(),
             prepared.turn(),
             prepared.attempt(),
-            serving_pool_target(
-                self.credential_families.as_ref(),
-                prepared.call().target(),
-                fast_mode,
-            ),
+            serving_evidence,
             credential_reference,
             &self.credential_pools,
         )
@@ -1371,12 +1375,6 @@ impl PostgresModelCallRepository {
                 ))?;
             return Ok(CountedActivationCheckpointOutcome::PoolExhausted(policy));
         };
-        let serving_evidence = prepared_serving_evidence(
-            self.credential_families.as_ref(),
-            &self.continuation_usage_limits,
-            prepared.call().target(),
-            fast_mode,
-        );
         insert_prepared_call(
             connection,
             prepared,
@@ -1582,17 +1580,19 @@ impl PostgresModelCallRepository {
                 )
                 .await?;
                 acquire_model_call_outbox_order_guard(&mut transaction).await?;
+                let serving_evidence = prepared_serving_evidence(
+                    self.credential_families.as_ref(),
+                    &self.continuation_usage_limits,
+                    resolved.target(),
+                    fast_mode,
+                );
                 let selected = Some(
                     select_runtime_pool_credential(
                         &mut transaction,
                         session,
                         execution.turn(),
                         execution.current_attempt().id(),
-                        serving_pool_target(
-                            self.credential_families.as_ref(),
-                            resolved.target(),
-                            fast_mode,
-                        ),
+                        serving_evidence,
                         credential_reference,
                         &self.credential_pools,
                     )
@@ -1782,11 +1782,13 @@ impl PostgresModelCallRepository {
                 .model_settings()
                 .effective()
                 .fast_mode();
-            let current_effective_target = serving_pool_target(
+            let current_serving_evidence = prepared_serving_evidence(
                 self.credential_families.as_ref(),
+                &self.continuation_usage_limits,
                 current.target(),
                 fast_mode,
             );
+            let current_effective_target = current_serving_evidence.effective_target;
             let stored_serving_evidence = sqlx::query(
                 "SELECT effective_provider_model_identity_id,
                         prepared_credential_model_family,
@@ -1807,24 +1809,12 @@ impl PostgresModelCallRepository {
                 .try_get::<Option<String>, _>("prepared_credential_model_family")?;
             let stored_limit =
                 decode_prepared_usage_limit(&stored_serving_evidence, stored_effective_target)?;
-            let current_credential_model_family = self
-                .credential_families
-                .as_ref()
-                .and_then(|families| families.family(current_effective_target));
-            let current_limit = self
-                .continuation_usage_limits
-                .get(&(current.target(), fast_mode))
-                .copied();
-            let serving_configuration_changed = stored_effective_target != current_effective_target
-                || stored_credential_model_family.as_deref() != current_credential_model_family
-                || !prepared_limit_configuration_matches(stored_limit, current_limit);
-            if serving_configuration_changed
-                && (!prepared_credential_family_matches(
-                    self.credential_families.as_ref(),
-                    stored_credential_model_family.as_deref(),
-                    current_effective_target,
-                ) || !remap_preserves_preflight_limits(stored_limit, current_limit))
-            {
+            if !prepared_serving_configuration_is_compatible(
+                stored_effective_target,
+                stored_credential_model_family.as_deref(),
+                stored_limit,
+                current_serving_evidence,
+            ) {
                 return Ok((false, AuthorizeModelCallOutcome::NoSend));
             }
             let authorized = execution.authorize_send().map_err(|_| {
@@ -3270,13 +3260,19 @@ where
             credential_families,
         )
         .await?;
+        let serving_evidence = prepared_serving_evidence(
+            credential_families,
+            continuation_usage_limits,
+            resolved.target(),
+            fast_mode,
+        );
         let selected = Some(
             select_runtime_pool_credential(
                 connection,
                 session,
                 turn,
                 execution.current_attempt().id(),
-                serving_pool_target(credential_families, resolved.target(), fast_mode),
+                serving_evidence,
                 default_reference,
                 credential_pools,
             )
@@ -6818,6 +6814,7 @@ fn serving_pool_target(
     })
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct PreparedServingEvidence<'a> {
     effective_target: ResolvedProviderTarget,
     credential_model_family: Option<&'a str>,
@@ -6838,17 +6835,6 @@ pub(crate) fn prepared_serving_evidence<'a>(
     }
 }
 
-fn prepared_credential_family_matches(
-    families: Option<&crate::ModelCredentialFamilyCatalog>,
-    prepared_family: Option<&str>,
-    right: ResolvedProviderTarget,
-) -> bool {
-    matches!(
-        (prepared_family, families.and_then(|families| families.family(right))),
-        (Some(prepared), Some(current)) if prepared == current
-    )
-}
-
 fn remap_preserves_preflight_limits(
     previous: Option<ToolContinuationUsageLimit>,
     current: Option<ToolContinuationUsageLimit>,
@@ -6866,6 +6852,22 @@ fn remap_preserves_preflight_limits(
         }
         _ => false,
     }
+}
+
+fn prepared_serving_configuration_is_compatible(
+    prepared_target: ResolvedProviderTarget,
+    prepared_family: Option<&str>,
+    prepared_limit: Option<ToolContinuationUsageLimit>,
+    current: PreparedServingEvidence<'_>,
+) -> bool {
+    let configuration_changed = prepared_target != current.effective_target
+        || prepared_family != current.credential_model_family
+        || !prepared_limit_configuration_matches(prepared_limit, current.limit);
+    !configuration_changed
+        || (matches!(
+            (prepared_family, current.credential_model_family),
+            (Some(prepared), Some(current)) if prepared == current
+        ) && remap_preserves_preflight_limits(prepared_limit, current.limit))
 }
 
 fn prepared_limit_configuration_matches(
@@ -7215,7 +7217,7 @@ async fn select_runtime_pool_credential(
     session: SessionId,
     turn: TurnId,
     attempt: TurnAttemptId,
-    target: ResolvedProviderTarget,
+    serving_evidence: PreparedServingEvidence<'_>,
     default_reference: ModelCallCredentialReference,
     policies: &CredentialPoolRuntimeCatalog,
 ) -> Result<SelectedRuntimePoolCredential, ModelCallRepositoryError> {
@@ -7240,17 +7242,43 @@ async fn select_runtime_pool_credential(
                 .ok_or(ModelCallCorruption::Missing(
                     "availability successor predecessor pool policy",
                 ))?;
-            let reference: String = sqlx::query_scalar(
-                "SELECT credential_reference
+            let row = sqlx::query(
+                "SELECT credential_reference,
+                        effective_provider_model_identity_id,
+                        prepared_credential_model_family,
+                        prepared_max_output_tokens,
+                        prepared_context_window_tokens,
+                        prepared_provider_compaction_replay
                    FROM model_call
                   WHERE model_call_id = $1",
             )
             .bind(predecessor)
             .fetch_one(&mut *connection)
             .await?;
+            let reference = row.try_get::<String, _>("credential_reference")?;
+            let prepared_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                row.try_get("effective_provider_model_identity_id")?,
+            ));
+            let prepared_family =
+                row.try_get::<Option<String>, _>("prepared_credential_model_family")?;
+            let prepared_limit = decode_prepared_usage_limit(&row, prepared_target)?;
+            if !prepared_serving_configuration_is_compatible(
+                prepared_target,
+                prepared_family.as_deref(),
+                prepared_limit,
+                serving_evidence,
+            ) {
+                return Err(ModelCallRepositoryError::InvalidTransition(
+                    "availability successor serving configuration changed",
+                ));
+            }
             (Some(policy), Some(reference), rotated)
         }
-        None => (policies.get(&target).cloned(), None, false),
+        None => (
+            policies.get(&serving_evidence.effective_target).cloned(),
+            None,
+            false,
+        ),
     };
     let Some(policy) = policy else {
         return Ok(SelectedRuntimePoolCredential {

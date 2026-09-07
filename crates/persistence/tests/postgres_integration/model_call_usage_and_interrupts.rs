@@ -817,6 +817,26 @@ async fn effective_target_authorization_records_changed_mapping_after_restart()
         mutation.as_database_error().and_then(|error| error.code()),
         Some("23514".into())
     );
+    let mut constraint_transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE model_call DISABLE TRIGGER model_call_changes_are_guarded")
+        .execute(&mut *constraint_transaction)
+        .await?;
+    let partial_limit = sqlx::query(
+        "UPDATE model_call
+            SET prepared_max_output_tokens = NULL
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .execute(&mut *constraint_transaction)
+    .await
+    .expect_err("partial prepared limit evidence violates its completeness constraint");
+    assert_eq!(
+        partial_limit
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("model_call_prepared_limit_evidence_complete")
+    );
+    constraint_transaction.rollback().await?;
 
     let changed_same_target_family = ModelCredentialFamilyCatalog::try_new([
         (selected_target, Arc::<str>::from("test-model-family"), None),

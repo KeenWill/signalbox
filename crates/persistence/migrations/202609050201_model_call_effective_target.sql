@@ -16,7 +16,9 @@ ALTER TABLE model_call
             AND prepared_context_window_tokens IS NULL
             AND prepared_provider_compaction_replay IS NULL
         ) OR (
-            prepared_max_output_tokens > 0
+            prepared_max_output_tokens IS NOT NULL
+            AND prepared_context_window_tokens IS NOT NULL
+            AND prepared_max_output_tokens > 0
             AND prepared_max_output_tokens = trunc(prepared_max_output_tokens)
             AND prepared_context_window_tokens > 0
             AND prepared_context_window_tokens = trunc(prepared_context_window_tokens)
