@@ -4,6 +4,7 @@ public enum SignalboxProcessProtocol {
   public static let currentVersion = SignalboxProcessProtocolVersion.one
   public static let maximumFrameBytes = 8 * 1024 * 1024
   public static let maximumContentFragmentUTF8Bytes = 1024 * 1024
+  public static let maximumHeadroomReservePercent: UInt8 = 99
   // docs/spec/process-protocol.md owns the metadata and conversation-list bounds.
   public static let maximumMetadataTags = 256
   public static let maximumMetadataAttributes = 256
@@ -5259,7 +5260,9 @@ public enum SignalboxCredentialPoolExclusion: Decodable, Equatable, Sendable {
       try payload.rejectUnadmittedFields(["kind", "observed_headroom_percent", "reserve_percent"], decoder: decoder)
       let observed: Int64 = try decoder.decode("observed_headroom_percent")
       let reserve: UInt8 = try decoder.decode("reserve_percent")
-      guard reserve <= 100, observed <= Int64(reserve) else { throw poolEvidenceError(decoder) }
+      guard reserve <= SignalboxProcessProtocol.maximumHeadroomReservePercent,
+        observed <= Int64(reserve)
+      else { throw poolEvidenceError(decoder) }
       self = .headroomReserve(observedHeadroomPercent: observed, reservePercent: reserve)
     default: throw poolEvidenceError(decoder)
     }

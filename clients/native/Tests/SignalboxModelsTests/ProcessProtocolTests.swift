@@ -3747,6 +3747,8 @@ extension ProcessProtocolTests {
       (#"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"chain_exclusion","predecessor_model_call_id":"55555555-5555-4555-8555-555555555555"}}]"#, nil),
       (#"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"transient_exclusion","observation_model_call_id":"66666666-6666-4666-8666-666666666666"}}]"#, 1_000),
       (#"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":10}}]"#, 1_000),
+      (#"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":0,"reserve_percent":0}}]"#, 1_000),
+      (#"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":99,"reserve_percent":99}}]"#, 1_000),
     ]
     for (members, reset) in cases {
       let state = try SignalboxJSONCoding.decoder().decode(
@@ -3773,6 +3775,7 @@ extension ProcessProtocolTests {
       #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"chain_exclusion","predecessor_model_call_id":"55555555-5555-4555-8555-555555555555"}}]"#,
       #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"transient_exclusion","observation_model_call_id":"66666666-6666-4666-8666-666666666666"}}]"#,
       #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":10}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":99,"reserve_percent":100}}]"#,
     ] {
       let state = try SignalboxJSONCoding.decoder().decode(
         SignalboxTranscriptTurnState.self, from: poolExhaustionStateJSON(members: members)

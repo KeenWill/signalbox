@@ -1277,6 +1277,11 @@ async fn outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> {
         .await?;
     assert_outbox_truncate_rejected(
         &pool,
+        "TRUNCATE TABLE credential_pool_exhaustion_outbox_event CASCADE",
+    )
+    .await?;
+    assert_outbox_truncate_rejected(
+        &pool,
         "TRUNCATE TABLE model_call_transition_outbox_event CASCADE",
     )
     .await?;

@@ -190,6 +190,8 @@ CREATE TABLE credential_pool_exhaustion_outbox_event (
 );
 CREATE TRIGGER credential_pool_exhaustion_outbox_immutable BEFORE UPDATE OR DELETE ON credential_pool_exhaustion_outbox_event
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+CREATE TRIGGER credential_pool_exhaustion_outbox_cannot_be_truncated BEFORE TRUNCATE ON credential_pool_exhaustion_outbox_event
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
 
 CREATE OR REPLACE FUNCTION require_outbox_event_typed_record() RETURNS trigger
     LANGUAGE plpgsql

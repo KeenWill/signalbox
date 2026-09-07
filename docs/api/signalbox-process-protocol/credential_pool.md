@@ -2,6 +2,12 @@
 
 # credential_pool
 
+## MAX_HEADROOM_RESERVE_PERCENT
+
+```rust
+pub const MAX_HEADROOM_RESERVE_PERCENT: i64;
+```
+
 ## CredentialPoolExclusion
 
 ```rust

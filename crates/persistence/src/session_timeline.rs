@@ -964,8 +964,10 @@ async fn project_detail_event(
                     turn,
                     disposition: DispatchedTurnTerminalDisposition::ReconciliationRequired { .. },
                 } => terminal_turn_body(*turn, "reconciliation_required", cursor)?,
-                DispatchedOutboxEventKind::CredentialPoolExhausted(_)
-                | DispatchedOutboxEventKind::SessionCreated(_)
+                DispatchedOutboxEventKind::CredentialPoolExhausted(evidence) => {
+                    terminal_turn_body(TurnId::from_uuid(evidence.turn_id), "failed", cursor)?
+                }
+                DispatchedOutboxEventKind::SessionCreated(_)
                 | DispatchedOutboxEventKind::SessionStateChanged(_)
                 | DispatchedOutboxEventKind::SessionTerminal(_)
                 | DispatchedOutboxEventKind::GoalChanged(_)

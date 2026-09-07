@@ -3,6 +3,9 @@ use crate::scalars::deserialize_required_nullable;
 use crate::{CanonicalU64, CanonicalUuid};
 use serde::{Deserialize, Serialize};
 
+/// Maximum admitted headroom reserve, leaving at least one percent usable.
+pub const MAX_HEADROOM_RESERVE_PERCENT: i64 = 99;
+
 /// One reason a configured member could not serve a call.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -92,7 +95,7 @@ pub fn valid_credential_pool_evidence(
                         reserve_percent,
                     } => {
                         member.reset_at_unix_ms.is_some()
-                            && *reserve_percent <= 100
+                            && i64::from(*reserve_percent) <= MAX_HEADROOM_RESERVE_PERCENT
                             && *observed_headroom_percent <= i64::from(*reserve_percent)
                     }
                     CredentialPoolExclusion::ChainExclusion { .. } => {

@@ -44,6 +44,14 @@ fn pool_exhaustion_accepts_each_closed_exclusion_arm() {
             serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":10}),
             Some(1_000),
         ),
+        (
+            serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":0,"reserve_percent":0}),
+            Some(1_000),
+        ),
+        (
+            serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":99,"reserve_percent":99}),
+            Some(1_000),
+        ),
     ] {
         let mut state = exhaustion_state(exclusion.clone());
         state["members"][0]["reset_at_unix_ms"] = serde_json::json!(reset_at_unix_ms);
@@ -107,7 +115,7 @@ fn pool_exhaustion_rejects_unknown_exclusions_and_invalid_generations() {
             Some(1_000),
         ),
         (
-            serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":101}),
+            serde_json::json!({"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":100}),
             Some(1_000),
         ),
     ] {

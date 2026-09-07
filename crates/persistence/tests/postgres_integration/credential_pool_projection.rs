@@ -144,6 +144,35 @@ async fn pool_projection_freezes_generation_and_unprojected_action_evidence()
         while let Some(event) = reader.read_next().await? {
             if let DispatchedOutboxEventKind::CredentialPoolExhausted(value) = event.kind() {
                 assert_eq!(**value, captured);
+                let address = signalbox_application::TimelineAddress::new(
+                    std::num::NonZeroU64::new(event.sequence()).expect("durable event sequence"),
+                );
+                let detail =
+                    signalbox_persistence::session_timeline::SessionTimelineRepository::new(
+                        pool.clone(),
+                    )
+                    .read_item_details(
+                        session,
+                        address,
+                        None,
+                        signalbox_application::TimelineDetailLimits::new(1, 256)
+                            .expect("bounded terminal detail"),
+                    )
+                    .await?
+                    .expect("exhaustion timeline detail");
+                assert_eq!(detail.items.len(), 1);
+                assert_eq!(
+                    detail.items[0].kind,
+                    signalbox_application::SessionTimelineEventKind::TurnFailed
+                );
+                assert_eq!(
+                    detail.items[0].body,
+                    signalbox_application::SessionTimelineDetailBody::TurnLifecycle {
+                        turn_id: turn,
+                        lifecycle: signalbox_application::TimelineTurnLifecycleKind::Terminalized,
+                        cause_code: "failed".to_owned(),
+                    }
+                );
                 found = true;
             }
             reader.acknowledge(event.sequence()).await?;
