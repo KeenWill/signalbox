@@ -60,13 +60,9 @@ mod error;
 mod presentation;
 mod transcript;
 
-// numeric-bound: guard - one submitted message exhausting wire-frame memory
 const MAX_INPUT_CONTENT_FRAME_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
-// numeric-bound: guard - prevents a system prompt from exceeding one wire frame
 const MAX_SYSTEM_PROMPT_FRAME_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
-// numeric-bound: guard - prevents review input from exceeding one wire frame
 const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
-// numeric-bound: guard - prevents import source from exceeding one wire frame
 const MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Bounded memory used while hashing one client-local blob source.
 const BLOB_HASH_BUFFER_BYTES: usize = 64 * 1024;
@@ -137,11 +133,9 @@ fn optional_usize_limit(value: Option<CanonicalU64>) -> Result<Option<usize>, Cl
 }
 
 /// Maximum time a terminal follower waits before rereading recovery state.
-// numeric-bound: interval - exposes reconciliation exhaustion without busy polling
 #[cfg(not(test))]
 const FOLLOW_RECOVERY_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
 /// Short equivalent used by deterministic socket tests.
-// numeric-bound: interval - keeps follower refetch tests bounded
 #[cfg(test)]
 const FOLLOW_RECOVERY_REFETCH_INTERVAL: Duration = Duration::from_millis(50);
 
