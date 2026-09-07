@@ -1,4 +1,5 @@
-//! Sealed submit-input preparation candidates and failures for `docs/spec/turn-lifecycle-and-scheduling.md`.
+//! Sealed submit-input preparation candidates and failures for
+//! `docs/spec/turn-lifecycle-and-scheduling.md`.
 
 use super::command::SubmitInput;
 use super::result::SubmitInputResult;

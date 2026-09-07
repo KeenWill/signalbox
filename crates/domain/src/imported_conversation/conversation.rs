@@ -189,18 +189,15 @@ impl ImportedConversationDisplayTitle {
     /// candidate that shapes to a nonempty title
     /// wins; a conversation with no shapeable candidate has no display title:
     ///
-    /// - Claude Code versions 1 and 2: for every raw record in physical order
-    ///   whose normalized value is an object whose first `type` member is the
-    ///   string `summary`, the string value of its first `summary` member;
-    ///   then every attested-text entry with an attested `user` speaker, in
-    ///   imported order.
-    /// - Codex rollout version 1: for every raw record in physical order
-    ///   whose normalized value is an object whose first `type` member is the
-    ///   string `session_meta` and whose first `payload` member is an object,
-    ///   the string value of the payload's first `title` member; then the
-    ///   string value of each such payload's first `instructions` member;
-    ///   then every attested-text entry with an attested `user` speaker, in
-    ///   imported order.
+    /// - Claude Code versions 1 and 2: for every raw record in physical order whose normalized
+    ///   value is an object whose first `type` member is the string `summary`, the string value of
+    ///   its first `summary` member; then every attested-text entry with an attested `user`
+    ///   speaker, in imported order.
+    /// - Codex rollout version 1: for every raw record in physical order whose normalized value is
+    ///   an object whose first `type` member is the string `session_meta` and whose first `payload`
+    ///   member is an object, the string value of the payload's first `title` member; then the
+    ///   string value of each such payload's first `instructions` member; then every attested-text
+    ///   entry with an attested `user` speaker, in imported order.
     ///
     /// The derivation reads only preserved source evidence, never a filename,
     /// wall clock, or import-time context, so re-deriving from the same

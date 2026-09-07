@@ -138,8 +138,7 @@ pub enum ImportedSessionRelationship {
 /// input, configuration, or a creation cause. Signalbox never infers ancestry
 /// from related-session links, task briefs, copied text, or delegation.
 ///
-/// ancestry never implies a creation cause and no variant
-/// carries one:
+/// ancestry never implies a creation cause and no variant carries one:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{SessionCreationCause, TranscriptAncestry};
@@ -178,8 +177,8 @@ pub enum TranscriptAncestry {
 
 /// The two required, independent, immutable creation facts for one session.
 ///
-/// Cause and ancestry vary independently and neither can be omitted.
-/// one fact alone is not creation provenance:
+/// Cause and ancestry vary independently and neither can be omitted. one fact alone is not creation
+/// provenance:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{SessionCreationCause, SessionCreationProvenance};
@@ -443,11 +442,9 @@ impl CreateSession {
     /// Establishes the first immutable defaults version this creation
     /// installs.
     ///
-    /// The result is always [`VersionedSessionConfigurationDefaults::establish`]
-    /// applied to the carried payload, so session creation establishes
-    /// version one. The established defaults are operationally
-    /// associated with the session but are not a third creation-provenance
-    /// fact:
+    /// The result is always [`VersionedSessionConfigurationDefaults::establish`] applied to the
+    /// carried payload, so session creation establishes version one. The established defaults are
+    /// operationally associated with the session but are not a third creation-provenance fact:
     ///
     /// ```compile_fail
     /// use signalbox_domain::{
@@ -1672,8 +1669,8 @@ mod tests {
         )
     }
 
-    /// a user-initiated session with explicitly empty
-    /// ancestry is complete creation provenance for an empty conversation.
+    /// a user-initiated session with explicitly empty ancestry is complete creation provenance for
+    /// an empty conversation.
     #[test]
     fn user_initiated_with_no_ancestry_is_complete_provenance() {
         let provenance = SessionCreationProvenance::new(
@@ -1685,8 +1682,8 @@ mod tests {
         assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
     }
 
-    /// a user-created fork records the exact
-    /// immutable source session and source frontier it was seeded from.
+    /// a user-created fork records the exact immutable source session and source frontier it was
+    /// seeded from.
     #[test]
     fn fork_provenance_records_exact_source_and_frontier() {
         let source_session = session_id(1);
@@ -1711,9 +1708,8 @@ mod tests {
         assert_eq!(carried_frontier, source_frontier);
     }
 
-    /// imported ancestry retains the exact imported
-    /// boundary and resume/fork relationship without duplicating the
-    /// conversation identity outside the frontier.
+    /// imported ancestry retains the exact imported boundary and resume/fork relationship without
+    /// duplicating the conversation identity outside the frontier.
     #[test]
     fn imported_ancestry_records_exact_frontier_and_relationship() {
         let source_frontier = test_imported_frontier(
@@ -1748,9 +1744,9 @@ mod tests {
         );
     }
 
-    /// the separate seed record retains the exact
-    /// session and generated context-frontier identities; equal semantic
-    /// content cannot substitute another frontier identity at this boundary.
+    /// the separate seed record retains the exact session and generated context-frontier
+    /// identities; equal semantic content cannot substitute another frontier identity at this
+    /// boundary.
     #[test]
     fn imported_seed_keeps_exact_local_frontier_identity() {
         let seed = ImportedSessionSeed {
@@ -1769,8 +1765,8 @@ mod tests {
         );
     }
 
-    /// the baseline current-session reconstitution seam cannot
-    /// accept imported ancestry without the separate exact-prefix seed facts.
+    /// the baseline current-session reconstitution seam cannot accept imported ancestry without the
+    /// separate exact-prefix seed facts.
     #[test]
     fn current_session_requires_imported_seed_reconstitution() {
         let provenance = SessionCreationProvenance::new(
@@ -1803,8 +1799,8 @@ mod tests {
         assert_eq!(error.input(), &input);
     }
 
-    /// the same user-initiated cause pairs with empty
-    /// and single-source ancestry, so neither fact is a proxy for the other.
+    /// the same user-initiated cause pairs with empty and single-source ancestry, so neither fact
+    /// is a proxy for the other.
     #[test]
     fn cause_and_ancestry_vary_independently() {
         let empty = SessionCreationProvenance::new(
@@ -1824,9 +1820,8 @@ mod tests {
         assert_ne!(empty, fork);
     }
 
-    /// ancestry equality is exact over both the source session
-    /// and the source frontier, and an explicit empty ancestry never equals a
-    /// single-source one.
+    /// ancestry equality is exact over both the source session and the source frontier, and an
+    /// explicit empty ancestry never equals a single-source one.
     #[test]
     fn ancestry_equality_is_exact_over_source_and_frontier() {
         let ancestry = TranscriptAncestry::SingleSource {
@@ -1852,9 +1847,8 @@ mod tests {
         assert_ne!(ancestry, TranscriptAncestry::None);
     }
 
-    /// a complete matching projection
-    /// reconstructs one owned current session with exact immutable provenance
-    /// and the complete later defaults version selected by the pointer.
+    /// a complete matching projection reconstructs one owned current session with exact immutable
+    /// provenance and the complete later defaults version selected by the pointer.
     #[test]
     fn matching_current_session_reconstitutes_whole() {
         let version = SessionConfigurationDefaultsVersion::first()
@@ -2004,8 +1998,8 @@ mod tests {
         assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
     }
 
-    /// matching delegated current-session facts retain the
-    /// exact spawning request and no transcript ancestry.
+    /// matching delegated current-session facts retain the exact spawning request and no transcript
+    /// ancestry.
     #[test]
     fn current_session_reconstitutes_delegated_no_ancestry() {
         let spawning_request = delegated_spawning_request();
@@ -2029,8 +2023,8 @@ mod tests {
         );
     }
 
-    /// delegated creation cannot retain user-selected template
-    /// provenance through the public current-session seam.
+    /// delegated creation cannot retain user-selected template provenance through the public
+    /// current-session seam.
     #[test]
     fn current_session_rejects_delegated_template_provenance() {
         let failure = current_session_reconstitution_failure(CurrentSessionFacts {
@@ -2093,10 +2087,9 @@ mod tests {
         );
     }
 
-    /// every requested/stored identity, defaults
-    /// pointer/record identity, placement pointer/event identity, or
-    /// selected-version mismatch fails closed and
-    /// returns the complete unchanged typed projection.
+    /// every requested/stored identity, defaults pointer/record identity, placement pointer/event
+    /// identity, or selected-version mismatch fails closed and returns the complete unchanged typed
+    /// projection.
     #[test]
     fn current_session_rejects_cross_wired_facts() {
         let matching = CurrentSessionFacts::matching(session_id(1));
@@ -2205,9 +2198,8 @@ mod tests {
         ]));
     }
 
-    /// the creation payload couples the durable command
-    /// identity, both independent provenance facts, and one complete
-    /// unversioned defaults payload.
+    /// the creation payload couples the durable command identity, both independent provenance
+    /// facts, and one complete unversioned defaults payload.
     #[test]
     fn create_session_couples_command_provenance_and_defaults() {
         let provenance = user_initiated_empty();
@@ -2218,8 +2210,8 @@ mod tests {
         assert_eq!(create.initial_configuration_defaults(), &defaults(2));
     }
 
-    /// session creation establishes exactly version one of the carried
-    /// model-selection defaults payload.
+    /// session creation establishes exactly version one of the carried model-selection defaults
+    /// payload.
     #[test]
     fn creation_establishes_version_one_of_the_carried_defaults() {
         let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));
@@ -2237,9 +2229,8 @@ mod tests {
         assert_eq!(*established.defaults(), defaults(2));
     }
 
-    /// initial defaults never join the provenance facts,
-    /// and replacing established defaults installs a later version while both
-    /// provenance facts compare unchanged.
+    /// initial defaults never join the provenance facts, and replacing established defaults
+    /// installs a later version while both provenance facts compare unchanged.
     #[test]
     fn defaults_are_not_a_third_provenance_fact() {
         let provenance = user_initiated_empty();
@@ -2260,11 +2251,10 @@ mod tests {
         assert_eq!(first.provenance(), provenance);
     }
 
-    /// the canonical comparison payload is every
-    /// caller-supplied semantic field except the command identifier itself, so
-    /// payloads that differ only in `command_id` compare equal (equal replay),
-    /// while any provenance or defaults difference is a distinct payload
-    /// (conflicting reuse of one identifier is then detectable).
+    /// the canonical comparison payload is every caller-supplied semantic field except the command
+    /// identifier itself, so payloads that differ only in `command_id` compare equal (equal
+    /// replay), while any provenance or defaults difference is a distinct payload (conflicting
+    /// reuse of one identifier is then detectable).
     #[test]
     fn create_session_comparison_payload_excludes_command_id() {
         let fork = SessionCreationProvenance::new(
@@ -2375,9 +2365,8 @@ mod tests {
         );
     }
 
-    /// imported-session command comparison excludes
-    /// only command identity; its conversation, boundary, relationship, and
-    /// defaults all remain replay-significant.
+    /// imported-session command comparison excludes only command identity; its conversation,
+    /// boundary, relationship, and defaults all remain replay-significant.
     #[test]
     fn imported_creation_comparison_payload_is_complete() {
         let conversation = imported_conversation_id(1);
@@ -2444,9 +2433,8 @@ mod tests {
         );
     }
 
-    /// preparation seals the exact
-    /// command, hub-supplied session, independent provenance, defaults version
-    /// one, and matching replay result without claiming a commit.
+    /// preparation seals the exact command, hub-supplied session, independent provenance, defaults
+    /// version one, and matching replay result without claiming a commit.
     #[test]
     fn preparation_couples_complete_creation() {
         let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));
@@ -2475,9 +2463,8 @@ mod tests {
         assert_eq!(carried_session.id(), carried_result.session());
     }
 
-    /// until trusted transcript-frontier production exists, a
-    /// single-source command yields no candidate or terminal command result
-    /// and returns the command and minted identity unchanged.
+    /// until trusted transcript-frontier production exists, a single-source command yields no
+    /// candidate or terminal command result and returns the command and minted identity unchanged.
     #[test]
     fn unavailable_ancestry_is_a_nonclaiming_preparation_failure() {
         let provenance = SessionCreationProvenance::new(
@@ -2510,8 +2497,8 @@ mod tests {
         );
     }
 
-    /// ordinary CreateSession cannot forge the delegated
-    /// creation family owned by the spawning-request transaction.
+    /// ordinary CreateSession cannot forge the delegated creation family owned by the
+    /// spawning-request transaction.
     #[test]
     fn create_session_rejects_delegated_creation() {
         let command = command_id(3);
@@ -2532,9 +2519,8 @@ mod tests {
         assert_eq!(error.command().provenance(), provenance);
     }
 
-    /// complete matching durable facts
-    /// reconstruct the same canonical initial session and typed replay result
-    /// without producing a pre-commit candidate.
+    /// complete matching durable facts reconstruct the same canonical initial session and typed
+    /// replay result without producing a pre-commit candidate.
     #[test]
     fn matching_creation_reconstitutes_whole() {
         let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));
@@ -2628,8 +2614,8 @@ mod tests {
         failure
     }
 
-    /// ordinary creation reconstitution cannot claim the
-    /// delegated provenance family owned by the spawning-request transaction.
+    /// ordinary creation reconstitution cannot claim the delegated provenance family owned by the
+    /// spawning-request transaction.
     #[test]
     fn creation_reconstitution_rejects_delegated_provenance() {
         let command = CreateSession::new(
@@ -2661,9 +2647,8 @@ mod tests {
         assert_eq!(input.defaults(), &facts.defaults);
     }
 
-    /// every cross-wired session, result,
-    /// provenance, or defaults shape fails closed and retains the complete
-    /// unchanged typed projection.
+    /// every cross-wired session, result, provenance, or defaults shape fails closed and retains
+    /// the complete unchanged typed projection.
     #[test]
     fn reconstitution_rejects_cross_wired_facts() {
         let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));

@@ -148,8 +148,8 @@ mod tests {
         )
     }
 
-    /// no-active-turn input carries one complete
-    /// version-bound configuration choice for its new logical work.
+    /// no-active-turn input carries one complete version-bound configuration choice for its new
+    /// logical work.
     #[test]
     fn start_request_carries_version_bound_choices() {
         let expected_version = first_version();
@@ -171,8 +171,8 @@ mod tests {
         assert_eq!(configuration.model(), model);
     }
 
-    /// interrupt payloads bind both the exact active
-    /// predecessor and the successor's complete configuration choice.
+    /// interrupt payloads bind both the exact active predecessor and the successor's complete
+    /// configuration choice.
     #[test]
     fn interrupt_carries_target_and_choices() {
         let expected_active_turn = turn_id(1);
@@ -197,8 +197,8 @@ mod tests {
         assert_eq!(carried_configuration, configuration);
     }
 
-    /// next-safe-point steering binds to the exact active turn
-    /// and has no independent configuration field.
+    /// next-safe-point steering binds to the exact active turn and has no independent configuration
+    /// field.
     #[test]
     fn next_safe_point_carries_only_its_target() {
         let expected_active_turn = turn_id(1);
@@ -215,8 +215,8 @@ mod tests {
         assert_eq!(carried_turn, expected_active_turn);
     }
 
-    /// after-current input binds the exact active
-    /// turn and the queued origin's complete configuration choice.
+    /// after-current input binds the exact active turn and the queued origin's complete
+    /// configuration choice.
     #[test]
     fn after_current_carries_target_and_choices() {
         let expected_active_turn = turn_id(1);
@@ -237,9 +237,8 @@ mod tests {
         assert_eq!(carried_configuration, configuration);
     }
 
-    /// canonical comparison includes every
-    /// delivery discriminator, target turn, expected defaults version, and
-    /// override.
+    /// canonical comparison includes every delivery discriminator, target turn, expected defaults
+    /// version, and override.
     #[test]
     fn delivery_payload_equality_is_structural() {
         let configuration = choices();

@@ -1,4 +1,5 @@
-//! Caller-supplied submit-input reconstruction and origin inputs for `docs/spec/turn-lifecycle-and-scheduling.md`.
+//! Caller-supplied submit-input reconstruction and origin inputs for
+//! `docs/spec/turn-lifecycle-and-scheduling.md`.
 
 use super::SubmitInput;
 use super::reconstituted::ReconstitutedSubmitInput;

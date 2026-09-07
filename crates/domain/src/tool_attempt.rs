@@ -1161,8 +1161,7 @@ mod tests {
         );
     }
 
-    /// version one rejects stored attempts that claim a later
-    /// dispatch generation.
+    /// version one rejects stored attempts that claim a later dispatch generation.
     #[test]
     fn reconstitution_rejects_nonfirst_dispatch_generation() {
         let input = ToolAttemptReconstitutionInput::new(
@@ -1183,8 +1182,7 @@ mod tests {
         assert_eq!(error.into_input(), input);
     }
 
-    /// restart cannot admit an external-effect child wait that
-    /// the live transition forbids.
+    /// restart cannot admit an external-effect child wait that the live transition forbids.
     #[test]
     fn reconstitution_rejects_external_effect_child_wait() {
         let input = ToolAttemptReconstitutionInput::new(
@@ -1208,8 +1206,8 @@ mod tests {
         assert_eq!(error.into_input(), input);
     }
 
-    /// persisted error detail rejects POSIX edge whitespace while
-    /// preserving admitted nonbreaking-space evidence exactly.
+    /// persisted error detail rejects POSIX edge whitespace while preserving admitted
+    /// nonbreaking-space evidence exactly.
     #[test]
     fn error_detail_rejects_posix_edges_and_preserves_nonbreaking_space() {
         for value in [" failed", "failed\n", "\tfailed", "failed\u{000b}"] {
@@ -1226,8 +1224,7 @@ mod tests {
         assert_eq!(admitted.as_str(), "\u{00a0}failed\u{00a0}");
     }
 
-    /// result application requires the
-    /// exact request/turn/attempt/generation fence.
+    /// result application requires the exact request/turn/attempt/generation fence.
     #[test]
     fn result_rejects_a_stale_fence_unchanged() {
         let authorized = prepared(ToolEffectClass::ExternalEffect)
@@ -1253,8 +1250,7 @@ mod tests {
         assert_eq!(error.attempt(), &in_flight);
     }
 
-    /// executor success is evidence only; the hub transition
-    /// creates terminal content authority.
+    /// executor success is evidence only; the hub transition creates terminal content authority.
     #[test]
     fn authorized_success_commits_exact_result_evidence() {
         let authorized = prepared(ToolEffectClass::EffectFree)
@@ -1279,8 +1275,8 @@ mod tests {
         ));
     }
 
-    /// foreground waiting ends the exact effect-free in-flight
-    /// request with typed child-wait evidence.
+    /// foreground waiting ends the exact effect-free in-flight request with typed child-wait
+    /// evidence.
     #[test]
     fn foreground_wait_parks_exact_in_flight_attempt() {
         let in_flight = prepared(ToolEffectClass::EffectFree)
@@ -1353,8 +1349,8 @@ mod tests {
         );
     }
 
-    /// ambiguous commit recovery can reconstruct
-    /// dispatch authority only from the exact durable in-flight checkpoint.
+    /// ambiguous commit recovery can reconstruct dispatch authority only from the exact durable
+    /// in-flight checkpoint.
     #[test]
     fn in_flight_reread_restores_exact_dispatch_authority() {
         let authorized = prepared(ToolEffectClass::ExternalEffect)
@@ -1375,8 +1371,8 @@ mod tests {
         );
     }
 
-    /// an unsent attempt resolves on every preflight error kind
-    /// the durable closed set admits, preauthorization rejection included.
+    /// an unsent attempt resolves on every preflight error kind the durable closed set admits,
+    /// preauthorization rejection included.
     #[test]
     fn preflight_resolves_every_unsent_error_kind() {
         assert_preflight_resolves_known_failed(ToolExecutionErrorKind::UnknownTool);
@@ -1384,8 +1380,8 @@ mod tests {
         assert_preflight_resolves_known_failed(ToolExecutionErrorKind::PreauthorizationRejected);
     }
 
-    /// preflight cannot manufacture evidence that only a
-    /// dispatched executor or restart classification may produce.
+    /// preflight cannot manufacture evidence that only a dispatched executor or restart
+    /// classification may produce.
     #[test]
     fn preflight_cannot_claim_dispatched_or_crash_errors() {
         assert_preflight_rejects_error_kind(ToolExecutionErrorKind::ExecutionFailed);
@@ -1393,8 +1389,8 @@ mod tests {
         assert_preflight_rejects_error_kind(ToolExecutionErrorKind::CrashLost);
     }
 
-    /// executor observations cannot claim error kinds reserved
-    /// for preflight validation or restart classification.
+    /// executor observations cannot claim error kinds reserved for preflight validation or restart
+    /// classification.
     #[test]
     fn executor_cannot_claim_preflight_or_crash_errors() {
         assert_executor_observation_rejects_error_kind(ToolExecutionErrorKind::UnknownTool);
@@ -1405,8 +1401,7 @@ mod tests {
         assert_executor_observation_rejects_error_kind(ToolExecutionErrorKind::CrashLost);
     }
 
-    /// crash loss of effect-free issued work is a
-    /// known failure and never an automatic retry.
+    /// crash loss of effect-free issued work is a known failure and never an automatic retry.
     #[test]
     fn effect_free_crash_loss_is_known_failed() {
         let in_flight = prepared(ToolEffectClass::EffectFree)
@@ -1425,8 +1420,7 @@ mod tests {
         ));
     }
 
-    /// crash loss of in-flight external-effect work
-    /// is ambiguous and retains the exact attempt.
+    /// crash loss of in-flight external-effect work is ambiguous and retains the exact attempt.
     #[test]
     fn external_effect_crash_loss_is_ambiguous() {
         let in_flight = prepared(ToolEffectClass::ExternalEffect)
@@ -1443,10 +1437,9 @@ mod tests {
         assert_eq!(ended.end(), &ToolAttemptEnd::Ambiguous);
     }
 
-    /// an executor that cannot establish the outcome
-    /// of an external effect ends the attempt ambiguous, which is the sole
-    /// entry to reconciliation; reporting it as a definite failure would let
-    /// an unknown-outcome push or GitHub mutation be repeated.
+    /// an executor that cannot establish the outcome of an external effect ends the attempt
+    /// ambiguous, which is the sole entry to reconciliation; reporting it as a definite failure
+    /// would let an unknown-outcome push or GitHub mutation be repeated.
     #[test]
     fn external_effect_observation_ends_ambiguous() {
         let authorized = prepared(ToolEffectClass::ExternalEffect)
@@ -1464,9 +1457,8 @@ mod tests {
         assert_eq!(ended.end(), &ToolAttemptEnd::Ambiguous);
     }
 
-    /// effect-free work cannot claim external-effect
-    /// ambiguity, so the rejection retains the unchanged in-flight attempt
-    /// rather than opening a reconciliation wait nothing can resolve.
+    /// effect-free work cannot claim external-effect ambiguity, so the rejection retains the
+    /// unchanged in-flight attempt rather than opening a reconciliation wait nothing can resolve.
     #[test]
     fn effect_free_observation_cannot_be_ambiguous() {
         let authorized = prepared(ToolEffectClass::EffectFree)
