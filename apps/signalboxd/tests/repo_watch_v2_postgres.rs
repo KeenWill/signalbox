@@ -2630,6 +2630,26 @@ async fn webhook_status(
     .await
 }
 
+/// Waits until the HTTP handler's insert is blocked by the fixture's table lock.
+async fn wait_for_blocked_webhook_admission(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT FROM pg_locks
+                 WHERE relation = 'webhook_delivery'::regclass AND NOT granted)",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
 async fn webhook_delivery_status(
     hook: &RuntimeHookFixture<'_>,
     secret: &[u8],
@@ -3081,6 +3101,71 @@ system_prompt = "Inspect repository activity."
         pending_disposition, "applied",
         "pending replay completes primary intake"
     );
+    let rotated_secret = files.path().join("admission-reload-secret");
+    const ROTATED_SECRET: &[u8] = b"admission-reload-secret";
+    std::fs::write(&rotated_secret, ROTATED_SECRET)?;
+    let shadow_rotated_hook = RuntimeHookFixture {
+        mode: "shadow",
+        secret: &rotated_secret,
+        ..hook
+    };
+    let inflight_delivery = RuntimeWebhookDelivery {
+        id: Uuid::now_v7(),
+        ..delivery
+    };
+    let mut admission_lock = module_pool.begin().await?;
+    sqlx::query("LOCK TABLE webhook_delivery IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *admission_lock)
+        .await?;
+    let (inflight_response, reload) = tokio::join!(
+        webhook_delivery_status(&hook, b"replacement-hook-secret", &inflight_delivery),
+        async {
+            wait_for_blocked_webhook_admission(&module_pool).await?;
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                runtime.reload_configuration(
+                    runtime_configuration(&shadow_rotated_hook)?
+                        .repository_watch()
+                        .cloned(),
+                ),
+            )
+            .await?
+            .expect("same-address reload completes while admission is blocked");
+            admission_lock.commit().await?;
+            Ok::<_, Box<dyn Error>>(())
+        }
+    );
+    reload?;
+    assert_eq!(
+        inflight_response?,
+        reqwest::StatusCode::UNAUTHORIZED,
+        "admission revalidates a secret rotated away during PostgreSQL I/O"
+    );
+    let inflight_disposition = || {
+        sqlx::query_scalar::<_, String>(
+            "SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2",
+        )
+        .bind(Decimal::from(hook.id))
+        .bind(inflight_delivery.id)
+    };
+    assert_eq!(
+        inflight_disposition().fetch_one(&module_pool).await?,
+        "pending",
+        "stale primary routing cannot settle or wake the admitted delivery"
+    );
+    assert_eq!(
+        webhook_delivery_status(&shadow_rotated_hook, ROTATED_SECRET, &inflight_delivery).await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        inflight_disposition().fetch_one(&module_pool).await?,
+        "ignored",
+        "authenticated retry follows the reloaded shadow mode"
+    );
+    runtime
+        .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+        .await
+        .expect("restore primary routing");
     module_pool.close().await;
     assert_eq!(
         webhook_status(&hook, b"replacement-hook-secret").await?,

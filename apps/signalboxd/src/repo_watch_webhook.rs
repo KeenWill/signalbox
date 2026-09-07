@@ -280,6 +280,8 @@ async fn delivery(
         let Some(expires_at) = received_at.checked_add(retention) else {
             return StatusCode::SERVICE_UNAVAILABLE;
         };
+        // Reload may replace routing while durable admission waits on PostgreSQL.
+        drop(current);
         let Ok(admission) = hook
             .store
             .admit_webhook(WebhookDelivery {
@@ -296,7 +298,14 @@ async fn delivery(
         else {
             return StatusCode::SERVICE_UNAVAILABLE;
         };
-        return settle_and_wake(hook, hook_id, delivery_id, admission).await;
+        let current = routing.read().await;
+        if !Arc::ptr_eq(&snapshot, &current) {
+            continue;
+        }
+        // Settlement and wake use one routing generation, excluding a concurrent reload.
+        let response = settle_and_wake(hook, hook_id, delivery_id, admission).await;
+        drop(current);
+        return response;
     }
 }
 
