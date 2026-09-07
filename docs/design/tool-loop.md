@@ -35,12 +35,12 @@ batch-complete condition.
 The loss transaction resolves every unresolved runner-locus request in the batch
 that has neither an offered lease nor executor dispatch, including earlier
 approved requests when a later request parks the batch. It retires any existing
-approval and records the same retryable `closed_inadmissible` resolution and
-projection without creating an attempt row, then resumes batch evaluation. Any
-existing `Prepared` tool attempt is terminalized as `KnownFailed` with
-`placement_lost` in that transaction before the request closes, without lease
-offer or executor dispatch; its retained evidence adds no second result
-projection.
+approval and records only the retryable `closed_inadmissible` logical resolution
+without creating an attempt row or result entry, then resumes batch evaluation;
+continuation projects the result after the whole batch resolves. Any existing
+`Prepared` tool attempt is terminalized as `KnownFailed` with `placement_lost`
+in that transaction before the request closes, without lease offer or executor
+dispatch; its retained evidence adds no second result projection.
 
 A `Prepared` dedicated approval-judge call is retired without authorization in
 the same loss transaction that closes the request. If the call is in flight, the
