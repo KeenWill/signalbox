@@ -1,6 +1,6 @@
 //! Reloadable authenticated webhook wakes for the repository task.
 
-use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -11,17 +11,24 @@ use axum::{
 use ring::hmac;
 use signalbox_domain::RepositorySlug;
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
+use signalbox_module_repo_watch_v2::{
+    RepoWatchStore, WebhookAdmission, WebhookDelivery, WebhookDisposition,
+};
+use signalbox_ownership_seam::OffsetDateTime;
 use tokio::{
     net::TcpListener,
     sync::{Notify, RwLock, oneshot},
     task::JoinSet,
 };
+use uuid::Uuid;
 
 use crate::{
     FileCredentialAccess, RepositoryWatchConfiguration, configuration::RepositoryWatchWebhookMode,
 };
 
 struct Hook {
+    store: RepoWatchStore,
+    retention: Duration,
     repository: RepositorySlug,
     credentials: FileCredentialAccess,
     reference: CredentialReference,
@@ -66,6 +73,7 @@ impl WebhookListener {
         &self,
         configuration: Option<&RepositoryWatchConfiguration>,
         wakes: &BTreeMap<RepositorySlug, Arc<Notify>>,
+        store: &RepoWatchStore,
     ) -> Result<PreparedListener, std::io::Error> {
         let configuration = configuration.filter(|configuration| configuration.enabled());
         let webhook = configuration.and_then(RepositoryWatchConfiguration::webhook);
@@ -85,10 +93,12 @@ impl WebhookListener {
         if let Some(webhook) = webhook {
             routing.path = webhook.path().to_owned();
         }
-        for repository in configuration
-            .into_iter()
-            .flat_map(|config| config.repositories())
-        {
+        for (repository, retention) in configuration.into_iter().flat_map(|config| {
+            config
+                .repositories()
+                .iter()
+                .map(move |repository| (repository, config.webhook_retention()))
+        }) {
             if let Some(webhook) = repository.webhook()
                 && let Some(reference) = repository.webhook_secret_reference()
                 && let Some(wake) = wakes.get(repository.repository())
@@ -96,6 +106,8 @@ impl WebhookListener {
                 routing.hooks.insert(
                     webhook.hook_id().get(),
                     Hook {
+                        store: store.clone(),
+                        retention,
                         repository: repository.repository().clone(),
                         credentials: FileCredentialAccess::new(
                             webhook.secret_file().to_path_buf(),
@@ -203,6 +215,20 @@ async fn delivery(
     else {
         return StatusCode::UNAUTHORIZED;
     };
+    let Some(delivery_id) = headers
+        .get("x-github-delivery")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let Some(event) = headers
+        .get("x-github-event")
+        .and_then(|value| value.to_str().ok())
+        .filter(|event| !event.is_empty())
+    else {
+        return StatusCode::BAD_REQUEST;
+    };
     loop {
         let snapshot = routing.read().await.clone();
         if uri.path() != snapshot.path {
@@ -243,17 +269,105 @@ async fn delivery(
         if repository.as_ref() != Some(&hook.repository) {
             return StatusCode::BAD_REQUEST;
         }
-        if hook.mode == RepositoryWatchWebhookMode::Primary {
-            hook.wake.notify_one();
-        }
-        return StatusCode::ACCEPTED;
+        let received_at = OffsetDateTime::now_utc();
+        let Ok(retention) = hook.retention.try_into() else {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        };
+        let Some(expires_at) = received_at.checked_add(retention) else {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        };
+        let Ok(admission) = hook
+            .store
+            .admit_webhook(WebhookDelivery {
+                repository: &hook.repository,
+                hook_id,
+                delivery_id,
+                event,
+                action: payload.get("action").and_then(serde_json::Value::as_str),
+                body: &body,
+                received_at,
+                expires_at,
+            })
+            .await
+        else {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        };
+        return settle_and_wake(hook, hook_id, delivery_id, admission).await;
     }
+}
+
+async fn settle_and_wake(
+    hook: &Hook,
+    hook_id: u64,
+    delivery_id: Uuid,
+    admission: WebhookAdmission,
+) -> StatusCode {
+    match admission {
+        WebhookAdmission::Inserted | WebhookAdmission::PendingReplay => {}
+        WebhookAdmission::Replayed => return StatusCode::ACCEPTED,
+        WebhookAdmission::ConflictingReuse => return StatusCode::CONFLICT,
+    }
+    let disposition = match hook.mode {
+        RepositoryWatchWebhookMode::Primary => {
+            hook.wake.notify_one();
+            WebhookDisposition::Applied
+        }
+        RepositoryWatchWebhookMode::Shadow => WebhookDisposition::Ignored,
+    };
+    if hook
+        .store
+        .settle_webhook(hook_id, delivery_id, disposition, OffsetDateTime::now_utc())
+        .await
+        .is_err()
+    {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
+    StatusCode::ACCEPTED
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use futures_util::FutureExt;
+
+    #[tokio::test]
+    async fn settled_replays_do_not_wake_primary_ingestion_or_rewrite_settlement() {
+        const FIXTURE_HOOK_ID: u64 = 17;
+        let directory = tempfile::tempdir().expect("credential directory");
+        let reference = CredentialReference::new("repository-watch:example/project:webhook");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+        pool.close().await;
+        let wake = Arc::new(Notify::new());
+        let hook = Hook {
+            store: RepoWatchStore::new(pool),
+            retention: Duration::from_secs(7 * 24 * 60 * 60),
+            repository: RepositorySlug::try_new(String::from("example/project"))
+                .expect("repository slug"),
+            credentials: FileCredentialAccess::new(
+                directory.path().join("unused-secret"),
+                reference.clone(),
+            ),
+            reference,
+            mode: RepositoryWatchWebhookMode::Primary,
+            wake: wake.clone(),
+        };
+        assert_eq!(
+            settle_and_wake(
+                &hook,
+                FIXTURE_HOOK_ID,
+                Uuid::now_v7(),
+                WebhookAdmission::Replayed
+            )
+            .await,
+            StatusCode::ACCEPTED,
+            "terminal replay does not require another settlement write"
+        );
+        assert!(
+            wake.notified().now_or_never().is_none(),
+            "terminal replay cannot wake primary ingestion"
+        );
+    }
 
     #[tokio::test]
     async fn empty_resolved_secrets_reject_signed_deliveries_without_waking_the_repository() {
@@ -269,6 +383,11 @@ mod tests {
             hooks: BTreeMap::from([(
                 FIXTURE_HOOK_ID,
                 Hook {
+                    retention: Duration::from_secs(7 * 24 * 60 * 60),
+                    store: RepoWatchStore::new(
+                        sqlx::postgres::PgPoolOptions::new()
+                            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new()),
+                    ),
                     repository: RepositorySlug::try_new(String::from("example/project"))
                         .expect("repository slug"),
                     credentials: FileCredentialAccess::new(path.clone(), reference.clone()),
@@ -280,6 +399,11 @@ mod tests {
         })));
         let empty_key_signature = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, b""), FIXTURE_BODY);
         let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-github-delivery",
+            Uuid::now_v7().to_string().parse().expect("delivery header"),
+        );
+        headers.insert("x-github-event", "push".parse().expect("event header"));
         headers.insert(
             "x-github-hook-id",
             FIXTURE_HOOK_ID.to_string().parse().expect("hook header"),

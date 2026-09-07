@@ -1710,7 +1710,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     replay.expires_at += Duration::from_secs(1);
     assert_eq!(
         store.admit_webhook(replay).await?,
-        WebhookAdmission::Replayed
+        WebhookAdmission::PendingReplay
     );
 
     let mut conflict = delivery();
@@ -1728,6 +1728,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 observed_at + Duration::from_secs(1),
             )
             .await?
+    );
+    assert_eq!(
+        store.admit_webhook(delivery()).await?,
+        WebhookAdmission::Replayed
     );
     assert!(store.advance_core_event(0, 4).await?);
     assert!(store.advance_core_event(4, 9).await?);
@@ -2541,15 +2545,22 @@ struct RuntimeHookFixture<'a> {
     enabled: bool,
     rule_version: u64,
     template: &'a str,
+    mode: &'a str,
+    retention: &'a str,
 }
 
 fn runtime_configuration(
     hook: &RuntimeHookFixture<'_>,
 ) -> Result<signalboxd::HubModelConfiguration, Box<dyn Error>> {
-    let catalog = include_str!("../../../config/signalboxd.example.toml").replace(
-        "/usr/local/bin/signalbox-exec-supervisor",
-        std::env::current_exe()?.to_string_lossy().as_ref(),
-    );
+    let catalog = include_str!("../../../config/signalboxd.example.toml")
+        .replace(
+            "/usr/local/bin/signalbox-exec-supervisor",
+            std::env::current_exe()?.to_string_lossy().as_ref(),
+        )
+        .replace(
+            "repository_watch_webhook_retention = \"604800s\"",
+            &format!("repository_watch_webhook_retention = {:?}", hook.retention),
+        );
     Ok(signalboxd::HubModelConfiguration::parse(&format!(
         r#"{catalog}
 [repository_watch]
@@ -2565,7 +2576,7 @@ poll_interval_seconds = 60
 credential_file = "{poll_credential}"
 webhook_hook_id = {id}
 webhook_secret_file = "{secret}"
-webhook_mode = "primary"
+webhook_mode = "{mode}"
 [[repository_watch.rules]]
 id = "ci"
 version = {rule_version}
@@ -2580,6 +2591,7 @@ template = "{template}"
         enabled = hook.enabled,
         rule_version = hook.rule_version,
         template = hook.template,
+        mode = hook.mode,
         address = hook.address,
         path = hook.path,
         id = hook.id,
@@ -2596,13 +2608,36 @@ async fn unused_webhook_address() -> Result<std::net::SocketAddr, std::io::Error
 
 const RUNTIME_WEBHOOK_BODY: &str = r#"{"repository":{"full_name":"Runtime/Project"}}"#;
 
+struct RuntimeWebhookDelivery<'a> {
+    id: Uuid,
+    event: &'a str,
+    body: &'a str,
+}
+
 async fn webhook_status(
     hook: &RuntimeHookFixture<'_>,
     secret: &[u8],
 ) -> Result<reqwest::StatusCode, reqwest::Error> {
+    webhook_delivery_status(
+        hook,
+        secret,
+        &RuntimeWebhookDelivery {
+            id: Uuid::now_v7(),
+            event: "push",
+            body: RUNTIME_WEBHOOK_BODY,
+        },
+    )
+    .await
+}
+
+async fn webhook_delivery_status(
+    hook: &RuntimeHookFixture<'_>,
+    secret: &[u8],
+    delivery: &RuntimeWebhookDelivery<'_>,
+) -> Result<reqwest::StatusCode, reqwest::Error> {
     let signature = ring::hmac::sign(
         &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret),
-        RUNTIME_WEBHOOK_BODY.as_bytes(),
+        delivery.body.as_bytes(),
     );
     let _ = rustls::crypto::ring::default_provider().install_default();
     Ok(reqwest::Client::builder()
@@ -2610,11 +2645,13 @@ async fn webhook_status(
         .build()?
         .post(format!("http://{}{}", hook.address, hook.path))
         .header("x-github-hook-id", hook.id)
+        .header("x-github-delivery", delivery.id.to_string())
+        .header("x-github-event", delivery.event)
         .header(
             "x-hub-signature-256",
             format!("sha256={}", hex::encode(signature.as_ref())),
         )
-        .body(RUNTIME_WEBHOOK_BODY)
+        .body(delivery.body.to_owned())
         .send()
         .await?
         .status())
@@ -2662,6 +2699,8 @@ async fn composed_repository_watch_dispatches_and_reloads_its_running_listener()
         enabled: false,
         rule_version: 1,
         template: "watch",
+        mode: "primary",
+        retention: "604800s",
     };
     let models = runtime_configuration(&hook)?;
     let template_path = files.path().join("templates.toml");
@@ -2707,10 +2746,72 @@ system_prompt = "Inspect repository activity."
         webhook_status(&hook, b"wrong-secret").await?,
         reqwest::StatusCode::UNAUTHORIZED
     );
+    let unauthenticated_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM webhook_delivery")
+        .fetch_one(&module_pool)
+        .await?;
     assert_eq!(
-        webhook_status(&hook, b"initial-hook-secret").await?,
+        unauthenticated_rows, 0,
+        "unauthenticated payloads are not retained"
+    );
+    let delivery = RuntimeWebhookDelivery {
+        id: Uuid::now_v7(),
+        event: "pull_request",
+        body: r#"{ "action":"opened", "repository":{"full_name":"Runtime/Project"} }"#,
+    };
+    assert_eq!(
+        webhook_delivery_status(&hook, b"initial-hook-secret", &delivery).await?,
         reqwest::StatusCode::ACCEPTED
     );
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct RetainedWebhook {
+        repository: String,
+        event_kind: String,
+        action: Option<String>,
+        body: Vec<u8>,
+        disposition: String,
+        received_at: OffsetDateTime,
+        expires_at: OffsetDateTime,
+        settled_at: Option<OffsetDateTime>,
+    }
+    let retained_delivery = || {
+        sqlx::query_as::<_, RetainedWebhook>(
+            "SELECT delivery.repository, delivery.event_kind, delivery.action,
+                body.body, disposition.disposition, delivery.received_at,
+                delivery.expires_at, disposition.settled_at
+         FROM webhook_delivery AS delivery
+         JOIN webhook_body AS body USING (hook_id, delivery_id)
+         JOIN webhook_disposition AS disposition USING (hook_id, delivery_id)
+         WHERE delivery.hook_id = $1 AND delivery.delivery_id = $2",
+        )
+        .bind(Decimal::from(hook.id))
+        .bind(delivery.id)
+    };
+    let retained = retained_delivery().fetch_one(&module_pool).await?;
+    assert_eq!(retained.repository, "runtime/project");
+    assert_eq!(retained.event_kind, delivery.event);
+    assert_eq!(retained.action.as_deref(), Some("opened"));
+    assert_eq!(retained.body, delivery.body.as_bytes());
+    assert_eq!(retained.disposition, "applied");
+    assert!(retained.settled_at.is_some());
+    assert_eq!(
+        (retained.expires_at - retained.received_at).whole_seconds(),
+        7 * 24 * 60 * 60
+    );
+    assert_eq!(
+        webhook_delivery_status(&hook, b"initial-hook-secret", &delivery).await?,
+        reqwest::StatusCode::ACCEPTED,
+        "equal delivery identities replay"
+    );
+    assert_eq!(retained_delivery().fetch_one(&module_pool).await?, retained);
+    let conflicting = RuntimeWebhookDelivery {
+        body: r#"{"action":"closed","repository":{"full_name":"Runtime/Project"}}"#,
+        ..delivery
+    };
+    assert_eq!(
+        webhook_delivery_status(&hook, b"initial-hook-secret", &conflicting).await?,
+        reqwest::StatusCode::CONFLICT
+    );
+    assert_eq!(retained_delivery().fetch_one(&module_pool).await?, retained);
 
     let store = RepoWatchStore::new(module_pool.clone());
     let repository = RepositorySlug::try_new(String::from("runtime/project"))?;
@@ -2777,7 +2878,7 @@ system_prompt = "Inspect repository activity."
         &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"replacement-hook-secret"),
         RUNTIME_WEBHOOK_BODY.as_bytes(),
     );
-    inflight.write_all(format!("POST {} HTTP/1.1\r\nHost: {}\r\nExpect: 100-continue\r\nConnection: close\r\nContent-Length: {}\r\nx-github-hook-id: {}\r\nx-hub-signature-256: sha256={}\r\n\r\n", hook.path, hook.address, RUNTIME_WEBHOOK_BODY.len(), hook.id, hex::encode(signature.as_ref())).as_bytes()).await?;
+    inflight.write_all(format!("POST {} HTTP/1.1\r\nHost: {}\r\nExpect: 100-continue\r\nConnection: close\r\nContent-Length: {}\r\nx-github-hook-id: {}\r\nx-github-delivery: {}\r\nx-github-event: push\r\nx-hub-signature-256: sha256={}\r\n\r\n", hook.path, hook.address, RUNTIME_WEBHOOK_BODY.len(), hook.id, Uuid::now_v7(), hex::encode(signature.as_ref())).as_bytes()).await?;
     let mut interim = [0; 25];
     tokio::time::timeout(Duration::from_secs(5), inflight.read_exact(&mut interim)).await??;
     assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
@@ -2825,6 +2926,116 @@ system_prompt = "Inspect repository activity."
         webhook_status(&hook, b"replacement-hook-secret").await?,
         reqwest::StatusCode::ACCEPTED
     );
+    hook.mode = "shadow";
+    hook.retention = "172800s";
+    runtime
+        .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+        .await
+        .expect("switch to shadow intake");
+    let shadow = RuntimeWebhookDelivery {
+        id: Uuid::now_v7(),
+        ..delivery
+    };
+    assert_eq!(
+        webhook_delivery_status(&hook, b"replacement-hook-secret", &shadow).await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    let shadow_disposition: String = sqlx::query_scalar(
+        "SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(hook.id))
+    .bind(shadow.id)
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(shadow_disposition, "ignored");
+    let shadow_retention: i64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM expires_at - received_at)::bigint
+         FROM webhook_delivery WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(hook.id))
+    .bind(shadow.id)
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(
+        shadow_retention,
+        2 * 24 * 60 * 60,
+        "reload changes the configured retention"
+    );
+    hook.mode = "primary";
+    runtime
+        .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+        .await
+        .expect("switch settled shadow delivery to primary intake");
+    assert_eq!(
+        webhook_delivery_status(&hook, b"replacement-hook-secret", &shadow).await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    let retained_shadow = || WebhookDelivery {
+        repository: &repository,
+        hook_id: hook.id,
+        delivery_id: shadow.id,
+        event: shadow.event,
+        action: Some("opened"),
+        body: shadow.body.as_bytes(),
+        received_at: retained.received_at,
+        expires_at: retained.expires_at,
+    };
+    assert_eq!(
+        store.admit_webhook(retained_shadow()).await?,
+        WebhookAdmission::Replayed
+    );
+    let replayed_disposition: String = sqlx::query_scalar(
+        "SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(hook.id))
+    .bind(shadow.id)
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(replayed_disposition, "ignored");
+
+    let pending = RuntimeWebhookDelivery {
+        id: Uuid::now_v7(),
+        ..shadow
+    };
+    assert_eq!(
+        store
+            .admit_webhook(WebhookDelivery {
+                delivery_id: pending.id,
+                ..retained_shadow()
+            })
+            .await?,
+        WebhookAdmission::Inserted
+    );
+    assert_eq!(
+        store
+            .admit_webhook(WebhookDelivery {
+                delivery_id: pending.id,
+                ..retained_shadow()
+            })
+            .await?,
+        WebhookAdmission::PendingReplay
+    );
+    assert_eq!(
+        webhook_delivery_status(&hook, b"replacement-hook-secret", &pending).await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    let pending_disposition: String = sqlx::query_scalar(
+        "SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(hook.id))
+    .bind(pending.id)
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(
+        pending_disposition, "applied",
+        "pending replay completes primary intake"
+    );
+    module_pool.close().await;
+    assert_eq!(
+        webhook_status(&hook, b"replacement-hook-secret").await?,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "durable admission failure cannot acknowledge a delivery"
+    );
     shutdown.send(true)?;
     worker.await?.expect("orderly module shutdown");
     assert!(module_pool.is_closed());
@@ -2865,6 +3076,8 @@ async fn repository_watch_rejects_invalid_reloads_and_keeps_dispatching_running_
         enabled: true,
         rule_version: 1,
         template: "watch",
+        mode: "primary",
+        retention: "604800s",
     };
     let models = Arc::new(runtime_configuration(&hook)?);
     let template_path = files.path().join("templates.toml");
