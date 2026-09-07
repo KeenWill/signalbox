@@ -51,6 +51,37 @@ impl ConfigurationCatalogs {
     }
 }
 
+/// Persistence failure classified by whether reload effects need recovery.
+#[derive(Debug)]
+pub enum ConfigurationReloadError {
+    BeforeEffect(ReloadRepositoryError),
+    RecoveryRequired(ReloadRepositoryError),
+}
+
+impl std::fmt::Display for ConfigurationReloadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BeforeEffect(error) | Self::RecoveryRequired(error) => {
+                std::fmt::Display::fmt(error, formatter)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigurationReloadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BeforeEffect(error) | Self::RecoveryRequired(error) => Some(error),
+        }
+    }
+}
+
+impl From<ReloadRepositoryError> for ConfigurationReloadError {
+    fn from(error: ReloadRepositoryError) -> Self {
+        Self::BeforeEffect(error)
+    }
+}
+
 /// One daemon-wide reload mutex and one atomically replaced catalog pair.
 #[derive(Clone, Debug)]
 pub struct ConfigurationReload {
@@ -153,7 +184,7 @@ impl ConfigurationReload {
     pub async fn reload(
         &self,
         request: ReloadConfiguration,
-    ) -> Result<ReloadLookup, ReloadRepositoryError> {
+    ) -> Result<ReloadLookup, ConfigurationReloadError> {
         let found = self.repository.lookup(request).await?;
         if found != ReloadLookup::Unclaimed {
             return Ok(found);
@@ -203,13 +234,23 @@ impl ConfigurationReload {
             Err(result) => {
                 return match self.repository.claim(request, Err(&result)).await? {
                     ReloadClaim::Settled(outcome) => Ok(outcome),
-                    ReloadClaim::Retained => Err(ReloadRepositoryError::Corruption(
-                        "rejection retained an install intent",
+                    ReloadClaim::Retained => Err(ConfigurationReloadError::RecoveryRequired(
+                        ReloadRepositoryError::Corruption("rejection retained an install intent"),
                     )),
                 };
             }
         };
-        let claimed = self.repository.claim(request, Ok(&intent)).await?;
+        let claimed = self
+            .repository
+            .claim(request, Ok(&intent))
+            .await
+            .map_err(|error| {
+                if matches!(error, ReloadRepositoryError::CommitAmbiguous(_)) {
+                    ConfigurationReloadError::RecoveryRequired(error)
+                } else {
+                    error.into()
+                }
+            })?;
         if let ReloadClaim::Settled(outcome) = claimed {
             return Ok(outcome);
         }
@@ -219,7 +260,8 @@ impl ConfigurationReload {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = replacement;
         self.repository
             .finish(request, &ReloadResult::Reloaded)
-            .await?;
+            .await
+            .map_err(ConfigurationReloadError::RecoveryRequired)?;
         Ok(ReloadLookup::Recorded(ReloadResult::Reloaded))
     }
 
@@ -325,6 +367,28 @@ mod tests {
         )
         .expect("reload composition");
         (directory, reload)
+    }
+
+    #[tokio::test]
+    async fn lookup_database_failure_does_not_require_recovery() {
+        let (_directory, mut reload) = fixture();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .expect("lazy pool");
+        pool.close().await;
+        reload.repository = ReloadConfigurationRepository::new(pool);
+        let error = reload
+            .reload(ReloadConfiguration {
+                command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            })
+            .await
+            .expect_err("closed pool rejects lookup");
+        assert!(matches!(
+            error,
+            ConfigurationReloadError::BeforeEffect(ReloadRepositoryError::Database(
+                sqlx::Error::PoolClosed
+            ))
+        ));
     }
 
     #[tokio::test]

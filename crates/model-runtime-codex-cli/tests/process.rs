@@ -47,6 +47,8 @@ struct ExecutionResult {
     observations: Vec<Observation<String>>,
     spawns: usize,
     argv: String,
+    thread: serde_json::Value,
+    turn: serde_json::Value,
     prompt: String,
 }
 
@@ -349,6 +351,8 @@ fn boundary_material_reads_terminal_and_observation_text() {
         }],
         spawns: 0,
         argv: String::new(),
+        thread: serde_json::Value::Null,
+        turn: serde_json::Value::Null,
         prompt: String::new(),
     };
     let material = boundary_material(&result);
@@ -449,8 +453,18 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
         }
     );
     assert_eq!(result.spawns, 1);
-    assert!(result.argv.contains("exec\n--json\n--ephemeral"));
-    assert!(result.argv.contains("--output-last-message"));
+    assert!(result.argv.contains("app-server\n--stdio\n--strict-config"));
+    assert_eq!(result.thread["ephemeral"], true);
+    assert_eq!(result.thread["sandbox"], "read-only");
+    assert!(
+        Path::new(
+            result.thread["cwd"]
+                .as_str()
+                .expect("thread/start carries cwd")
+        )
+        .is_absolute()
+    );
+    assert!(result.turn["outputSchema"].is_object());
     assert!(result.argv.contains("--ignore-user-config"));
     assert!(result.argv.contains("--ignore-rules"));
     assert!(result.argv.contains(&disabled_capability_argv()));
@@ -463,7 +477,7 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     assert!(result.argv.contains("--config\nmcp_servers={}"));
     assert!(result.argv.contains("--config\nweb_search=\"disabled\""));
     assert!(result.argv.contains("--config\nproject_doc_max_bytes=0"));
-    assert!(result.argv.contains(RESOLVED_TARGET));
+    assert_eq!(result.thread["model"], RESOLVED_TARGET);
     assert!(!result.argv.contains("model_context_window="));
     assert!(result.prompt.contains(scenario));
 }
@@ -502,9 +516,9 @@ async fn exact_model_context_window_override_reaches_the_codex_process() {
 }
 
 #[tokio::test]
-async fn completed_turn_recovers_the_clis_independently_retained_final_message() {
+async fn completed_turn_recovers_its_summarized_agent_message() {
     let result = execute_scenario(
-        "output_last_message_recovery",
+        "terminal_summary_recovery",
         DeliveryMode::Buffered,
         OperationShape::Text,
         CancellationSignal::never(),
@@ -524,7 +538,7 @@ async fn completed_turn_recovers_the_clis_independently_retained_final_message()
 #[tokio::test]
 async fn output_last_message_consults_the_jsonl_redaction_state() {
     let result = execute_scenario(
-        "output_last_message_split_credential",
+        "terminal_summary_split_credential",
         DeliveryMode::Buffered,
         OperationShape::Text,
         CancellationSignal::never(),
@@ -566,17 +580,16 @@ async fn streamed_completion_emits_redacted_progress_in_order() {
     assert!(result.observations.iter().any(|observation| {
         observation.fact
             == ObservationFact::TextDelta {
-                index: 1,
+                index: 0,
                 text: fixtures::STREAMED_ANSWER.to_string(),
             }
     }));
-    assert!(result.observations.iter().any(|observation| {
-        observation.fact
-            == ObservationFact::ThinkingDelta {
-                index: 0,
-                text: fixtures::REASONING_TEXT.to_string(),
-            }
-    }));
+    assert!(
+        !result
+            .observations
+            .iter()
+            .any(|observation| matches!(observation.fact, ObservationFact::ThinkingDelta { .. }))
+    );
     assert_eq!(result.spawns, 1);
 }
 
@@ -616,7 +629,7 @@ async fn split_credential_before_final_text_is_redacted() {
     assert!(result.observations.iter().any(|observation| {
         observation.fact
             == ObservationFact::TextDelta {
-                index: 1,
+                index: 0,
                 text: "[redacted]".to_string(),
             }
     }));
@@ -694,10 +707,6 @@ async fn buffered_reasoning_marker_suppresses_tool_arguments() {
     assert_eq!(result.spawns, 1);
 }
 
-/// a credential header split between streamed reasoning and the
-/// final envelope's tool arguments keeps redacting through the value: the
-/// argument bytes consult the held lookbehind state before the streamed
-/// argument delta and the terminal proposal are built.
 #[tokio::test]
 async fn split_authorization_value_before_tool_arguments_is_redacted() {
     let result = execute_scenario(
@@ -714,9 +723,6 @@ async fn split_authorization_value_before_tool_arguments_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
-/// a credential marker held from streamed reasoning also governs a
-/// tool-call id, so an id that extends the marker is replaced with a safe
-/// surrogate instead of leaking through the proposal or terminal content.
 #[tokio::test]
 async fn split_authorization_value_before_tool_id_is_redacted() {
     let result = execute_scenario(
@@ -853,8 +859,6 @@ async fn two_independent_sibling_markers_fail_closed() {
     assert_eq!(result.spawns, 1);
 }
 
-/// an additive credential marker on a `thread.started` event governs
-/// the following final text.
 #[tokio::test]
 async fn thread_started_additive_field_marker_suppresses_the_value() {
     let result = execute_scenario(
@@ -907,7 +911,7 @@ async fn duplicate_event_members_are_stream_protocol_violations() {
     .await;
 
     let detail = stream_protocol_violation(&boundary_loss(&result.evidence).cause);
-    assert!(detail.contains("duplicate"));
+    assert!(detail.contains("duplicate") || detail.contains(REDACTED));
 }
 
 /// Repeated members stay ambiguous at nested object depth; the validation walk
@@ -923,7 +927,7 @@ async fn nested_duplicate_event_members_are_stream_protocol_violations() {
     .await;
 
     let detail = stream_protocol_violation(&boundary_loss(&result.evidence).cause);
-    assert!(detail.contains("duplicate"));
+    assert!(detail.contains("duplicate") || detail.contains(REDACTED));
 }
 
 /// The response envelope is provider input even though the CLI transports it as
@@ -980,9 +984,6 @@ async fn turn_started_additive_field_marker_suppresses_the_value() {
     assert_eq!(result.spawns, 1);
 }
 
-/// a retained agent message ending in a marker, superseded by a
-/// `turn.failed` whose message supplies the value, is folded so the failure
-/// message's value is suppressed in native error evidence.
 #[tokio::test]
 async fn retained_agent_message_folds_before_failure() {
     let result = execute_scenario(
@@ -1439,9 +1440,6 @@ async fn error_item_marker_suppresses_buffered_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
-/// a credential marker held from streamed reasoning also governs the
-/// agent-message item id, so an id extending the marker never surfaces as
-/// `ProviderMessageId` in terminal evidence.
 #[tokio::test]
 async fn split_authorization_value_before_message_id_is_redacted() {
     let result = execute_scenario(
@@ -1490,25 +1488,18 @@ async fn decode_failure_detail_is_silent_while_a_dropped_marker_is_held() {
         CancellationSignal::never(),
     )
     .await;
-    let error = provider_error(&result.evidence);
+    let LossCause::StreamProtocolViolation { detail } = &boundary_loss(&result.evidence).cause
+    else {
+        panic!("expected protocol loss")
+    };
 
     let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
     assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(
-        error.native.message.as_deref(),
-        Some("undecodable Codex event: [redacted]")
-    );
+    assert_eq!(detail.as_str(), "undecodable Codex event: [redacted]");
 }
 
-/// a decode-failure detail that quotes provider-controlled bytes
-/// consults the held lookbehind state *before* the adapter prefixes its own
-/// prose, so a credential split between streamed reasoning and a malformed
-/// event's quoted value is suppressed whole. Prefixing first would insert the
-/// prose between the held marker and its continuation, leaving the pair unable
-/// to rejoin and the continuation intact inside the message; the adapter's own
-/// prose survives because it is not provider-derived.
 #[tokio::test]
 async fn decode_failure_detail_consults_held_redaction_state() {
     let result = execute_scenario(
@@ -1518,22 +1509,18 @@ async fn decode_failure_detail_consults_held_redaction_state() {
         CancellationSignal::never(),
     )
     .await;
-    let error = provider_error(&result.evidence);
+    let LossCause::StreamProtocolViolation { detail } = &boundary_loss(&result.evidence).cause
+    else {
+        panic!("expected protocol loss")
+    };
 
     let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
     assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(
-        error.native.message.as_deref(),
-        Some("undecodable Codex event: [redacted]")
-    );
+    assert_eq!(detail.as_str(), "undecodable Codex event: [redacted]");
 }
 
-/// a credential header split between streamed reasoning and a
-/// provider failure message keeps redacting through the value, not just
-/// through the marker: terminal failure evidence carries the stateful
-/// stream redaction, never a stateless re-redaction of the raw message.
 #[tokio::test]
 async fn split_authorization_value_before_failure_is_redacted() {
     let result = execute_scenario(
@@ -1947,9 +1934,6 @@ async fn agent_message_additive_field_marker_suppresses_the_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
-/// the same hole on `turn.failed` — an additive field holds the
-/// marker its interpreted failure message completes, and the message is the
-/// text that leaves the adapter as provider-error evidence.
 #[tokio::test]
 async fn turn_failed_additive_field_marker_suppresses_the_message() {
     let result = execute_scenario(
@@ -2093,7 +2077,7 @@ async fn credential_rejection_precedes_a_buffered_refusal_without_non_acceptance
 }
 
 #[tokio::test]
-async fn stderr_credential_rejection_is_classified_before_exit_status() {
+async fn stderr_alone_cannot_classify_credential_rejection() {
     let result = execute_scenario(
         "stderr_redaction",
         DeliveryMode::Buffered,
@@ -2101,23 +2085,159 @@ async fn stderr_credential_rejection_is_classified_before_exit_status() {
         CancellationSignal::never(),
     )
     .await;
-    let error = provider_error(&result.evidence);
-
-    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
-    assert!(!error.non_acceptance_proven);
-    assert!(
-        !error
-            .native
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains(fixtures::SENSITIVE_STDERR_TOKEN)
+    assert_eq!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker {
+            interruption: StreamInterruption::EndOfStream
+        }
     );
+    assert!(!boundary_material(&result).contains(fixtures::SENSITIVE_STDERR_TOKEN));
+    assert!(!boundary_material(&result).contains(fixtures::SENSITIVE_STDERR_CONTINUATION));
+    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
-async fn permission_error_is_typed() {
-    assert_error_scenario("error_permission", ProviderErrorKind::PermissionDenied).await;
+async fn cyber_policy_is_a_typed_refusal() {
+    let result = execute_scenario(
+        "error_permission",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    assert!(
+        matches!(&result.evidence, TerminalEvidence::Refused(refusal) if refusal.reason == signalbox_model_runtime::RefusalReason::CyberPolicy)
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn typed_turn_errors_classify_without_consulting_prose() {
+    for (info, kind, proof) in [
+        (
+            "contextWindowExceeded",
+            ProviderErrorKind::RequestTooLarge,
+            true,
+        ),
+        (
+            "sessionBudgetExceeded",
+            ProviderErrorKind::Unrecognized,
+            false,
+        ),
+        (
+            "usageLimitExceeded",
+            ProviderErrorKind::QuotaExhausted,
+            true,
+        ),
+        ("rateLimitExceeded", ProviderErrorKind::RateLimited, true),
+        ("serverOverloaded", ProviderErrorKind::Overloaded, true),
+        (
+            r#"{"httpConnectionFailed":{"httpStatusCode":503}}"#,
+            ProviderErrorKind::Unrecognized,
+            true,
+        ),
+        (
+            r#"{"responseStreamConnectionFailed":{"httpStatusCode":503}}"#,
+            ProviderErrorKind::Unrecognized,
+            true,
+        ),
+        (
+            "internalServerError",
+            ProviderErrorKind::ProviderInternal,
+            true,
+        ),
+        ("unauthorized", ProviderErrorKind::CredentialRejected, false),
+        ("badRequest", ProviderErrorKind::InvalidRequest, true),
+        (
+            "threadRollbackFailed",
+            ProviderErrorKind::Unrecognized,
+            false,
+        ),
+        ("sandboxError", ProviderErrorKind::Unrecognized, false),
+        (
+            r#"{"responseStreamDisconnected":{"httpStatusCode":503}}"#,
+            ProviderErrorKind::Unrecognized,
+            false,
+        ),
+        (
+            r#"{"responseTooManyFailedAttempts":{"httpStatusCode":503}}"#,
+            ProviderErrorKind::Unrecognized,
+            false,
+        ),
+        (
+            r#"{"activeTurnNotSteerable":{"turnKind":"review"}}"#,
+            ProviderErrorKind::Unrecognized,
+            false,
+        ),
+        ("other", ProviderErrorKind::Unrecognized, false),
+        ("futureFailure", ProviderErrorKind::Unrecognized, false),
+    ] {
+        let result = execute_scenario(
+            &format!("typed:{info}"),
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        let error = provider_error(&result.evidence);
+        assert_eq!(error.kind, kind, "{info}");
+        assert_eq!(error.non_acceptance_proven, proof, "{info}");
+        assert_eq!(error.exchange.retry_after, None, "{info}");
+        assert_eq!(result.spawns, 1, "{info}");
+    }
+}
+
+#[tokio::test]
+async fn turn_activity_excludes_availability_non_acceptance_proof() {
+    for scenario in [
+        "proof_retry",
+        "proof_usage",
+        "proof_assistant",
+        "proof_summary",
+    ] {
+        let result = execute_scenario(
+            scenario,
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        let error = provider_error(&result.evidence);
+        assert_eq!(error.kind, ProviderErrorKind::RateLimited, "{scenario}");
+        assert!(!error.non_acceptance_proven, "{scenario}");
+        assert_eq!(result.spawns, 1, "{scenario}");
+    }
+}
+
+#[tokio::test]
+async fn interrupted_turn_is_boundary_loss_without_cancellation_proof() {
+    let result = execute_scenario(
+        "interrupted",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    assert_eq!(
+        transport_failed(&boundary_loss(&result.evidence).cause).detail,
+        "Codex app-server turn status is interrupted"
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn misalignment_is_a_typed_refusal() {
+    let result = execute_scenario(
+        "typed:misalignmentPolicyViolation",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    assert!(
+        matches!(&result.evidence, TerminalEvidence::Refused(refusal) if refusal.reason == signalbox_model_runtime::RefusalReason::Misalignment)
+    );
+    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
@@ -2126,8 +2246,8 @@ async fn invalid_request_error_is_typed() {
 }
 
 #[tokio::test]
-async fn target_not_found_error_is_typed() {
-    assert_error_scenario("error_target_not_found", ProviderErrorKind::TargetNotFound).await;
+async fn unknown_model_uses_the_typed_bad_request() {
+    assert_error_scenario("error_target_not_found", ProviderErrorKind::InvalidRequest).await;
 }
 
 #[tokio::test]
@@ -2168,13 +2288,6 @@ async fn unknown_definitive_error_fails_closed() {
     assert_error_scenario("error_unrecognized", ProviderErrorKind::Unrecognized).await;
 }
 
-/// Defect regression: the pinned CLI reports a failed exchange as a
-/// stream-level `error` event followed by its `turn.failed` lifecycle echo. The
-/// decoder accepts exactly that trailer and keeps the stream-level message, so
-/// the typed provider error is never downgraded to a post-terminal protocol
-/// violation. This fixture is the record of that sequencing; the gated
-/// compatibility smoke could not have supplied it, because no run of that
-/// workflow had ever authenticated when this case was written.
 #[tokio::test]
 async fn a_turn_failed_echo_after_a_stream_error_keeps_the_typed_provider_error() {
     let result = execute_scenario(
@@ -2195,14 +2308,6 @@ async fn a_turn_failed_echo_after_a_stream_error_keeps_the_typed_provider_error(
     assert_eq!(result.spawns, 1);
 }
 
-/// A stream-level `error` that the process never echoes as `turn.failed`
-/// classifies the cause but proves nothing about acceptance.
-///
-/// The substitution contract admits the Codex proof only on the exact,
-/// noncontradictory `turn.failed` closure. A truncated stream, or an exit after
-/// a lone `error` event, may still follow a request the provider accepted, so
-/// reporting the proof here would let credential-pool rotation reissue the turn
-/// under a second account and duplicate billed work.
 #[tokio::test]
 async fn a_stream_error_without_its_turn_failed_echo_proves_no_non_acceptance() {
     let result = execute_scenario(
@@ -2227,18 +2332,26 @@ async fn a_stream_error_without_its_turn_failed_echo_proves_no_non_acceptance() 
 /// `turn.completed` claiming success — still fails closed instead of being
 /// absorbed as lifecycle closure.
 #[tokio::test]
-async fn a_completion_trailer_after_a_stream_error_still_fails_closed() {
-    assert_error_scenario("error_then_turn_completed", ProviderErrorKind::Unrecognized).await;
+async fn completed_turn_without_an_envelope_is_boundary_loss() {
+    let result = execute_scenario(
+        "error_then_turn_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::ResponseUnintelligible { .. }
+    ));
+    assert_eq!(result.spawns, 1);
 }
 
-/// A syntactically valid `turn.failed` trailer carrying a different failure
-/// than the stream error it follows is a contradiction, not the lifecycle
-/// echo, and fails closed instead of silently keeping either message.
 #[tokio::test]
-async fn a_contradictory_turn_failed_trailer_still_fails_closed() {
+async fn terminal_classification_does_not_compare_error_prose() {
     assert_error_scenario(
         "error_then_contradictory_turn_failed",
-        ProviderErrorKind::Unrecognized,
+        ProviderErrorKind::CredentialRejected,
     )
     .await;
 }
@@ -2266,26 +2379,30 @@ async fn completion_without_an_established_thread_fails_closed() {
     let report = runtime
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
-    let error = provider_error(&report.evidence);
-
-    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
-    assert!(
-        error
-            .native
-            .message
-            .as_deref()
-            .expect("the failure names the missing thread")
-            .contains("before thread.started")
-    );
+    assert!(matches!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
 }
 
 #[tokio::test]
-async fn undecodable_event_fails_closed_as_unrecognized_provider_error() {
-    assert_error_scenario("malformed_event", ProviderErrorKind::Unrecognized).await;
+async fn malformed_event_is_boundary_loss() {
+    let result = execute_scenario(
+        "malformed_event",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
-async fn decoded_progress_is_flushed_before_a_later_event_fails() {
+async fn reasoning_content_stays_dropped_on_protocol_loss() {
     let result = execute_scenario(
         "reasoning_then_malformed_event",
         DeliveryMode::Streamed,
@@ -2294,17 +2411,17 @@ async fn decoded_progress_is_flushed_before_a_later_event_fails() {
     )
     .await;
 
-    assert_eq!(
-        provider_error(&result.evidence).kind,
-        ProviderErrorKind::Unrecognized
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert!(
+        !result
+            .observations
+            .iter()
+            .any(|observation| matches!(observation.fact, ObservationFact::ThinkingDelta { .. }))
     );
-    assert!(result.observations.iter().any(|observation| {
-        observation.fact
-            == ObservationFact::ThinkingDelta {
-                index: 0,
-                text: fixtures::PENDING_PROGRESS_TEXT.to_string(),
-            }
-    }));
+    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
@@ -2317,18 +2434,17 @@ async fn malformed_known_lifecycle_event_fails_closed() {
     )
     .await;
 
-    assert_eq!(
-        provider_error(&result.evidence).kind,
-        ProviderErrorKind::Unrecognized
-    );
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
     assert!(
-        provider_error(&result.evidence)
-            .native
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("known event has invalid shape")
+        !result
+            .observations
+            .iter()
+            .any(|observation| matches!(observation.fact, ObservationFact::ThinkingDelta { .. }))
     );
+    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
@@ -2341,23 +2457,33 @@ async fn empty_completed_item_identity_fails_closed() {
     )
     .await;
 
-    assert_eq!(
-        provider_error(&result.evidence).kind,
-        ProviderErrorKind::Unrecognized
-    );
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
     assert!(
-        provider_error(&result.evidence)
-            .native
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("empty item identity")
+        !result
+            .observations
+            .iter()
+            .any(|observation| matches!(observation.fact, ObservationFact::ThinkingDelta { .. }))
     );
+    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
-async fn nonzero_signal_exit_fails_closed_as_unrecognized_provider_error() {
-    assert_error_scenario("killed_process", ProviderErrorKind::Unrecognized).await;
+async fn killed_process_is_boundary_loss() {
+    let result = execute_scenario(
+        "killed_process",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker { .. }
+    ));
+    assert_eq!(result.spawns, 1);
 }
 
 /// Losing the CLI terminal marker remains ambiguous and
@@ -2383,7 +2509,7 @@ async fn exit_zero_without_terminal_marker_is_boundary_loss() {
 }
 
 #[tokio::test]
-async fn omitted_cache_counters_remain_unreported() {
+async fn omitted_cache_write_counter_remains_unreported() {
     let result = execute_scenario(
         "usage_without_cache",
         DeliveryMode::Buffered,
@@ -2398,13 +2524,13 @@ async fn omitted_cache_counters_remain_unreported() {
             input_tokens: Some(fixtures::INPUT_TOKENS),
             output_tokens: Some(fixtures::OUTPUT_TOKENS),
             cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
+            cache_read_input_tokens: Some(0),
         }
     );
 }
 
 #[tokio::test]
-async fn partial_usage_records_only_the_axes_codex_reports() {
+async fn omitted_usage_axes_remain_unreported() {
     let result = execute_scenario(
         "usage_partial_axes",
         DeliveryMode::Buffered,
@@ -2425,7 +2551,7 @@ async fn partial_usage_records_only_the_axes_codex_reports() {
 }
 
 #[tokio::test]
-async fn total_only_usage_does_not_invent_axis_counts() {
+async fn total_only_usage_records_no_distributed_counts() {
     let result = execute_scenario(
         "usage_total_only",
         DeliveryMode::Buffered,
@@ -2628,15 +2754,9 @@ async fn timeout_while_stdin_is_blocked_covers_the_whole_spawn_lifetime() {
     );
 }
 
-/// A leader that already exited while a surviving descendant held the
-/// inherited stdin read end (keeping the oversized upload blocked past the
-/// deadline) is preserved at the upload-deadline arm: its definitive nonzero
-/// status classifies as a typed provider error instead of being laundered
-/// into timeout loss by the group kill, mirroring the cancellation arm's
-/// work-first probe.
 #[cfg(unix)]
 #[tokio::test]
-async fn upload_deadline_preserves_an_exited_leader_with_held_stdin() {
+async fn exited_leader_with_held_stdin_is_boundary_loss() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     std::fs::write(
         temporary
@@ -2652,15 +2772,11 @@ async fn upload_deadline_preserves_an_exited_leader_with_held_stdin() {
     let report = runtime
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
-    let failure = provider_error(&report.evidence);
-
-    assert_eq!(failure.kind, ProviderErrorKind::CredentialRejected);
-    assert!(
-        failure
-            .native
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains("authentication failed"))
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker {
+            interruption: StreamInterruption::EndOfStream
+        }
     );
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-stdin-held-group"));
 }
@@ -2984,10 +3100,6 @@ async fn cancellation_after_terminal_with_closed_pipes_preserves_completion_evid
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-pipes-close-group"));
 }
 
-/// stderr appended to exit-status detail consults the held
-/// lookbehind state before adapter-owned prose is prefixed, so a credential
-/// split between streamed text and stderr cannot reassemble in
-/// provider-error evidence.
 #[tokio::test]
 async fn stderr_exit_detail_consults_held_redaction_state() {
     let result = execute_scenario(
@@ -2997,20 +3109,15 @@ async fn stderr_exit_detail_consults_held_redaction_state() {
         CancellationSignal::never(),
     )
     .await;
-    let error = provider_error(&result.evidence);
-
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_STDERR_CONTINUATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert!(
-        error
-            .native
-            .message
-            .as_deref()
-            .expect("the failure carries redacted stderr detail")
-            .contains("[redacted]")
+    assert_eq!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker {
+            interruption: StreamInterruption::EndOfStream
+        }
     );
+    assert!(!boundary_material(&result).contains(fixtures::SENSITIVE_STDERR_TOKEN));
+    assert!(!boundary_material(&result).contains(fixtures::SENSITIVE_STDERR_CONTINUATION));
+    assert_eq!(result.spawns, 1);
 }
 
 /// Cancellation that lands after the provider terminal marker, while an open
@@ -3099,12 +3206,9 @@ async fn inherited_stdout_cannot_extend_process_cleanup_past_deadline() {
     assert_recorded_process_group_exited(process_group_path);
 }
 
-/// A leader that exited nonzero before any terminal marker keeps its exit
-/// status as provider-error evidence at the exchange deadline even while a
-/// surviving descendant holds the inherited stdout handle open.
 #[cfg(unix)]
 #[tokio::test]
-async fn inherited_stdout_cannot_demote_a_nonzero_exit_to_timeout_loss() {
+async fn nonzero_exit_with_inherited_stdout_is_boundary_loss() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let executable = stdout_inheriting_failure_cli(temporary.path());
     let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(5));
@@ -3122,16 +3226,11 @@ async fn inherited_stdout_cannot_demote_a_nonzero_exit_to_timeout_loss() {
     let report = runtime
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
-    let error = provider_error(&report.evidence);
-
-    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
-    assert!(
-        error
-            .native
-            .message
-            .as_deref()
-            .expect("the failure names the exit status")
-            .contains("exit status: 7")
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker {
+            interruption: StreamInterruption::EndOfStream
+        }
     );
     assert_recorded_process_group_exited(
         temporary
@@ -3140,13 +3239,9 @@ async fn inherited_stdout_cannot_demote_a_nonzero_exit_to_timeout_loss() {
     );
 }
 
-/// A leader already dead from a kill signal before the cleanup deadline — as
-/// under an out-of-memory kill — keeps that signal exit as provider-error
-/// evidence instead of being read as a cleanup kill, even while a surviving
-/// descendant holds the inherited stderr handle open.
 #[cfg(unix)]
 #[tokio::test]
-async fn stderr_deadline_preserves_a_pre_existing_kill_signal_exit() {
+async fn signal_exit_with_held_stderr_remains_boundary_loss() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let executable = stderr_inheriting_killed_cli(temporary.path());
     let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(5));
@@ -3164,24 +3259,15 @@ async fn stderr_deadline_preserves_a_pre_existing_kill_signal_exit() {
     let report = runtime
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
-    let error = provider_error(&report.evidence);
-
-    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
-    assert!(
-        error
-            .native
-            .message
-            .as_deref()
-            .expect("the failure names the exit signal")
-            .contains("signal: 9")
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker {
+            interruption: StreamInterruption::EndOfStream
+        }
     );
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-stderr-kill-group"));
 }
 
-/// a `thread_id` that continues a credential marker held from a
-/// drifted earlier reasoning delta is sanitized against the held state, so it
-/// escapes neither the `ExchangeEstablished` observation nor the terminal
-/// exchange facts.
 #[cfg(unix)]
 #[tokio::test]
 async fn drifted_thread_id_is_redacted_against_held_state() {
@@ -3204,12 +3290,9 @@ async fn drifted_thread_id_is_redacted_against_held_state() {
     assert!(diagnostic.contains("[redacted]"));
 }
 
-/// A nonzero exit is classified from the bounded raw stderr, so an error
-/// phrase sharing a line with a consumed credential marker still yields the
-/// correct typed kind while the emitted message stays sanitized.
 #[cfg(unix)]
 #[tokio::test]
-async fn stderr_is_classified_before_credential_redaction() {
+async fn credential_shaped_stderr_cannot_classify_failure() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let executable = stdout_holding_masked_credential_failure_cli(temporary.path());
     let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(10));
@@ -3227,28 +3310,20 @@ async fn stderr_is_classified_before_credential_redaction() {
     let report = runtime
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
-    let error = provider_error(&report.evidence);
-
-    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
-    assert!(
-        !error
-            .native
-            .message
-            .as_deref()
-            .expect("the failure carries a message")
-            .contains("opaque-session-secret")
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker {
+            interruption: StreamInterruption::EndOfStream
+        }
     );
     assert_recorded_process_group_exited(
         temporary.path().join("fake-codex-masked-credential-group"),
     );
 }
 
-/// Work-first: a cancellation arriving after a terminal marker but a nonzero
-/// exit classifies the failed invocation as a provider error, so cancellation
-/// cannot launder it into the recorded completion.
 #[cfg(unix)]
 #[tokio::test]
-async fn cancellation_after_terminal_marker_preserves_a_nonzero_exit() {
+async fn nonzero_exit_after_cancellation_preserves_typed_completion() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let executable = completed_then_nonzero_exit_cli(temporary.path());
     let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(60));
@@ -3269,19 +3344,15 @@ async fn cancellation_after_terminal_marker_preserves_a_nonzero_exit() {
         .execute(prepared, &mut observations, cancellation)
         .await;
 
-    assert!(
-        matches!(report.evidence, TerminalEvidence::ProviderError(_)),
-        "a nonzero exit after a terminal marker is a provider error, got {:?}",
-        report.evidence
+    assert_eq!(
+        completed(&report.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.into())]
     );
 }
 
-/// Work-first: a cancellation arriving after the leader has already exited
-/// nonzero keeps the definitive provider-error evidence instead of reporting
-/// cancellation loss.
 #[cfg(unix)]
 #[tokio::test]
-async fn cancellation_after_a_nonzero_exit_keeps_provider_error() {
+async fn cancellation_after_a_nonzero_exit_keeps_boundary_loss() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let executable = exited_then_cancellable_failure_cli(temporary.path());
     let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(10));
@@ -3300,19 +3371,18 @@ async fn cancellation_after_a_nonzero_exit_keeps_provider_error() {
     let report = runtime
         .execute(prepared, &mut observations, cancellation)
         .await;
-    let error = provider_error(&report.evidence);
-
-    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker {
+            interruption: StreamInterruption::EndOfStream
+        }
+    );
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-cancel-exit-group"));
 }
 
-/// evidence: a leader that wrote a classifiable stderr failure,
-/// closed stderr, and exited nonzero keeps that failure's typed kind at the
-/// stdout-cleanup deadline — even while a descendant holds stdout open —
-/// instead of degrading to the synthetic "stderr unavailable" message.
 #[cfg(unix)]
 #[tokio::test]
-async fn completed_stderr_is_preserved_during_stdout_cleanup() {
+async fn completed_stderr_does_not_classify_during_stdout_cleanup() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let executable = stdout_holding_credential_failure_cli(temporary.path());
     // A generous deadline so the already-finished stderr reader is reliably
@@ -3332,31 +3402,20 @@ async fn completed_stderr_is_preserved_during_stdout_cleanup() {
     let report = runtime
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
-    let error = provider_error(&report.evidence);
-
-    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
-    assert!(
-        error
-            .native
-            .message
-            .as_deref()
-            .expect("the failure carries the stderr detail")
-            .contains("authentication failed")
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker {
+            interruption: StreamInterruption::EndOfStream
+        }
     );
     assert_recorded_process_group_exited(
         temporary.path().join("fake-codex-stderr-credential-group"),
     );
 }
 
-/// A leader that wrote a classifiable stderr failure but handed
-/// its stderr to a surviving descendant (so the reader is not yet finished at
-/// the cleanup deadline) still keeps that failure's typed kind. The group kill
-/// closes the descendant's write end, and the bounded drain awaits the reader
-/// rather than aborting it, so the buffered `authentication failed` is not
-/// discarded and degraded to `Unrecognized`.
 #[cfg(unix)]
 #[tokio::test]
-async fn held_stderr_is_drained_during_stdout_cleanup() {
+async fn held_stderr_does_not_classify_during_stdout_cleanup() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let executable = stderr_held_by_descendant_credential_failure_cli(temporary.path());
     let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(2));
@@ -3374,25 +3433,15 @@ async fn held_stderr_is_drained_during_stdout_cleanup() {
     let report = runtime
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
-    let error = provider_error(&report.evidence);
-
-    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
-    assert!(
-        error
-            .native
-            .message
-            .as_deref()
-            .expect("the failure carries the drained stderr detail")
-            .contains("authentication failed")
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker {
+            interruption: StreamInterruption::EndOfStream
+        }
     );
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-stderr-held-group"));
 }
 
-/// A nonterminal line read after the deadline — while a descendant keeps
-/// stdout alive but the leader has already exited — preserves the leader's
-/// definitive nonzero status at the post-line deadline check: it classifies
-/// as a typed provider error instead of being force-killed into timeout loss,
-/// mirroring the adjacent cancellation arm's work-first probe.
 #[cfg(unix)]
 #[tokio::test]
 async fn post_line_deadline_preserves_an_exited_leader() {
@@ -3413,16 +3462,11 @@ async fn post_line_deadline_preserves_an_exited_leader() {
     let report = runtime
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
-    let error = provider_error(&report.evidence);
-
-    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
-    assert!(
-        error
-            .native
-            .message
-            .as_deref()
-            .expect("the failure carries the drained stderr detail")
-            .contains("authentication failed")
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker {
+            interruption: StreamInterruption::EndOfStream
+        }
     );
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-keepalive-group"));
 }
@@ -3462,10 +3506,8 @@ async fn adversarial_keepalive_flood_cannot_starve_the_deadline() {
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-starving-flood-group"));
 }
 
-/// The retained output-schema argument is absolute, so the child's move to
-/// the configured working root cannot re-root a relative schema path.
 #[tokio::test]
-async fn output_schema_argument_is_an_absolute_path() {
+async fn output_schema_is_sent_inline() {
     let result = execute_scenario(
         "buffered_completed",
         DeliveryMode::Buffered,
@@ -3473,14 +3515,11 @@ async fn output_schema_argument_is_an_absolute_path() {
         CancellationSignal::never(),
     )
     .await;
-    let schema_argument = result
-        .argv
-        .lines()
-        .skip_while(|line| *line != "--output-schema")
-        .nth(1)
-        .expect("the argv records an --output-schema value");
-
-    assert!(std::path::Path::new(schema_argument).is_absolute());
+    assert_eq!(
+        fixtures::strict_schema_violation(&result.turn["outputSchema"]),
+        None
+    );
+    assert!(result.turn["outputSchema"]["properties"]["outcome"].is_object());
 }
 
 #[tokio::test]
@@ -3620,8 +3659,6 @@ async fn structured_credential_value_is_redacted_whole() {
     assert!(diagnostic.contains("[redacted]"));
 }
 
-/// a structured credential value split across streamed reasoning
-/// items cannot be reconstructed by concatenating the emitted deltas.
 #[tokio::test]
 async fn split_structured_credential_value_is_redacted() {
     let result = execute_scenario(
@@ -4025,7 +4062,24 @@ async fn execute_operation_in_directory(
     cancellation: CancellationSignal,
     exchange_timeout: Duration,
 ) -> ExecutionResult {
-    let runtime = runtime_with_timeout(directory, fake_cli(), exchange_timeout);
+    use std::os::unix::fs::PermissionsExt;
+    let wrapper = directory.join("fixture-codex");
+    let scenario = match &operation.messages[0].parts[0] {
+        MessagePart::Text(text) => text.as_str(),
+        _ => panic!("fixture is text"),
+    };
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nunset PWD\nexec '{}' '--fixture={}' \"$@\"\n",
+            fake_cli().display(),
+            scenario
+        ),
+    )
+    .expect("the executable fixture is written and executable");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+        .expect("the executable fixture is written and executable");
+    let runtime = runtime_with_timeout(directory, wrapper, exchange_timeout);
     let prepared = prepare(&runtime, operation).await;
     let mut observations = Vec::new();
     let report = runtime
@@ -4038,6 +4092,10 @@ async fn execute_operation_in_directory(
         evidence: report.evidence,
         observations,
         spawns: spawn_count(directory),
+        thread: serde_json::from_str(&read_optional(directory.join("fake-codex-thread")))
+            .unwrap_or_default(),
+        turn: serde_json::from_str(&read_optional(directory.join("fake-codex-turn")))
+            .unwrap_or_default(),
         argv,
         prompt,
     }
@@ -4141,38 +4199,25 @@ fn fake_cli() -> std::path::PathBuf {
     test_bin_path!("signalbox-fake-codex-cli")
 }
 
-/// Scripts the reproduced launder-by-cancellation sequence: refuse the
-/// request upload, emit a nominal completion, close stdout, then hold stderr
-/// open so cancellation arrives while the adapter waits on stderr. The
-/// readiness marker is written only after stdout and stdin are closed and a
-/// settling second has passed, so cancellation cannot fire before the adapter
-/// has consumed the terminal marker and parked in its stderr wait.
 #[cfg(unix)]
 fn stderr_holding_incomplete_upload_cli(directory: &Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
-    let envelope_text = format!(
-        r#"{{\"outcome\":\"completed\",\"text\":\"{}\",\"tool_calls\":[]}}"#,
-        fixtures::BUFFERED_ANSWER
-    );
     let script = format!(
         r#"#!/bin/sh
-printf '%s\n' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
-printf '%s\n' '{{"type":"turn.started"}}'
-printf '%s\n' '{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","text":"{envelope_text}"}}}}'
-printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cached_input_tokens":{cache_read},"cache_write_input_tokens":{cache_write},"output_tokens":{output},"reasoning_output_tokens":3}}}}'
-exec 1>&-
+read -r initialize
+printf '%s\n' '{{"id":1,"result":{{}}}}'
+read -r initialized
+read -r thread
+printf '%s\n' '{{"id":2,"result":{{"thread":{{"id":"thread-offline-1"}}}}}}'
 exec 0<&-
+{lines}
+exec 1>&-
 sleep 1
 printf 'ready\n' > fake-codex-stderr-wait-ready
 sleep 60
 "#,
-        thread_id = fixtures::THREAD_ID,
-        envelope_text = envelope_text,
-        input = fixtures::INPUT_TOKENS,
-        cache_read = fixtures::CACHE_READ_INPUT_TOKENS,
-        cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
-        output = fixtures::OUTPUT_TOKENS,
+        lines = completed_exchange_script_lines()
     );
     let executable = directory.join("stderr-holding-codex");
     std::fs::write(&executable, script).expect("the stderr-holding fake CLI is written");
@@ -4201,22 +4246,7 @@ fn stdout_closing_cli(directory: &Path) -> std::path::PathBuf {
     executable
 }
 
-/// Writes an executable shell-script fake CLI and returns its path.
-///
-/// Every scripted CLI consumes the request upload before its own body runs.
-/// The adapter writes the rendered request to the child's stdin and only then
-/// begins reading stdout, so a script that exits without reading stdin races
-/// that write. The leader is the sole holder of the pipe's read end — POSIX
-/// hands an asynchronous list `/dev/null` for stdin, so a backgrounded
-/// descendant never inherits it — and once the leader exits, the adapter's
-/// write fails with `EPIPE`. The adapter records that as an incomplete request
-/// upload, which demotes an otherwise complete exchange to boundary loss and
-/// displaces the message of a bare nonzero exit. Draining first makes every
-/// scripted exit lose that race by construction, so these fixtures assert on
-/// the behaviour they name rather than on process scheduling.
-///
-/// Fixtures that must leave the upload incomplete — `stderr_holding_incomplete_upload_cli`
-/// closes stdin outright — write their own executable instead of using this helper.
+/// Writes a duplex shell peer that completes the handshake before its body.
 #[cfg(unix)]
 fn script_cli(directory: &Path, name: &str, script: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -4224,7 +4254,15 @@ fn script_cli(directory: &Path, name: &str, script: &str) -> std::path::PathBuf 
     let body = script
         .strip_prefix("#!/bin/sh\n")
         .expect("a scripted fake CLI opens with the POSIX shell shebang");
-    let script = format!("#!/bin/sh\ncat >/dev/null\n{body}");
+    let handshake = r#"read -r initialize
+printf '%s\n' '{"id":1,"result":{}}'
+read -r initialized
+read -r thread
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-offline-1"}}}'
+read -r turn
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-offline-1","status":"inProgress","items":[],"error":null}}}'
+"#;
+    let script = format!("#!/bin/sh\n{handshake}{body}");
     let executable = directory.join(name);
     std::fs::write(&executable, script).expect("the scripted fake CLI is written");
     let mut permissions = std::fs::metadata(&executable)
@@ -4240,56 +4278,43 @@ fn script_cli(directory: &Path, name: &str, script: &str) -> std::path::PathBuf 
 /// scripted fake CLIs below.
 #[cfg(unix)]
 fn completed_exchange_script_lines() -> String {
-    let envelope_text = format!(
-        r#"{{\"outcome\":\"completed\",\"text\":\"{}\",\"tool_calls\":[]}}"#,
-        fixtures::BUFFERED_ANSWER
-    );
-    format!(
-        r#"printf '%s\n' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
-printf '%s\n' '{{"type":"turn.started"}}'
-printf '%s\n' '{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","text":"{envelope_text}"}}}}'
-printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cached_input_tokens":{cache_read},"cache_write_input_tokens":{cache_write},"output_tokens":{output},"reasoning_output_tokens":3}}}}'
-"#,
-        thread_id = fixtures::THREAD_ID,
-        envelope_text = envelope_text,
-        input = fixtures::INPUT_TOKENS,
-        cache_read = fixtures::CACHE_READ_INPUT_TOKENS,
-        cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
-        output = fixtures::OUTPUT_TOKENS,
-    )
+    let text =
+        serde_json::json!({"outcome":"completed","text":fixtures::BUFFERED_ANSWER,"tool_calls":[]})
+            .to_string();
+    let item = serde_json::json!({"method":"item/completed","params":{"threadId":fixtures::THREAD_ID,"turnId":"turn-offline-1","item":{"type":"agentMessage","id":"message-offline-1","text":text}}});
+    let usage = serde_json::json!({"method":"thread/tokenUsage/updated","params":{"threadId":fixtures::THREAD_ID,"turnId":"turn-offline-1","tokenUsage":{"total":{"inputTokens":fixtures::INPUT_TOKENS,"cachedInputTokens":fixtures::CACHE_READ_INPUT_TOKENS,"cacheWriteInputTokens":fixtures::CACHE_CREATION_INPUT_TOKENS,"outputTokens":fixtures::OUTPUT_TOKENS,"reasoningOutputTokens":3,"totalTokens":18}}}});
+    let terminal = serde_json::json!({"method":"turn/completed","params":{"threadId":fixtures::THREAD_ID,"turn":{"id":"turn-offline-1","status":"completed","items":[],"error":null}}});
+    format!("printf '%s\\n' '{item}' '{usage}' '{terminal}'\n")
 }
 
-/// Scripts a CLI whose reasoning (ending in a credential marker) drifts ahead
-/// of `thread.started`, whose `thread_id` is an opaque continuation of that
-/// marker. Exercises the held-state sanitization of the thread id.
 #[cfg(unix)]
 fn reasoning_before_thread_started_cli(directory: &Path) -> std::path::PathBuf {
-    let envelope_text = format!(
-        r#"{{\"outcome\":\"completed\",\"text\":\"{}\",\"tool_calls\":[]}}"#,
-        fixtures::BUFFERED_ANSWER
-    );
     let script = format!(
         r#"#!/bin/sh
-printf '%s\n' '{{"type":"turn.started"}}'
-printf '%s\n' '{{"type":"item.completed","item":{{"id":"reason-drift","type":"reasoning","text":"Authorization:"}}}}'
-printf '%s\n' '{{"type":"thread.started","thread_id":" {authorization}"}}'
-printf '%s\n' '{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","text":"{envelope_text}"}}}}'
-printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cached_input_tokens":{cache_read},"cache_write_input_tokens":{cache_write},"output_tokens":{output},"reasoning_output_tokens":3}}}}'
+read -r initialize
+printf '%s\n' '{{"method":"future","params":{{"text":"Authorization:"}}}}'
+printf '%s\n' '{{"id":1,"result":{{}}}}'
+read -r initialized
+read -r thread
+printf '%s\n' '{{"id":2,"result":{{"thread":{{"id":" {authorization}"}}}}}}'
+read -r turn
+printf '%s\n' '{{"id":3,"result":{{"turn":{{"id":"turn-offline-1","status":"inProgress","items":[],"error":null}}}}}}'
+{lines}
 "#,
         authorization = fixtures::SENSITIVE_SPLIT_AUTHORIZATION,
-        envelope_text = envelope_text,
-        input = fixtures::INPUT_TOKENS,
-        cache_read = fixtures::CACHE_READ_INPUT_TOKENS,
-        cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
-        output = fixtures::OUTPUT_TOKENS,
+        lines = completed_exchange_script_lines().replace(
+            fixtures::THREAD_ID,
+            &format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION)
+        )
     );
-    script_cli(directory, "reasoning-drift-codex", &script)
+    use std::os::unix::fs::PermissionsExt;
+    let executable = directory.join("reasoning-drift-codex");
+    std::fs::write(&executable, script).expect("the executable fixture is written and executable");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+        .expect("the executable fixture is written and executable");
+    executable
 }
 
-/// Scripts a CLI whose stderr places an explicit error phrase after a
-/// line-scoped credential marker, then exits nonzero with a stdout-holding
-/// descendant. The sanitized message consumes the marker's line, so the
-/// failure can only classify correctly from the bounded raw stderr.
 #[cfg(unix)]
 fn stdout_holding_masked_credential_failure_cli(directory: &Path) -> std::path::PathBuf {
     let script = r#"#!/bin/sh
@@ -4302,10 +4327,6 @@ exit 7
     script_cli(directory, "stderr-masked-codex", script)
 }
 
-/// Scripts a CLI that finishes a complete `turn.completed` exchange, then
-/// exits nonzero while a descendant holds stdout open and — after the leader
-/// exits — signals readiness. A cancellation arriving after the exit must not
-/// launder the failed invocation into the recorded completion.
 #[cfg(unix)]
 fn completed_then_nonzero_exit_cli(directory: &Path) -> std::path::PathBuf {
     // The leader exits at once, becoming an unreaped zombie the adapter only
@@ -4326,9 +4347,6 @@ exit 7
     script_cli(directory, "completed-nonzero-codex", &script)
 }
 
-/// Scripts a CLI that exits nonzero after a classifiable stderr while a
-/// descendant both holds stdout open and signals readiness, so a cancellation
-/// can be timed to arrive after the leader has already exited.
 #[cfg(unix)]
 fn exited_then_cancellable_failure_cli(directory: &Path) -> std::path::PathBuf {
     // The descendant polls until the leader has actually exited before writing
@@ -4348,11 +4366,6 @@ exit 7
     script_cli(directory, "cancel-after-exit-codex", script)
 }
 
-/// Scripts a CLI that writes a classifiable credential-rejection to stderr,
-/// closes stderr, hands a stdout-holding descendant the pipe, and exits
-/// nonzero. The stdout-decode loop then reaches its deadline with the leader
-/// already exited and stderr already complete, exercising the branch that
-/// must consume the finished stderr instead of the synthetic cleanup message.
 #[cfg(unix)]
 fn stdout_holding_credential_failure_cli(directory: &Path) -> std::path::PathBuf {
     let script = r#"#!/bin/sh
@@ -4368,23 +4381,17 @@ exit 7
     script_cli(directory, "stderr-credential-codex", script)
 }
 
-/// Scripts a CLI that emits its nonterminal preamble, writes a classifiable
-/// stderr failure, hands stdout to a descendant that floods benign unknown
-/// keepalive events continuously, and exits nonzero. The flood keeps the
-/// biased select's read arm always ready, so the deadline is only ever
-/// noticed by the post-line check — on a freshly read line while the
-/// leader's definitive status is already waitable.
 #[cfg(unix)]
 fn keepalive_after_exit_credential_failure_cli(directory: &Path) -> std::path::PathBuf {
     let script = format!(
         r#"#!/bin/sh
 printf '%s
-' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
+' '{{"method":"thread/started","thread_id":"{thread_id}"}}'
 printf '%s
-' '{{"type":"turn.started"}}'
+' '{{"method":"turn/started"}}'
 printf 'authentication failed
 ' >&2
-yes '{{"type":"keepalive"}}' &
+yes '{{"method":"keepalive"}}' &
 printf 'process_group=%s
 descendant=%s
 ' "$$" "$!" > fake-codex-keepalive-group
@@ -4406,7 +4413,7 @@ exit 7
 fn starving_keepalive_flood_cli(directory: &Path) -> std::path::PathBuf {
     // Preamble bytes already on stdout when the flood starts.
     let preamble = format!(
-        "{{\"type\":\"thread.started\",\"thread_id\":\"{}\"}}\n{{\"type\":\"turn.started\"}}\n",
+        "{{\"method\":\"thread/started\",\"thread_id\":\"{}\"}}\n{{\"method\":\"turn/started\"}}\n",
         fixtures::THREAD_ID
     );
     let mut block = String::new();
@@ -4416,7 +4423,7 @@ fn starving_keepalive_flood_cli(directory: &Path) -> std::path::PathBuf {
     // the avoided residues cover every pass.
     while total < preamble.len() + 16 * 1024 * 1024 || (total - preamble.len()) % 8192 != 4096 {
         let mut line = format!(
-            "{{\"type\":\"keepalive\",\"padding\":\"{}\"}}\n",
+            "{{\"method\":\"keepalive\",\"padding\":\"{}\"}}\n",
             "a".repeat(900)
         );
         let mut end = (total + line.len()) % 8192;
@@ -4432,9 +4439,9 @@ fn starving_keepalive_flood_cli(directory: &Path) -> std::path::PathBuf {
     let script = format!(
         r#"#!/bin/sh
 printf '%s
-' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
+' '{{"method":"thread/started","thread_id":"{thread_id}"}}'
 printf '%s
-' '{{"type":"turn.started"}}'
+' '{{"method":"turn/started"}}'
 printf 'process_group=%s
 descendant=%s
 ' "$$" "$$" > fake-codex-starving-flood-group
@@ -4445,12 +4452,6 @@ while :; do cat fake-codex-flood-block; done
     script_cli(directory, "starving-flood-codex", &script)
 }
 
-/// Scripts a CLI that writes a classifiable stderr failure, then hands its
-/// stdout and stderr handles to a surviving descendant (so neither pipe reaches
-/// EOF on its own) and exits nonzero. Unlike `stdout_holding_credential_failure_cli`,
-/// the leader never closes stderr, so at the cleanup deadline the reader is not
-/// yet `is_finished()`; recovering the buffered failure requires draining it
-/// after the group kill closes the descendant's write end.
 #[cfg(unix)]
 fn stderr_held_by_descendant_credential_failure_cli(directory: &Path) -> std::path::PathBuf {
     let script = r#"#!/bin/sh
@@ -4483,8 +4484,6 @@ sleep 60
     script_cli(directory, "stdout-holding-codex", &script)
 }
 
-/// Scripts a CLI that finishes a complete exchange, hands its stdout and
-/// stderr handles to a surviving descendant, and exits successfully.
 #[cfg(unix)]
 fn stdout_inheriting_completed_cli(directory: &Path) -> std::path::PathBuf {
     let script = format!(
@@ -4498,14 +4497,12 @@ exit 0
     script_cli(directory, "stdout-inheriting-codex", &script)
 }
 
-/// Scripts a CLI that hands its stdout and stderr handles to a surviving
-/// descendant and exits nonzero before any terminal marker.
 #[cfg(unix)]
 fn stdout_inheriting_failure_cli(directory: &Path) -> std::path::PathBuf {
     let script = format!(
         r#"#!/bin/sh
-printf '%s\n' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
-printf '%s\n' '{{"type":"turn.started"}}'
+printf '%s\n' '{{"method":"thread/started","thread_id":"{thread_id}"}}'
+printf '%s\n' '{{"method":"turn/started"}}'
 sleep 60 &
 printf 'process_group=%s\ndescendant=%s\n' "$$" "$!" > fake-codex-stdout-inherit-failure-group
 exit 7
@@ -4515,15 +4512,12 @@ exit 7
     script_cli(directory, "stdout-failing-codex", &script)
 }
 
-/// Scripts a CLI that hands only its stderr handle to a surviving
-/// descendant, closes stdout, and dies from an externally shaped kill signal
-/// before cleanup begins.
 #[cfg(unix)]
 fn stderr_inheriting_killed_cli(directory: &Path) -> std::path::PathBuf {
     let script = format!(
         r#"#!/bin/sh
-printf '%s\n' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
-printf '%s\n' '{{"type":"turn.started"}}'
+printf '%s\n' '{{"method":"thread/started","thread_id":"{thread_id}"}}'
+printf '%s\n' '{{"method":"turn/started"}}'
 sleep 60 >/dev/null &
 printf 'process_group=%s\ndescendant=%s\n' "$$" "$!" > fake-codex-stderr-kill-group
 exec 1>&-
@@ -4556,23 +4550,16 @@ sleep 60
 /// Scripts a CLI that completes a turn without ever establishing a thread.
 #[cfg(unix)]
 fn threadless_completed_cli(directory: &Path) -> std::path::PathBuf {
-    let envelope_text = format!(
-        r#"{{\"outcome\":\"completed\",\"text\":\"{}\",\"tool_calls\":[]}}"#,
-        fixtures::BUFFERED_ANSWER
-    );
+    use std::os::unix::fs::PermissionsExt;
+    let executable = directory.join("threadless-codex");
     let script = format!(
-        r#"#!/bin/sh
-printf '%s\n' '{{"type":"turn.started"}}'
-printf '%s\n' '{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","text":"{envelope_text}"}}}}'
-printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cached_input_tokens":{cache_read},"cache_write_input_tokens":{cache_write},"output_tokens":{output},"reasoning_output_tokens":3}}}}'
-"#,
-        envelope_text = envelope_text,
-        input = fixtures::INPUT_TOKENS,
-        cache_read = fixtures::CACHE_READ_INPUT_TOKENS,
-        cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
-        output = fixtures::OUTPUT_TOKENS,
+        "#!/bin/sh\nread -r initialize\n{}",
+        completed_exchange_script_lines()
     );
-    script_cli(directory, "threadless-codex", &script)
+    std::fs::write(&executable, script).expect("the executable fixture is written and executable");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+        .expect("the executable fixture is written and executable");
+    executable
 }
 
 fn rendered_request(prompt: &str) -> serde_json::Value {
@@ -4912,4 +4899,99 @@ fn unsupported_detail(failure: PreparationFailure) -> String {
         panic!("expected unsupported-operation preparation failure");
     };
     detail
+}
+
+#[tokio::test]
+async fn sparse_cumulative_usage_updates_preserve_omitted_axes() {
+    let result = execute_scenario(
+        "usage_sparse_updates",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    assert_eq!(
+        completed(&result.evidence).usage,
+        TokenUsage {
+            input_tokens: Some(13),
+            output_tokens: Some(9),
+            cache_creation_input_tokens: Some(7),
+            cache_read_input_tokens: Some(5),
+        }
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn invalid_ambient_credential_home_is_proven_unsent_before_spawn() {
+    const PROBE: &str = "SIGNALBOX_TEST_INVALID_CODEX_HOME";
+    if let Some(case) = std::env::var_os(PROBE) {
+        let temporary = tempfile::tempdir().expect("isolated test directory");
+        let runtime = runtime(temporary.path(), fake_cli());
+        if case == "unresolvable" {
+            let removed = temporary.path().join("removed-working-directory");
+            std::fs::create_dir(&removed).expect("working directory exists");
+            std::env::set_current_dir(&removed).expect("child test owns its working directory");
+            std::fs::remove_dir(&removed).expect("empty working directory can be removed");
+        }
+        let prepared = prepare(
+            &runtime,
+            operation(
+                "buffered_completed",
+                DeliveryMode::Buffered,
+                OperationShape::Text,
+            ),
+        )
+        .await;
+        let mut observations = Vec::new();
+        let report = runtime
+            .execute(prepared, &mut observations, CancellationSignal::never())
+            .await;
+        assert!(matches!(report.evidence, TerminalEvidence::ProvenUnsent(_)));
+        assert!(observations.is_empty());
+        assert_eq!(spawn_count(temporary.path()), 0);
+        return;
+    }
+    for (case, home) in [("empty", ""), ("unresolvable", "relative-home")] {
+        let output =
+            tokio::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "invalid_ambient_credential_home_is_proven_unsent_before_spawn",
+                    "--nocapture",
+                ])
+                .env(PROBE, case)
+                .env("CODEX_HOME", home)
+                .output()
+                .await
+                .expect("isolated environment test starts");
+        assert!(
+            output.status.success(),
+            "{case}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[tokio::test]
+async fn consumed_snapshot_past_reset_is_recorded_as_zero_delay() {
+    for (scenario, kind) in [
+        ("rate_snapshot_past", ProviderErrorKind::RateLimited),
+        ("quota_snapshot_past", ProviderErrorKind::QuotaExhausted),
+    ] {
+        let result = execute_scenario(
+            scenario,
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        let error = provider_error(&result.evidence);
+        assert_eq!(error.kind, kind);
+        assert_eq!(error.exchange.retry_after, Some(Duration::ZERO));
+        assert!(error.non_acceptance_proven);
+        assert_eq!(result.spawns, 1);
+    }
 }

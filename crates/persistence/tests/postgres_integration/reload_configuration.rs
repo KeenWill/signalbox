@@ -98,6 +98,23 @@ async fn reload_configuration_refusal_claims_identity_and_requires_a_typed_recor
     assert!(sqlx::query("INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind, issuer_module)
         VALUES ($1, 'reload_configuration', 1, now(), 'operator', NULL)")
         .bind(missing).execute(&pool).await.is_err());
+    // A newly admitted kind still has one supported version and the registry stays closed.
+    for (kind, version) in [
+        ("reload_configuration", 2_i16),
+        ("unknown_reload_kind", 1_i16),
+    ] {
+        let error = sqlx::query("INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind, issuer_module)
+            VALUES ($1, $2, $3, now(), 'operator', NULL)")
+            .bind(next_test_submit_uuid()).bind(kind).bind(version).execute(&pool).await
+            .expect_err("unsupported registry kind or version");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("23514")
+        );
+    }
     let existing = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let mut service = CreateSessionService::new(
         FixedSessionIds::new([SessionId::from_uuid(next_test_submit_uuid())]),

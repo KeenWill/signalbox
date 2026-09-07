@@ -56,6 +56,7 @@ pub(crate) enum Command {
     ReloadConfiguration {
         command_id: Option<CommandId>,
     },
+    Credential(CredentialCommand),
     Create {
         selection: Option<ModelSelection>,
         template: Option<String>,
@@ -412,6 +413,33 @@ struct Cli {
     command: CliCommand,
 }
 
+#[derive(Debug, ClapArgs)]
+struct CredentialArguments {
+    #[command(subcommand)]
+    command: CredentialCommand,
+}
+
+/// Operator-invoked OAuth administration.
+#[derive(Debug, Subcommand)]
+pub(crate) enum CredentialCommand {
+    /// Begin device authorization for a credential profile.
+    Provision(CredentialTarget),
+    /// Replace the profile's stored authorization through device authorization.
+    Reprovision(CredentialTarget),
+    /// Delete the profile's retained OAuth authorization.
+    Delete(CredentialTarget),
+}
+
+#[derive(Debug, ClapArgs)]
+pub(crate) struct CredentialTarget {
+    /// Credential profile name, 1 through 256 UTF-8 bytes without padding or NUL.
+    #[arg(value_name = "PROFILE")]
+    pub(crate) profile: String,
+    /// Durable UUID for retries; omission generates and prints a new identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    pub(crate) command_id: Option<CommandId>,
+}
+
 #[derive(Debug, Subcommand)]
 enum CliCommand {
     /// Re-read and validate the daemon configuration and reload its catalogs.
@@ -420,6 +448,8 @@ enum CliCommand {
         #[arg(long, value_name = "UUID", value_parser = command_id)]
         command_id: Option<CommandId>,
     },
+    /// Provision, replace, or delete an OAuth credential.
+    Credential(CredentialArguments),
     /// Create a session.
     Create(CreateArguments),
     /// Append an explicit immutable placement update.
@@ -1918,6 +1948,7 @@ pub(crate) fn parse(
                 content: delegation_text_argument(arguments.content, arguments.content_file)?,
             },
         }),
+        CliCommand::Credential(arguments) => Command::Credential(arguments.command),
         CliCommand::Goal(arguments) => Command::Goal(match arguments.command {
             GoalSubcommand::Attach(arguments) => GoalCommand::Attach {
                 session_id: arguments.session_id,

@@ -1,6 +1,7 @@
 //! Process-protocol configuration reload request and receipt mapping.
 
 use super::*;
+use crate::configuration_reload::ConfigurationReloadError;
 use signalbox_persistence::reload_configuration::{
     ReloadConfiguration, ReloadLookup, ReloadPhase, ReloadRepositoryError, ReloadResult,
 };
@@ -71,16 +72,22 @@ pub(super) async fn handle_reload<Writer: AsyncWrite + Unpin>(
             .await
         }
         outcome @ (Ok(ReloadLookup::Unclaimed) | Err(_)) => {
-            let code = match outcome {
-                Err(ReloadRepositoryError::CommitAmbiguous(_)) => ErrorCode::CommitAmbiguous,
-                Err(ReloadRepositoryError::Database(_)) => ErrorCode::Unavailable,
+            let (error, recovery_required) = match outcome {
+                Err(ConfigurationReloadError::BeforeEffect(error)) => (Some(error), false),
+                Err(ConfigurationReloadError::RecoveryRequired(error)) => (Some(error), true),
+                _ => (None, false),
+            };
+            let code = match error {
+                Some(ReloadRepositoryError::CommitAmbiguous(_)) => ErrorCode::CommitAmbiguous,
+                Some(ReloadRepositoryError::Database(_)) => ErrorCode::Unavailable,
                 _ => ErrorCode::Internal,
             };
             tracing::error!(
                 cause = "configuration_reload_persistence_failed",
-                "configuration reload needs recovery"
+                recovery_required,
+                "configuration reload persistence failed"
             );
-            if let Some(reporter) = &services.recovery_reporter {
+            if recovery_required && let Some(reporter) = &services.recovery_reporter {
                 reporter.report_recovery_required();
             }
             write_error(
