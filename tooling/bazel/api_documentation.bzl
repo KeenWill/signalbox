@@ -11,7 +11,8 @@ def _api_documentation_impl(ctx):
         executable = ctx.executable.renderer,
         arguments = [arguments],
         inputs = ctx.files.json + ctx.files.sources,
-        tools = [ctx.attr.renderer[DefaultInfo].files_to_run],
+        tools = [ctx.attr.renderer[DefaultInfo].files_to_run, ctx.file.rustfmt],
+        env = {"RUSTFMT": ctx.file.rustfmt.path},
         outputs = [output],
         mnemonic = "RenderApi",
     )
@@ -22,6 +23,7 @@ api_documentation = rule(
     attrs = {
         "json": attr.label_list(allow_files = True),
         "renderer": attr.label(default = Label("//scripts:render_api"), executable = True, cfg = "exec"),
+        "rustfmt": attr.label(default = Label("@rules_rust//rust/toolchain:current_rustfmt_toolchain"), allow_single_file = True, cfg = "exec"),
         "sources": attr.label_list(allow_files = True),
     },
 )
