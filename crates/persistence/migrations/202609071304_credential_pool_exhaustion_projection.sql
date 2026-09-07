@@ -15,6 +15,7 @@ CREATE TABLE credential_pool_exhaustion_member (
     action_id bigint REFERENCES credential_pool_member_action,
     member_action_ids bigint[] NOT NULL,
     cleared_record_generations bigint[] NOT NULL,
+    oauth_home_generation bigint,
     transient_observation_model_call_ids uuid[] NOT NULL,
     capacity_windows jsonb CHECK (jsonb_typeof(capacity_windows) = 'array'),
     record_generation bigint GENERATED ALWAYS AS ((evidence->'exclusion'->>'record_generation')::bigint) STORED REFERENCES credential_exclusion,
@@ -31,6 +32,10 @@ CREATE TRIGGER credential_pool_exhaustion_member_immutable BEFORE UPDATE OR DELE
 
 CREATE FUNCTION capture_credential_pool_exhaustion_reset_sources() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    SELECT authorization.generation INTO NEW.oauth_home_generation
+      FROM oauth_credential_authorization authorization
+      WHERE authorization.profile = NEW.profile AND authorization.quarantined
+        AND authorization.quarantine_cause = 'credential_home';
     SELECT COALESCE(array_agg(x.record_generation ORDER BY x.record_generation), '{}'::bigint[])
       INTO NEW.cleared_record_generations
       FROM credential_exclusion x
@@ -80,6 +85,7 @@ WITH context AS (
               AND newer.pool_policy_id IS NOT DISTINCT FROM x.pool_policy_id
               AND newer.session_id IS NOT DISTINCT FROM x.session_id)
         AND NOT (x.record_generation = ANY(e.cleared_record_generations))
+        AND (x.oauth_generation IS NULL OR x.oauth_generation = e.oauth_home_generation)
 ), windows AS (
     SELECT (capacity_window->>'remaining_percent')::bigint AS remaining,
            (capacity_window->>'resets_at')::numeric AS reset_nanos
@@ -141,8 +147,11 @@ SELECT jsonb_build_object('profile', e.profile, 'exclusion', selected.exclusion,
            (SELECT CASE WHEN count(reset_ms) = count(*) THEN max(reset_ms) END FROM candidates)),
        selected.action_id
   FROM candidates selected
+  LEFT JOIN credential_pool_transient_exclusion transient_order
+    ON selected.rank = 4 AND transient_order.observation_model_call_id = selected.correlation
   ORDER BY selected.rank, selected.source_order, selected.record_generation DESC NULLS LAST,
-           selected.action_id DESC NULLS LAST, selected.reset_ms DESC NULLS LAST, selected.correlation
+           selected.action_id DESC NULLS LAST, transient_order.reset_at DESC NULLS LAST,
+           selected.reset_ms DESC NULLS LAST, selected.correlation
   LIMIT 1;
 $$;
 
