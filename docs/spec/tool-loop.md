@@ -475,8 +475,7 @@ trips under the scheduler lock.
 
 ## Planned
 
-- Pre-approval lost-placement resolution:
-  [tool-loop design](../design/tool-loop.md).
+- Lost-placement resolution: [tool-loop design](../design/tool-loop.md).
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a fourth
   `ToolInadmissible` result entry; see

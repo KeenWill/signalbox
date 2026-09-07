@@ -1,14 +1,13 @@
 # Tool loop design
 
 This design is not built; it extends [tool-loop](../spec/tool-loop.md) with four
-capabilities: pre-approval lost-placement resolution, pre-approval
-admissibility, the instruction admission effect, and child creation by
-`spawn_session`.
+capabilities: lost-placement resolution, pre-approval admissibility, the
+instruction admission effect, and child creation by `spawn_session`.
 
 ## Goal
 
-Lost-placement resolution prevents approval parking for unavailable runner
-requests.
+Lost-placement resolution prevents or retires approval parking for unavailable
+runner requests.
 
 Pre-approval admissibility lets a tool family refuse a request on evidence
 available before any approval decision, so no judge or user is asked about a
@@ -31,6 +30,11 @@ an approval state, judge call, attempt row, or executor work. It projects one
 `ToolInadmissible { request }` entry in proposal order, rendered as
 `execution_failed` with detail `placement_lost`, and satisfies the
 batch-complete condition.
+
+If placement loss finds a runner-locus request parked for approval, the loss
+transaction retires that approval and records the same retryable
+`closed_inadmissible` resolution and projection without an attempt row, then
+resumes batch evaluation.
 
 A family declares an admissibility check for a condition it can evaluate before
 approval. Where a family declares one, that check takes precedence over the
@@ -128,7 +132,9 @@ until the creation transaction exists, and no other surface creates the child.
 
 A runner-locus request on a lost placement records a retryable failure without
 approval parking or an attempt row; its retained `closed_inadmissible`
-resolution projects `ToolInadmissible` and counts toward batch completion.
+resolution projects `ToolInadmissible` and counts toward batch completion. Loss
+after approval parking retires the approval, records that resolution, and
+resumes batch evaluation.
 
 A request a declaring family marks inadmissible resolves before approval with no
 approval state, no judge call, no attempt row, and no executor work; it projects

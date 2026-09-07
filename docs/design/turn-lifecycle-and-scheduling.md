@@ -53,8 +53,8 @@ shapes and placement transitions are owned by
 [runner-protocol](../spec/runner-protocol.md). This subsystem owns their effect
 on the turn. Replacement is never refused because a model call is in flight; it
 stays staged and resumable while daemon-locus requests execute on the current
-placement. [Tool loop](tool-loop.md) owns pre-approval lost-placement
-resolution. After every request resolves, replacement takes over in the
+placement. [Tool loop](tool-loop.md) owns lost-placement resolution. After every
+request resolves, replacement takes over in the
 [continuation transaction](../spec/tool-loop.md), after all tool results are
 appended and before the next call is prepared against the changed placement.
 When an interrupt or crash-loss reconciliation terminalizes the batch, that path
