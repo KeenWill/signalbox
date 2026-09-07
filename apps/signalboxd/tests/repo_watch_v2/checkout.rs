@@ -980,6 +980,77 @@ async fn disabled_runtime_scavenges_checkouts_without_submitting_pending_command
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn startup_removes_a_prepared_directory_before_identity_retention()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::dispatch::{CommandSubmission, SessionCommandSink};
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    let pending = fixture
+        .store
+        .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+        .await?;
+    sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
+    let result = fixture
+        .sink
+        .submit(pending[0].command().clone())
+        .await
+        .expect("held core creation");
+    let CommandSubmission::Creation(CreateSessionOutcome::Applied(applied)) = result else {
+        panic!("core creation must be applied");
+    };
+    let session = applied.session();
+    fixture
+        .store
+        .retain_checkout_location(
+            fixture.command,
+            session,
+            fixture
+                .sink
+                .models
+                .daemon_tools()
+                .expect("tools")
+                .workspace_root()
+                .as_os_str()
+                .as_bytes(),
+        )
+        .await?;
+    let root = fixture.root(session);
+    std::fs::create_dir_all(&root)?;
+    let restarted = RepoWatchStore::new(fixture.module.clone());
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("active prepared directory retained");
+    assert!(root.is_dir());
+    fixture.stop(session).await;
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("terminal prepared directory removed");
+    assert!(!root.exists());
+    let flags: (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT submission_pending, checkout_removed,
+                checkout_device IS NULL AND checkout_inode IS NULL,
+                checkout_path IS NULL AND created_session_id IS NULL
+         FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.module)
+    .await?;
+    assert_eq!(flags, (true, true, true, true));
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("repeated cleanup is idempotent");
+    assert!(restarted.checkout_removal_candidates().await?.is_empty());
+    assert!(fixture.runner.steps.lock().expect("Git steps").is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn pending_replay_preserves_cleanup_of_an_unrecorded_checkout() -> Result<(), Box<dyn Error>>
 {
     use signalboxd::repo_watch_dispatch::scavenge_checkouts;

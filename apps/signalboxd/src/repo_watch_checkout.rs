@@ -283,10 +283,7 @@ pub(crate) fn remove(
     };
     let stat = rustix::fs::fstat(&directory)?;
     if identity
-        != Some(CheckoutDirectoryIdentity {
-            device: stat.st_dev,
-            inode: stat.st_ino,
-        })
+        .is_some_and(|identity| (identity.device, identity.inode) != (stat.st_dev, stat.st_ino))
     {
         return Err(rustix::io::Errno::STALE);
     }

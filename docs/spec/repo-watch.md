@@ -215,8 +215,9 @@ root and core session identity before filesystem work; cleanup uses them without
 waiting for `SessionCreated` settlement or consulting current configuration.
 Cleanup includes locations retained before checkout recording. Settled cleanup
 prevents repeated provisioning. The ledger retains the directory device and
-inode before Git runs; removal verifies them before changing permissions or
-traversing contents. A substituted directory leaves removal pending. The removal
+inode before Git runs; removal verifies retained identities before changing
+permissions or traversing contents. An identity mismatch leaves removal pending;
+an unrecorded identity permits removal at the retained location. The removal
 migration settles existing provisioned rows without a retained location. Removal
 restores owner directory permissions and refuses mount crossings. Pending
 submission follow-ups remain retryable after core command settlement, including
