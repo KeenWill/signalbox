@@ -45,6 +45,13 @@ pub(crate) const WITHDRAW_GIT_REMOTE_KIND: &str =
 pub(crate) const SESSION_LIFECYCLE_KIND: &str =
     durable_command_kind_to_str(CommandKind::SessionLifecycle);
 
+pub(crate) const REPLACE_LOST_RUNNER_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReplaceLostRunner);
+pub(crate) const ABANDON_LOST_RUNNER_KIND: &str =
+    durable_command_kind_to_str(CommandKind::AbandonLostRunner);
+pub(crate) const PROMOTE_PENDING_RUNNER_KIND: &str =
+    durable_command_kind_to_str(CommandKind::PromotePendingRunner);
+
 /// Returns the envelope's `issuer_kind` and `issuer_module` spellings.
 pub(crate) const fn issuer_columns(
     principal: CommandPrincipal,
@@ -79,7 +86,7 @@ pub(crate) const REPROVISION_OAUTH_CREDENTIAL_KIND: &str =
 pub(crate) const DELETE_OAUTH_CREDENTIAL_KIND: &str =
     durable_command_kind_to_str(CommandKind::DeleteOauthCredential);
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 20] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 23] = [
     CommandKindDefinition {
         kind: CommandKind::ReloadConfiguration,
         spelling: RELOAD_CONFIGURATION_KIND,
@@ -217,6 +224,27 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 20] = [
         kind: CommandKind::SessionLifecycle,
         spelling: SESSION_LIFECYCLE_KIND,
         typed_table: "session_lifecycle_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::ReplaceLostRunner,
+        spelling: REPLACE_LOST_RUNNER_KIND,
+        typed_table: "replace_lost_runner_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::AbandonLostRunner,
+        spelling: ABANDON_LOST_RUNNER_KIND,
+        typed_table: "abandon_lost_runner_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::PromotePendingRunner,
+        spelling: PROMOTE_PENDING_RUNNER_KIND,
+        typed_table: "promote_pending_runner_command",
         minimum_version: 1,
         maximum_version: 1,
     },

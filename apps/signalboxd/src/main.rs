@@ -369,9 +369,19 @@ fn socket_artifacts_conflict(process_path: &Path, runner_path: &Path) -> bool {
     let Some(runner_artifacts) = socket_artifact_paths(runner_path) else {
         return process_path == runner_path;
     };
+    let oauth_root = oauth_credential_root(&process_artifacts[0]);
     process_artifacts
         .iter()
         .any(|process| runner_artifacts.iter().any(|runner| runner == process))
+        || runner_artifacts
+            .iter()
+            .any(|runner| runner.starts_with(&oauth_root) || oauth_root.starts_with(runner))
+}
+
+fn oauth_credential_root(process_socket: &Path) -> PathBuf {
+    let mut root = process_socket.as_os_str().to_owned();
+    root.push(".oauth");
+    PathBuf::from(root)
 }
 
 fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
@@ -637,6 +647,38 @@ fn report_database_close_failure(error: &SingleHubGuardError) {
     );
 }
 
+async fn migrate_hub_database(pool: &sqlx::PgPool) -> Result<(), HubRuntimeError> {
+    migrate(pool).await.map_err(|error| {
+        tracing::error!(migration_detail = %error, "database migration rejected");
+        erase_startup_cause(
+            RuntimePhase::Migration,
+            SanitizedStartupCause::Static("database_migration_failed"),
+        )
+    })?;
+    tracing::info!(phase = ?RuntimePhase::Migration, "daemon startup phase completed");
+    Ok(())
+}
+
+async fn install_oauth_registrations(
+    pool: &sqlx::PgPool,
+    oauth_registrations: &[(
+        String,
+        signalbox_persistence::oauth_credential::OauthRegistration,
+    )],
+) -> Result<(), HubRuntimeError> {
+    signalbox_persistence::oauth_credential::OauthCredentialRepository::new(pool.clone())
+        .replace_registrations(oauth_registrations)
+        .await
+        .map_err(|error| {
+            erase_startup_scan_cause(
+                process_runtime_failure_class(&ProcessRuntimeError::OauthRecovery(error)),
+                "oauth_registration_recovery_failed",
+                None,
+                None,
+            )
+        })
+}
+
 async fn migrate_scan_then_schedule<Migration, Scan, Schedule, Runtime, Output>(
     migration: Migration,
     scan: Scan,
@@ -804,6 +846,9 @@ fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailure
     use signalbox_persistence::outbox::OutboxDispatchError;
 
     match error {
+        ProcessRuntimeError::OauthRecovery(error) => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: matches!(error, signalbox_persistence::oauth_credential::OauthCredentialRepositoryError::CommitAmbiguous),
+        },
         ProcessRuntimeError::Accept(_)
         | ProcessRuntimeError::SpoolIo(_)
         | ProcessRuntimeError::InsufficientPoolCapacity
@@ -1353,20 +1398,7 @@ async fn run_hub(
     })?;
     let pool = database.pool().clone();
     let fenced_pool_floor_pool = pool.clone();
-    migrate(&pool).await.map_err(|error| {
-        tracing::error!(
-            migration_detail = %error,
-            "database migration rejected"
-        );
-        erase_startup_cause(
-            RuntimePhase::Migration,
-            SanitizedStartupCause::Static("database_migration_failed"),
-        )
-    })?;
-    tracing::info!(
-        phase = ?RuntimePhase::Migration,
-        "daemon startup phase completed"
-    );
+    migrate_hub_database(&pool).await?;
     let pending_reload =
         signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
             pool.clone(),
@@ -1448,7 +1480,7 @@ async fn run_hub(
                 )
             })?;
     }
-    let runtime_factory = signalboxd::model_catalog_runtime::ModelRuntimeFactory::new(
+    let mut runtime_factory = signalboxd::model_catalog_runtime::ModelRuntimeFactory::new(
         model_exchange_timeout,
         post_kill_reap_bound,
         native_message_limit,
@@ -1479,6 +1511,41 @@ async fn run_hub(
             )
         })?
         .with_convergence_policy(model_configuration.convergence().cloned());
+    let oauth_registrations = model_configuration.oauth_registrations();
+    let root_path = oauth_credential_root(configuration.process_socket_path());
+    let retained_root = match root_path.symlink_metadata() {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => {
+            return Err(erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("oauth_credential_home_recovery_failed"),
+            ));
+        }
+    };
+    let oauth_service = if !oauth_registrations.is_empty() || retained_root {
+        let root = signalbox_model_runtime_codex_cli::OauthCredentialRoot::open(&root_path)
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("oauth_credential_home_recovery_failed"),
+                )
+            })?;
+        let service = Arc::new(
+            signalboxd::OauthCredentialService::new(pool.clone(), oauth_registrations).map_err(
+                |_| {
+                    erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static("oauth_delivery_construction_failed"),
+                    )
+                },
+            )?,
+        );
+        runtime_factory = runtime_factory.with_oauth_delivery(service.clone(), root);
+        Some(service)
+    } else {
+        None
+    };
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
         .map(|configuration| configuration.exec_supervisor_executable().to_path_buf());
@@ -1531,9 +1598,10 @@ async fn run_hub(
     );
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
+    let migration_oauth_registrations = model_configuration.oauth_registrations();
     let scan_pool = pool.clone();
     let startup = migrate_scan_then_schedule(
-        std::future::ready(Ok(())),
+        install_oauth_registrations(&pool, &migration_oauth_registrations),
         async move {
             let mut scan = StartupScanService::new(
                 UuidV7StartupScanIdGenerator,
@@ -1877,7 +1945,7 @@ async fn run_hub(
         )
     })?;
     let configuration_reload = configuration_reload
-        .with_runtime_factory(runtime_factory)
+        .with_runtime_factory(runtime_factory.clone())
         .with_github_tool_credential(configuration.github_token_file());
     let configuration_reload = match &repository_watch_runtime {
         Some(watch) => {
@@ -1927,7 +1995,7 @@ async fn run_hub(
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
         signalboxd::model_catalog_runtime::CatalogContextCompactionModel::new(
             configuration_reload.catalogs().models,
-            runtime_factory,
+            runtime_factory.clone(),
         ),
     );
     let process_runtime = ProcessRuntime::new_with_templates(
@@ -1947,6 +2015,10 @@ async fn run_hub(
     };
     let process_runtime = match blob_store_registry {
         Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
+        None => process_runtime,
+    };
+    let process_runtime = match oauth_service {
+        Some(service) => process_runtime.with_oauth_service(service),
         None => process_runtime,
     };
     let web_http_runtime = web_http_listener
@@ -2862,6 +2934,20 @@ mod tests {
     }
 
     #[test]
+    fn oauth_startup_recovery_preserves_commit_ambiguity() {
+        use signalbox_persistence::oauth_credential::OauthCredentialRepositoryError;
+        for (error, commit_ambiguous) in [
+            (OauthCredentialRepositoryError::Database, false),
+            (OauthCredentialRepositoryError::CommitAmbiguous, true),
+        ] {
+            assert_eq!(
+                process_runtime_failure_class(&ProcessRuntimeError::OauthRecovery(error)),
+                OperatorFailureClass::Infrastructure { commit_ambiguous }
+            );
+        }
+    }
+
+    #[test]
     fn tracing_filter_defaults_scopes_debug_and_quiets_dependencies() {
         let (default_filter, default_disposition) = operator_filter(None);
         let (empty_filter, empty_disposition) = operator_filter(Some(""));
@@ -2900,6 +2986,65 @@ mod tests {
         assert_eq!(external_disposition, OperatorFilterDisposition::Rejected);
         assert_eq!(invalid_filter.to_string(), "info");
         assert_eq!(invalid_disposition, OperatorFilterDisposition::Rejected);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn fresh_fenced_database_migrates_before_installing_oauth_catalog()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testcontainers_modules::{
+            postgres::Postgres,
+            testcontainers::{ImageExt, runners::AsyncRunner},
+        };
+        let container = Postgres::default()
+            // Same PostgreSQL image as tests/process_substrate.rs.
+            .with_tag("18.4-alpine3.23")
+            .with_cmd(signalbox_persistence::disposable_postgres_server_args())
+            .with_mount(signalbox_persistence::disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(signalbox_persistence::disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?,
+        );
+        let database = signalboxd::FencedHubDatabase::connect_with(
+            signalbox_persistence::local_test_connection_options(&url)?,
+            None,
+        )
+        .await?;
+        let table: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('oauth_credential_registration')::text")
+                .fetch_one(database.pool())
+                .await?;
+        assert!(
+            table.is_none(),
+            "fencing initializes only its migration baseline"
+        );
+        let registration = signalbox_persistence::oauth_credential::OauthRegistration {
+            client_id: "startup-client".into(),
+            token_url: "https://authorization.example/token".into(),
+            refresh_token_url: "https://authorization.example/oauth/token".into(),
+            device_authorization_url: "https://authorization.example/device".into(),
+            scopes: vec!["openid".into()],
+        };
+        super::migrate_hub_database(database.pool())
+            .await
+            .map_err(|_| "startup migration failed")?;
+        super::install_oauth_registrations(
+            database.pool(),
+            &[("startup-profile".into(), registration)],
+        )
+        .await
+        .map_err(|_| "OAuth startup migration failed")?;
+        let profile: String =
+            sqlx::query_scalar("SELECT profile FROM oauth_credential_registration")
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(profile, "startup-profile");
+        database.close().await?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -3075,6 +3220,68 @@ mod tests {
             configuration.runner_socket_path(),
             std::path::Path::new("/tmp/signalbox-runner.sock")
         );
+    }
+
+    #[test]
+    fn oauth_root_remains_distinct_when_the_socket_ends_in_oauth() {
+        let socket = std::path::Path::new("/tmp/signalbox.oauth");
+        let root = super::oauth_credential_root(socket);
+        assert_ne!(root, socket);
+        assert_eq!(root, std::path::Path::new("/tmp/signalbox.oauth.oauth"));
+        assert_ne!(
+            root,
+            super::oauth_credential_root(std::path::Path::new("/tmp/signalbox.sock"))
+        );
+    }
+
+    #[test]
+    fn runner_socket_cannot_replace_the_oauth_credential_root() {
+        let error = HubConfiguration::from_values(HubConfigurationValues {
+            process_socket_path: Some(OsString::from("/tmp/signalbox.sock")),
+            runner_socket_path: Some(OsString::from("/tmp/signalbox.sock.oauth")),
+            ..hub_configuration_values()
+        })
+        .err()
+        .expect("the OAuth root is a reserved process socket artifact");
+        assert_eq!(
+            error,
+            HubConfigurationError::new(
+                RUNNER_SOCKET_PATH_ENVIRONMENT,
+                RequiredSettingFailure::Conflicts,
+            )
+        );
+    }
+
+    #[test]
+    fn runner_socket_cannot_contain_or_enter_the_oauth_credential_root() {
+        for runner in [
+            "/tmp/oauth-overlap/process.sock.oauth/runner.sock",
+            "/tmp/oauth-overlap",
+        ] {
+            let error = HubConfiguration::from_values(HubConfigurationValues {
+                process_socket_path: Some(OsString::from("/tmp/oauth-overlap/process.sock")),
+                runner_socket_path: Some(OsString::from(runner)),
+                ..hub_configuration_values()
+            })
+            .err()
+            .expect("runner artifacts cannot overlap the OAuth directory");
+            assert_eq!(
+                error,
+                HubConfigurationError::new(
+                    RUNNER_SOCKET_PATH_ENVIRONMENT,
+                    RequiredSettingFailure::Conflicts,
+                ),
+                "{runner}",
+            );
+        }
+        HubConfiguration::from_values(HubConfigurationValues {
+            process_socket_path: Some(OsString::from("/tmp/oauth-overlap/process.sock")),
+            runner_socket_path: Some(OsString::from(
+                "/tmp/oauth-overlap/process.sock.oauth-sibling/runner.sock",
+            )),
+            ..hub_configuration_values()
+        })
+        .expect("a shared name prefix does not overlap directory components");
     }
 
     #[test]

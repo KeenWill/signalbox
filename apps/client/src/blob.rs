@@ -144,9 +144,12 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::ReviewOrchestration { .. }
         | ServerMessage::ConfigurationReloaded { .. }
         | ServerMessage::ConfigurationReloadFailed { .. }
+        | ServerMessage::DeploymentLimits { .. }
+        | ServerMessage::RunnerReplacementReceipt { .. }
+        | ServerMessage::RunnerAbandonmentReceipt { .. }
+        | ServerMessage::RunnerPromotionReceipt { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
-        | ServerMessage::OauthCredentialReceipt { .. }
-        | ServerMessage::DeploymentLimits { .. } => BlobUploadResponse::Unexpected,
+        | ServerMessage::OauthCredentialReceipt { .. } => BlobUploadResponse::Unexpected,
     }
 }
 

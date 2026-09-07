@@ -139,8 +139,10 @@ pub(super) fn delegation_content_from_live_completed(
             | crate::SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | crate::SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | crate::SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | crate::SemanticTranscriptEntryPayload::ToolInadmissible { .. }
             | crate::SemanticTranscriptEntryPayload::ToolClosed { .. }
             | crate::SemanticTranscriptEntryPayload::TurnCompleted { .. }
+            | crate::SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | crate::SemanticTranscriptEntryPayload::TurnCancelled { .. } => return None,
         };
         if entry.source_session() != value.session() || *producing_call != value.call().id() {

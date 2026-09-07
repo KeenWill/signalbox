@@ -59,6 +59,16 @@ pub enum CredentialAccessFailure {
     Unavailable,
     /// The delivery artifact was present but could not be read as a value.
     Unreadable,
+    /// OAuth minting and current configuration tuples differ.
+    OauthTupleMismatch,
+    /// OAuth refresh may have rotated without a retained replacement.
+    OauthRefreshAmbiguous,
+    /// The authorization server permanently rejected OAuth refresh.
+    OauthRefreshRejected,
+    /// OAuth refresh returned a different account identity.
+    OauthIdentityChanged,
+    /// OAuth material could not be installed in an isolated credential home.
+    OauthCredentialHome,
 }
 
 /// A reference-only credential-access failure; never contains secret bytes.

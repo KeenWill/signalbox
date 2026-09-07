@@ -558,10 +558,13 @@ impl GoalRepository {
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
                 | CommandKind::ReloadConfiguration
+                | CommandKind::SessionLifecycle
+                | CommandKind::ReplaceLostRunner
+                | CommandKind::AbandonLostRunner
+                | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
-                | CommandKind::DeleteOauthCredential
-                | CommandKind::SessionLifecycle,
+                | CommandKind::DeleteOauthCredential,
             ) => Err(GoalRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -1688,10 +1691,13 @@ async fn existing_or_conflicting(
         | CommandKind::MintGitRemote
         | CommandKind::WithdrawGitRemote
         | CommandKind::ReloadConfiguration
+        | CommandKind::SessionLifecycle
+        | CommandKind::ReplaceLostRunner
+        | CommandKind::AbandonLostRunner
+        | CommandKind::PromotePendingRunner
         | CommandKind::ProvisionOauthCredential
         | CommandKind::ReprovisionOauthCredential
-        | CommandKind::DeleteOauthCredential
-        | CommandKind::SessionLifecycle => {
+        | CommandKind::DeleteOauthCredential => {
             return Ok(GoalCommandHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });

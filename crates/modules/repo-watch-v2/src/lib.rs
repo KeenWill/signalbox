@@ -29,6 +29,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 mod baseline;
+pub mod checkout;
 pub mod dispatch;
 mod event_decode;
 pub mod github;

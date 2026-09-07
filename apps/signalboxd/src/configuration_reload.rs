@@ -152,9 +152,12 @@ impl ConfigurationReload {
         &self,
         models: Arc<HubModelConfiguration>,
     ) -> Option<Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel>> {
-        self.runtime_factory.map(|factory| {
+        self.runtime_factory.as_ref().map(|factory| {
             Arc::new(
-                crate::model_catalog_runtime::CatalogContextCompactionModel::new(models, factory),
+                crate::model_catalog_runtime::CatalogContextCompactionModel::new(
+                    models,
+                    factory.clone(),
+                ),
             ) as _
         })
     }
@@ -180,7 +183,7 @@ impl ConfigurationReload {
                 "repository-watch credential conflicts with GitHub tool credential",
             ));
         }
-        if let Some(factory) = self.runtime_factory {
+        if let Some(factory) = &self.runtime_factory {
             factory
                 .build(&catalogs.models)
                 .map_err(|_| failure(ReloadPhase::Validate, "model runtime composition failed"))?;

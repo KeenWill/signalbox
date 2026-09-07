@@ -77,6 +77,11 @@ impl ToolBatch {
         let mut entries = Vec::with_capacity(self.requests.len());
         for (request, identity) in self.requests.iter().zip(entry_ids) {
             let payload = match self.approvals.get(&request.id()) {
+                _ if request.inadmissible_reason().is_some() => {
+                    SemanticTranscriptEntryPayload::ToolInadmissible {
+                        request: request.id(),
+                    }
+                }
                 Some(resolution)
                     if matches!(resolution.decision(), ToolApprovalDecision::Deny { .. }) =>
                 {
@@ -290,6 +295,11 @@ impl ToolBatch {
         let mut entries = Vec::with_capacity(self.requests.len());
         for (request, identity) in self.requests.iter().zip(entry_ids) {
             let payload = match self.approvals.get(&request.id()) {
+                _ if request.inadmissible_reason().is_some() => {
+                    SemanticTranscriptEntryPayload::ToolInadmissible {
+                        request: request.id(),
+                    }
+                }
                 Some(resolution)
                     if matches!(resolution.decision(), ToolApprovalDecision::Deny { .. }) =>
                 {
@@ -411,6 +421,11 @@ impl ToolBatch {
         let mut entries = Vec::with_capacity(self.requests.len());
         for (request, identity) in self.requests.iter().zip(entry_ids) {
             let payload = match self.approvals.get(&request.id()) {
+                _ if request.inadmissible_reason().is_some() => {
+                    SemanticTranscriptEntryPayload::ToolInadmissible {
+                        request: request.id(),
+                    }
+                }
                 Some(resolution)
                     if matches!(resolution.decision(), ToolApprovalDecision::Deny { .. }) =>
                 {
