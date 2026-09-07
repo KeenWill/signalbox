@@ -96,7 +96,7 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         )
     };
     let candidate = store.enroll_pristine(request).await?.into_receipt();
-    store
+    let candidate_connection = store
         .open_connection(candidate.identities().enrollment())
         .await?;
     let command = signalbox_domain::ReplaceLostRunner {
@@ -178,6 +178,13 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
             .is_err()
     );
     store
+        .transition_connection(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    store
         .record_replacement_workspace_ready(authorization, &ready)
         .await?;
     store
@@ -200,6 +207,17 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         RunnerEnrollmentState::Pending
     );
 
+    assert_eq!(
+        store.resume_runner_replacement(command.command_id).await?,
+        RunnerRecoveryOutcome::Pending
+    );
+    store
+        .transition_connection(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+            RunnerConnectionTransition::HeartbeatRecovered,
+        )
+        .await?;
     let result = store.resume_runner_replacement(command.command_id).await?;
 
     assert_eq!(

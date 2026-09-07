@@ -266,7 +266,8 @@ admissible stores the completed call but no decision and leaves the same request
 parked. A commissioned dispatch also keeps the request parked while its
 authority stands or when the turn has pending steering. Once that authority is
 withdrawn, an escalation with no pending steering terminalizes the unattended
-turn under the commissioned-dispatch audit. A `KnownFailed`, `Refused`,
+turn under the commissioned-dispatch audit, preserving `ToolInadmissible` for
+requests already closed by placement loss. A `KnownFailed`, `Refused`,
 `Cancelled`, or `Ambiguous` terminal judge call for an admissible request
 retains the attended park while immediately admitting a user decision.
 
