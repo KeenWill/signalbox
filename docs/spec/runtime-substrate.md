@@ -305,7 +305,8 @@ the status. An error record that follows the provider's finish marker and names
 no classifiable failure is stream-protocol loss, while a classified one stays
 definitive and outranks the finish. A provider-directed retry delay, decoded
 from the HTTP `Retry-After` header or the Codex app-server's typed rate-limit
-snapshot, rides the provider-error evidence into durable availability backoff.
+snapshot, rides the provider-error evidence into durable availability backoff
+except for quota failures, which carry the evidence without affecting backoff.
 The header admits delay-seconds and HTTP-date forms; malformed values carry no
 evidence. For rate-limit and quota failures, Codex uses the latest reported
 reset among fully consumed primary and secondary windows; null windows in sparse
