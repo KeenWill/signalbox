@@ -280,8 +280,8 @@ and needs no change. What the wiring PR must touch:
    (`crates/persistence/src/model_execution.rs:233`), so a second provider with
    its own credential needs the durable target-to-credential routing, and its
    tests, in this PR's scope as well.
-3. **`apps/signalboxd/src/configuration.rs`** — the provider allow-list gate,
-   currently a literal `!= "anthropic"` check →
+3. **`apps/signalboxd/src/configuration/mod.rs`** — the provider allow-list
+   gate, currently a literal `!= "anthropic"` check →
    `HubModelConfigurationError::UnsupportedProvider`. Must admit the new
    provider string — and retain it: today the gate validates `provider` and then
    drops it (`RuntimeModelDefinition` keeps only target, model spelling, and
