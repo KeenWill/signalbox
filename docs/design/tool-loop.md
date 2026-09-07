@@ -23,18 +23,25 @@ creates a delegated child and its initial task work.
 
 ## Design
 
-A runner-locus request whose placement is lost resolves as a retryable failure
-recorded in the batch before any approval wait parks the batch. The request
-stores `closed_inadmissible` with the retryable `placement_lost` reason, without
-an approval state, judge call, attempt row, or executor work. It projects one
+Before approval, a runner-locus request whose placement is lost before any lease
+offer or executor dispatch resolves as a retryable failure recorded in the batch
+before any approval wait parks the batch. The request stores
+`closed_inadmissible` with the retryable `placement_lost` reason, without an
+approval state, judge call, attempt row, or executor work. It projects one
 `ToolInadmissible { request }` entry in proposal order, rendered as
 `execution_failed` with detail `placement_lost`, and satisfies the
 batch-complete condition.
 
-If placement loss finds a runner-locus request parked for approval, the loss
-transaction retires that approval and records the same retryable
-`closed_inadmissible` resolution and projection without an attempt row, then
-resumes batch evaluation.
+The loss transaction resolves every unresolved runner-locus request in the batch
+that has neither an offered lease nor executor dispatch, including earlier
+approved requests when a later request parks the batch. It retires any existing
+approval and records the same retryable `closed_inadmissible` resolution and
+projection without creating an attempt row, then resumes batch evaluation.
+
+An offered lease is already dispatched. Its attempt, or any executor-dispatched
+attempt, completes or receives the
+[runner contract's](../spec/runner-protocol.md) effect-class crash
+classification; placement loss never rewrites or cancels it.
 
 A family declares an admissibility check for a condition it can evaluate before
 approval. Where a family declares one, that check takes precedence over the
@@ -130,11 +137,14 @@ until the creation transaction exists, and no other surface creates the child.
 
 ## Acceptance criteria
 
-A runner-locus request on a lost placement records a retryable failure without
-approval parking or an attempt row; its retained `closed_inadmissible`
-resolution projects `ToolInadmissible` and counts toward batch completion. Loss
-after approval parking retires the approval, records that resolution, and
-resumes batch evaluation.
+A runner-locus request that loses placement before any lease offer or executor
+dispatch records a retryable failure without creating an attempt row; its
+retained `closed_inadmissible` resolution projects `ToolInadmissible` and counts
+toward batch completion. Loss retires existing approvals and records that
+resolution for every unresolved runner-locus request before dispatch, including
+earlier approved requests in a parked batch, then resumes batch evaluation.
+Offered or executor-dispatched attempts complete or receive effect-class crash
+classification; placement loss never rewrites or cancels them.
 
 A request a declaring family marks inadmissible resolves before approval with no
 approval state, no judge call, no attempt row, and no executor work; it projects

@@ -149,9 +149,9 @@ parked turn terminalizes it cancelled through a fresh cancelled successor
 attempt and leaves no wait stored.
 
 A pinned-loss replacement command issued while a call is in flight is accepted,
-and its placement boundary commits after that call's observation boundary; a
-commit in any other order is rejected by the prefix-preserving frontier
-triggers.
+and its placement boundary commits after that call's observation boundary. A
+commit that places the replacement boundary before the call's observation
+boundary is rejected.
 
 An abandonment command against a session with an active turn is rejected with
 the existing-control result and creates no cancellation.
