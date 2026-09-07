@@ -648,7 +648,12 @@ impl PostgresApprovalJudgeRepository {
         let encoded = encode_usage(usage);
         if state == ApprovalJudgeStateStorageKind::Terminal {
             let exact: bool = sqlx::query_scalar(
-                "SELECT terminal_disposition_kind = $1
+                "SELECT (terminal_disposition_kind = $1 OR (
+                            terminal_disposition_kind = 'cancelled' AND $7
+                            AND EXISTS (SELECT 1 FROM tool_request AS request
+                                WHERE request.request_id = tool_approval_judge_model_call.request_id
+                                  AND request.inadmissible_reason = 'placement_lost')
+                        ))
                         AND recommendation_kind IS NULL AND rationale IS NULL
                         AND input_tokens IS NOT DISTINCT FROM $2
                         AND output_tokens IS NOT DISTINCT FROM $3
@@ -664,6 +669,10 @@ impl PostgresApprovalJudgeRepository {
             .bind(encoded.cache_creation)
             .bind(encoded.cache_read)
             .bind(prepared.call.into_uuid())
+            .bind(
+                disposition == FailedApprovalJudgeDisposition::KnownFailed
+                    && usage == ProviderReportedTokenUsage::unreported(),
+            )
             .fetch_one(&mut *transaction)
             .await?;
             transaction.rollback().await?;
