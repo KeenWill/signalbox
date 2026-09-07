@@ -388,22 +388,22 @@ receipt before current registration is evaluated, and conflicting reuse is
 rejected. The terminal client verifies the command and profile correlations and
 prints authorization details before the receipt.
 
-OAuth exchange claims retain validated authorization instructions before
-emission; invalid progress fields yield `device_endpoint_rejected`. Equal
-pending commands replay available instructions and report busy; startup records
-`abandoned` for pending exchanges; an ambiguous claim commit or failure to
-retain or send authorization progress or commit exchange completion raises the
-daemon's recovery signal. Authorization and its terminal receipt commit
-atomically after generation and current-registration checks; stale generations
-yield `superseded`, and changed registrations yield
-`failed { reason: registration_changed }`. Initial provisioning with stored
-authorization returns `already_provisioned` without an exchange; re-provisioning
-without authorization returns `not_provisioned`.
+OAuth configuration is rejected until dispatch support admits it; exchange
+handlers are therefore unreachable through daemon configuration. Exchange claims
+retain validated authorization instructions before emission; invalid progress
+fields yield `device_endpoint_rejected`. Equal pending commands replay available
+instructions and report busy; startup records `abandoned` for pending exchanges;
+an ambiguous claim commit or failure to retain or send authorization progress or
+commit exchange completion raises the daemon's recovery signal. Authorization
+and its terminal receipt commit atomically after generation and
+current-registration checks; stale generations yield `superseded`, and changed
+registrations yield `failed { reason: registration_changed }`. Initial
+provisioning with stored authorization returns `already_provisioned` without an
+exchange; re-provisioning without authorization returns `not_provisioned`.
 
 ## Planned
 
-- OAuth credential provisioning, re-provisioning after rejected refresh, and
-  deletion: [design](../design/process-protocol.md).
+- OAuth credential deletion: [design](../design/process-protocol.md).
 - Credential-exclusion administration, a listing read and a clear mutation over
   active exclusions: [design](../design/process-protocol.md).
 - Configuration reload request: [design](../design/process-protocol.md).

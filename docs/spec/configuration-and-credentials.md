@@ -695,8 +695,9 @@ OAuth provisioning runs the configured device exchange, retains refresh and
 identity tokens with the canonical configuration tuple and generation, and
 stores no authorization when the response lacks an identity token. Authorization
 commits and pool-policy membership insertion serialize account-independence
-checks against every retained co-membership. OAuth configuration admission
-requires dispatch support.
+checks against every retained co-membership. Configuration rejects OAuth as
+undelivered, so provisioning handlers remain unreachable until dispatch support
+admits it.
 
 ## Planned
 
