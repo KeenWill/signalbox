@@ -162,11 +162,6 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
             return Ok(result);
         };
         let session = applied.session();
-        let repository = self
-            .configuration
-            .repositories()
-            .iter()
-            .find(|repository| repository.repository() == checkout.event.repository());
         let stop = if let Some(stop) = checkout.stop_command {
             let sticky = match checkout.retired_reason {
                 Some(CheckoutRetirementReason::RepositoryUnconfigured) => {
@@ -175,10 +170,14 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 _ => StopStickiness::Sticky,
             };
             Some((stop, sticky))
-        } else if let Some(repository) = repository {
-            if checkout.head.as_ref() == Some(context.head_sha()) {
-                return Ok(result);
-            }
+        } else if checkout.head.as_ref() == Some(context.head_sha()) {
+            None
+        } else if let Some(repository) = self
+            .configuration
+            .repositories()
+            .iter()
+            .find(|repository| repository.repository() == checkout.event.repository())
+        {
             let provisioned = async {
                 let tools = self
                     .core

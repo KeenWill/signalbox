@@ -90,11 +90,13 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_CONFIG_GLOBAL", "/dev/null"),
         ("GIT_TERMINAL_PROMPT", "0"),
-        ("GIT_CONFIG_COUNT", "3"),
+        ("GIT_CONFIG_COUNT", "4"),
         ("GIT_CONFIG_KEY_1", "credential.helper"),
         ("GIT_CONFIG_VALUE_1", ""),
         ("GIT_CONFIG_KEY_2", "core.hooksPath"),
         ("GIT_CONFIG_VALUE_2", "/dev/null"),
+        ("GIT_CONFIG_KEY_3", "http.followRedirects"),
+        ("GIT_CONFIG_VALUE_3", "false"),
     ]
     .into_iter()
     .map(|(key, value)| (key.into(), value.into()))
