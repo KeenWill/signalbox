@@ -141,7 +141,9 @@ observation, and commits the differ's facts with their poll or webhook lineage.
 Terminal pull requests leave the ordinary baseline when observed; merged
 subjects retain a compact baseline until
 `numeric_bounds.repository_watch_webhook_retention` elapses from their merge
-time, and discussion reads run only for open subjects. Workflow reads query
+time, and discussion reads run only for open subjects. A comparison snapshot
+with a compact baseline missing its merge time is discarded and rebuilt by the
+next observation without resetting the event frontier. Workflow reads query
 completed runs by distinct current head SHA for the default branch and open
 pull-request same-repository head branches; prior completions for those branches
 remain comparison input. Each observation admits at most 1,000 REST and GraphQL

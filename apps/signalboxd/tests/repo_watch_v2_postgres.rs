@@ -2245,6 +2245,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .await?;
     assert_eq!(kinds, vec![String::from("check_run_completed")]);
     let retained = reopened.ingest_baseline(&compact_repository).await?;
+    let compact_payload: String = sqlx::query_scalar(
+        "SELECT comparison_baseline::text FROM repository_state WHERE repository = $1",
+    )
+    .bind(compact_repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
     assert!(
         retained
             .observation
@@ -2324,6 +2330,35 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         event_count, 1,
         "compaction expiry does not delete immutable events"
     );
+
+    let mut missing_merge_time: serde_json::Value = serde_json::from_str(&compact_payload)?;
+    missing_merge_time["merged_pull_requests"][0]
+        .as_object_mut()
+        .expect("compact baseline")
+        .remove("merged_at");
+    sqlx::query(
+        "UPDATE repository_state SET comparison_baseline = $2::jsonb WHERE repository = $1",
+    )
+    .bind(compact_repository.as_str())
+    .bind(missing_merge_time.to_string())
+    .execute(&module_pool)
+    .await?;
+    let invalidated = reopened.ingest_baseline(&compact_repository).await?;
+    assert!(invalidated.observation.is_none());
+    assert!(invalidated.merged_baselines.is_empty());
+    assert_eq!(invalidated.generation, at_expiry.generation);
+    assert_eq!(invalidated.frontier, at_expiry.frontier);
+    assert!(matches!(
+        reopened
+            .ingest_observation(&invalidated, &next, EventProducer::Poll, MERGED_RETENTION)
+            .await?,
+        FrontierEventAdmission::Committed { .. }
+    ));
+    let rebuilt = RepoWatchStore::new(module_pool.clone())
+        .ingest_baseline(&compact_repository)
+        .await?;
+    assert!(rebuilt.observation.is_some());
+    assert_eq!(rebuilt.merged_baselines[0].merged_at, merge_time);
 
     module_pool.close().await;
     core_pool.close().await;
