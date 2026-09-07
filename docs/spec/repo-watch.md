@@ -117,6 +117,15 @@ is a replay; different content is a conflict. Settlement changes a pending
 disposition exactly once. A frontier release supplies its observed generation
 and is stale after any intervening frontier commit.
 
+The module's repository task serializes polling and webhook wakes. Poll
+intervals are start-to-start; a wake received during an attempt waits for that
+attempt to finish and does not postpone the periodic poll deadline. Each attempt
+reloads its committed comparison baseline and frontier, including compacted
+merged pull requests and their head repository identities, fetches a complete
+observation, and commits the differ's facts with their poll or webhook lineage.
+Failed observations leave the prior committed state intact. The daemon does not
+start these tasks, a webhook listener, or a command worker.
+
 Lifecycle reactions accept only `session_terminal` or `goal_changed` inputs and
 only `release_start` or sticky-stop lifecycle commands. These are the command
 forms used for convergence release and stale-work termination; no module lease
@@ -143,7 +152,7 @@ commands. It cannot import core persistence, qualify `public` tables, or name
 another module schema.
 
 The module retains an authenticated, HTTPS-only GitHub client for API-relative
-GET requests. It is an external-I/O capability and receives no database handle.
+GET requests and GraphQL observation queries. It receives no database handle.
 The daemon's repository-specific client loader rereads the configured credential
 file on each load and returns only an authenticated client handle. Credential
 and client-construction failures have distinct redacted error classes.

@@ -626,6 +626,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             ),
         ]
     );
+    let loaded = RepoWatchStore::new(module_pool.clone())
+        .ingest_baseline(&repository)
+        .await?;
+    assert_eq!(loaded.generation, 1);
+    assert_eq!(loaded.observation.as_ref(), Some(&comparison_baseline));
+    assert_eq!(loaded.frontier, frontier);
     let retained_event_source: (String, Decimal) = sqlx::query_as(
         "SELECT producer, repository_event_ordinal FROM gh_event WHERE event_id = $1",
     )
@@ -1956,6 +1962,187 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_one(&module_pool)
     .await?;
     assert_eq!(retained_sequence, Decimal::from(3_u64));
+
+    // A separate repository exercises the runtime's empty-store and restart path.
+    let runtime_repository = RepositorySlug::try_new(String::from("runtime-restart/project"))?;
+    let empty_baseline = store.ingest_baseline(&runtime_repository).await?;
+    assert_eq!(empty_baseline.generation, 0);
+    assert!(empty_baseline.observation.is_none());
+    let observed = signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        repository: runtime_repository.clone(),
+        default_branch: default_branch.clone(),
+        default_head: default_head.clone(),
+        observation: comparison_baseline.clone(),
+        observed_at,
+    };
+    assert!(matches!(
+        store
+            .ingest_observation(&empty_baseline, &observed, EventProducer::Webhook)
+            .await?,
+        FrontierEventAdmission::Committed { generation: 1, .. }
+    ));
+    let restarted = RepoWatchStore::new(module_pool.clone());
+    let restart_baseline = restarted.ingest_baseline(&runtime_repository).await?;
+    assert_eq!(
+        restart_baseline.observation.as_ref(),
+        Some(&comparison_baseline)
+    );
+    assert_eq!(
+        restarted
+            .ingest_observation(&restart_baseline, &observed, EventProducer::Poll)
+            .await?,
+        FrontierEventAdmission::Unchanged
+    );
+    let retry = restarted
+        .ingest_observation(&empty_baseline, &observed, EventProducer::Poll)
+        .await?;
+    let FrontierEventAdmission::Committed { generation, events } = retry else {
+        panic!("an identical retry must recover its committed frontier");
+    };
+    assert_eq!(generation, 1);
+    assert!(!events.is_empty());
+    assert!(
+        events
+            .iter()
+            .all(|event| *event == EventAdmission::Replayed)
+    );
+    let lineage: (i64, bool) = sqlx::query_as(
+        "SELECT count(*), bool_and(producer = 'webhook'
+                AND frontier_generation = 1 AND repository_event_ordinal = event_ordinal)
+           FROM gh_event WHERE repository = $1",
+    )
+    .bind(runtime_repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert!(lineage.0 > 0);
+    assert!(lineage.1);
+
+    let compact_repository = RepositorySlug::try_new(String::from("compacted-restart/project"))?;
+    let source = &comparison_baseline.state().pull_requests()[0];
+    let merged = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        context: source.context().clone(),
+        lifecycle: RepoWatchPullRequestLifecycle::Merged,
+        mergeable_state: source.mergeable_state(),
+        completed_check_suites: source.completed_check_suites().to_vec(),
+        completed_check_runs: source.completed_check_runs().to_vec(),
+        reviews: source.reviews().to_vec(),
+        threads: source.threads().to_vec(),
+        reactions: source.reactions().to_vec(),
+    })?;
+    let compacted =
+        signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineV1::from_merged_state(
+            &merged,
+            comparison_baseline.signal_reviewers(),
+        )?
+        .expect("merged baseline");
+    let compact_observation = RepoWatchObservation::new(
+        comparison_baseline.signal_reviewers().to_vec(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                default_branch.clone(),
+                default_head.clone(),
+            )],
+        })?,
+    );
+    let compact_projection = RepositoryProjection {
+        repository: RepositoryState {
+            repository: &compact_repository,
+            default_branch: &default_branch,
+            default_head: &default_head,
+            observed_at,
+        },
+        pull_requests: Vec::new(),
+        comparison_baseline: &compact_observation,
+        merged_baselines: std::slice::from_ref(&compacted),
+    };
+    store
+        .commit_frontier_candidate(
+            &compact_projection,
+            0,
+            &[],
+            &[],
+            EventProducer::Poll,
+            observed_at,
+        )
+        .await?;
+    let reopened = RepoWatchStore::new(module_pool.clone());
+    let restored = reopened.ingest_baseline(&compact_repository).await?;
+    assert_eq!(restored.merged_baselines, vec![compacted]);
+    let mut completed_check_runs = merged.completed_check_runs().to_vec();
+    // A distinct completed run is the only change after compaction and restart.
+    completed_check_runs.push(RepoWatchCheckRunObservation::new(
+        GitHubObjectId::new(NonZeroU64::new(900001).expect("new fixture check identity")),
+        RepoWatchCheckCompletionGeneration::try_new(String::from("post-merge-completion"))?,
+        CheckRunName::try_new(String::from("post-merge"))?,
+        CheckConclusion::Success,
+    ));
+    let changed = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        context: merged.context().clone(),
+        lifecycle: RepoWatchPullRequestLifecycle::Merged,
+        mergeable_state: merged.mergeable_state(),
+        completed_check_suites: merged.completed_check_suites().to_vec(),
+        completed_check_runs,
+        reviews: merged.reviews().to_vec(),
+        threads: merged.threads().to_vec(),
+        reactions: merged.reactions().to_vec(),
+    })?;
+    let next = signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        repository: compact_repository.clone(),
+        default_branch: default_branch.clone(),
+        default_head: default_head.clone(),
+        observed_at,
+        observation: RepoWatchObservation::new(
+            comparison_baseline.signal_reviewers().to_vec(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests: vec![changed],
+                workflow_runs: Vec::new(),
+                branch_heads: compact_observation.state().branch_heads().to_vec(),
+            })?,
+        ),
+    };
+    reopened
+        .ingest_observation(&restored, &next, EventProducer::Poll)
+        .await?;
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT event_kind FROM gh_event WHERE repository = $1 ORDER BY repository_event_ordinal",
+    )
+    .bind(compact_repository.as_str())
+    .fetch_all(&module_pool)
+    .await?;
+    assert_eq!(kinds, vec![String::from("check_run_completed")]);
+    let retained = reopened.ingest_baseline(&compact_repository).await?;
+    assert!(
+        retained
+            .observation
+            .as_ref()
+            .expect("committed ordinary observation")
+            .state()
+            .pull_requests()
+            .is_empty(),
+        "refetched compact pull requests remain outside the ordinary baseline"
+    );
+    let ordinary_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pr_state WHERE repository = $1")
+            .bind(compact_repository.as_str())
+            .fetch_one(&module_pool)
+            .await?;
+    assert_eq!(
+        ordinary_rows, 0,
+        "refetch does not recreate ordinary PR rows"
+    );
+    assert_eq!(retained.merged_baselines.len(), 1);
+    assert_eq!(
+        retained.merged_baselines[0].completed_check_runs().len(),
+        merged.completed_check_runs().len() + 1
+    );
+    assert_eq!(
+        reopened
+            .ingest_observation(&retained, &next, EventProducer::Poll)
+            .await?,
+        FrontierEventAdmission::Unchanged
+    );
 
     module_pool.close().await;
     core_pool.close().await;
