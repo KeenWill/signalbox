@@ -1125,7 +1125,8 @@ where
             operation.messages(),
             operation.reasoning_provenance(),
             &self.models,
-        );
+        )
+        .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
         let tools = runtime_tool_definitions(operation.tools()).map_err(|error| {
             report_invalid_runtime_tool_schema(telemetry, &error);
             RuntimeInputTokenCountError::InvalidToolSchema
@@ -1233,7 +1234,14 @@ where
             operation.messages(),
             operation.reasoning_provenance(),
             &self.models,
-        );
+        )
+        .ok_or_else(|| {
+            fail_closed(
+                telemetry,
+                RuntimeModelCallProviderError::UnconfiguredTarget,
+                None,
+            )
+        })?;
         let tools = runtime_tool_definitions(operation.tools()).map_err(|error| {
             report_invalid_runtime_tool_schema(telemetry, &error);
             fail_closed(
@@ -1527,7 +1535,7 @@ fn render_runtime_messages(
     messages: &[ModelConversationMessage],
     provenance: &[signalbox_application::ProviderReasoningProvenance],
     models: &RuntimeModelCatalog,
-) -> Vec<ConversationMessage> {
+) -> Option<Vec<ConversationMessage>> {
     let mut rendered = Vec::new();
     let mut assistant_call = None;
     let mut collecting_tool_results = false;
@@ -1647,14 +1655,10 @@ fn render_runtime_messages(
                 producing_call,
                 item,
             } => {
-                let Some(origin) = provenance.iter().find(|origin| {
+                let origin = provenance.iter().find(|origin| {
                     origin.source == *source && origin.producing_call == *producing_call
-                }) else {
-                    continue;
-                };
-                let Some(producer) = models.resolve(origin.producing_target) else {
-                    continue;
-                };
+                })?;
+                let producer = models.resolve(origin.producing_target)?;
                 let part = MessagePart::ProviderReasoning {
                     item_json: item.as_json().to_owned(),
                     producing_target: ResolvedTarget::new(producer.provider_model()),
@@ -1742,7 +1746,7 @@ fn render_runtime_messages(
             }
         }
     }
-    rendered
+    Some(rendered)
 }
 
 fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
@@ -2549,6 +2553,7 @@ mod tests {
     fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<ConversationMessage> {
         let models = RuntimeModelCatalog::try_from_definitions([]).expect("empty fixture catalog");
         render_runtime_messages_with_provenance(messages, &[], &models)
+            .expect("fixture messages need no producing-target mappings")
     }
 
     fn source(value: u128) -> SemanticTranscriptEntryRef {
@@ -3271,6 +3276,48 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_projection_fails_when_the_current_target_exists_but_the_producer_is_missing() {
+        let current_target = target(41);
+        let producing_target = target(42);
+        let models = RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            current_target,
+            "current-model".to_string(),
+            64,
+            1024,
+        )
+        .expect("current target fixture")])
+        .expect("current target catalog");
+        let provenance = [signalbox_application::ProviderReasoningProvenance {
+            source: source(31),
+            producing_call: call(),
+            producing_target,
+            producing_credential: signalbox_application::ModelCallCredentialReference::new(
+                "producer-primary",
+            ),
+        }];
+        let messages = [
+            ModelConversationMessage::AssistantToolUse {
+                source: source(30),
+                producing_call: call(),
+                request: request(20, "{}"),
+            },
+            ModelConversationMessage::ProviderReasoning {
+                source: source(31),
+                producing_call: call(),
+                item: signalbox_domain::ProviderReasoningItem::try_new(
+                    r#"{"type":"reasoning","id":"rs_required","encrypted_content":"opaque"}"#
+                        .to_string(),
+                )
+                .expect("durable reasoning fixture"),
+            },
+        ];
+        assert_eq!(
+            render_runtime_messages_with_provenance(&messages, &provenance, &models),
+            None
+        );
+    }
+
+    #[test]
     fn durable_reasoning_replays_between_calls_in_the_same_assistant_message() {
         let raw = r#"{ "type":"reasoning", "id":"rs_fixture", "summary":[], "encrypted_content":"opaque" }"#;
         let first = request(20, "{}");
@@ -3312,7 +3359,8 @@ mod tests {
             ],
             &provenance,
             &models,
-        );
+        )
+        .expect("the producing target is configured");
         assert_eq!(rendered.len(), 1);
         assert_eq!(rendered[0].parts.len(), 3);
         assert_eq!(

@@ -45,8 +45,9 @@ replay that provider-qualified part reject the operation before send. A
 provider-reasoning part carries a complete raw reasoning item with encrypted
 content; its JSON bytes remain unchanged through the runtime and bridge. Replay
 carries the producing call's durable effective target and pinned credential
-reference. Streaming takes those bytes from the completed output item. A
-credential in the item rejects the whole evidence with
+reference. A missing producing-target mapping fails input estimation and request
+preparation before provider interaction. Streaming takes those bytes from the
+completed output item. A credential in the item rejects the whole evidence with
 `credential_in_provider_reasoning`.
 
 `ModelRuntime` has two stages. `prepare` does all work that needs no provider
