@@ -1179,6 +1179,7 @@ async fn insert_prepared_accepted_activation(
         | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
         | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
+        | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
         | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
         | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
@@ -1264,6 +1265,7 @@ async fn insert_prepared_accepted_activation(
             | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
             | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
+            | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
             | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
             | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }

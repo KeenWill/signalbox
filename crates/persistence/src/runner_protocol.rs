@@ -38,6 +38,12 @@ use signalbox_domain::{
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
+pub use signalbox_domain::RunnerEnrollmentRequestId;
+
+mod provisioning;
+mod recovery;
+pub use recovery::{RunnerRecoveryError, RunnerRecoveryOutcome};
+
 use crate::lock_inventory::{
     RUNNER_CONNECTION_LOSS_HEAD, RUNNER_CONNECTION_LOSS_PROPAGATION, RUNNER_ENROLLMENT,
     RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY, RUNNER_LEASE_GRANT_AUTHORITY,
@@ -294,27 +300,6 @@ pub struct StoredValidatedRunnerRegistration {
     /// Returns the domain-validated registration snapshot.
     #[get]
     registration: ValidatedRunnerRegistration,
-}
-
-/// Stable runner-created identity for one pristine enrollment request.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RunnerEnrollmentRequestId(Uuid);
-
-impl RunnerEnrollmentRequestId {
-    /// Creates an enrollment-request identity from its UUID value.
-    pub const fn from_uuid(value: Uuid) -> Self {
-        Self(value)
-    }
-
-    /// Borrows the UUID value.
-    pub const fn as_uuid(&self) -> &Uuid {
-        &self.0
-    }
-
-    /// Returns the UUID value.
-    pub const fn into_uuid(self) -> Uuid {
-        self.0
-    }
 }
 
 #[derive(signalbox_derive::Accessors)]
@@ -613,7 +598,7 @@ impl RunnerProtocolStore {
         .fetch_one(&mut *transaction)
         .await?;
         match state.as_str() {
-            "active" => {}
+            "active" | "pending" => {}
             "revoked" => {
                 transaction.rollback().await?;
                 return Err(RunnerProtocolStoreError::Domain(
@@ -1311,40 +1296,62 @@ impl RunnerProtocolStore {
         }
 
         let active: Option<Uuid> = sqlx::query_scalar(
-            "SELECT enrollment_id
-               FROM runner_enrollment
-              WHERE state_kind = 'active'",
+            "SELECT enrollment_id FROM runner_enrollment WHERE state_kind = 'active'",
         )
         .fetch_optional(&mut *transaction)
         .await?;
-        if let Some(active) = active {
-            transaction.rollback().await?;
-            return Err(RunnerEnrollmentRequestFailure::ActiveEnrollmentExists {
-                request,
-                active_enrollment: runner_enrollment_id(active),
+        let predecessor = if let Some(active) = active {
+            let connection =
+                load_connection_head_in(transaction.as_mut(), runner_enrollment_id(active)).await?;
+            let pending_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM runner_enrollment WHERE state_kind = 'pending')",
+            )
+            .fetch_one(&mut *transaction)
+            .await?;
+            if pending_exists
+                || !connection.is_some_and(|connection| {
+                    matches!(
+                        connection.state(),
+                        RunnerConnectionState::Lost | RunnerConnectionState::Shutdown
+                    )
+                })
+            {
+                return Err(RunnerEnrollmentRequestFailure::ActiveEnrollmentExists {
+                    request,
+                    active_enrollment: runner_enrollment_id(active),
+                }
+                .into());
             }
-            .into());
-        }
-
-        let enrollment = RunnerEnrollment::new(
-            issued.enrollment(),
-            issued.runner(),
-            issued.authentication(),
-            allowed_classes,
-        );
-        let pending = enrollment
-            .prepare_registration(advertisement, &self.catalog)
-            .map_err(RunnerProtocolStoreError::Domain)?;
+            Some(active)
+        } else {
+            None
+        };
+        let (enrollment, registration) = if predecessor.is_some() {
+            RunnerEnrollment::new_pending(
+                issued.enrollment(),
+                issued.runner(),
+                issued.authentication(),
+                allowed_classes,
+                advertisement,
+                &self.catalog,
+            )
+            .map_err(RunnerProtocolStoreError::Domain)?
+        } else {
+            let enrollment = RunnerEnrollment::new(
+                issued.enrollment(),
+                issued.runner(),
+                issued.authentication(),
+                allowed_classes,
+            );
+            let registration = enrollment
+                .register(advertisement, &self.catalog)
+                .map_err(RunnerProtocolStoreError::Domain)?;
+            (enrollment, registration)
+        };
         let revision = RunnerRegistrationRevision::MIN;
-        if pending.registration().revision().get() != revision.get() {
-            transaction.rollback().await?;
-            return Err(RunnerProtocolStoreError::Domain(
-                RunnerDomainError::RegistrationChanged,
-            ));
-        }
 
         insert_enrollment_rows(&mut transaction, &enrollment).await?;
-        insert_registration(&mut transaction, revision, pending.registration()).await?;
+        insert_registration(&mut transaction, revision, &registration).await?;
         sqlx::query(
             "INSERT INTO runner_current_registration
                 (enrollment_id, registration_revision)
@@ -1367,9 +1374,13 @@ impl RunnerProtocolStore {
         .bind(Decimal::from(revision.get()))
         .execute(&mut *transaction)
         .await?;
+        if let Some(predecessor) = predecessor {
+            sqlx::query("INSERT INTO runner_pending_predecessor (enrollment_id, predecessor_enrollment_id) VALUES ($1, $2)")
+                .bind(issued.enrollment().into_uuid())
+                .bind(predecessor)
+                .execute(&mut *transaction).await?;
+        }
         commit_mutation(transaction).await?;
-
-        let registration = pending.commit().map_err(RunnerProtocolStoreError::Domain)?;
         Ok(RunnerEnrollmentOutcome {
             disposition: RunnerEnrollmentDisposition::Created,
             receipt: RunnerEnrollmentReceipt {
@@ -1444,6 +1455,12 @@ impl RunnerProtocolStore {
             registration,
         };
         let advertisement_matches = receipt.advertisement() == advertisement;
+        if receipt.enrollment().state() == RunnerEnrollmentState::Pending && !advertisement_matches
+        {
+            return Err(
+                RunnerEnrollmentRequestFailure::ReplayAdvertisementMismatch { request }.into(),
+            );
+        }
         match prior_revision.cmp(&current) {
             Ordering::Less if advertisement_matches => {
                 transaction.commit().await?;
@@ -1569,40 +1586,7 @@ impl RunnerProtocolStore {
             ));
         }
         terminalize_connection_for_revocation(&mut transaction, enrollment_id).await?;
-        let runner = enrollment.runner();
-        let authentication = enrollment.authentication();
-        let classes: Vec<_> = enrollment.allowed_classes().cloned().collect();
-        sqlx::query(
-            "INSERT INTO runner_enrollment_audit
-                (enrollment_id, revision, runner_id,
-                 authentication_reference_id, allowed_class_count, state_kind)
-             VALUES ($1, 2, $2, $3, $4, 'revoked')",
-        )
-        .bind(enrollment_id.into_uuid())
-        .bind(runner.into_uuid())
-        .bind(authentication.into_uuid())
-        .bind(count_decimal(classes.len())?)
-        .execute(&mut *transaction)
-        .await?;
-        for class in classes {
-            sqlx::query(
-                "INSERT INTO runner_enrollment_audit_allowed_class
-                    (enrollment_id, revision, capability_class)
-                 VALUES ($1, 2, $2)",
-            )
-            .bind(enrollment_id.into_uuid())
-            .bind(class.as_str())
-            .execute(&mut *transaction)
-            .await?;
-        }
-        sqlx::query(
-            "UPDATE runner_enrollment
-                SET revision = 2, state_kind = 'revoked'
-              WHERE enrollment_id = $1",
-        )
-        .bind(enrollment_id.into_uuid())
-        .execute(&mut *transaction)
-        .await?;
+        recovery::advance_enrollment_state(&mut transaction, enrollment_id, "revoked").await?;
         commit_mutation(transaction).await?;
         enrollment
             .revoke_in_place()
@@ -2019,7 +2003,7 @@ impl RunnerProtocolStore {
         .await?;
         match decode_enrollment_state(&enrollment_state)? {
             RunnerEnrollmentState::Active => {}
-            RunnerEnrollmentState::Revoked => {
+            RunnerEnrollmentState::Pending | RunnerEnrollmentState::Revoked => {
                 return Err(RunnerProtocolStoreError::Domain(
                     RunnerDomainError::EnrollmentRevoked,
                 ));
@@ -3908,29 +3892,40 @@ async fn insert_enrollment_rows(
     transaction: &mut Transaction<'_, Postgres>,
     enrollment: &RunnerEnrollment,
 ) -> Result<(), RunnerProtocolStoreError> {
+    let state = match enrollment.state() {
+        RunnerEnrollmentState::Pending => "pending",
+        RunnerEnrollmentState::Active => "active",
+        RunnerEnrollmentState::Revoked => {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::EnrollmentRevoked,
+            ));
+        }
+    };
     let classes: Vec<_> = enrollment.allowed_classes().collect();
     sqlx::query(
         "INSERT INTO runner_enrollment_audit
             (enrollment_id, revision, runner_id,
              authentication_reference_id, allowed_class_count, state_kind)
-         VALUES ($1, 1, $2, $3, $4, 'active')",
+         VALUES ($1, 1, $2, $3, $4, $5)",
     )
     .bind(enrollment.enrollment().into_uuid())
     .bind(enrollment.runner().into_uuid())
     .bind(enrollment.authentication().into_uuid())
     .bind(count_decimal(classes.len())?)
+    .bind(state)
     .execute(&mut **transaction)
     .await?;
     sqlx::query(
         "INSERT INTO runner_enrollment
             (enrollment_id, runner_id, authentication_reference_id,
              allowed_class_count, revision, state_kind)
-         VALUES ($1, $2, $3, $4, 1, 'active')",
+         VALUES ($1, $2, $3, $4, 1, $5)",
     )
     .bind(enrollment.enrollment().into_uuid())
     .bind(enrollment.runner().into_uuid())
     .bind(enrollment.authentication().into_uuid())
     .bind(count_decimal(classes.len())?)
+    .bind(state)
     .execute(&mut **transaction)
     .await?;
     for class in classes {
@@ -7362,6 +7357,7 @@ fn decode_lease_state(value: String) -> Result<RunnerLeaseState, RunnerProtocolS
 fn decode_enrollment_state(value: &str) -> Result<RunnerEnrollmentState, RunnerProtocolStoreError> {
     match value {
         "active" => Ok(RunnerEnrollmentState::Active),
+        "pending" => Ok(RunnerEnrollmentState::Pending),
         "revoked" => Ok(RunnerEnrollmentState::Revoked),
         _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
     }

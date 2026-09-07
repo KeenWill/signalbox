@@ -27,6 +27,21 @@ pub(super) fn decode_transcript_entry(
     let source_session = session_id_from_uuid(required(row, "source_session_id")?);
     let entry = SemanticTranscriptEntryId::from_uuid(required(row, "semantic_entry_id")?);
     let payload_kind: String = required(row, "payload_kind")?;
+    if payload_kind == "runner_placement_changed" {
+        let revision: Decimal = required(row, "runner_placement_revision")?;
+        let placement_revision = u64::try_from(revision)
+            .ok()
+            .and_then(signalbox_domain::RunnerGeneration::try_from_u64)
+            .ok_or(ProcessReadCorruption::Inconsistent(
+                "placement boundary revision",
+            ))?;
+        return Ok(ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index,
+            source_session,
+            entry,
+            placement_revision,
+        });
+    }
     let origin: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
     let steering_source_turn: Option<Uuid> = row.try_get("steering_source_turn_id")?;
     let failed_turn: Option<Uuid> = row.try_get("failed_turn_id")?;

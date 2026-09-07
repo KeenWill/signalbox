@@ -1292,7 +1292,7 @@ impl PostgresModelCallRepository {
             .clone()
             .prepare_initial_call(call)
             .map_err(|_| ModelCallRepositoryError::InvalidTransition("preview initial call"))?;
-        let request = execution
+        let mut request = execution
             .preview_initial_call(call)
             .map_err(|_| ModelCallRepositoryError::InvalidTransition("preview initial call"))?;
         let system_prompt = load_frozen_epoch_system_prompt(
@@ -1301,6 +1301,7 @@ impl PostgresModelCallRepository {
             preview.turn().configuration().session_defaults_version(),
         )
         .await?;
+        resolve_runner_placement_entries(transaction.as_mut(), &mut request).await?;
         let tool_entries = load_tool_conversation_entries(&mut transaction, &request).await?;
         let reasoning_provenance =
             load_provider_reasoning_provenance(&mut transaction, &request).await?;
@@ -1537,7 +1538,7 @@ impl PostgresModelCallRepository {
                 return match current_call.state() {
                     signalbox_domain::CurrentModelCallState::Prepared => {
                         let current_call_id = current_call.id();
-                        let request = execution.resume_prepared_call().map_err(|_| {
+                        let mut request = execution.resume_prepared_call().map_err(|_| {
                             ModelCallRepositoryError::InvalidTransition(
                                 "Prepared call could not resume",
                             )
@@ -1562,6 +1563,8 @@ impl PostgresModelCallRepository {
                                 .session_defaults_version(),
                         )
                         .await?;
+                        resolve_runner_placement_entries(transaction.as_mut(), &mut request)
+                            .await?;
                         let tool_entries =
                             load_tool_conversation_entries(&mut transaction, &request).await?;
                         let reasoning_provenance =
@@ -6452,6 +6455,7 @@ async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
@@ -7835,6 +7839,38 @@ pub(crate) async fn insert_prepared_call(
     Ok(())
 }
 
+async fn resolve_runner_placement_entries(
+    connection: &mut PgConnection,
+    request: &mut PreparedModelCallRequest,
+) -> Result<(), ModelCallRepositoryError> {
+    let references = request
+        .frontier_entries()
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision } => {
+                Some((entry.reference(), *placement_revision))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (source, revision) in references {
+        let row = sqlx::query(
+            "SELECT record.placement_revision, record.requested_sandbox_profile FROM runner_placement_boundary AS boundary
+             JOIN runner_session_placement_record AS record USING (session_id, event_ordinal)
+             WHERE boundary.session_id = $1 AND boundary.semantic_entry_id = $2 AND boundary.placement_revision = $3
+               AND record.placement_revision = boundary.placement_revision AND record.event_kind = 'runner_replaced'",
+        ).bind(source.source_session().into_uuid()).bind(source.entry().into_uuid()).bind(Decimal::from(revision.get()))
+            .fetch_optional(&mut *connection).await?.ok_or(ModelCallCorruption::Missing("placement boundary record"))?;
+        let sandbox: String = required(&row, "requested_sandbox_profile")?;
+        let sandbox = crate::mapping::runner_sandbox_from_str(&sandbox).ok_or(
+            ModelCallCorruption::Inconsistent("placement boundary sandbox"),
+        )?;
+        request
+            .resolve_runner_placement(source, revision, sandbox)
+            .map_err(|_| ModelCallCorruption::Inconsistent("placement boundary correlation"))?;
+    }
+    Ok(())
+}
+
 async fn load_provider_reasoning_provenance(
     connection: &mut PgConnection,
     request: &PreparedModelCallRequest,
@@ -7937,6 +7973,7 @@ async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
         }
@@ -8039,6 +8076,7 @@ async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
         }
@@ -11141,6 +11179,7 @@ fn preview_entry_content_bytes(
         | SemanticTranscriptEntryPayload::ToolDenied { .. }
         | SemanticTranscriptEntryPayload::ToolClosed { .. }
         | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+        | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
         | SemanticTranscriptEntryPayload::TurnCancelled { .. } => 0,
     }
 }

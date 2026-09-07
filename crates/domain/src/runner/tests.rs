@@ -2621,7 +2621,7 @@ fn connection_loss_rejects_same_runner_replacement() {
 }
 
 #[test]
-fn registration_loss_label_does_not_authorize_same_runner_replacement() {
+fn registration_loss_revalidates_a_same_runner_replacement() {
     let (registration, mut pin) = pinned("readonly");
     let prior_grant = pin.grant.take().expect("the pin carries its grant");
     let request = pin.placement.request().clone();
@@ -2653,15 +2653,22 @@ fn registration_loss_label_does_not_authorize_same_runner_replacement() {
     )
     .expect("complete stored loss facts reconstitute");
 
-    assert_eq!(
-        lost.replace_lost_runner(
+    let replacement = lost
+        .replace_lost_runner(
             request,
             &registration,
             directory("/workspace/session"),
             None,
             Some(prior_grant),
-        ),
-        Err(RunnerDomainError::CorrelationMismatch),
+        )
+        .expect("current registration permits same-runner registration-loss recovery");
+    assert_eq!(
+        replacement.change.before.runner,
+        replacement.change.after.runner
+    );
+    assert_eq!(
+        replacement.placement.revision(),
+        replacement.change.prior_revision.checked_next().unwrap()
     );
 }
 

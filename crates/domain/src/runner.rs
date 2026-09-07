@@ -8,6 +8,7 @@ mod enrollment;
 mod lease;
 mod names;
 mod placement;
+mod recovery;
 
 #[cfg(test)]
 mod tests;
@@ -47,4 +48,9 @@ pub use placement::{
     SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, SessionRunnerPlacementState, WorkingDirectorySelection,
     WorkspaceRequirement,
+};
+pub use recovery::{
+    AbandonLostRunner, AbandonLostRunnerResult, PromotePendingRunner, PromotePendingRunnerResult,
+    ReplaceLostRunner, ReplaceLostRunnerResult, RunnerPlacementBoundary,
+    RunnerProvisioningFailureKind, RunnerRecoveryRejection, RunnerReplacementProvisioning,
 };

@@ -555,7 +555,10 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::ReadReviewOrchestration { .. }
         | ClientRequest::StopTurn { .. }
         | ClientRequest::DecideToolRequest { .. }
-        | ClientRequest::OverrideDeniedToolRequest { .. } => false,
+        | ClientRequest::OverrideDeniedToolRequest { .. }
+        | ClientRequest::ReplaceLostRunner { .. }
+        | ClientRequest::AbandonLostRunner { .. }
+        | ClientRequest::PromotePendingRunner { .. } => false,
     }
 }
 pub(super) fn retain_inbound_frame_permit_during_import_admission(
@@ -758,7 +761,10 @@ impl SnapshotReaderAdmission {
             | ClientRequest::RecordReviewPublicationOutcomes { .. }
             | ClientRequest::StopTurn { .. }
             | ClientRequest::DecideToolRequest { .. }
-            | ClientRequest::OverrideDeniedToolRequest { .. } => Self::NotRequired,
+            | ClientRequest::OverrideDeniedToolRequest { .. }
+            | ClientRequest::ReplaceLostRunner { .. }
+            | ClientRequest::AbandonLostRunner { .. }
+            | ClientRequest::PromotePendingRunner { .. } => Self::NotRequired,
         }
     }
 }

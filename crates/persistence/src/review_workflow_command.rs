@@ -174,7 +174,10 @@ async fn inspect_existing(
             | CommandKind::RegisterWorkspace
             | CommandKind::MintGitRemote
             | CommandKind::WithdrawGitRemote
-            | CommandKind::SessionLifecycle,
+            | CommandKind::SessionLifecycle
+            | CommandKind::ReplaceLostRunner
+            | CommandKind::AbandonLostRunner
+            | CommandKind::PromotePendingRunner,
         ) => Ok(ClaimInspection::Conflicting),
     }
 }

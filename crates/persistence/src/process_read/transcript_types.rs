@@ -477,6 +477,17 @@ pub enum ProcessToolExecutionResultDisposition {
 /// One ordered member of the latest authoritative semantic frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTranscriptEntry {
+    /// Reference-only successor placement boundary.
+    RunnerPlacementChanged {
+        /// Zero-based frontier position.
+        entry_index: u64,
+        /// Session owning the placement record.
+        source_session: SessionId,
+        /// Semantic boundary identity.
+        entry: SemanticTranscriptEntryId,
+        /// Exact successor placement revision.
+        placement_revision: signalbox_domain::RunnerGeneration,
+    },
     /// Exact delegated task that opened one child session.
     DelegatedTask {
         /// Zero-based position in the projected frontier.

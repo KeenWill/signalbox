@@ -184,10 +184,6 @@ the current state on reconnect. The event family is the extension point for
 later runner facts: a new fact adds a state and its members to this event kind,
 never a second kind. A snapshot's session summary carries the same runner
 object, with connection health present exactly for a pinned placement.
-`replace_lost_runner`, `abandon_lost_runner`, and `promote_pending_runner` are
-planned wire commands whose durable request, replay, and recovery semantics stay
-in [identity-and-commands.md](../spec/identity-and-commands.md) and
-[runner-protocol.md](../spec/runner-protocol.md).
 
 `spawn_session` carries a bounded `task` and the closed relationship object and
 returns `session_spawned { tool_request_id, child_session_id, relationship }`.

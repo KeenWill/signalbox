@@ -425,6 +425,7 @@ impl SnapshotSelection {
                     | TranscriptEntry::ToolExecutionResult { .. }
                     | TranscriptEntry::ToolDenied { .. }
                     | TranscriptEntry::ToolClosed { .. }
+                    | TranscriptEntry::RunnerPlacementChanged { .. }
                     | TranscriptEntry::TurnCompleted { .. }
                     | TranscriptEntry::TurnFailed { .. }
                     | TranscriptEntry::TurnCancelled { .. }
