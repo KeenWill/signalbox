@@ -94,6 +94,7 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
         use crate::repo_watch_checkout::{CheckoutProvisioningFailed, CheckoutStep};
         use signalbox_application::CreateSessionOutcome;
         use signalbox_domain::{DescendantTerminationScope, RepoWatchEventTarget, StopStickiness};
+        use signalbox_module_repo_watch_v2::checkout::CheckoutRetirementReason;
 
         let id = command.command_id();
         let result = self.core.submit(command).await?;
@@ -112,11 +113,23 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
             return Ok(result);
         };
         let session = applied.session();
+        let repository = self
+            .configuration
+            .repositories()
+            .iter()
+            .find(|repository| repository.repository() == checkout.event.repository());
         let stop = if let Some(stop) = checkout.stop_command {
-            Some(stop)
-        } else if checkout.head.as_ref() == Some(context.head_sha()) {
-            None
-        } else {
+            let sticky = match checkout.retired_reason {
+                Some(CheckoutRetirementReason::RepositoryUnconfigured) => {
+                    StopStickiness::Redispatchable
+                }
+                _ => StopStickiness::Sticky,
+            };
+            Some((stop, sticky))
+        } else if let Some(repository) = repository {
+            if checkout.head.as_ref() == Some(context.head_sha()) {
+                return Ok(result);
+            }
             let provisioned = async {
                 let tools = self
                     .core
@@ -126,12 +139,6 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 let roots =
                     crate::daemon_tools::SessionWorkspaceRoots::try_new(tools.workspace_root())
                         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
-                let repository = self
-                    .configuration
-                    .repositories()
-                    .iter()
-                    .find(|repository| repository.repository() == checkout.event.repository())
-                    .ok_or(CheckoutProvisioningFailed::at(CheckoutStep::Configuration))?;
                 let runner = self
                     .runner
                     .as_mut()
@@ -158,31 +165,54 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 Err(failure) => {
                     tracing::warn!(reason = "checkout_provisioning_failed", step = failure.step.as_str(), status = %failure.status(), ?session,
                         "repository-watch checkout provisioning failed");
-                    Some(
+                    Some((
                         self.store
                             .retire_dispatch_checkout(
                                 id,
+                                CheckoutRetirementReason::ProvisioningFailed,
                                 failure.step.as_str(),
                                 &failure.status(),
                                 DurableCommandId::from_uuid(Uuid::now_v7()),
                             )
                             .await
                             .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?,
-                    )
+                        StopStickiness::Sticky,
+                    ))
                 }
             }
+        } else {
+            tracing::warn!(
+                reason = "repository_unconfigured",
+                ?session,
+                "repository-watch dispatch retired"
+            );
+            Some((
+                self.store
+                    .retire_dispatch_checkout(
+                        id,
+                        CheckoutRetirementReason::RepositoryUnconfigured,
+                        CheckoutStep::Configuration.as_str(),
+                        "not_started",
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                    )
+                    .await
+                    .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?,
+                StopStickiness::Redispatchable,
+            ))
         };
-        if let Some(stop) = stop {
-            let stop = SessionCommand::lifecycle(SessionLifecycleCommand::new(
+        if let Some((stop, sticky)) = stop {
+            let stop = SessionLifecycleCommand::new(
                 stop,
                 session,
                 SessionLifecycleOperation::Stop {
-                    sticky: StopStickiness::Sticky,
+                    sticky,
                     descendant_scope: DescendantTerminationScope::ParentAlone,
                 },
-            ))
-            .map_err(|_| RepositoryWatchCommandError::UnsupportedCommand)?;
-            if !matches!(self.core.submit(stop).await?, CommandSubmission::Accepted) {
+            );
+            if !matches!(
+                self.core.submit_lifecycle(stop).await?,
+                CommandSubmission::Accepted
+            ) {
                 return Err(RepositoryWatchCommandError::CoreCommandFailed);
             }
         }
@@ -302,51 +332,60 @@ impl SessionCommandSink for RepositoryWatchCommandSink {
                     .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
                 Ok(CommandSubmission::Creation(outcome))
             }
-            SessionCommandPayload::Lifecycle(command) => {
-                let outcome = SessionLifecycleCommandRepository::new(self.pool.clone())
-                    .handle(
-                        command.clone(),
-                        CommandPrincipal::Module {
-                            module: DispatchingModule::RepositoryWatch,
-                        },
-                    )
-                    .await
-                    .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
-                match outcome {
-                    SessionLifecycleCommandHandlingOutcome::ConflictingReuse { .. } => {
-                        Ok(CommandSubmission::ConflictingReuse)
-                    }
-                    SessionLifecycleCommandHandlingOutcome::Recorded(result) => {
-                        if let SessionLifecycleCommandResult::Applied(application) = result {
-                            match application {
-                                SessionLifecycleApplication::StartReleased => {
-                                    let _ = self.eligibility_nudge.nudge(command.session());
-                                }
-                                SessionLifecycleApplication::ClosurePending {
-                                    live_turn,
-                                    defaults_version,
-                                    ..
-                                } => {
-                                    crate::process_runtime::interrupt_for_committed_closure(
-                                        &self.pool,
-                                        &self.models,
-                                        &self.eligibility_nudge,
-                                        &self.tool_dispatch_gate,
-                                        &command,
-                                        live_turn,
-                                        defaults_version,
-                                    )
-                                    .await
-                                    .map_err(|_| RepositoryWatchCommandError::InterruptFailed)?;
-                                }
-                                _ => {}
-                            }
+            SessionCommandPayload::Lifecycle(command) => self.submit_lifecycle(command).await,
+            _ => Err(RepositoryWatchCommandError::UnsupportedCommand),
+        }
+    }
+}
+
+impl RepositoryWatchCommandSink {
+    // Daemon checkout disposition uses the normal lifecycle handler; module-issued
+    // commands still pass through the ownership seam's closed admission.
+    async fn submit_lifecycle(
+        &mut self,
+        command: SessionLifecycleCommand,
+    ) -> Result<CommandSubmission, RepositoryWatchCommandError> {
+        let outcome = SessionLifecycleCommandRepository::new(self.pool.clone())
+            .handle(
+                command.clone(),
+                CommandPrincipal::Module {
+                    module: DispatchingModule::RepositoryWatch,
+                },
+            )
+            .await
+            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+        match outcome {
+            SessionLifecycleCommandHandlingOutcome::ConflictingReuse { .. } => {
+                Ok(CommandSubmission::ConflictingReuse)
+            }
+            SessionLifecycleCommandHandlingOutcome::Recorded(result) => {
+                if let SessionLifecycleCommandResult::Applied(application) = result {
+                    match application {
+                        SessionLifecycleApplication::StartReleased => {
+                            let _ = self.eligibility_nudge.nudge(command.session());
                         }
-                        Ok(CommandSubmission::Accepted)
+                        SessionLifecycleApplication::ClosurePending {
+                            live_turn,
+                            defaults_version,
+                            ..
+                        } => {
+                            crate::process_runtime::interrupt_for_committed_closure(
+                                &self.pool,
+                                &self.models,
+                                &self.eligibility_nudge,
+                                &self.tool_dispatch_gate,
+                                &command,
+                                live_turn,
+                                defaults_version,
+                            )
+                            .await
+                            .map_err(|_| RepositoryWatchCommandError::InterruptFailed)?;
+                        }
+                        _ => {}
                     }
                 }
+                Ok(CommandSubmission::Accepted)
             }
-            _ => Err(RepositoryWatchCommandError::UnsupportedCommand),
         }
     }
 }
