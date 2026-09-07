@@ -76,6 +76,11 @@ The checker job runs its eight Python suites with
 fixture suite and two shell-script suites carry `external` because they execute
 host utilities; their results always run. The other five results are cacheable.
 
+`bazel test //:markdown_format` checks repository Markdown with the same pinned
+mdformat and GFM plugin as devenv. Its inputs include the Markdown files and
+`.mdformat.toml`; generated `docs/api` files remain excluded. The checker CI job
+uses this target instead of installing a separate Python environment.
+
 The sweep's container-label check scans the declared workspace Rust source
 manifest inside test runfiles. Direct Python invocation continues to select
 tracked sources with Git.

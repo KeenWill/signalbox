@@ -8,6 +8,7 @@ native_runtime(
 )
 
 exports_files([
+    "check_markdown.py",
     "patches/deno-embedded-javascript.patch",
     "patches/v8-build-output.patch",
 ])
