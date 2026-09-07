@@ -2,45 +2,6 @@
 
 # review_workflow
 
-## ReviewRunRef
-
-```rust
-pub struct ReviewRunRef {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ReviewRunRef {
-    pub const fn new(target: ReviewTargetId, run: ReviewRunId) -> Self;
-    pub const fn target(self) -> ReviewTargetId;
-    pub const fn run(self) -> ReviewRunId;
-}
-```
-
-## ReviewPassRef
-
-```rust
-pub struct ReviewPassRef {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ReviewPassRef {
-    pub const fn new(run: ReviewRunRef, pass: ReviewPassId) -> Self;
-    pub const fn run(self) -> ReviewRunRef;
-    pub const fn pass(self) -> ReviewPassId;
-    pub const fn target(self) -> ReviewTargetId;
-}
-```
-
-## ReviewFindingRef
-
-```rust
-pub struct ReviewFindingRef {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ReviewFindingRef {
-    pub const fn new(pass: ReviewPassRef, finding: ReviewFindingId) -> Self;
-    pub const fn pass(self) -> ReviewPassRef;
-    pub const fn run(self) -> ReviewRunRef;
-    pub const fn finding(self) -> ReviewFindingId;
-    pub const fn target(self) -> ReviewTargetId;
-}
-```
-
 ## ReviewFindingStatus
 
 ```rust
@@ -1258,6 +1219,45 @@ pub struct ReviewPolicyError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewPolicyError {
     pub const fn into_parts(self) -> (ReviewPolicyVersion, ReviewConfidence, ReviewConfidence);
+}
+```
+
+## ReviewRunRef
+
+```rust
+pub struct ReviewRunRef {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ReviewRunRef {
+    pub const fn new(target: ReviewTargetId, run: ReviewRunId) -> Self;
+    pub const fn target(self) -> ReviewTargetId;
+    pub const fn run(self) -> ReviewRunId;
+}
+```
+
+## ReviewPassRef
+
+```rust
+pub struct ReviewPassRef {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ReviewPassRef {
+    pub const fn new(run: ReviewRunRef, pass: ReviewPassId) -> Self;
+    pub const fn run(self) -> ReviewRunRef;
+    pub const fn pass(self) -> ReviewPassId;
+    pub const fn target(self) -> ReviewTargetId;
+}
+```
+
+## ReviewFindingRef
+
+```rust
+pub struct ReviewFindingRef {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ReviewFindingRef {
+    pub const fn new(pass: ReviewPassRef, finding: ReviewFindingId) -> Self;
+    pub const fn pass(self) -> ReviewPassRef;
+    pub const fn run(self) -> ReviewRunRef;
+    pub const fn finding(self) -> ReviewFindingId;
+    pub const fn target(self) -> ReviewTargetId;
 }
 ```
 
