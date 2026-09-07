@@ -78,9 +78,7 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
                                             writer,
                                             version,
                                             request_id,
-                                            ProtocolError::without_detail(
-                                                oauth_repository_error_code(error),
-                                            ),
+                                            oauth_repository_error(error),
                                         )
                                         .await;
                                     }
@@ -121,7 +119,7 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
                                 writer,
                                 version,
                                 request_id,
-                                ProtocolError::without_detail(oauth_repository_error_code(error)),
+                                oauth_repository_error(error),
                             )
                             .await;
                         }
@@ -132,7 +130,7 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
             Err(error) => Err(error),
         }
     };
-    let code = match result {
+    let error = match result {
         Ok(OauthCredentialHandlingOutcome::Recorded(outcome)) => {
             return write_message(
                 writer,
@@ -146,28 +144,34 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
             )
             .await;
         }
-        Ok(OauthCredentialHandlingOutcome::ConflictingReuse) => ErrorCode::ConflictingReuse,
-        Ok(OauthCredentialHandlingOutcome::Pending) => ErrorCode::Unavailable,
-        Err(error) => oauth_repository_error_code(error),
+        Ok(OauthCredentialHandlingOutcome::ConflictingReuse) => {
+            ProtocolError::without_detail(ErrorCode::ConflictingReuse)
+        }
+        Ok(OauthCredentialHandlingOutcome::Pending) => {
+            ProtocolError::without_detail(ErrorCode::Unavailable)
+        }
+        Err(error) => oauth_repository_error(error),
     };
-    write_error(
-        writer,
-        version,
-        request_id,
-        ProtocolError::without_detail(code),
-    )
-    .await
+    write_error(writer, version, request_id, error).await
 }
 
-fn oauth_repository_error_code(
+fn oauth_repository_error(
     error: signalbox_persistence::oauth_credential::OauthCredentialRepositoryError,
-) -> ErrorCode {
+) -> ProtocolError {
     use signalbox_persistence::oauth_credential::OauthCredentialRepositoryError;
     match error {
-        OauthCredentialRepositoryError::Database => ErrorCode::Unavailable,
-        OauthCredentialRepositoryError::CommitAmbiguous => ErrorCode::CommitAmbiguous,
-        OauthCredentialRepositoryError::Corruption => ErrorCode::Internal,
-        OauthCredentialRepositoryError::InvalidProfile => ErrorCode::InvalidRequest,
+        OauthCredentialRepositoryError::Database => {
+            ProtocolError::without_detail(ErrorCode::Unavailable)
+        }
+        OauthCredentialRepositoryError::CommitAmbiguous => {
+            ProtocolError::without_detail(ErrorCode::CommitAmbiguous)
+        }
+        OauthCredentialRepositoryError::Corruption => {
+            internal_protocol_error(None, InternalDiagnostic::OauthCredentialCorruption)
+        }
+        OauthCredentialRepositoryError::InvalidProfile => {
+            ProtocolError::without_detail(ErrorCode::InvalidRequest)
+        }
     }
 }
 
