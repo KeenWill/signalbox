@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from render_domain_spine import HEADER, MAX_LINES, Renderer, build_json, format_rust, write_files
+from render_domain_spine import HEADER, MAX_LINES, Renderer, build_json, format_rust, main, write_files
 
 
 EMPTY_GENERICS = {'params': [], 'where_predicates': []}
@@ -633,6 +633,30 @@ pub struct Token;
         self.assertIn('example/types-2.md', files)
         self.assertIn('[types-2](example/types-2.md)', files['README.md'])
         self.assertTrue(all(len(content.splitlines()) < MAX_LINES for content in files.values()))
+
+    def test_prebuilt_json_renders_to_separate_output_and_preserves_page_boundaries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source'
+            page_directory = source / 'docs/api/sample/example'
+            page_directory.mkdir(parents=True)
+            boundary = page_directory / 'types.md'
+            previous = '# example: types\n\n## Record\n'
+            boundary.write_text(previous)
+            (source / 'docs/api/crates.toml').write_text('crates = ["sample", "second"]\n')
+            json_directories = [root / 'first-json', root / 'second-json']
+            for directory, crate in zip(json_directories, ['sample', 'second']):
+                directory.mkdir()
+                (directory / f'{crate}.json').write_text(json.dumps(fixture()))
+            output = root / 'output'
+            arguments = ['render', '--source-root', str(source), '--output-dir', str(output),
+                         '--json-dir', *map(str, json_directories)]
+            with patch('sys.argv', arguments), patch('render_domain_spine.build_json') as build:
+                main()
+            build.assert_not_called()
+            self.assertEqual(boundary.read_text(), previous)
+            self.assertIn('## Record', (output / 'sample/example/types.md').read_text())
+            self.assertTrue((output / 'second/README.md').is_file())
 
     def test_regeneration_removes_obsolete_pages(self):
         with tempfile.TemporaryDirectory() as temporary:

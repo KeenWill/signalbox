@@ -20,8 +20,8 @@ MAX_LINES = 2000
 MAX_BYTES = 120_000
 
 
-def configuration():
-    return tomllib.loads((ROOT / 'docs/api/crates.toml').read_text())
+def configuration(source_root=None):
+    return tomllib.loads(((source_root or ROOT) / 'docs/api/crates.toml').read_text())
 
 
 def build_json(crate, *, workspace=ROOT, target=None):
@@ -570,14 +570,14 @@ class Renderer:
         visit(self.root['id'])
         return {name: sorted(items, key=self.source_order) for name, items in result.items()}
 
-    def files(self, crate):
+    def files(self, crate, source_root=None):
         files = {}
         rows = []
         for module, items in self.modules().items():
             blocks = [self.block(item) for item in items]
             whole = page(module, blocks)
             links = []
-            previous = list((ROOT / 'docs/api' / crate / module).glob('*.md'))
+            previous = list(((source_root or ROOT) / 'docs/api' / crate / module).glob('*.md'))
             if not items or (fits(whole) and not previous):
                 files[f'{module}.md'] = whole
                 links.append(f'[{module}]({module}.md)')
@@ -631,18 +631,29 @@ def write_files(directory, files):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--json-dir', type=Path, help='Read already-built rustdoc JSON instead of building')
+    parser.add_argument('--json-dir', type=Path, nargs='+', help='Read already-built rustdoc JSON instead of building')
+    parser.add_argument('--source-root', type=Path, default=ROOT, help='Read configuration and page boundaries from this tree')
+    parser.add_argument('--output-dir', type=Path, help='Write API pages to this directory')
     args = parser.parse_args()
-    paths = {crate: args.json_dir / f"{crate.replace('-', '_')}.json" if args.json_dir else build_json(crate)
-             for crate in configuration()['crates']}
+    paths = {}
+    for crate in configuration(args.source_root)['crates']:
+        if args.json_dir:
+            filename = f"{crate.replace('-', '_')}.json"
+            candidates = [directory / filename for directory in args.json_dir
+                          if (directory / filename).is_file()]
+            if len(candidates) != 1:
+                raise ValueError(f'{crate}: expected one rustdoc JSON input, found {len(candidates)}')
+            paths[crate] = candidates[0]
+        else:
+            paths[crate] = build_json(crate, workspace=args.source_root)
     public_exports = {}
     for path in paths.values():
         renderer = Renderer(json.loads(path.read_text()))
         public_exports.update(renderer.exports())
     for crate, path in paths.items():
         renderer = Renderer(json.loads(path.read_text()), public_exports)
-        files = renderer.files(crate)
-        write_files(ROOT / 'docs/api' / crate, files)
+        files = renderer.files(crate, source_root=args.source_root)
+        write_files((args.output_dir or args.source_root / 'docs/api') / crate, files)
         print(f'{crate}: {len(files)} Markdown files')
 
 

@@ -126,27 +126,44 @@ jobs:
         run: |
           python3 -m venv --clear /tmp/mdformat-venv
           /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-version: 1.29.0
       - name: Check generated domain API declarations
-        run: |
-          rustdoc_toolchain=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("docs/api/crates.toml").read_text())["rustdoc_toolchain"])')
-          rustup toolchain install "$rustdoc_toolchain" --profile minimal
-          python3 scripts/render_domain_spine.py
-          git diff --exit-code -- docs/api
-          test -z "$(git ls-files --others --exclude-standard docs/api)"
-      - name: Report domain API digest
-        continue-on-error: true
         env:
-          DOMAIN_SPINE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BAZEL_REMOTE_CACHE: ${{ vars.BAZEL_REMOTE_CACHE }}
         run: |
-          export PATH="$PATH:${CARGO_HOME:-$HOME/.cargo}/bin"
-          command -v cargo-public-api || cargo install cargo-public-api --locked
-          python3 scripts/domain_spine_digest.py >> "$GITHUB_STEP_SUMMARY"
+          cache_args=()
+          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
+            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
+          fi
+          bazel test --config=api --jobs=4 --local_test_jobs=1 "${cache_args[@]}" //:api_documentation_current
       - name: Check documentation consistency
         run: /tmp/mdformat-venv/bin/python scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
         run: python3 scripts/check_migration_versions.py
       - name: Check ownership-seam boundaries
         run: python3 scripts/check_ownership_seam.py
+  domain-api-digest:
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Report domain API digest
+        continue-on-error: true
+        env:
+          DOMAIN_SPINE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          rustdoc_toolchain=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("docs/api/crates.toml").read_text())["rustdoc_toolchain"])')
+          rustup toolchain install "$rustdoc_toolchain" --profile minimal
+          export PATH="$PATH:${CARGO_HOME:-$HOME/.cargo}/bin"
+          command -v cargo-public-api || cargo install cargo-public-api --locked
+          python3 scripts/domain_spine_digest.py >> "$GITHUB_STEP_SUMMARY"
   checker-and-format-tests:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 10

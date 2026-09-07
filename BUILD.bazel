@@ -1,5 +1,6 @@
 load("@python_deps//:requirements.bzl", "requirement")
 load("@rules_python//python:defs.bzl", "py_test")
+load("//tooling/bazel:api_documentation.bzl", "api_documentation")
 load("//tooling/bazel:native_generation.bzl", "native_generation")
 load("//tooling/bazel:source_manifest.bzl", "source_manifest")
 
@@ -417,4 +418,82 @@ test_suite(
         ":model_projections_generated",
         ":web_contract_generated",
     ],
+)
+
+filegroup(
+    name = "api_json",
+    srcs = [
+        "//crates/application:api_json",
+        "//crates/blob-store:api_json",
+        "//crates/blob-store-filesystem:api_json",
+        "//crates/blob-store-s3:api_json",
+        "//crates/convergence:api_json",
+        "//crates/domain:api_json",
+        "//crates/egress-transport:api_json",
+        "//crates/file-media-linux-sandbox:api_json",
+        "//crates/file-media-processor-runtime:api_json",
+        "//crates/file-media-provider-runtime:api_json",
+        "//crates/file-media-runtime:api_json",
+        "//crates/model-provider-runtime:api_json",
+        "//crates/model-reference-catalog:api_json",
+        "//crates/model-runtime:api_json",
+        "//crates/model-runtime-anthropic:api_json",
+        "//crates/model-runtime-claude-cli:api_json",
+        "//crates/model-runtime-codex-cli:api_json",
+        "//crates/model-runtime-openai:api_json",
+        "//crates/ownership-seam:api_json",
+        "//crates/persistence:api_json",
+        "//crates/process-protocol:api_json",
+        "//crates/program-runtime:api_json",
+        "//crates/runner-wire:api_json",
+        "//crates/tool-contract:api_json",
+        "//crates/tools-basic:api_json",
+        "//crates/tools-code-host:api_json",
+        "//crates/tools-conversations:api_json",
+        "//crates/tools-exec:api_json",
+        "//crates/tools-file-media:api_json",
+        "//crates/tools-git:api_json",
+        "//crates/tools-github:api_json",
+        "//crates/tools-plan:api_json",
+        "//crates/tools-sessions:api_json",
+        "//crates/tools-web:api_json",
+        "//crates/tools-workspace:api_json",
+        "//crates/web-contract:api_json",
+    ],
+)
+
+filegroup(
+    name = "api_snapshots",
+    srcs = glob(["docs/api/**/*.md"]),
+)
+
+api_documentation(
+    name = "api_pages",
+    json = [":api_json"],
+    sources = [
+        ":api_snapshots",
+        "docs/api/crates.toml",
+    ],
+)
+
+source_manifest(
+    name = "api_snapshot_manifest",
+    srcs = [":api_snapshots"],
+)
+
+py_test(
+    name = "api_documentation_current",
+    size = "small",
+    srcs = ["//tooling/bazel:check_generated.py"],
+    args = [
+        "$(rootpath :api_snapshot_manifest)",
+        "$(rootpath :api_pages)",
+        "--source-prefix",
+        "docs/api",
+    ],
+    data = [
+        ":api_pages",
+        ":api_snapshot_manifest",
+    ],
+    main = "//tooling/bazel:check_generated.py",
 )
