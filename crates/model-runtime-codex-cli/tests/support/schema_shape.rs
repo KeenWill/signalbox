@@ -132,6 +132,15 @@ pub(super) fn compatible(
     {
         return true;
     }
+    if expected["x-codex-agent-items"] == true {
+        return actual["type"] == "array"
+            && agent_items(
+                &expected["items"],
+                expected_root,
+                &actual["items"],
+                actual_root,
+            ) == Ok(true);
+    }
     if expected["x-codex-unknown-tags"] == true {
         return error_info(expected, expected_root, actual, actual_root, false).is_ok();
     }
@@ -288,4 +297,33 @@ fn error_info(
         }
     }
     Ok(())
+}
+
+// Check every representation that can reach the adapter's agent-message decoder.
+// Other item tags are retained as JSON and do not constrain their payloads.
+fn agent_items(
+    expected: &Value,
+    expected_root: &Value,
+    actual: &Value,
+    actual_root: &Value,
+) -> Result<bool, String> {
+    let actual = dereference(actual, actual_root);
+    if let Some(branches) = alternatives(actual) {
+        let mut found = false;
+        for branch in branches {
+            found |= agent_items(expected, expected_root, &branch, actual_root)?;
+        }
+        return Ok(found);
+    }
+    let tag = dereference(&actual["properties"]["type"], actual_root);
+    let tags = tag["enum"]
+        .as_array()
+        .ok_or("item schema must identify its possible tags")?;
+    if !tags.iter().any(|tag| tag == "agentMessage") {
+        return Ok(false);
+    }
+    if !compatible(expected, expected_root, actual, actual_root) {
+        return Err("incompatible agent-message item schema".into());
+    }
+    Ok(true)
 }

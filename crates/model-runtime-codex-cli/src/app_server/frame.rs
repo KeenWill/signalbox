@@ -171,6 +171,7 @@ pub(crate) struct Turn {
     pub(crate) id: String,
     pub(crate) status: TurnStatus,
     pub(crate) error: Option<TurnError>,
+    #[cfg_attr(test, schemars(schema_with = "consumed_turn_items_schema"))]
     pub(crate) items: Vec<Value>,
 }
 
@@ -235,6 +236,7 @@ pub(crate) struct ItemNotification {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct AgentMessage {
     pub(crate) id: String,
     pub(crate) text: String,
@@ -340,4 +342,12 @@ impl RateLimits {
                 .unwrap_or(std::time::Duration::ZERO),
         )
     }
+}
+
+// Turn items are retained as JSON, then agent messages are decoded separately.
+#[cfg(test)]
+fn consumed_turn_items_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = <Vec<AgentMessage> as schemars::JsonSchema>::json_schema(generator);
+    schema.insert("x-codex-agent-items".into(), true.into());
+    schema
 }

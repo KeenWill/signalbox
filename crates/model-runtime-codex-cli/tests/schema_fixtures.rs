@@ -325,3 +325,48 @@ fn an_inlined_error_union_can_flatten_its_nullable_alternative() {
     actual["definitions"]["TurnError"]["properties"]["codexErrorInfo"] = error_info;
     assert_eq!(check_errors(&actual), Ok(()));
 }
+
+#[test]
+fn agent_message_fields_are_checked_through_referenced_and_inlined_turn_items() {
+    let expected = derived::<frame::TurnCompleted>();
+    for inline in [false, true] {
+        let mut actual = schema("TurnCompletedNotification");
+        if inline {
+            actual["definitions"]["Turn"]["properties"]["items"]["items"] =
+                actual["definitions"]["ThreadItem"].clone();
+        }
+        assert!(schema_shape::object_shape(&expected, &actual, &actual).is_ok());
+        let items = if inline {
+            &mut actual["definitions"]["Turn"]["properties"]["items"]["items"]
+        } else {
+            &mut actual["definitions"]["ThreadItem"]
+        };
+        let message = items["oneOf"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| strings(&item["properties"]["type"]["enum"]).contains("agentMessage"))
+            .unwrap();
+        message["properties"]["text"]["type"] = serde_json::json!(["string", "null"]);
+        assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
+    }
+}
+
+#[test]
+fn unconsumed_item_payloads_can_change_and_new_item_tags_are_allowed() {
+    let expected = derived::<frame::TurnCompleted>();
+    let mut actual = schema("TurnCompletedNotification");
+    let items = actual["definitions"]["ThreadItem"]["oneOf"]
+        .as_array_mut()
+        .unwrap();
+    for item in items.iter_mut() {
+        if !strings(&item["properties"]["type"]["enum"]).contains("agentMessage") {
+            item["properties"]["text"] = serde_json::json!({"type":["string","null"]});
+        }
+    }
+    items.push(serde_json::json!({
+        "type":"object", "required":["type"],
+        "properties":{"type":{"type":"string","enum":["futureItem"]},"payload":{}}
+    }));
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_ok());
+}
