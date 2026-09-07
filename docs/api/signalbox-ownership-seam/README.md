@@ -4,4 +4,4 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
-| root | 18 | 0 | 0 | [root](root.md) |
+| root | 20 | 0 | 0 | [root](root.md) |

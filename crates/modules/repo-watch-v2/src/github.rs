@@ -4,7 +4,10 @@ use std::{error::Error, fmt};
 
 use reqwest::{
     Client, StatusCode,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, LINK, USER_AGENT},
+    header::{
+        ACCEPT, AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderMap, HeaderValue, IF_MODIFIED_SINCE,
+        IF_NONE_MATCH, LAST_MODIFIED, LINK, USER_AGENT,
+    },
 };
 
 const API_ROOT: &str = "https://api.github.com";
@@ -49,10 +52,32 @@ impl GitHubClient {
 
     /// Fetches one page and reports GitHub's next-page link without following it.
     pub async fn get_page(&self, path: &str) -> Result<(Vec<u8>, bool), GitHubClientError> {
+        match self.conditional_page(path, None).await? {
+            ConditionalPage::Modified { body, has_next, .. } => Ok((body, has_next)),
+            ConditionalPage::Unchanged => Err(GitHubClientError::Rejected {
+                path: path.to_owned(),
+                status: StatusCode::NOT_MODIFIED,
+            }),
+        }
+    }
+
+    /// Sends retained validators for one accepted resource snapshot.
+    pub async fn conditional_page(
+        &self,
+        path: &str,
+        validators: Option<&HttpValidators>,
+    ) -> Result<ConditionalPage, GitHubClientError> {
         validate_path(path)?;
-        let response = self
-            .client
-            .get(format!("{API_ROOT}{path}"))
+        let mut request = self.client.get(format!("{API_ROOT}{path}"));
+        if let Some(validators) = validators {
+            if let Some(etag) = &validators.etag {
+                request = request.header(IF_NONE_MATCH, etag);
+            }
+            if let Some(modified) = &validators.last_modified {
+                request = request.header(IF_MODIFIED_SINCE, modified);
+            }
+        }
+        let response = request
             .send()
             .await
             .map_err(|source| GitHubClientError::Request {
@@ -61,6 +86,9 @@ impl GitHubClient {
                 source,
             })?;
         let status = response.status();
+        if status == StatusCode::NOT_MODIFIED {
+            return Ok(ConditionalPage::Unchanged);
+        }
         if !status.is_success() {
             return Err(GitHubClientError::Rejected {
                 path: path.to_owned(),
@@ -74,10 +102,26 @@ impl GitHubClient {
                     .any(|link| link.split(';').any(|part| part.trim() == "rel=\"next\""))
             })
         });
+        let validators = HttpValidators {
+            etag: response
+                .headers()
+                .get(ETAG)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned),
+            last_modified: response
+                .headers()
+                .get(LAST_MODIFIED)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned),
+        };
         response
             .bytes()
             .await
-            .map(|body| (body.to_vec(), has_next))
+            .map(|body| ConditionalPage::Modified {
+                body: body.to_vec(),
+                has_next,
+                validators,
+            })
             .map_err(|source| GitHubClientError::Request {
                 path: path.to_owned(),
                 status: Some(status),
@@ -215,4 +259,21 @@ mod tests {
             Err(GitHubClientError::InvalidPath)
         ));
     }
+}
+
+/// HTTP validators retained with an accepted page; neither value is a credential.
+#[derive(Clone, Debug, Default)]
+pub struct HttpValidators {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+/// A conditional GET either supplies a replacement or reuses the accepted page.
+pub enum ConditionalPage {
+    Modified {
+        body: Vec<u8>,
+        has_next: bool,
+        validators: HttpValidators,
+    },
+    Unchanged,
 }
