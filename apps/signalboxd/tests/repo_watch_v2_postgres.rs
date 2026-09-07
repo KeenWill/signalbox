@@ -2656,6 +2656,26 @@ async fn wait_for_blocked_webhook_admission(pool: &PgPool) -> Result<(), Box<dyn
     Ok(())
 }
 
+/// Waits until rule activation is blocked after the listener pause.
+async fn wait_for_blocked_reload_activation(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT FROM pg_locks
+                 WHERE relation = 'reload_activation'::regclass AND NOT granted)",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
 async fn webhook_delivery_status(
     hook: &RuntimeHookFixture<'_>,
     secret: &[u8],
@@ -3425,7 +3445,7 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
         enabled: false,
         rule_version: 1,
         template: "watch",
-        mode: "primary",
+        mode: "shadow",
         retention: "604800s",
     };
     let prior_source = runtime_configuration_source(&hook)?;
@@ -3542,6 +3562,71 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
         webhook_status(&hook, b"wrong-secret").await?,
         reqwest::StatusCode::UNAUTHORIZED
     );
+    // Pause after delivery admission starts, while rule activation remains blocked.
+    let delivery = RuntimeWebhookDelivery {
+        id: Uuid::now_v7(),
+        event: "push",
+        body: RUNTIME_WEBHOOK_BODY,
+    };
+    let mut admission_lock = module_pool.begin().await?;
+    sqlx::query("LOCK TABLE webhook_delivery IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *admission_lock)
+        .await?;
+    let mut activation_lock = module_pool.begin().await?;
+    sqlx::query("LOCK TABLE reload_activation IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *activation_lock)
+        .await?;
+    hook.mode = "primary";
+    std::fs::write(&model_path, runtime_configuration_source(&hook)?)?;
+    let (response_sent, response_received) = tokio::sync::oneshot::channel();
+    let control_pool = module_pool.clone();
+    let delivery_id = delivery.id;
+    let hook_id = hook.id;
+    let (response, installed, controls) = tokio::join!(
+        async {
+            let response = webhook_delivery_status(&hook, b"hook-secret", &delivery).await?;
+            let _ = response_sent.send(response);
+            Ok::<_, Box<dyn Error>>(response)
+        },
+        async {
+            wait_for_blocked_webhook_admission(&module_pool).await?;
+            Ok::<_, Box<dyn Error>>(
+                reload
+                    .reload(ReloadConfiguration {
+                        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+                    })
+                    .await?,
+            )
+        },
+        async move {
+            wait_for_blocked_reload_activation(&control_pool).await?;
+            admission_lock.commit().await?;
+            assert_eq!(
+                response_received.await?,
+                reqwest::StatusCode::SERVICE_UNAVAILABLE
+            );
+            let pending: String = sqlx::query_scalar("SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2")
+                .bind(Decimal::from(hook_id)).bind(delivery_id).fetch_one(&control_pool).await?;
+            assert_eq!(pending, "pending");
+            activation_lock.commit().await?;
+            Ok::<_, Box<dyn Error>>(())
+        }
+    );
+    controls?;
+    assert_eq!(response?, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(installed?, ReloadLookup::Recorded(ReloadResult::Reloaded));
+    assert_eq!(
+        webhook_delivery_status(&hook, b"hook-secret", &delivery).await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    let applied: String = sqlx::query_scalar(
+        "SELECT disposition FROM webhook_disposition WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(hook.id))
+    .bind(delivery.id)
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(applied, "applied");
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let running_address = hook.address;
     hook.address = occupied.local_addr()?;

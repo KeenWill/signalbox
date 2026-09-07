@@ -220,8 +220,7 @@ async fn delivery(
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
-    let admission = routing.paused.read().await;
-    if *admission {
+    if *routing.paused.read().await {
         return StatusCode::SERVICE_UNAVAILABLE;
     }
     if method != Method::POST {
@@ -321,6 +320,10 @@ async fn delivery(
         else {
             return StatusCode::SERVICE_UNAVAILABLE;
         };
+        let settlement = routing.paused.read().await;
+        if *settlement {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
         let current = routing.current.read().await;
         if !Arc::ptr_eq(&snapshot, &current) {
             continue;
