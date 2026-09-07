@@ -61,6 +61,7 @@ pub(crate) struct WireFunctionTool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(try_from = "ResponseEnvelope")]
 pub(crate) struct Response {
     pub id: Option<String>,
     pub object: Option<String>,
@@ -70,6 +71,53 @@ pub(crate) struct Response {
     pub output: Option<Box<RawValue>>,
     pub usage: Option<WireUsage>,
     pub error: Option<ResponseError>,
+}
+
+#[derive(Deserialize)]
+struct ResponseEnvelope {
+    id: Option<String>,
+    object: Option<String>,
+    model: Option<String>,
+    status: Option<String>,
+    incomplete_details: Option<Box<RawValue>>,
+    output: Option<Box<RawValue>>,
+    usage: Option<Box<RawValue>>,
+    error: Option<ResponseError>,
+}
+
+impl TryFrom<ResponseEnvelope> for Response {
+    type Error = serde_json::Error;
+
+    fn try_from(envelope: ResponseEnvelope) -> Result<Self, Self::Error> {
+        let failed = envelope.status.as_deref() == Some("failed") && envelope.error.is_some();
+        let usage = envelope
+            .usage
+            .map(|raw| serde_json::from_str(raw.get()))
+            .transpose();
+        let usage = if failed {
+            usage.unwrap_or(None)
+        } else {
+            usage?
+        };
+        let incomplete_details = if failed {
+            None
+        } else {
+            envelope
+                .incomplete_details
+                .map(|raw| serde_json::from_str(raw.get()))
+                .transpose()?
+        };
+        Ok(Self {
+            id: envelope.id,
+            object: envelope.object,
+            model: envelope.model,
+            status: envelope.status,
+            incomplete_details,
+            output: envelope.output,
+            usage,
+            error: envelope.error,
+        })
+    }
 }
 
 impl Response {

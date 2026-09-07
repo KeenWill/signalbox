@@ -1082,4 +1082,69 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn buffered_failed_envelopes_survive_malformed_ancillary_fields() {
+        for status in ["failed", "completed", "incomplete"] {
+            for field in ["usage", "incomplete_details"] {
+                for malformed in [
+                    json!("invalid"),
+                    json!([]),
+                    json!({"input_tokens":"invalid","reason":42}),
+                ] {
+                    let mut value = response();
+                    value["status"] = json!(status);
+                    if status == "failed" {
+                        value["error"] =
+                            json!({"code":"server_error","message":"generation failed"});
+                    }
+                    if status == "incomplete" {
+                        value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                    }
+                    value[field] = malformed;
+                    let (evidence, observations) = decode(value);
+                    if status == "failed" {
+                        let TerminalEvidence::ProviderError(error) = evidence else {
+                            panic!("ancillary {field} must not erase the failed envelope");
+                        };
+                        assert_eq!(
+                            error.kind,
+                            signalbox_model_runtime::ProviderErrorKind::ProviderInternal
+                        );
+                        assert_eq!(error.native.error_code.as_deref(), Some("server_error"));
+                        assert_eq!(error.native.message.as_deref(), Some("generation failed"));
+                        assert_eq!(error.exchange.http_status, Some(200));
+                        assert!(!error.non_acceptance_proven);
+                        let expected = if field == "usage" {
+                            TokenUsage::unreported()
+                        } else {
+                            TokenUsage {
+                                input_tokens: Some(19),
+                                output_tokens: Some(7),
+                                cache_read_input_tokens: Some(3),
+                                cache_creation_input_tokens: Some(5),
+                            }
+                        };
+                        assert_eq!(error.usage, expected);
+                        let observed_usage = observations.iter().rev().find_map(|o| match o.fact {
+                            ObservationFact::UsageReported(usage) => Some(usage),
+                            _ => None,
+                        });
+                        assert_eq!(
+                            observed_usage,
+                            (expected != TokenUsage::unreported()).then_some(expected)
+                        );
+                    } else {
+                        assert!(
+                            matches!(evidence, TerminalEvidence::BoundaryLoss(_)),
+                            "{status} {field}"
+                        );
+                    }
+                    assert!(!observations.iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                }
+            }
+        }
+    }
 }

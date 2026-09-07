@@ -1980,4 +1980,95 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn streamed_failed_envelopes_survive_malformed_ancillary_fields() {
+        for status in [
+            "failed",
+            "completed",
+            "incomplete",
+            "created",
+            "in_progress",
+            "queued",
+        ] {
+            for field in ["usage", "incomplete_details"] {
+                for malformed in [
+                    json!("invalid"),
+                    json!([]),
+                    json!({"input_tokens":"invalid","reason":42}),
+                ] {
+                    let mut event = terminal();
+                    event["type"] = json!(format!("response.{status}"));
+                    event["response"]["status"] = json!(status);
+                    if status == "failed" {
+                        event["response"]["error"] =
+                            json!({"code":"server_error","message":"generation failed"});
+                    }
+                    if status == "incomplete" {
+                        event["response"]["incomplete_details"] =
+                            json!({"reason":"max_output_tokens"});
+                    }
+                    event["response"][field] = malformed;
+                    let mut decoder = StreamDecoder::new(ExchangeFacts {
+                        http_status: Some(200),
+                        ..ExchangeFacts::default()
+                    });
+                    let mut observations = Vec::new();
+                    assert!(matches!(
+                        apply(
+                            &mut decoder,
+                            json!({"type":"response.created","response":{
+                                "id":"resp_fixture","model":"model-fixture","status":"in_progress","output":[],
+                                "usage":{"input_tokens":23,"output_tokens":7,"input_tokens_details":{"cached_tokens":5,"cache_write_tokens":3}}
+                            }}),
+                            &mut observations
+                        ),
+                        StreamStep::Continue
+                    ));
+                    let StreamStep::Terminal(evidence) =
+                        apply(&mut decoder, event, &mut observations)
+                    else {
+                        panic!("malformed ancillary fields must terminate this fixture");
+                    };
+                    let evidence = *evidence;
+                    if status == "failed" {
+                        let TerminalEvidence::ProviderError(error) = evidence else {
+                            panic!("ancillary {field} must not erase the failed envelope");
+                        };
+                        assert_eq!(
+                            error.kind,
+                            signalbox_model_runtime::ProviderErrorKind::ProviderInternal
+                        );
+                        assert_eq!(error.native.error_code.as_deref(), Some("server_error"));
+                        assert_eq!(error.native.message.as_deref(), Some("generation failed"));
+                        assert_eq!(error.exchange.http_status, Some(200));
+                        assert!(!error.non_acceptance_proven);
+                        let expected = TokenUsage {
+                            input_tokens: Some(if field == "usage" { 23 } else { 5 }),
+                            output_tokens: Some(if field == "usage" { 7 } else { 2 }),
+                            cache_read_input_tokens: Some(5),
+                            cache_creation_input_tokens: Some(3),
+                        };
+                        assert_eq!(error.usage, expected);
+                        let observed_usage = observations.iter().rev().find_map(|o| match o.fact {
+                            ObservationFact::UsageReported(usage) => Some(usage),
+                            _ => None,
+                        });
+                        assert_eq!(
+                            observed_usage,
+                            (expected != TokenUsage::unreported()).then_some(expected)
+                        );
+                    } else {
+                        assert!(
+                            matches!(evidence, TerminalEvidence::BoundaryLoss(_)),
+                            "{status} {field}"
+                        );
+                    }
+                    assert!(!observations.iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                }
+            }
+        }
+    }
 }
