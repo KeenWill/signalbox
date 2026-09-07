@@ -37,6 +37,19 @@ async fn deadline_warning_names_the_failed_operation_and_database_error() {
         .connect_lazy("postgres://localhost/deadline_warning_test")
         .expect("fixture connection options");
     pool.close().await;
+    let warning = capture_deadline_warning(pool).await;
+    assert!(
+        warning.contains("session deadline pass produced no decision"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("operation=\"select_deadline_candidate\""),
+        "{warning}"
+    );
+    assert!(warning.contains("error_class=\"pool_closed\""), "{warning}");
+}
+
+async fn capture_deadline_warning(pool: sqlx::PgPool) -> String {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let capture = DeadlineWarningCapture {
@@ -46,6 +59,7 @@ async fn deadline_warning_names_the_failed_operation_and_database_error() {
     let subscriber = tracing_subscriber::fmt()
         .without_time()
         .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
         .with_writer(move || capture.clone())
         .finish();
     let runtime = LifecycleDeadlineRuntime::new(
@@ -61,15 +75,50 @@ async fn deadline_warning_names_the_failed_operation_and_database_error() {
     .await
     .expect("the first warning shuts down the pass");
 
-    let warning = String::from_utf8(bytes.lock().expect("warning capture lock").clone())
-        .expect("UTF-8 warning");
+    String::from_utf8(bytes.lock().expect("warning capture lock").clone()).expect("UTF-8 warning")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn deadline_warning_excludes_postgres_message_detail_hint_and_sql()
+-> Result<(), Box<dyn std::error::Error>> {
+    let runtime = super::RunningRuntime::start().await?;
+    // A candidate view makes the real deadline query receive a PostgreSQL
+    // exception containing each payload-bearing diagnostic field.
+    sqlx::raw_sql(
+        "ALTER TABLE session_deadline RENAME TO saved_session_deadline;
+         CREATE FUNCTION private_deadline_source() RETURNS uuid LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION USING
+                 MESSAGE = 'private-deadline-message',
+                 DETAIL = 'private-deadline-detail',
+                 HINT = 'private-deadline-hint';
+         END;
+         $$;
+         CREATE VIEW session_deadline AS
+         SELECT private_deadline_source() AS session_id,
+                'admission'::text AS deadline_kind,
+                clock_timestamp() AS armed_at,
+                clock_timestamp() - INTERVAL '1 hour' AS expires_at;",
+    )
+    .execute(&runtime.pool)
+    .await?;
+    let warning = capture_deadline_warning(runtime.pool.clone()).await;
     assert!(
-        warning.contains("session deadline pass produced no decision"),
+        warning.contains("operation=\"select_deadline_candidate\""),
         "{warning}"
     );
-    assert!(
-        warning.contains("query: \"select_deadline_candidate\""),
-        "{warning}"
-    );
-    assert!(warning.contains("PoolClosed"), "{warning}");
+    assert!(warning.contains("error_class=\"database\""), "{warning}");
+    assert!(warning.contains("sqlstate=\"P0001\""), "{warning}");
+    for excluded in [
+        "private-deadline",
+        "private_deadline_source",
+        "RAISE EXCEPTION",
+        "SELECT",
+        "PL/pgSQL",
+        "PgDatabaseError",
+    ] {
+        assert!(!warning.contains(excluded), "{warning}");
+    }
+    runtime.stop().await
 }
