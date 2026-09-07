@@ -344,10 +344,10 @@ impl RateLimits {
     }
 }
 
-// Turn items are retained as JSON, then agent messages are decoded separately.
+// Turn items supply proof-gate discriminators; agent messages are also decoded separately.
 #[cfg(test)]
 fn consumed_turn_items_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let mut schema = <Vec<AgentMessage> as schemars::JsonSchema>::json_schema(generator);
-    schema.insert("x-codex-agent-items".into(), true.into());
+    schema.insert("x-codex-consumed-items".into(), true.into());
     schema
 }

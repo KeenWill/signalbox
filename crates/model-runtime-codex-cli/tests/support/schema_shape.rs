@@ -132,9 +132,9 @@ pub(super) fn compatible(
     {
         return true;
     }
-    if expected["x-codex-agent-items"] == true {
+    if expected["x-codex-consumed-items"] == true {
         return actual["type"] == "array"
-            && agent_items(
+            && turn_items(
                 &expected["items"],
                 expected_root,
                 &actual["items"],
@@ -299,9 +299,9 @@ fn error_info(
     Ok(())
 }
 
-// Check every representation that can reach the adapter's agent-message decoder.
-// Other item tags are retained as JSON and do not constrain their payloads.
-fn agent_items(
+// Check agent-message decoding and the non-output discriminators used by the proof gate.
+// Other item payloads are retained as JSON and remain unconstrained.
+fn turn_items(
     expected: &Value,
     expected_root: &Value,
     actual: &Value,
@@ -311,7 +311,7 @@ fn agent_items(
     if let Some(branches) = alternatives(actual) {
         let mut found = false;
         for branch in branches {
-            found |= agent_items(expected, expected_root, &branch, actual_root)?;
+            found |= turn_items(expected, expected_root, &branch, actual_root)?;
         }
         return Ok(found);
     }
@@ -319,6 +319,20 @@ fn agent_items(
     let tags = tag["enum"]
         .as_array()
         .ok_or("item schema must identify its possible tags")?;
+    if tags.iter().any(|tag| {
+        matches!(
+            tag.as_str(),
+            Some("agentMessage" | "userMessage" | "hookPrompt")
+        )
+    }) {
+        let discriminator = serde_json::json!({
+            "type":"object", "required":["type"],
+            "properties":{"type":{"type":"string"}}
+        });
+        if !compatible(&discriminator, &discriminator, actual, actual_root) {
+            return Err("consumed item discriminator must remain a required string".into());
+        }
+    }
     if !tags.iter().any(|tag| tag == "agentMessage") {
         return Ok(false);
     }

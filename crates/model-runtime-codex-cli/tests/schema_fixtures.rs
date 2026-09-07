@@ -370,3 +370,40 @@ fn unconsumed_item_payloads_can_change_and_new_item_tags_are_allowed() {
     }));
     assert!(schema_shape::object_shape(&expected, &actual, &actual).is_ok());
 }
+
+#[test]
+fn consumed_item_discriminators_remain_required_strings() {
+    let expected = derived::<frame::TurnCompleted>();
+    for tag in ["userMessage", "hookPrompt", "agentMessage"] {
+        for mutation in ["optional", "nullable", "removed"] {
+            let mut actual = schema("TurnCompletedNotification");
+            let item = actual["definitions"]["ThreadItem"]["oneOf"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|item| strings(&item["properties"]["type"]["enum"]).contains(tag))
+                .unwrap();
+            match mutation {
+                "optional" => item["required"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|field| field != "type"),
+                "nullable" => {
+                    item["properties"]["type"]["type"] = serde_json::json!(["string", "null"]);
+                    item["properties"]["type"]["enum"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(Value::Null);
+                }
+                "removed" => {
+                    item["properties"].as_object_mut().unwrap().remove("type");
+                }
+                _ => panic!("unknown discriminator mutation"),
+            }
+            assert!(
+                schema_shape::object_shape(&expected, &actual, &actual).is_err(),
+                "{tag}: {mutation}"
+            );
+        }
+    }
+}

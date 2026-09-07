@@ -213,10 +213,10 @@ The Codex smoke compares the pin's checked-in app-server error, turn-completed,
 and rate-limit notification schemas with the adapter's consumed fields, enum
 members, and required fields. Consumed fields must remain decoder-compatible,
 adapter-required fields must remain required, and turn statuses must match.
-Agent-message turn items preserve their consumed fields. Tagged error objects
-contain only their tag. Compatible additions are reported; consumed fields and
-error members must remain present. Committed schema fixtures must match the
-pinned files byte for byte.
+Consumed turn-item discriminators remain required strings; agent-message items
+preserve their consumed fields. Tagged error objects contain only their tag.
+Compatible additions are reported; consumed fields and error members must remain
+present. Committed schema fixtures must match the pinned files byte for byte.
 
 The compatibility smokes assert nothing about answer quality.
 
