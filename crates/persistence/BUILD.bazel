@@ -594,7 +594,10 @@ rust_test(
 rust_test(
     name = "runner_protocol_postgres",
     size = "large",
-    srcs = ["tests/runner_protocol_postgres.rs"] + glob(["tests/support/**/*.rs"]),
+    srcs = glob([
+        "tests/runner_protocol_postgres/**/*.rs",
+        "tests/support/**/*.rs",
+    ]),
     aliases = aliases(
         normal_dev = True,
         proc_macro_dev = True,
@@ -607,7 +610,7 @@ rust_test(
         "postgres-integration",
         "test-support",
     ],
-    crate_root = "tests/runner_protocol_postgres.rs",
+    crate_root = "tests/runner_protocol_postgres/main.rs",
     edition = crate_edition(),
     lint_config = ":cargo_lints",
     proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(

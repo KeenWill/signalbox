@@ -5,6 +5,7 @@
 ## ChildSetup
 
 ```rust
+#[cfg(target_os = "linux")]
 pub struct ChildSetup {
     pub address_space_bytes: u64,
     pub cpu_seconds: u64,
@@ -20,17 +21,20 @@ pub struct ChildSetup {
 ## install_pre_exec
 
 ```rust
+#[cfg(target_os = "linux")]
 pub fn install_pre_exec(command: &mut process::Command, setup: ChildSetup);
 ```
 
 ## create_executable_snapshot
 
 ```rust
+#[cfg(target_os = "linux")]
 pub fn create_executable_snapshot() -> error::Result<fs::File>;
 ```
 
 ## seal_executable_snapshot
 
 ```rust
+#[cfg(target_os = "linux")]
 pub fn seal_executable_snapshot(file: &fs::File) -> error::Result<()>;
 ```
