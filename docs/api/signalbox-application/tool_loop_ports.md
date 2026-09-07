@@ -20,6 +20,10 @@ pub enum ResolvedToolConversationEntry {
         request: signalbox_domain::ToolRequest,
         approval: signalbox_domain::ToolApprovalResolution,
     },
+    Inadmissible {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        request: signalbox_domain::ToolRequest,
+    },
     Closed {
         source: signalbox_domain::SemanticTranscriptEntryRef,
         request: signalbox_domain::ToolRequest,

@@ -465,6 +465,12 @@ model_call_cause_tokens! {
     CredentialUnmapped => "credential_unmapped",
     CredentialUnavailable => "credential_unavailable",
     CredentialUnreadable => "credential_unreadable",
+    OauthTupleMismatch => "oauth_tuple_mismatch",
+    OauthRefreshAmbiguous => "oauth_refresh_ambiguous",
+    OauthRefreshRejected => "oauth_refresh_rejected",
+    OauthIdentityChanged => "oauth_identity_changed",
+    OauthCredentialHome => "oauth_credential_home",
+
     CredentialUnusable => "credential_unusable",
     ProviderTargetSubstituted => "provider_target_substituted",
     UnrepresentableToolMaterial => "unrepresentable_tool_material",
@@ -663,6 +669,16 @@ pub enum CredentialAccessCode {
     Unavailable,
     /// The artifact was present but could not be read as a value.
     Unreadable,
+    /// OAuth delivery failure: `oauth_tuple_mismatch`.
+    OauthTupleMismatch,
+    /// OAuth delivery failure: `oauth_refresh_ambiguous`.
+    OauthRefreshAmbiguous,
+    /// OAuth delivery failure: `oauth_refresh_rejected`.
+    OauthRefreshRejected,
+    /// OAuth delivery failure: `oauth_identity_changed`.
+    OauthIdentityChanged,
+    /// OAuth delivery failure: `oauth_credential_home`.
+    OauthCredentialHome,
 }
 
 impl CredentialAccessCode {
@@ -676,6 +692,11 @@ impl CredentialAccessCode {
             Self::Unmapped => ModelCallCauseToken::CredentialUnmapped,
             Self::Unavailable => ModelCallCauseToken::CredentialUnavailable,
             Self::Unreadable => ModelCallCauseToken::CredentialUnreadable,
+            Self::OauthTupleMismatch => ModelCallCauseToken::OauthTupleMismatch,
+            Self::OauthRefreshAmbiguous => ModelCallCauseToken::OauthRefreshAmbiguous,
+            Self::OauthRefreshRejected => ModelCallCauseToken::OauthRefreshRejected,
+            Self::OauthIdentityChanged => ModelCallCauseToken::OauthIdentityChanged,
+            Self::OauthCredentialHome => ModelCallCauseToken::OauthCredentialHome,
         }
     }
 
@@ -684,6 +705,11 @@ impl CredentialAccessCode {
             CredentialAccessFailure::Unmapped => Self::Unmapped,
             CredentialAccessFailure::Unavailable => Self::Unavailable,
             CredentialAccessFailure::Unreadable => Self::Unreadable,
+            CredentialAccessFailure::OauthTupleMismatch => Self::OauthTupleMismatch,
+            CredentialAccessFailure::OauthRefreshAmbiguous => Self::OauthRefreshAmbiguous,
+            CredentialAccessFailure::OauthRefreshRejected => Self::OauthRefreshRejected,
+            CredentialAccessFailure::OauthIdentityChanged => Self::OauthIdentityChanged,
+            CredentialAccessFailure::OauthCredentialHome => Self::OauthCredentialHome,
         }
     }
 }
@@ -1520,6 +1546,24 @@ fn render_runtime_messages(
     let mut collecting_tool_results = false;
     for message in messages {
         match message {
+            ModelConversationMessage::RunnerPlacementChanged {
+                placement_revision,
+                sandbox,
+                ..
+            } => {
+                let revision = placement_revision.get();
+                let content = match sandbox {
+                    signalbox_domain::RunnerSandboxProfile::WorkspaceRestricted => format!(
+                        "Signalbox session event: runner placement changed to revision {revision} with profile workspace-restricted; the prior placement can no longer execute. The successor writable root and working directory are now active. Relocation did not delete prior files; they may still exist, but only paths exposed inside the successor restricted workspace are reachable."
+                    ),
+                    signalbox_domain::RunnerSandboxProfile::Ambient => format!(
+                        "Signalbox session event: runner placement changed to revision {revision} with profile ambient; the prior placement can no longer execute. The successor working directory is now active. Relocation did not delete prior files, and they may remain reachable at their previous paths through the invoking user's filesystem; check before recreating or overwriting them."
+                    ),
+                };
+                rendered.push(ConversationMessage::user_text(content));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
             ModelConversationMessage::ModelIdentityChanged {
                 defaults_version,
                 selected,

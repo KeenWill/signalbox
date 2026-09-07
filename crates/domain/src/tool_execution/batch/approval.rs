@@ -69,7 +69,7 @@ impl ToolBatch {
                 failure: ToolBatchDecisionFailure::CommandCorrelationMismatch,
             });
         };
-        if self.approvals.contains_key(&request) {
+        if request_record.inadmissible_reason().is_some() || self.approvals.contains_key(&request) {
             return Ok(PreparedToolBatchDecision::rejected(
                 self,
                 command.prepare_already_resolved(),
@@ -79,7 +79,10 @@ impl ToolBatch {
         let earliest = self
             .requests
             .iter()
-            .find(|candidate| !self.approvals.contains_key(&candidate.id()))
+            .find(|candidate| {
+                candidate.inadmissible_reason().is_none()
+                    && !self.approvals.contains_key(&candidate.id())
+            })
             .map(ToolRequest::id);
         if earliest != Some(request) {
             let earliest = earliest.ok_or(ToolBatchDecisionError {
@@ -111,7 +114,10 @@ impl ToolBatch {
         let next_undecided = self
             .requests
             .iter()
-            .find(|candidate| !approvals.contains_key(&candidate.id()))
+            .find(|candidate| {
+                candidate.inadmissible_reason().is_none()
+                    && !approvals.contains_key(&candidate.id())
+            })
             .map(ToolRequest::id);
         let (phase, active_phase) = match (next_undecided, continuation_attempt) {
             (Some(next), None) => (
@@ -206,7 +212,10 @@ impl ToolBatch {
         let next_undecided = self
             .requests
             .iter()
-            .find(|candidate| !approvals.contains_key(&candidate.id()))
+            .find(|candidate| {
+                candidate.inadmissible_reason().is_none()
+                    && !approvals.contains_key(&candidate.id())
+            })
             .map(ToolRequest::id);
         let (phase, active_phase) = match (next_undecided, continuation_attempt) {
             (Some(next), None) => (

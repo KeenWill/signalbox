@@ -21,6 +21,7 @@ import {
   HttpSessionTimelineSource,
   type SessionWindowAnchor,
 } from './session-timeline/model'
+import { SESSION_WINDOW_BYTES, SESSION_WINDOW_ITEMS } from './session-workspace'
 import {
   actions,
   selectApp,
@@ -32,8 +33,6 @@ import {
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const NATIVE_SESSION_ID_PATTERN = String.raw`\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*`
-const SESSION_WINDOW_ITEMS = 80
-const SESSION_WINDOW_BYTES = 64 * 1024
 const MAX_CACHED_SESSION_WORKSPACES = 4
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
 export interface SessionSelectionEvidence {
@@ -237,7 +236,7 @@ export function SessionWorkspaceSurface({
   )
   const timelineIds = useMemo(() => items.map((item) => item.address.event_sequence), [items])
   const loadWindow = useCallback(
-    async (anchor: 'first' | 'latest') => {
+    async (anchor: 'first' | 'latest', control?: HTMLButtonElement) => {
       const request = ++boundaryRequest.current
       manualAnchorRef.current = { kind: anchor }
       const result = await refetchSession()
@@ -249,7 +248,7 @@ export function SessionWorkspaceSurface({
           boundarySessionItemId(result.data.window.items, store.getState().app.detail, anchor),
         ),
       )
-      timelineRef.current?.focus()
+      if (control === undefined) timelineRef.current?.focus()
     },
     [dispatch, refetchSession, timelineRef],
   )
@@ -400,6 +399,7 @@ export function SessionWorkspaceSurface({
       | 'selection.first'
       | 'selection.last'
       | 'selection.toggleExpansion',
+    control?: HTMLButtonElement,
   ) =>
     invokeCommand(command, {
       dispatch,
@@ -409,7 +409,7 @@ export function SessionWorkspaceSurface({
       artifactOriginalIds: [],
       timelineWindowAvailable: displayedSession !== undefined,
       focusTimeline: () => timelineRef.current?.focus(),
-      loadTimelineWindow: loadWindow,
+      loadTimelineWindow: (anchor) => loadWindow(anchor, control),
       toggleTimelineExpansion: toggleSelectedExpansion,
     })
   const handleTimelineKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -436,8 +436,13 @@ export function SessionWorkspaceSurface({
     event.preventDefault()
     invokeTimelineCommand(command)
   }
-  const invokeBoundaryCommand = (command: 'selection.first' | 'selection.last') =>
-    invokeTimelineCommand(command)
+  const invokeBoundaryCommand = (
+    command: 'selection.first' | 'selection.last',
+    control: HTMLButtonElement,
+  ) => {
+    control.focus()
+    invokeTimelineCommand(command, control)
+  }
 
   return (
     <div className="surface-body session-workspace-surface">
@@ -448,7 +453,7 @@ export function SessionWorkspaceSurface({
             aria-label="Exact session ID"
             placeholder="00000000-0000-0000-0000-000000000000"
             value={draftId}
-            onChange={(event) => setDraftId(event.target.value)}
+            onChange={(event) => setDraftId(event.target.value.trim())}
             pattern={NATIVE_SESSION_ID_PATTERN}
             required
           />
@@ -528,10 +533,16 @@ export function SessionWorkspaceSurface({
             </dl>
           </header>
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
-            <button type="button" onClick={() => invokeBoundaryCommand('selection.first')}>
+            <button
+              type="button"
+              onClick={(event) => invokeBoundaryCommand('selection.first', event.currentTarget)}
+            >
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
             </button>
-            <button type="button" onClick={() => invokeBoundaryCommand('selection.last')}>
+            <button
+              type="button"
+              onClick={(event) => invokeBoundaryCommand('selection.last', event.currentTarget)}
+            >
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
             <button
@@ -576,12 +587,37 @@ export function SessionWorkspaceSurface({
                   Reconnect live updates
                 </button>
               </>
+            ) : synchronization.sessionId === sessionId && synchronization.phase === 'resyncing' ? (
+              'Resynchronizing live session…'
             ) : live ? (
               'Following live session'
             ) : (
               'Connecting live session…'
             )}
           </p>
+          {(live?.reconciliation || live?.runner) && (
+            <div className="session-live-facts">
+              {live.reconciliation && (
+                <span className="availability-tag">
+                  Awaiting reconciliation · {live.reconciliation.kind.replaceAll('_', ' ')}
+                </span>
+              )}
+              {live.runner && (
+                <span className="availability-tag">
+                  Runner · {live.runner.state.replaceAll('_', ' ')}
+                  {live.runner.state === 'pinned' && ` · ${live.runner.connection_health}`}
+                </span>
+              )}
+            </div>
+          )}
+          {synchronization.sessionId === sessionId && synchronization.drafts.length > 0 && (
+            <section className="provider-drafts" aria-label="Provider draft">
+              <span>Streaming draft · discarded on resync</span>
+              {synchronization.drafts.map((draft) => (
+                <p key={draft.key}>{draft.content}</p>
+              ))}
+            </section>
+          )}
           {transcriptAvailable &&
             displayedSession.descriptor.sizes.projected_text_bytes !== '0' && (
               <SessionTranscriptText

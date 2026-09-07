@@ -53,6 +53,9 @@ use testcontainers_modules::{
 };
 use uuid::Uuid;
 
+#[path = "repo_watch_v2/checkout.rs"]
+mod checkout;
+
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 
 fn event_candidate<'a>(

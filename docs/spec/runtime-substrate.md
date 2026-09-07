@@ -209,6 +209,16 @@ Each CLI adapter's supported-version constant is only a claim until three
 statements agree: the version pinned for installation, the version the adapter
 covers, and the version actually invoked.
 
+The Codex smoke compares the pin's checked-in schemas for every decoded
+app-server notification, response, and JSON-RPC envelope with the adapter's
+consumed fields, enum members, and required fields. Consumed fields must remain
+decoder-compatible, adapter-required fields must remain required, and turn
+statuses must match. Consumed turn-item discriminators remain required strings;
+agent-message items preserve their consumed fields. Tagged error objects contain
+only their tag. Compatible additions are reported; consumed fields and error
+members must remain present. Committed schema fixtures must match the pinned
+files byte for byte.
+
 The compatibility smokes assert nothing about answer quality.
 
 A smoke's required aggregate gates merge for a pull request that changes the
@@ -229,25 +239,34 @@ save.
 ## Boundary contracts
 
 The daemon refers to a credential by its non-secret name everywhere except at
-the point of use. No credential value, credential file path, or database URL
-appears in a log, an error, or a durable record. For a profile whose credential
-value the daemon resolves, the daemon redacts that exact value from provider
-text before it truncates the text; a delivery that gives the daemon no value
-receives credential-shape redaction instead. A credential for one repository
-never authorizes a request to another.
+the point of use. OAuth authorization tables hold the refresh and identity
+tokens the delivery needs; no credential value appears in a log, an error, or
+any other durable record. No credential file path or database URL appears in a
+log, an error, or a durable record. For a profile whose credential value the
+daemon resolves, the daemon redacts that exact value from provider text before
+it truncates the text; a delivery that gives the daemon no value receives
+credential-shape redaction instead. A credential for one repository never
+authorizes a request to another.
+
+OAuth access and identity tokens seed exact-value redaction before scratch-home
+writes. Raw and JSON-escaped token forms are scrubbed across child-output chunks
+before adapter decoding, truncation, observations, or terminal evidence;
+credential-shape redaction also applies. Failure to install this delivery fails
+preparation before spawn.
 
 `crates/domain`, `crates/application` and `crates/persistence` declare no
 dependency on any runtime crate, and no runtime type appears in a domain or
 application signature.
 
 `prepare` performs all validation, translation, serialization, credential access
-and request construction with no provider traffic, rejecting duplicate ordinary
-tool names, an ordinary tool whose name equals the structured-output contract
-name, and a named choice of an undeclared tool before any send. `execute`
-consumes the capability, performs at most one provider interaction, emits
-observations synchronously and in order, and always returns a terminal report.
-Nothing in this layer retries, falls back, or repeats its unit of dispatch after
-the provider could have accepted it; the attempt-level retry rule is
+and request construction with no provider traffic except OAuth delivery
+exchanges with the authorization server, rejecting duplicate ordinary tool
+names, an ordinary tool whose name equals the structured-output contract name,
+and a named choice of an undeclared tool before any send. `execute` consumes the
+capability, performs at most one provider interaction, emits observations
+synchronously and in order, and always returns a terminal report. Nothing in
+this layer retries, falls back, or repeats its unit of dispatch after the
+provider could have accepted it; the attempt-level retry rule is
 [model-call-execution](model-call-execution.md)'s. In a subprocess adapter the
 send-commenced fact immediately precedes spawn, a spawn failure is proven
 unsent, and after a successful spawn no path respawns the CLI.
@@ -584,6 +603,4 @@ turn-liveness causes.
   ([design](../design/runtime-substrate.md)).
 - Codex CLI file credential delivery: the configuration grammar admits it and
   composition rejects it as undelivered
-  ([design](../design/runtime-substrate.md)).
-- Codex CLI OAuth delivery and the exact-value redaction it seeds before spawn
   ([design](../design/runtime-substrate.md)).

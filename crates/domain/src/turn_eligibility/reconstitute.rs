@@ -436,7 +436,9 @@ fn reconstitute_inner(
             }
             InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
-            | InitialSemanticTranscriptEntryPayload::ToolClosed { .. } => {}
+            | InitialSemanticTranscriptEntryPayload::ToolInadmissible { .. }
+            | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
+            | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. } => {}
             InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
             | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
             | InitialSemanticTranscriptEntryPayload::DelegationResult { .. } => {}
@@ -1255,6 +1257,7 @@ fn reconstitute_inner(
                                 base_entry_count,
                                 round.round_tool_attempts(),
                                 round.round_tool_denials(),
+                                &input.inadmissible_requests,
                                 &model_calls,
                                 &assistant_by_call,
                                 &snapshots,
@@ -1499,6 +1502,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -1780,6 +1784,7 @@ fn reconstitute_inner(
                                         source_snapshot.entry_count(),
                                         round.round_tool_attempts(),
                                         round.round_tool_denials(),
+                                        &input.inadmissible_requests,
                                         &model_calls,
                                         &assistant_by_call,
                                         &snapshots,
@@ -1943,9 +1948,11 @@ fn reconstitute_inner(
                                             ..
                                         }
                                         | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                                        | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
                                         | SemanticTranscriptEntryPayload::ToolClosed { .. }
                                         | SemanticTranscriptEntryPayload::TurnCompleted { .. }
                                         | SemanticTranscriptEntryPayload::TurnFailed { .. }
+                                        | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
                                         | SemanticTranscriptEntryPayload::TurnCancelled { .. } => {
                                             false
                                         }
@@ -2028,6 +2035,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -2173,6 +2181,7 @@ fn reconstitute_inner(
                                     terminal.entry_count().saturating_sub(1),
                                     execution.terminal_tool_attempts(),
                                     execution.terminal_tool_denials(),
+                                    &input.inadmissible_requests,
                                     &model_calls,
                                     &assistant_by_call,
                                     &snapshots,
@@ -2197,6 +2206,7 @@ fn reconstitute_inner(
                                 failed_entry,
                                 execution.terminal_tool_attempts(),
                                 execution.terminal_tool_denials(),
+                                &input.inadmissible_requests,
                                 &model_calls,
                                 &assistant_by_call,
                                 &snapshots,
@@ -2249,6 +2259,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -2372,6 +2383,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -2442,6 +2454,7 @@ fn reconstitute_inner(
                                 source.entry_count(),
                                 round.round_tool_attempts(),
                                 round.round_tool_denials(),
+                                &input.inadmissible_requests,
                                 &model_calls,
                                 &assistant_by_call,
                                 &snapshots,
@@ -2542,6 +2555,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -2658,6 +2672,7 @@ fn reconstitute_inner(
                             terminal.entry_count().saturating_sub(1),
                             terminal_execution.terminal_tool_attempts(),
                             terminal_execution.terminal_tool_denials(),
+                            &input.inadmissible_requests,
                             &model_calls,
                             &assistant_by_call,
                             &snapshots,
@@ -2684,6 +2699,7 @@ fn reconstitute_inner(
                         cancellation_entry,
                         terminal_execution.terminal_tool_attempts(),
                         terminal_execution.terminal_tool_denials(),
+                        &input.inadmissible_requests,
                         &model_calls,
                         &assistant_by_call,
                         &snapshots,
@@ -2779,6 +2795,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -2845,6 +2862,7 @@ fn reconstitute_inner(
                                 source.entry_count(),
                                 round.round_tool_attempts(),
                                 round.round_tool_denials(),
+                                &input.inadmissible_requests,
                                 &model_calls,
                                 &assistant_by_call,
                                 &snapshots,
@@ -2949,6 +2967,7 @@ fn reconstitute_inner(
                     &origin_by_turn,
                     model_identity_entry,
                     &compaction_chain,
+                    &input.runner_placement_frontiers,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -3020,6 +3039,32 @@ fn reconstitute_inner(
     }
 
     referenced_snapshots.extend(compaction_snapshots);
+    for frontier in &input.runner_placement_frontiers {
+        let boundary = snapshots.get(frontier).ok_or(
+            AcceptedInputSchedulingReconstitutionFailure::UnreferencedSnapshot {
+                snapshot: *frontier,
+            },
+        )?;
+        let valid = boundary
+            .ordered_entries()
+            .next_back()
+            .and_then(|reference| semantic_entries.get(&reference))
+            .is_some_and(|entry| {
+                entry.source_session() == session
+                    && matches!(
+                        entry.payload(),
+                        SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+                    )
+            });
+        if !valid {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::UnreferencedSnapshot {
+                    snapshot: *frontier,
+                },
+            );
+        }
+        referenced_snapshots.insert(*frontier);
+    }
     referenced_snapshots.extend(assistant_call_snapshots);
     if let Some(snapshot) = snapshots
         .keys()
@@ -3067,6 +3112,7 @@ fn reconstitute_inner(
     }
 
     Ok(AcceptedInputSchedulingProjection {
+        runner_placement_frontier: input.runner_placement_frontiers.last().copied(),
         session: input.session.clone(),
         initial_seed_frontier,
         latest_compaction_result,

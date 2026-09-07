@@ -524,6 +524,7 @@ pub struct WorkspaceLeakRecorded {
 ```rust
 pub struct WorkspaceProvision {
     pub correlation: ProvisionCorrelation,
+    pub recovery: option::Option<Recovery>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
@@ -533,6 +534,7 @@ pub struct WorkspaceProvision {
 ```rust
 pub struct WorkspaceReady {
     pub correlation: ProvisionCorrelation,
+    pub working_directory: string::String,
     pub ready: ReadyManifest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>

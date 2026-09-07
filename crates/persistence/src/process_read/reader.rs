@@ -222,7 +222,31 @@ async fn advance_through_latest_compaction(
     .bind(session_id_to_uuid(session))
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some(latest) = latest.map(ContextFrontierId::from_uuid) else {
+    let current = later_transcript_frontier(
+        transaction,
+        session,
+        current,
+        latest.map(ContextFrontierId::from_uuid),
+    )
+    .await?;
+    let placement: Option<Uuid> = sqlx::query_scalar("SELECT boundary.context_frontier_id FROM runner_session_placement_frontier AS head JOIN runner_placement_boundary AS boundary USING (session_id, placement_revision) WHERE head.session_id = $1")
+        .bind(session_id_to_uuid(session)).fetch_optional(&mut **transaction).await?;
+    later_transcript_frontier(
+        transaction,
+        session,
+        current,
+        placement.map(ContextFrontierId::from_uuid),
+    )
+    .await
+}
+
+async fn later_transcript_frontier(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+    current: Option<ContextFrontierId>,
+    latest: Option<ContextFrontierId>,
+) -> Result<Option<ContextFrontierId>, ProcessReadError> {
+    let Some(latest) = latest else {
         return Ok(current);
     };
     let Some(current) = current else {
@@ -261,7 +285,7 @@ async fn advance_through_latest_compaction(
         (true, false) => Ok(Some(latest)),
         (false, true) => Ok(Some(current)),
         _ => {
-            Err(ProcessReadCorruption::Inconsistent("turn and compaction frontier lineage").into())
+            Err(ProcessReadCorruption::Inconsistent("transcript boundary frontier lineage").into())
         }
     }
 }

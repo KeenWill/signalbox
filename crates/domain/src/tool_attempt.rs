@@ -62,7 +62,8 @@ impl ApprovedToolRequest {
         request: ToolRequest,
         approval: ToolApprovalResolution,
     ) -> Result<Self, ApprovedToolRequestError> {
-        if request.id() != approval.request()
+        if request.inadmissible_reason().is_some()
+            || request.id() != approval.request()
             || !matches!(approval.decision(), ToolApprovalDecision::Approve)
         {
             return Err(ApprovedToolRequestError {
@@ -583,6 +584,19 @@ impl CurrentToolAttempt {
         Ok(self.end(ToolAttemptEnd::KnownFailed { error }))
     }
 
+    /// Retires a prepared attempt when its runner placement is lost before dispatch.
+    pub fn end_placement_lost(self) -> Result<EndedToolAttempt, ToolAttemptTransitionError> {
+        if self.state != CurrentToolAttemptState::Prepared {
+            return Err(ToolAttemptTransitionError {
+                attempt: self,
+                failure: ToolAttemptTransitionFailure::InvalidState,
+            });
+        }
+        Ok(self.end(ToolAttemptEnd::KnownFailed {
+            error: crate::ToolInadmissibleReason::PlacementLost.execution_error(),
+        }))
+    }
+
     /// Applies executor evidence through a freshly reloaded exact fence.
     pub fn apply_terminal_observation(
         self,
@@ -1071,6 +1085,18 @@ pub enum ReconstitutedToolAttempt {
     Current(CurrentToolAttempt),
     /// One terminal immutable attempt.
     Ended(EndedToolAttempt),
+}
+
+impl crate::ToolInadmissibleReason {
+    /// Renders this request-level reason through the existing typed error shape.
+    pub fn execution_error(self) -> ToolExecutionError {
+        match self {
+            Self::PlacementLost => ToolExecutionError::new(
+                ToolExecutionErrorKind::ExecutionFailed,
+                Some(ToolExecutionErrorDetail("placement_lost".to_owned())),
+            ),
+        }
+    }
 }
 
 #[cfg(test)]

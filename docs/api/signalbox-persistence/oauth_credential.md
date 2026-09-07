@@ -77,8 +77,8 @@ pub enum OauthCredentialHandlingOutcome {
 
 ```rust
 pub enum OauthCredentialRepositoryError {
-    Database(error::Error),
-    CommitAmbiguous(error::Error),
+    Database,
+    CommitAmbiguous,
     Corruption,
     InvalidProfile,
 }
@@ -90,7 +90,7 @@ impl error::Error for oauth_credential::OauthCredentialRepositoryError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl convert::From<error::Error> for oauth_credential::OauthCredentialRepositoryError {
-    fn from(error: error::Error) -> Self;
+    fn from(_error: error::Error) -> Self;
 }
 ```
 
@@ -109,5 +109,177 @@ impl oauth_credential::OauthCredentialRepository {
         oauth_credential::OauthCredentialHandlingOutcome,
         oauth_credential::OauthCredentialRepositoryError,
     >;
+}
+impl oauth_credential::OauthCredentialRepository {
+    pub async fn delete(
+        &self,
+        command: &oauth_credential::OauthCredentialCommand,
+        unretained_failure: oauth_credential::OauthCredentialFailure,
+        discard_access: impl function::FnOnce() + marker::Send,
+    ) -> result::Result<
+        oauth_credential::OauthCredentialHandlingOutcome,
+        oauth_credential::OauthCredentialRepositoryError,
+    >;
+}
+impl oauth_credential::OauthCredentialRepository {
+    pub async fn replace_registrations(
+        &self,
+        registrations: &[(string::String, oauth_credential::OauthRegistration)],
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn begin_exchange(
+        &self,
+        command: &oauth_credential::OauthCredentialCommand,
+        registration: result::Result<
+            &oauth_credential::OauthRegistration,
+            oauth_credential::OauthCredentialFailure,
+        >,
+    ) -> result::Result<
+        oauth_credential::OauthStartOutcome,
+        oauth_credential::OauthCredentialRepositoryError,
+    >;
+    pub async fn retain_progress(
+        &self,
+        exchange: &oauth_credential::OauthExchange,
+        progress: &oauth_credential::OauthProgress,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn progress(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+    ) -> result::Result<
+        option::Option<oauth_credential::OauthProgress>,
+        oauth_credential::OauthCredentialRepositoryError,
+    >;
+    pub async fn complete_exchange(
+        &self,
+        exchange: &oauth_credential::OauthExchange,
+        authorization: result::Result<
+            &oauth_credential::OauthAuthorization,
+            oauth_credential::OauthCredentialFailure,
+        >,
+    ) -> result::Result<
+        oauth_credential::OauthCredentialOutcome,
+        oauth_credential::OauthCredentialRepositoryError,
+    >;
+    pub async fn abandon_pending(
+        &self,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+}
+impl oauth_credential::OauthCredentialRepository {
+    pub async fn lock_dispatch(
+        &self,
+        profile: &str,
+    ) -> result::Result<
+        option::Option<oauth_credential::OauthDispatchLease>,
+        oauth_credential::OauthCredentialRepositoryError,
+    >;
+}
+```
+
+## OauthRegistration
+
+```rust
+pub struct OauthRegistration {
+    pub client_id: string::String,
+    pub token_url: string::String,
+    pub refresh_token_url: string::String,
+    pub device_authorization_url: string::String,
+    pub scopes: vec::Vec<string::String>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## OauthProgress
+
+```rust
+pub struct OauthProgress {
+    pub user_code: string::String,
+    pub verification_uri: string::String,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## OauthAuthorization
+
+```rust
+pub struct OauthAuthorization {
+    pub refresh_token: string::String,
+    pub identity_token: string::String,
+    pub account_identity: value::Value,
+}
+// derives: clone::Clone
+impl fmt::Debug for oauth_credential::OauthAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+```
+
+## OauthExchange
+
+```rust
+pub struct OauthExchange {/* private */}
+// derives: clone::Clone, fmt::Debug
+impl oauth_credential::OauthExchange {
+    pub fn profile(&self) -> &str;
+}
+```
+
+## OauthStartOutcome
+
+```rust
+pub enum OauthStartOutcome {
+    Started(oauth_credential::OauthExchange),
+    Existing(oauth_credential::OauthCredentialHandlingOutcome),
+}
+// derives: clone::Clone, fmt::Debug
+```
+
+## OauthQuarantineCause
+
+```rust
+pub enum OauthQuarantineCause {
+    TupleMismatch,
+    RefreshAmbiguous,
+    RefreshRejected,
+    IdentityChanged,
+    CredentialHome,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## OauthStoredAuthorization
+
+```rust
+pub struct OauthStoredAuthorization {
+    pub registration: oauth_credential::OauthRegistration,
+    pub authorization: oauth_credential::OauthAuthorization,
+    pub generation: i64,
+    pub refresh_in_progress: bool,
+    pub quarantine: option::Option<oauth_credential::OauthQuarantineCause>,
+}
+// derives: clone::Clone, fmt::Debug
+```
+
+## OauthDispatchLease
+
+```rust
+pub struct OauthDispatchLease {/* private */}
+impl oauth_credential::OauthDispatchLease {
+    pub fn authorization(&self) -> option::Option<&oauth_credential::OauthStoredAuthorization>;
+    pub async fn mark_refresh(
+        self,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn clear_refresh(
+        self,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn replace_refresh(
+        self,
+        authorization: &oauth_credential::OauthAuthorization,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn quarantine(
+        self,
+        cause: oauth_credential::OauthQuarantineCause,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn commit(
+        self,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
 }
 ```

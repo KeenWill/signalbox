@@ -27,19 +27,6 @@ mapping is pending that decision. Media with no admitted projection keeps the
 bounded textual stub. Modality admission is owned by
 [blob-storage](../spec/blob-storage.md).
 
-A runner-placement change entry, itself not built and owned by
-[sessions-and-transcript](../spec/sessions-and-transcript.md), renders as a
-structured placement change carrying the positive placement revision and the
-selected sandbox profile. The bridge emits one of two exact injected user-role
-messages, chosen by profile, with the braces replaced by the canonical decimal
-revision. For `workspace-restricted`:
-`Signalbox session event: runner placement changed to revision {revision} with profile workspace-restricted; the prior placement can no longer execute. The successor writable root and working directory are now active. Relocation did not delete prior files; they may still exist, but only paths exposed inside the successor restricted workspace are reachable.`
-For `ambient`:
-`Signalbox session event: runner placement changed to revision {revision} with profile ambient; the prior placement can no longer execute. The successor working directory is now active. Relocation did not delete prior files, and they may remain reachable at their previous paths through the invoking user's filesystem; check before recreating or overwriting them.`
-Missing, stale, cross-session, or non-successor placement authority fails
-rendering instead of inventing text. The same profile-specific text renders
-every relocation, including a working-directory move on the same runner.
-
 The prepared model operation carries one immutable snapshot of the tools
 executable in this session, not the unfiltered process registry. Each entry
 binds the exact definition, its permission and effect policy, and the selected

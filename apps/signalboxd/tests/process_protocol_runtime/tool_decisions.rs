@@ -443,3 +443,63 @@ async fn decide_tool_request_refuses_an_already_resolved_request() -> Result<(),
     drop(connection);
     runtime.stop().await
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn placement_loss_request_refuses_approval_before_result_projection()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(
+        &mut connection,
+        session_id,
+        "approval closure fixture".to_owned(),
+    )
+    .await?;
+    let closed = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let pending = CanonicalUuid::from_uuid(Uuid::now_v7());
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[closed, pending]).await?;
+    let mut transaction = runtime.pool.begin().await?;
+    // Seed the retained request resolution; loss transaction coverage owns its runner evidence.
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_resolution_guard")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("UPDATE tool_request SET resolution_kind = 'closed_inadmissible', inadmissible_reason = 'placement_lost' WHERE request_id = $1")
+        .bind(closed.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query("UPDATE turn_lifecycle SET approval_tool_request_id = $1 WHERE session_id = $2 AND state_kind = 'active'")
+        .bind(pending.into_uuid()).bind(session_id.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER tool_request_resolution_guard")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    connection
+        .request(
+            3,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id: closed,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ToolRequestAlreadyResolved {
+            tool_request_id: closed
+        }
+    );
+    let entries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM semantic_transcript_entry WHERE tool_result_request_id = $1",
+    )
+    .bind(closed.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(entries, 0);
+    drop(connection);
+    runtime.stop().await
+}

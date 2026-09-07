@@ -90,6 +90,7 @@ pub enum PrepareApprovalJudgeOutcome {
 ```rust
 pub enum CompleteApprovalJudgeOutcome {
     Decided,
+    ClosedInadmissible,
     EscalatedToHuman,
     HeadlessEscalationTerminalized,
 }
