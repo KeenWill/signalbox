@@ -166,8 +166,16 @@ impl OauthCredentialRepository {
 
 pub(crate) async fn quarantined_profiles(
     connection: &mut PgConnection,
+    policy: &crate::model_execution::CredentialPoolRuntimePolicy,
 ) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT profile FROM oauth_credential_authorization WHERE quarantined")
+    provisioning::lock_pool_members(connection, policy).await?;
+    let profiles = policy
+        .members()
+        .iter()
+        .map(|member| member.credential_reference())
+        .collect::<Vec<_>>();
+    sqlx::query_scalar("SELECT profile FROM oauth_credential_authorization WHERE quarantined AND profile = ANY($1)")
+        .bind(profiles)
         .fetch_all(connection)
         .await
 }

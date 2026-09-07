@@ -53,12 +53,6 @@ impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for OauthFixture
             })
         })
     }
-    fn invalidate<'a>(
-        &'a self,
-        _: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async {})
-    }
 }
 
 #[cfg(unix)]

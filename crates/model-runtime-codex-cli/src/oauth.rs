@@ -36,11 +36,6 @@ pub trait OauthCredentialProvider: Send + Sync + std::fmt::Debug {
         installer: &'a mut dyn OauthCredentialInstaller,
         cancellation: CancellationSignal,
     ) -> OauthDeliveryFuture<'a>;
-    /// Removes any cached access token after an operator changes retained authorization.
-    fn invalidate<'a>(
-        &'a self,
-        reference: &'a str,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
 
 #[cfg(unix)]

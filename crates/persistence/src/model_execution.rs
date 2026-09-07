@@ -7184,7 +7184,7 @@ async fn load_durable_pool_exclusions(
     .await?
     .into_iter()
     .collect::<HashSet<_>>();
-    excluded.extend(crate::oauth_credential::quarantined_profiles(connection).await?);
+    excluded.extend(crate::oauth_credential::quarantined_profiles(connection, policy).await?);
     let actions = sqlx::query_as::<_, (i64, String, String, Uuid, Uuid)>(
         "SELECT action_id, credential_reference, action_kind,
                 observed_session_id, observed_turn_id

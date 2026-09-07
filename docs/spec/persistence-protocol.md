@@ -599,7 +599,9 @@ OAuth refresh marks the current authorization generation under the profile row
 lock before exchange; replacement of returned tokens and marker clearing commit
 atomically, and recovery rereads the generation and marker. Delivery quarantine
 and its typed failure evidence commit together. Dispatch retains the row lock
-through copying tokens to the child's scratch home.
+through copying tokens to the child's scratch home. Pool selection locks its
+OAuth profiles before reading quarantine and retains those locks through
+checkpointing.
 
 ## Planned
 

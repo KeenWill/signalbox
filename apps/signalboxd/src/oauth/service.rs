@@ -12,7 +12,7 @@ use signalbox_persistence::oauth_credential::{
     OauthCredentialRepository, OauthDispatchLease, OauthQuarantineCause as Cause,
     OauthRegistration, OauthStoredAuthorization,
 };
-use std::{collections::HashMap, future::Future, pin::Pin};
+use std::collections::HashMap;
 use tokio::{sync::Mutex, time::Instant};
 
 struct CachedAccess {
@@ -268,17 +268,6 @@ impl OauthCredentialProvider for OauthCredentialService {
     ) -> OauthDeliveryFuture<'a> {
         Box::pin(self.prepare(reference.as_str(), installer, cancellation))
     }
-
-    fn invalidate<'a>(
-        &'a self,
-        reference: &'a str,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            if let Some(profile) = self.profiles.get(reference) {
-                *profile.access.lock().await = RefreshState::default();
-            }
-        })
-    }
 }
 
 #[cfg(test)]
@@ -414,7 +403,6 @@ mod tests {
                 }),
             )
             .await?;
-        service.invalidate("profile").await;
         repository
             .lock_dispatch("profile")
             .await?

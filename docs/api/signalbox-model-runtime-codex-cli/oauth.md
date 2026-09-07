@@ -47,10 +47,6 @@ pub trait OauthCredentialProvider: marker::Send + marker::Sync + fmt::Debug {
         installer: &'a mut dyn OauthCredentialInstaller,
         cancellation: signalbox_model_runtime::CancellationSignal,
     ) -> OauthDeliveryFuture<'a>;
-    fn invalidate<'a>(
-        &'a self,
-        reference: &'a str,
-    ) -> pin::Pin<boxed::Box<dyn future::Future<Output = ()> + marker::Send + 'a>>;
 }
 ```
 
