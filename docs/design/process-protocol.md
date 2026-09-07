@@ -99,12 +99,13 @@ the terminal result. Core first commits the reload command with a complete
 checked snapshot of every reloadable section and the rule-set digest as durable
 intent. The snapshot contains the model catalog, session-template catalog, and
 repository-watch configuration, including rules, convergence targets, template,
-interval, credential path, webhook listener settings, and hook map. Core
-reconciles convergence targets from the retained intent. Reload stops and joins
-affected ingestion tasks before rule activation and event-tail capture;
-ingestion resumes only under the replacement snapshot. A failure after ingestion
-stops leaves the intent pending until recovery installs that snapshot and
-resumes ingestion before terminalizing the claim. The
+interval, credential path, webhook listener settings, and hook map. Core pauses
+sweep admission and stops and joins active sweep attempts before reconciling
+convergence targets from the retained intent. Reload stops and joins affected
+ingestion tasks before rule activation and event-tail capture; ingestion and
+sweep admission resume only under the replacement snapshot. A failure after
+either stops leaves the intent pending until recovery installs that snapshot and
+resumes them before terminalizing the claim. The
 [reload-intent input](ownership-seam.md) delivers rule activation only, and the
 module activates the rules atomically and idempotently by command identity and
 digest. The activation transaction captures each repository's current event tail

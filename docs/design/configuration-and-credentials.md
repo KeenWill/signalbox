@@ -29,11 +29,12 @@ webhook listener and repository polling-task reload belong to
 [repository watch](repo-watch.md). A reload that adds, edits, or removes
 `repository_watch.rules` commits activations and deactivations in the
 [reconciliation transaction](../spec/repo-watch.md) that records each
-activation's repository event tail, inside the reload boundary. A reload re-runs
-convergence configured-target reconciliation inside the reload boundary.
-Enabling convergence composes the sweep task; disabling it terminates the task.
-A running sweep reads the new targets, template, interval, and credential path
-at its next attempt.
+activation's repository event tail, inside the reload boundary. A reload pauses
+sweep admission and stops and joins active sweep attempts before re-running
+convergence configured-target reconciliation inside the reload boundary; sweep
+admission resumes only under the replacement snapshot. Enabling convergence
+composes the sweep task; disabling it terminates the task. A running sweep reads
+the new targets, template, interval, and credential path at its next attempt.
 
 A model entry carries zero or more `[[models.rate_windows]]` entries, each one
 dated price window over that entry's own `provider_model`. A window names the
