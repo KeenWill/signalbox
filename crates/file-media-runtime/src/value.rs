@@ -4,19 +4,12 @@ use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde_json::value::RawValue;
 
 const SHA256_PREFIX: &str = "sha256:";
-// numeric-bound: ceiling - bounds retained caller media-type text
 const MAX_DECLARED_MEDIA_TYPE_BYTES: usize = 255;
-// numeric-bound: ceiling - bounds retained caller display-name text
 const MAX_DISPLAY_FILENAME_BYTES: usize = 255;
-// numeric-bound: ceiling - bounds registry identity and selector storage
 const MAX_NAME_BYTES: usize = 64;
-// numeric-bound: ceiling - bounds retained reader-revision text
 const MAX_REVISION_BYTES: usize = 32;
-// numeric-bound: ceiling - bounds retained and parsed view-schema memory
 const MAX_SCHEMA_BYTES: usize = 65_536;
-// numeric-bound: ceiling - bounds retained and parsed processor-metadata memory
 const MAX_METADATA_BYTES: usize = 16_384;
-// numeric-bound: ceiling - bounds retained untrusted continuation state
 const MAX_CONTINUATION_CURSOR_BYTES: usize = 1_024;
 
 #[derive(signalbox_derive::Accessors)]
