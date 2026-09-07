@@ -10,6 +10,7 @@ use signalbox_persistence::runner_protocol::{
 };
 
 pub(super) async fn handle_runner_recovery<Writer: AsyncWrite + Unpin>(
+    reader: &BufReader<OwnedReadHalf>,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -153,11 +154,10 @@ pub(super) async fn handle_runner_recovery<Writer: AsyncWrite + Unpin>(
                     }
                     Err(error) => break Err(error),
                     Ok(RunnerRecoveryOutcome::Pending) => {
-                        tokio::select! {
-                            notification = notifications.changed() => {
-                                if notification.is_err() { return Ok(()); }
-                            }
-                            _ = shutdown.changed() => return Ok(()),
+                        if !wait_for_runner_recovery(reader, &mut notifications, &mut shutdown)
+                            .await
+                        {
+                            return Ok(());
                         }
                     }
                 }
@@ -180,6 +180,18 @@ pub(super) async fn handle_runner_recovery<Writer: AsyncWrite + Unpin>(
         }
         Ok(RunnerRecoveryOutcome::Pending) => Err(ProcessConnectionError::EncodeInvariant),
         Err(error) => write_recovery_error(writer, version, request_id, error).await,
+    }
+}
+
+async fn wait_for_runner_recovery(
+    reader: &BufReader<OwnedReadHalf>,
+    notifications: &mut watch::Receiver<()>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
+    tokio::select! {
+        notification = notifications.changed() => notification.is_ok(),
+        () = wait_for_connection_loss(reader) => false,
+        () = wait_for_shutdown(shutdown) => false,
     }
 }
 
@@ -223,5 +235,64 @@ fn rejection(
         Domain::PlacementUnavailable => Wire::PlacementUnavailable,
         Domain::RevisionWithoutRepository => Wire::RevisionWithoutRepository,
         Domain::ProvisioningFailed => Wire::ProvisioningFailed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_runner_recovery_replays_release_connection_slots()
+    -> Result<(), Box<dyn Error>> {
+        let (notifications, _) = watch::channel(());
+        let (_shutdown, shutdown) = watch::channel(false);
+        let mut clients = Vec::new();
+        let mut connections = tokio::task::JoinSet::new();
+        for _ in 0..MAX_ACTIVE_CONNECTIONS {
+            let (mut client, server) = tokio::net::UnixStream::pair()?;
+            let (reader, _) = server.into_split();
+            let mut reader = BufReader::new(reader);
+            client.write_all(b"pipelined request").await?;
+            assert_eq!(reader.fill_buf().await?, b"pipelined request");
+            let mut notification = notifications.subscribe();
+            let mut shutdown = shutdown.clone();
+            connections.spawn(async move {
+                wait_for_runner_recovery(&reader, &mut notification, &mut shutdown).await
+            });
+            clients.push(client);
+        }
+        assert_eq!(connections.len(), MAX_ACTIVE_CONNECTIONS);
+        drop(clients);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(result) = connections.join_next().await {
+                assert!(!result.expect("the disconnected replay wait joins"));
+            }
+        })
+        .await?;
+        assert!(connections.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runner_recovery_wait_keeps_half_closed_clients_for_the_receipt()
+    -> Result<(), Box<dyn Error>> {
+        let (mut client, server) = tokio::net::UnixStream::pair()?;
+        let (reader, _writer) = server.into_split();
+        let reader = BufReader::new(reader);
+        let (notifications, mut notification) = watch::channel(());
+        let (_shutdown, mut shutdown) = watch::channel(false);
+        client.shutdown().await?;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                wait_for_runner_recovery(&reader, &mut notification, &mut shutdown)
+            )
+            .await
+            .is_err()
+        );
+        notifications.send(())?;
+        assert!(wait_for_runner_recovery(&reader, &mut notification, &mut shutdown).await);
+        Ok(())
     }
 }
