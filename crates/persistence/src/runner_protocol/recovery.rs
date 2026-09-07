@@ -664,33 +664,36 @@ impl RunnerProtocolStore {
         {
             return Ok(rejected(Rejection::PlacementUnavailable));
         }
-        sqlx::query("INSERT INTO runner_replacement_stage (command_id, session_id, source_event_ordinal, successor_enrollment_id, successor_registration_revision) VALUES ($1, $2, $3, $4, $5)")
-            .bind(command.command_id.into_uuid()).bind(command.session.into_uuid())
-            .bind(Decimal::from(stored.event_ordinal())).bind(candidate_id.into_uuid())
-            .bind(Decimal::from(registration.revision().get())).execute(&mut **transaction).await?;
         let repository = match &request.workspace {
             WorkspaceRequirement::RepositoryWorktree { repository } => Some(repository.as_str()),
             WorkspaceRequirement::None => None,
         };
+        let recovery = command
+            .revision
+            .clone()
+            .map(|revision| WorkspaceRecovery::Commit { revision })
+            .or_else(|| match stored.placement().state() {
+                SessionRunnerPlacementState::RunnerLost(lost) => lost
+                    .pinned()
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| workspace.recovery.clone()),
+                _ => None,
+            });
+        let (_, branch, revision) = recovery
+            .as_ref()
+            .map(encode_workspace_recovery)
+            .unwrap_or((None, None, None));
+        if repository.is_some() != revision.is_some() {
+            return Ok(rejected(Rejection::PlacementUnavailable));
+        }
+        sqlx::query("INSERT INTO runner_replacement_stage (command_id, session_id, source_event_ordinal, successor_enrollment_id, successor_registration_revision) VALUES ($1, $2, $3, $4, $5)")
+            .bind(command.command_id.into_uuid()).bind(command.session.into_uuid())
+            .bind(Decimal::from(stored.event_ordinal())).bind(candidate_id.into_uuid())
+            .bind(Decimal::from(registration.revision().get())).execute(&mut **transaction).await?;
         let private_root = request.sandbox == RunnerSandboxProfile::WorkspaceRestricted
             && request.working_directory == WorkingDirectorySelection::RunnerDefault;
         if repository.is_some() || private_root {
-            let recovery = command
-                .revision
-                .clone()
-                .map(|revision| WorkspaceRecovery::Commit { revision })
-                .or_else(|| match stored.placement().state() {
-                    SessionRunnerPlacementState::RunnerLost(lost) => lost
-                        .pinned()
-                        .workspace
-                        .as_ref()
-                        .and_then(|workspace| workspace.recovery.clone()),
-                    _ => None,
-                });
-            let (_, branch, revision) = recovery
-                .as_ref()
-                .map(encode_workspace_recovery)
-                .unwrap_or((None, None, None));
             let successor_revision = stored
                 .placement()
                 .revision()
