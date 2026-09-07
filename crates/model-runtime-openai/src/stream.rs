@@ -4,12 +4,14 @@
 use std::collections::BTreeMap;
 
 use signalbox_model_runtime::{
-    BoundaryLossEvidence, ExchangeFacts, LossCause, ObservationFact, ObservationSink,
+    BoundaryLossEvidence, ExchangeFacts, FinishReason, LossCause, ObservationFact, ObservationSink,
     ProviderJsonNestingValidator, ProviderReportedModel, SseRecord, StreamInterruption,
     TerminalEvidence, TokenUsage, ToolCallsAtLoss, validate_provider_json_nesting,
 };
 
-use crate::response::{convert_usage, decode_response, emit, output_tool_calls, provider_error};
+use crate::response::{
+    convert_usage, decode_response, emit, map_terminal, output_tool_calls, provider_error,
+};
 use crate::wire::{Response, ResponseError, ResponseEvent, WireOutputItem};
 
 pub(crate) enum StreamStep {
@@ -72,6 +74,7 @@ pub(crate) struct StreamDecoder {
     exchange: ExchangeFacts,
     response_id: Option<String>,
     reported_model: Option<ProviderReportedModel>,
+    finish_reported: Option<FinishReason>,
     usage: TokenUsage,
     opened_tool_calls: bool,
     discarded_unexamined_bytes: bool,
@@ -88,6 +91,7 @@ impl StreamDecoder {
             exchange,
             response_id: None,
             reported_model: None,
+            finish_reported: None,
             usage: TokenUsage::unreported(),
             opened_tool_calls: false,
             discarded_unexamined_bytes: false,
@@ -159,18 +163,8 @@ impl StreamDecoder {
                     return self.violation("terminal event lacks response");
                 };
                 let failed = event.kind == "response.failed";
-                let terminal_has_tools = !failed
-                    && response.output_items().is_ok_and(|items| {
-                        output_tool_calls(items.as_deref()) == ToolCallsAtLoss::Opened
-                    });
-                if self.opened_tool_calls
-                    && !terminal_has_tools
-                    && response.status.as_deref() == Some("completed")
-                {
-                    return self.violation("completed response omits an announced function call");
-                }
-                self.opened_tool_calls |= terminal_has_tools;
                 if response.status.as_deref() != event.kind.strip_prefix("response.") {
+                    self.discarded_unexamined_bytes = true;
                     return self.violation("terminal event and response status disagree");
                 }
                 if failed && response.error.is_some() {
@@ -188,9 +182,33 @@ impl StreamDecoder {
                         sink,
                     )));
                 }
+                if response.status.as_deref() == Some("incomplete") && response.error.is_none() {
+                    let finish = map_terminal(
+                        "incomplete",
+                        response
+                            .incomplete_details
+                            .as_ref()
+                            .map(|details| details.reason.as_str()),
+                        self.tool_calls_at_loss(),
+                    );
+                    if !matches!(finish, FinishReason::Unrecognized { .. }) {
+                        self.finish_reported = Some(finish);
+                    }
+                }
                 if let Err(detail) = self.observe_response(&response, correlation, sink) {
                     return self.violation(detail);
                 }
+                let terminal_has_tools = !failed
+                    && response.output_items().is_ok_and(|items| {
+                        output_tool_calls(items.as_deref()) == ToolCallsAtLoss::Opened
+                    });
+                if self.opened_tool_calls
+                    && !terminal_has_tools
+                    && response.status.as_deref() == Some("completed")
+                {
+                    return self.violation("completed response omits an announced function call");
+                }
+                self.opened_tool_calls |= terminal_has_tools;
                 if response.usage.is_none()
                     && self.usage == TokenUsage::unreported()
                     && response.status.as_deref() != Some("failed")
@@ -207,6 +225,9 @@ impl StreamDecoder {
                 );
                 match evidence {
                     TerminalEvidence::BoundaryLoss(mut loss) => {
+                        loss.finish_reported = loss
+                            .finish_reported
+                            .or_else(|| self.finish_reported.clone());
                         loss.cause = LossCause::StreamProtocolViolation {
                             detail: format!("invalid terminal response: {:?}", loss.cause),
                         };
@@ -380,6 +401,7 @@ impl StreamDecoder {
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), String> {
+        let metadata = self.observe_response_metadata(response, correlation, sink);
         let output = response.output_items().map_err(|error| {
             self.discarded_unexamined_bytes = true;
             error.to_string()
@@ -391,7 +413,7 @@ impl StreamDecoder {
                 ToolCallsAtLoss::NoneOpened => {}
             }
         }
-        self.observe_response_metadata(response, correlation, sink)?;
+        metadata?;
         if matches!(response.status.as_deref(), Some("completed" | "incomplete")) {
             let length = u32::try_from(output.as_ref().map_or(0, Vec::len))
                 .map_err(|error| error.to_string())?;
@@ -597,7 +619,7 @@ impl StreamDecoder {
             cause,
             exchange: self.exchange.clone(),
             reported_model: self.reported_model.clone(),
-            finish_reported: None,
+            finish_reported: self.finish_reported.clone(),
             tool_calls,
             usage: self.usage,
         })
@@ -1549,7 +1571,14 @@ mod tests {
     fn terminal_event_must_agree_with_response_status() {
         let mut event = terminal();
         event["response"]["status"] = json!("in_progress");
-        assert!(matches!(decode(event), TerminalEvidence::BoundaryLoss(_)));
+        assert!(matches!(
+            decode(event),
+            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                tool_calls: ToolCallsAtLoss::Unobserved,
+                finish_reported: None,
+                ..
+            })
+        ));
     }
     #[test]
     fn incomplete_output_ceiling_is_typed_completion() {
@@ -2244,5 +2273,109 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn first_incomplete_terminal_retains_facts_when_output_cannot_be_decoded() {
+        for (reason, expected_finish) in [
+            ("max_output_tokens", Some(FinishReason::MaxOutputTokens)),
+            ("content_filter", Some(FinishReason::Refusal)),
+            ("unknown", None),
+        ] {
+            for output in [
+                json!({}),
+                json!("invalid"),
+                json!([{"type":"message","id":"msg_fixture","content":42}]),
+            ] {
+                let mut event = terminal();
+                event["type"] = json!("response.incomplete");
+                event["response"]["status"] = json!("incomplete");
+                event["response"]["incomplete_details"] = json!({"reason":reason});
+                event["response"]["output"] = output.clone();
+                let mut decoder = StreamDecoder::new(ExchangeFacts {
+                    http_status: Some(200),
+                    ..ExchangeFacts::default()
+                });
+                let mut sink = Vec::new();
+                let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                    panic!("malformed terminal output must terminate");
+                };
+                let TerminalEvidence::BoundaryLoss(loss) = *evidence else {
+                    panic!("malformed terminal output must remain boundary loss");
+                };
+                assert!(matches!(
+                    loss.cause,
+                    LossCause::StreamProtocolViolation { .. }
+                ));
+                assert_eq!(
+                    loss.reported_model,
+                    Some(ProviderReportedModel::new("model-fixture"))
+                );
+                assert_eq!(
+                    loss.usage,
+                    TokenUsage {
+                        input_tokens: Some(5),
+                        output_tokens: Some(2),
+                        ..TokenUsage::unreported()
+                    }
+                );
+                assert_eq!(loss.finish_reported, expected_finish, "{reason}: {output}");
+                assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+                assert_eq!(loss.exchange.http_status, Some(200));
+                assert!(sink.iter().any(|observation| observation.fact
+                    == ObservationFact::ProviderModelReported(ProviderReportedModel::new(
+                        "model-fixture"
+                    ))));
+                assert!(!sink.iter().any(|observation| matches!(
+                    observation.fact,
+                    ObservationFact::TextDelta { .. }
+                        | ObservationFact::ToolCallProposed(_)
+                        | ObservationFact::FinishReported(_)
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_terminal_output_preserves_prior_tools_and_merges_usage() {
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+        let mut sink = Vec::new();
+        assert!(matches!(
+            apply(
+                &mut decoder,
+                json!({"type":"response.created","response":{
+                    "id":"resp_fixture","model":"model-fixture","status":"in_progress",
+                    "output":[{"type":"function_call","id":"fc_fixture","status":"in_progress"}],
+                    "usage":{"input_tokens":23,"output_tokens":7,"input_tokens_details":{"cached_tokens":5,"cache_write_tokens":3}}
+                }}),
+                &mut sink
+            ),
+            StreamStep::Continue
+        ));
+        let mut event = terminal();
+        event["type"] = json!("response.incomplete");
+        event["response"]["status"] = json!("incomplete");
+        event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+        event["response"]["output"] = json!({});
+        let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+            panic!("malformed terminal output must terminate");
+        };
+        let TerminalEvidence::BoundaryLoss(loss) = *evidence else {
+            panic!("malformed terminal output must remain boundary loss");
+        };
+        assert_eq!(
+            loss.reported_model,
+            Some(ProviderReportedModel::new("model-fixture"))
+        );
+        assert_eq!(loss.finish_reported, Some(FinishReason::MaxOutputTokens));
+        assert_eq!(
+            loss.usage,
+            TokenUsage {
+                input_tokens: Some(5),
+                output_tokens: Some(2),
+                cache_read_input_tokens: Some(5),
+                cache_creation_input_tokens: Some(3)
+            }
+        );
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
     }
 }
