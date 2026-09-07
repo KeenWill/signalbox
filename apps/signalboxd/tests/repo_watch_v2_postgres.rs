@@ -2532,3 +2532,294 @@ async fn repository_watch_creation_records_its_module_issuer() -> Result<(), Box
     drop(container);
     Ok(())
 }
+
+struct RuntimeHookFixture<'a> {
+    address: std::net::SocketAddr,
+    path: &'a str,
+    id: u64,
+    secret: &'a std::path::Path,
+    enabled: bool,
+}
+
+fn runtime_configuration(
+    hook: &RuntimeHookFixture<'_>,
+) -> Result<signalboxd::HubModelConfiguration, Box<dyn Error>> {
+    let catalog = include_str!("../../../config/signalboxd.example.toml").replace(
+        "/usr/local/bin/signalbox-exec-supervisor",
+        std::env::current_exe()?.to_string_lossy().as_ref(),
+    );
+    Ok(signalboxd::HubModelConfiguration::parse(&format!(
+        r#"{catalog}
+[repository_watch]
+version = 1
+enabled = {enabled}
+[repository_watch.webhook]
+bind_address = "{address}"
+path = "{path}"
+[[repository_watch.repositories]]
+repository = "runtime/project"
+poll_interval_seconds = 60
+credential_file = "{poll_credential}"
+webhook_hook_id = {id}
+webhook_secret_file = "{secret}"
+webhook_mode = "primary"
+[[repository_watch.rules]]
+id = "ci"
+version = 1
+singleton_per = "repository"
+cooldown_seconds = 0
+[repository_watch.rules.matcher]
+event_kinds = ["branch_workflow_run_completed"]
+[[repository_watch.rules.actions]]
+kind = "dispatch_session"
+template = "watch"
+"#,
+        enabled = hook.enabled,
+        address = hook.address,
+        path = hook.path,
+        id = hook.id,
+        secret = hook.secret.display(),
+        poll_credential = hook.secret.with_extension("missing-token").display(),
+    ))?)
+}
+
+async fn unused_webhook_address() -> Result<std::net::SocketAddr, std::io::Error> {
+    tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await?
+        .local_addr()
+}
+
+const RUNTIME_WEBHOOK_BODY: &str = r#"{"repository":{"full_name":"Runtime/Project"}}"#;
+
+async fn webhook_status(
+    hook: &RuntimeHookFixture<'_>,
+    secret: &[u8],
+) -> Result<reqwest::StatusCode, reqwest::Error> {
+    let signature = ring::hmac::sign(
+        &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret),
+        RUNTIME_WEBHOOK_BODY.as_bytes(),
+    );
+    Ok(reqwest::Client::new()
+        .post(format!("http://{}{}", hook.address, hook.path))
+        .header("x-github-hook-id", hook.id)
+        .header(
+            "x-hub-signature-256",
+            format!("sha256={}", hex::encode(signature.as_ref())),
+        )
+        .body(RUNTIME_WEBHOOK_BODY)
+        .send()
+        .await?
+        .status())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn composed_repository_watch_dispatches_and_reloads_its_running_listener()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
+    use signalbox_persistence::scheduler::PostgresEligibilitySweep;
+    use signalboxd::{
+        SessionTemplateConfiguration,
+        repo_watch_runtime::{
+            RepositoryWatchRuntime, RepositoryWatchServices, connect_repository_watch_pool,
+        },
+    };
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (container, core_pool, _) = postgres().await?;
+    migrate(&core_pool).await?;
+    let module_pool = connect_repository_watch_pool(&core_pool)
+        .await
+        .expect("independently authenticated module pool");
+    let user: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(&module_pool)
+        .await?;
+    assert_eq!(user, "mod_repo_watch");
+    assert!(
+        sqlx::query("SELECT * FROM public.session_lifecycle")
+            .fetch_all(&module_pool)
+            .await
+            .is_err(),
+        "module login cannot read core session tables"
+    );
+    let files = tempfile::tempdir()?;
+    let secret = files.path().join("hook-secret");
+    std::fs::write(&secret, b"initial-hook-secret")?;
+    let mut hook = RuntimeHookFixture {
+        address: unused_webhook_address().await?,
+        path: "/initial",
+        id: 17,
+        secret: &secret,
+        enabled: false,
+    };
+    let models = runtime_configuration(&hook)?;
+    let template_path = files.path().join("templates.toml");
+    std::fs::write(
+        &template_path,
+        r#"version = 1
+[[templates]]
+name = "watch"
+version = 1
+alias = "540ce009-c2ec-4a04-b823-c411ea189778"
+dangerous_tool_auto_approval = false
+system_prompt = "Inspect repository activity."
+"#,
+    )?;
+    let templates = SessionTemplateConfiguration::read(&template_path, || None, &models)?;
+    let (eligibility_nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(core_pool.clone()));
+    let runtime = RepositoryWatchRuntime::new(
+        module_pool.clone(),
+        models.repository_watch().cloned(),
+        RepositoryWatchServices {
+            core_pool: core_pool.clone(),
+            models: Arc::new(models),
+            templates: Arc::new(templates),
+            eligibility_nudge,
+            tool_dispatch_gate: InProcessToolDispatchGate::default(),
+        },
+    )
+    .await
+    .expect("prepare runtime");
+    let (shutdown, stopped) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(runtime.clone().run(stopped));
+    assert!(
+        tokio::net::TcpStream::connect(hook.address).await.is_err(),
+        "disabled module has no listener"
+    );
+    hook.enabled = true;
+    runtime
+        .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+        .await
+        .expect("enable during reload");
+    assert_eq!(
+        webhook_status(&hook, b"wrong-secret").await?,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        webhook_status(&hook, b"initial-hook-secret").await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+
+    let store = RepoWatchStore::new(module_pool.clone());
+    let repository = RepositorySlug::try_new(String::from("runtime/project"))?;
+    for run in [1, 2] {
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &dispatch_observation(&repository, run, OffsetDateTime::now_utc()),
+                EventProducer::Poll,
+            )
+            .await?;
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM session_lifecycle")
+                .fetch_one(&core_pool)
+                .await?;
+            let applied: Decimal =
+                sqlx::query_scalar("SELECT applied_through FROM core_event_cursor")
+                    .fetch_one(&module_pool)
+                    .await?;
+            if count == 1 && applied > Decimal::ZERO {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    let held: bool = sqlx::query_scalar("SELECT start_gate_held FROM session_lifecycle")
+        .fetch_one(&core_pool)
+        .await?;
+    assert!(held);
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+        .fetch_one(&core_pool)
+        .await?;
+    assert_eq!(inputs, 0);
+
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let occupied_hook = RuntimeHookFixture {
+        address: occupied.local_addr()?,
+        ..hook
+    };
+    assert!(
+        runtime
+            .reload_configuration(
+                runtime_configuration(&occupied_hook)?
+                    .repository_watch()
+                    .cloned()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        webhook_status(&hook, b"initial-hook-secret").await?,
+        reqwest::StatusCode::ACCEPTED,
+        "failed replacement bind preserves running settings"
+    );
+
+    // Expect/continue proves the old server admitted the request before replacement.
+    let mut inflight = tokio::net::TcpStream::connect(hook.address).await?;
+    let replacement_secret = files.path().join("replacement-secret");
+    std::fs::write(&replacement_secret, b"replacement-hook-secret")?;
+    let signature = ring::hmac::sign(
+        &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"replacement-hook-secret"),
+        RUNTIME_WEBHOOK_BODY.as_bytes(),
+    );
+    inflight.write_all(format!("POST {} HTTP/1.1\r\nHost: {}\r\nExpect: 100-continue\r\nConnection: close\r\nContent-Length: {}\r\nx-github-hook-id: {}\r\nx-hub-signature-256: sha256={}\r\n\r\n", hook.path, hook.address, RUNTIME_WEBHOOK_BODY.len(), hook.id, hex::encode(signature.as_ref())).as_bytes()).await?;
+    let mut interim = [0; 25];
+    tokio::time::timeout(Duration::from_secs(5), inflight.read_exact(&mut interim)).await??;
+    assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+    hook.address = unused_webhook_address().await?;
+    hook.secret = &replacement_secret;
+    runtime
+        .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+        .await
+        .expect("rebind during delivery");
+    inflight.write_all(RUNTIME_WEBHOOK_BODY.as_bytes()).await?;
+    let mut response = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        inflight.read_to_string(&mut response),
+    )
+    .await??;
+    assert!(
+        response.starts_with("HTTP/1.1 202"),
+        "in-flight delivery uses replacement hook map: {response}"
+    );
+    assert_eq!(
+        webhook_status(&hook, b"replacement-hook-secret").await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    let old_path = RuntimeHookFixture { ..hook };
+    hook.path = "/replacement";
+    hook.id = 18;
+    runtime
+        .reload_configuration(runtime_configuration(&hook)?.repository_watch().cloned())
+        .await
+        .expect("swap path and hook map on same socket");
+    assert_eq!(
+        webhook_status(&old_path, b"replacement-hook-secret").await?,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let old_id = RuntimeHookFixture {
+        id: old_path.id,
+        ..hook
+    };
+    assert_eq!(
+        webhook_status(&old_id, b"replacement-hook-secret").await?,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        webhook_status(&hook, b"replacement-hook-secret").await?,
+        reqwest::StatusCode::ACCEPTED
+    );
+    shutdown.send(true)?;
+    worker.await?.expect("orderly module shutdown");
+    assert!(module_pool.is_closed());
+    assert!(tokio::net::TcpStream::connect(hook.address).await.is_err());
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}

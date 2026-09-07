@@ -536,7 +536,7 @@ impl WatchedRepositoryWebhookConfiguration {
         &self.secret_file
     }
 
-    /// Returns whether authenticated deliveries only project or also write.
+    /// Returns whether authenticated deliveries only acknowledge or also wake ingestion.
     pub const fn mode(&self) -> RepositoryWatchWebhookMode {
         self.mode
     }
@@ -555,16 +555,15 @@ impl fmt::Debug for WatchedRepositoryWebhookConfiguration {
 
 /// Per-repository rollout mode for authenticated webhook deliveries.
 ///
-/// Shadow projects a delivery against an in-memory baseline and writes only
-/// parity rows; the durable cursor stays the poller's. Primary applies the
-/// delivery to the durable cursor and writes ordinary webhook-produced events.
+/// Shadow authenticates and acknowledges without waking ingestion. Primary
+/// wakes the repository task to fetch a complete provider observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepositoryWatchWebhookMode {
     Shadow,
     Primary,
 }
 
-/// One repository-specific version-one polling and credential configuration.
+/// One repository-specific polling and credential configuration.
 #[derive(Clone, Eq, PartialEq)]
 pub struct WatchedRepositoryConfiguration {
     repository: RepositorySlug,
@@ -580,7 +579,7 @@ impl WatchedRepositoryConfiguration {
         &self.repository
     }
 
-    /// Returns the positive interval between completed polling attempts.
+    /// Returns the positive start-to-start interval between scheduled polls.
     pub const fn poll_interval(&self) -> Duration {
         self.poll_interval
     }
@@ -630,9 +629,10 @@ impl fmt::Debug for WatchedRepositoryConfiguration {
     }
 }
 
-/// Complete optional version-one repository-watch configuration.
+/// Complete optional repository-watch configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryWatchConfiguration {
+    enabled: bool,
     signal_reviewers: Box<[RepoWatchAuthorLogin]>,
     repositories: Box<[WatchedRepositoryConfiguration]>,
     rules: Box<[RepoWatchRule]>,
@@ -664,6 +664,11 @@ impl ConvergenceSweepConfiguration {
 }
 
 impl RepositoryWatchConfiguration {
+    /// Returns whether repository polling, webhook wakes, and dispatch are enabled.
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Returns the exact canonical login set used for reaction ingestion.
     pub fn signal_reviewers(&self) -> &[RepoWatchAuthorLogin] {
         &self.signal_reviewers
@@ -2355,6 +2360,7 @@ fn parse_repository_watch_configuration(
         table,
         &[
             "version",
+            "enabled",
             "signal_reviewers",
             "repositories",
             "rules",
@@ -2366,6 +2372,15 @@ fn parse_repository_watch_configuration(
     if table.get("version").and_then(Item::as_integer) != Some(1) {
         return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
     }
+    let enabled = table
+        .get("enabled")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        })
+        .transpose()?
+        .unwrap_or(true);
     let reviewer_values = table
         .get("signal_reviewers")
         .and_then(Item::as_array)
@@ -2551,6 +2566,7 @@ fn parse_repository_watch_configuration(
         return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
     }
     Ok(RepositoryWatchConfiguration {
+        enabled,
         signal_reviewers: signal_reviewers.into_boxed_slice(),
         repositories: repositories.into_boxed_slice(),
         rules: rules.into_boxed_slice(),
@@ -5333,6 +5349,34 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
 
         assert_eq!(configured.repository_watch(), None);
+    }
+
+    #[test]
+    fn repository_watch_is_enabled_by_default() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch configuration");
+        assert!(
+            configured
+                .repository_watch()
+                .expect("configured watch")
+                .enabled()
+        );
+    }
+
+    #[test]
+    fn repository_watch_can_be_disabled_explicitly() {
+        let configured =
+            HubModelConfiguration::parse(&configuration_with_repository_watch().replace(
+                "[repository_watch]\nversion = 1",
+                "[repository_watch]\nversion = 1\nenabled = false",
+            ))
+            .expect("disabled repository-watch configuration");
+        assert!(
+            !configured
+                .repository_watch()
+                .expect("configured watch")
+                .enabled()
+        );
     }
 
     #[test]

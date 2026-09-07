@@ -44,6 +44,16 @@ impl RepositoryWatchClientLoader {
     }
 }
 
+impl signalbox_module_repo_watch_v2::provider::RepositoryClientLoader
+    for RepositoryWatchClientLoader
+{
+    type Error = RepositoryWatchClientLoadError;
+
+    async fn load_client(&self) -> Result<GitHubClient, Self::Error> {
+        self.load().await
+    }
+}
+
 /// Credential resolution or authenticated-client construction failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepositoryWatchClientLoadError {

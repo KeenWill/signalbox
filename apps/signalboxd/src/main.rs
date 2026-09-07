@@ -7,6 +7,11 @@
 //! deployment configuration, and migration policy at this executable
 //! boundary.
 
+use signalboxd::repo_watch_runtime::{
+    RepositoryWatchRuntime, RepositoryWatchRuntimeError, RepositoryWatchServices,
+    connect_repository_watch_pool,
+};
+
 use std::{
     cell::Cell,
     env,
@@ -612,6 +617,7 @@ enum RuntimeTaskExit {
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
     ConvergenceSweep,
+    RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
     WebHttp(Result<(), WebHttpRuntimeError>),
     TurnLiveness,
     LifecycleDeadline,
@@ -657,6 +663,7 @@ enum RuntimeTaskDefect {
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
     ConvergenceSweepCompletedBeforeShutdown,
+    RepositoryWatchCompletedBeforeShutdown,
     WebHttpCompletedBeforeShutdown,
     TurnLivenessCompletedBeforeShutdown,
     LifecycleDeadlineCompletedBeforeShutdown,
@@ -678,6 +685,9 @@ impl RuntimeTaskDefect {
             Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
             Self::ConvergenceSweepCompletedBeforeShutdown => {
                 "convergence_sweep_completed_before_shutdown"
+            }
+            Self::RepositoryWatchCompletedBeforeShutdown => {
+                "repository_watch_completed_before_shutdown"
             }
             Self::WebHttpCompletedBeforeShutdown => "web_http_completed_before_shutdown",
             Self::TurnLivenessCompletedBeforeShutdown => "turn_liveness_completed_before_shutdown",
@@ -1039,6 +1049,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::ConvergenceSweep)
+        | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness)
         | Ok(RuntimeTaskExit::LifecycleDeadline)
@@ -1049,6 +1060,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         }
         Ok(RuntimeTaskExit::Runner(Err(error))) => {
             report_runner_runtime_failure(&error);
+            RuntimeTaskCompletion::Failed
+        }
+        Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
+            tracing::error!(?error, "repository-watch runtime failed");
             RuntimeTaskCompletion::Failed
         }
         Ok(RuntimeTaskExit::WebHttp(Err(error))) => {
@@ -2076,6 +2091,52 @@ async fn run_hub(
             return Ok(ShutdownOutcome::GuardLost);
         }
     }
+    let repository_watch_runtime = if model_configuration.repository_watch().is_some() {
+        let start = async {
+            let module_pool = connect_repository_watch_pool(&pool).await?;
+            RepositoryWatchRuntime::new(
+                module_pool,
+                model_configuration.repository_watch().cloned(),
+                RepositoryWatchServices {
+                    core_pool: pool.clone(),
+                    models: Arc::new(model_configuration.clone()),
+                    templates: Arc::new(template_configuration.clone()),
+                    eligibility_nudge: eligibility_nudge.clone(),
+                    tool_dispatch_gate: tool_dispatch_gate.clone(),
+                },
+            )
+            .await
+        };
+        match await_while_guarded(&mut database, start).await {
+            GuardedAwait::Completed(Ok(runtime)) => Some(runtime),
+            GuardedAwait::Completed(Err(_)) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("repository_watch_startup_failed"),
+                );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                drop(blob_executor);
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+            GuardedAwait::GuardLost => {
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                if let Some(registry) = blob_store_registry.as_ref() {
+                    registry.disarm_staging_sweep();
+                }
+                drop(blob_executor);
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Ok(ShutdownOutcome::GuardLost);
+            }
+        }
+    } else {
+        None
+    };
     tool_executor = tool_executor.with_blob_executor(blob_executor);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
@@ -2237,6 +2298,7 @@ async fn run_hub(
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
     let (convergence_sweep_shutdown, convergence_sweep_shutdown_receiver) = watch::channel(false);
+    let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
@@ -2277,6 +2339,15 @@ async fn run_hub(
                 .run(convergence_sweep_shutdown_receiver)
                 .await;
             RuntimeTaskExit::ConvergenceSweep
+        });
+    }
+    if let Some(repository_watch_runtime) = repository_watch_runtime {
+        runtime_tasks.spawn(async move {
+            RuntimeTaskExit::RepositoryWatch(
+                repository_watch_runtime
+                    .run(repository_watch_shutdown_receiver)
+                    .await,
+            )
         });
     }
     runtime_tasks.spawn(async move {
@@ -2348,6 +2419,14 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
+                        tracing::error!(?error, "repository-watch runtime failed");
+                        RuntimeStopCause::RuntimeFailed
+                    }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))) => {
+                        report_runtime_task_defect(RuntimeTaskDefect::RepositoryWatchCompletedBeforeShutdown);
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
                         report_web_http_runtime_failure(&error);
                         RuntimeStopCause::RuntimeFailed
@@ -2405,6 +2484,7 @@ async fn run_hub(
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
             let _ = convergence_sweep_shutdown.send(true);
+            let _ = repository_watch_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);
             let _ = lifecycle_deadline_shutdown.send(true);

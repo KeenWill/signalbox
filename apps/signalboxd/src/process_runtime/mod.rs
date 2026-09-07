@@ -261,7 +261,7 @@ use crate::{
     usage_limits::context_compaction_usage_exceeds_configured_limits,
 };
 
-const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+pub(crate) const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const DELEGATION_DELIVERY_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const PROCESS_UPDATE_CAPACITY: usize = 64;

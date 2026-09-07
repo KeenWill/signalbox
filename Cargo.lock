@@ -5072,6 +5072,7 @@ dependencies = [
  "percent-encoding",
  "prometheus",
  "reqwest",
+ "ring",
  "rust_decimal",
  "rustix 1.1.4",
  "rustls",
