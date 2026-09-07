@@ -1,6 +1,7 @@
+load("@crates//:defs.bzl", "all_crate_deps")
 load("//tooling/bazel:package.bzl", "rust_package")
-load("//tooling/bazel:rust.bzl", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_unit_test")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_FEATURES = ["test-support"]
 
@@ -18,3 +19,21 @@ rust_unit_test(
     crate = ":signalbox_module_repo_watch_v2",
     crate_features = CRATE_FEATURES,
 )
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_module_repo_watch_v2",
+    crate_features = ["test-support"],
+)
+
+rust_binary(
+    name = "observation_probe",
+    srcs = ["examples/observation_probe.rs"],
+    crate_root = "examples/observation_probe.rs",
+    deps = [
+        ":signalbox_module_repo_watch_v2",
+        "//crates/ownership-seam:signalbox_ownership_seam",
+    ] + all_crate_deps(normal_dev = True),
+)
+
+rust_quality_tests(documented_crates = [":signalbox_module_repo_watch_v2"])

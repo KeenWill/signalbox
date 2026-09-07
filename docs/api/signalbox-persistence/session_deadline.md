@@ -38,8 +38,14 @@ pub enum SessionDeadlinePassOutcome {
 ```rust
 pub enum SessionDeadlineRepositoryError {
     BoundExceedsStorage,
-    Database(error::Error),
-    Lifecycle(boxed::Box<session_lifecycle::SessionLifecycleRepositoryError>),
+    Database {
+        query: &'static str,
+        source: error::Error,
+    },
+    Lifecycle {
+        query: &'static str,
+        source: boxed::Box<session_lifecycle::SessionLifecycleRepositoryError>,
+    },
 }
 // derives: fmt::Debug
 impl fmt::Display for session_deadline::SessionDeadlineRepositoryError {
@@ -47,14 +53,6 @@ impl fmt::Display for session_deadline::SessionDeadlineRepositoryError {
 }
 impl error::Error for session_deadline::SessionDeadlineRepositoryError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
-}
-impl convert::From<error::Error> for session_deadline::SessionDeadlineRepositoryError {
-    fn from(error: error::Error) -> Self;
-}
-impl convert::From<session_lifecycle::SessionLifecycleRepositoryError>
-    for session_deadline::SessionDeadlineRepositoryError
-{
-    fn from(error: session_lifecycle::SessionLifecycleRepositoryError) -> Self;
 }
 ```
 

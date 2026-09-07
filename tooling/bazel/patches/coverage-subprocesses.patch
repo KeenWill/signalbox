@@ -1,0 +1,21 @@
+--- a/util/collect_coverage/collect_coverage.rs
++++ b/util/collect_coverage/collect_coverage.rs
+@@ -208,0 +209,18 @@
++    // Declared subprocess fixtures write profiles alongside the test binary.
++    let helpers: std::collections::BTreeSet<_> = env::vars()
++        .filter(|(name, _)| name.starts_with("NEXTEST_BIN_EXE_"))
++        .map(|(_, path)| PathBuf::from(path))
++        .collect();
++    for helper in helpers {
++        let helper = if helper.is_absolute() {
++            helper
++        } else {
++            runfiles_dir
++                .as_ref()
++                .expect("subprocess coverage requires test runfiles")
++                .join(env::var("TEST_WORKSPACE").unwrap())
++                .join(helper)
++        };
++        llvm_cov_cmd.arg("-object").arg(helper);
++    }
++

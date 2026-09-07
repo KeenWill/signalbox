@@ -11,6 +11,31 @@ use signalbox_persistence::runner_protocol::RunnerRecoveryOutcome;
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_provisioning_retains_one_receipt_and_consumes_it_with_installation()
 -> Result<(), Box<dyn Error>> {
+    provision_with_candidate_capabilities(ProvisionCase::Supported).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_rejects_registration_only_candidates_without_staging_provisioning()
+-> Result<(), Box<dyn Error>> {
+    provision_with_candidate_capabilities(ProvisionCase::Unsupported).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_rejects_checkout_revision_without_repository_before_staging()
+-> Result<(), Box<dyn Error>> {
+    provision_with_candidate_capabilities(ProvisionCase::RevisionWithoutRepository).await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProvisionCase {
+    Supported,
+    Unsupported,
+    RevisionWithoutRepository,
+}
+
+async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -46,7 +71,7 @@ async fn recovery_provisioning_retains_one_receipt_and_consumes_it_with_installa
             authorized(INITIAL_PHYSICAL_ATTEMPT),
             offer_request(),
         )
-        .unwrap();
+        .expect("the provisioning fixture retains its correlated authority");
     let connection = store
         .open_connection(predecessor.identities().enrollment())
         .await?;
@@ -59,18 +84,50 @@ async fn recovery_provisioning_retains_one_receipt_and_consumes_it_with_installa
         )
         .await?;
     append_runner_lost_projection(&pool, session).await?;
-    let candidate = store
-        .enroll_pristine(enrollment_request())
-        .await?
-        .into_receipt();
-    store
+    let request = enrollment_request();
+    let request = if case != ProvisionCase::Unsupported {
+        request
+    } else {
+        signalbox_persistence::runner_protocol::PristineRunnerEnrollmentRequest::new(
+            request.request(),
+            request.issued(),
+            [class()],
+            RunnerAdvertisement::new([], [], [], [], [], []),
+        )
+    };
+    let candidate = store.enroll_pristine(request).await?.into_receipt();
+    let candidate_connection = store
         .open_connection(candidate.identities().enrollment())
         .await?;
     let command = signalbox_domain::ReplaceLostRunner {
         command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
         session,
-        revision: None,
+        revision: (case == ProvisionCase::RevisionWithoutRepository)
+            .then(|| WorkspaceRevision::try_new("a".repeat(40)).expect("checkout SHA is valid")),
     };
+    if case != ProvisionCase::Supported {
+        let rejected =
+            RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Rejected(
+                if case == ProvisionCase::RevisionWithoutRepository {
+                    signalbox_domain::RunnerRecoveryRejection::RevisionWithoutRepository
+                } else {
+                    signalbox_domain::RunnerRecoveryRejection::PlacementUnavailable
+                },
+            ));
+        assert_eq!(store.replace_lost_runner(command.clone()).await?, rejected);
+        assert_eq!(store.replace_lost_runner(command).await?, rejected);
+        let staged: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM runner_replacement_stage) + (SELECT count(*) FROM runner_replacement_provisioning_authorization)").fetch_one(&pool).await?;
+        assert_eq!(staged, 0);
+        assert_eq!(
+            store
+                .load_connection(candidate.identities().enrollment())
+                .await?
+                .expect("candidate connection remains available")
+                .state(),
+            RunnerConnectionState::Connected
+        );
+        return Ok(());
+    }
     assert_eq!(
         store.replace_lost_runner(command.clone()).await?,
         RunnerRecoveryOutcome::Pending
@@ -78,6 +135,19 @@ async fn recovery_provisioning_retains_one_receipt_and_consumes_it_with_installa
     let operations = store
         .replacement_provisioning(candidate.identities().enrollment())
         .await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query("ALTER TABLE runner_replacement_provisioning_authorization DISABLE TRIGGER runner_replacement_provisioning_authorization_is_append_only")
+        .execute(&mut *malformed).await?;
+    let error = sqlx::query("UPDATE runner_replacement_provisioning_authorization SET repository_key = $1 WHERE command_id = $2")
+        .bind(repository_key().as_str()).bind(command.command_id.into_uuid())
+        .execute(&mut *malformed).await.expect_err("a repository authorization without a revision cannot persist");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("runner_replacement_repository_recovery_pair")
+    );
+    malformed.rollback().await?;
     assert_eq!(operations.len(), 1);
     assert_eq!(
         store.replace_lost_runner(command.clone()).await?,
@@ -108,6 +178,13 @@ async fn recovery_provisioning_retains_one_receipt_and_consumes_it_with_installa
             .is_err()
     );
     store
+        .transition_connection(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    store
         .record_replacement_workspace_ready(authorization, &ready)
         .await?;
     store
@@ -125,11 +202,22 @@ async fn recovery_provisioning_retains_one_receipt_and_consumes_it_with_installa
         store
             .load_enrollment(candidate.identities().enrollment())
             .await?
-            .unwrap()
+            .expect("the provisioning fixture retains its correlated authority")
             .state(),
         RunnerEnrollmentState::Pending
     );
 
+    assert_eq!(
+        store.resume_runner_replacement(command.command_id).await?,
+        RunnerRecoveryOutcome::Pending
+    );
+    store
+        .transition_connection(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+            RunnerConnectionTransition::HeartbeatRecovered,
+        )
+        .await?;
     let result = store.resume_runner_replacement(command.command_id).await?;
 
     assert_eq!(
@@ -144,7 +232,7 @@ async fn recovery_provisioning_retains_one_receipt_and_consumes_it_with_installa
         store
             .load_enrollment(candidate.identities().enrollment())
             .await?
-            .unwrap()
+            .expect("the provisioning fixture retains its correlated authority")
             .state(),
         RunnerEnrollmentState::Active
     );
@@ -441,6 +529,27 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_rejected_staging_releases_only_its_exact_ready_workspace()
 -> Result<(), Box<dyn Error>> {
+    rejected_staging_releases_ready_workspace(false, false).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_abandonment_releases_a_late_correlated_workspace_receipt()
+-> Result<(), Box<dyn Error>> {
+    rejected_staging_releases_ready_workspace(true, false).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recovery_release_receipt_cannot_cross_the_retained_cleanup_epoch()
+-> Result<(), Box<dyn Error>> {
+    rejected_staging_releases_ready_workspace(false, true).await
+}
+
+async fn rejected_staging_releases_ready_workspace(
+    late_ready: bool,
+    successor_epoch: bool,
+) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -476,7 +585,7 @@ async fn recovery_rejected_staging_releases_only_its_exact_ready_workspace()
             authorized(INITIAL_PHYSICAL_ATTEMPT),
             offer_request(),
         )
-        .unwrap();
+        .expect("the recovery fixture retains its required correlated fact");
     let connection = store
         .open_connection(predecessor.identities().enrollment())
         .await?;
@@ -515,8 +624,21 @@ async fn recovery_rejected_staging_releases_only_its_exact_ready_workspace()
         candidate.identities().runner(),
         authorization.placement_revision,
     );
+    if !late_ready {
+        store
+            .record_replacement_workspace_ready(authorization, &ready)
+            .await?;
+    }
+    let candidate_connection = store
+        .load_connection(candidate.identities().enrollment())
+        .await?
+        .expect("the recovery fixture retains its required correlated fact");
     store
-        .record_replacement_workspace_ready(authorization, &ready)
+        .transition_connection(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
         .await?;
     store
         .abandon_lost_runner(signalbox_domain::AbandonLostRunner {
@@ -533,12 +655,72 @@ async fn recovery_rejected_staging_releases_only_its_exact_ready_workspace()
             signalbox_domain::RunnerRecoveryRejection::PlacementNotLost
         ))
     );
+    if late_ready {
+        let mut wrong = ready.clone();
+        wrong.runner = predecessor.identities().runner();
+        assert!(
+            store
+                .record_replacement_workspace_ready(authorization, &wrong)
+                .await
+                .is_err()
+        );
+        store
+            .record_replacement_workspace_ready(authorization, &ready)
+            .await?;
+        store
+            .record_replacement_workspace_ready(authorization, &ready)
+            .await?;
+    }
+    let releases: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_release WHERE authorization_id = $1 AND connection_epoch = $2")
+        .bind(authorization.authorization.into_uuid()).bind(Decimal::from(candidate_connection.epoch().get())).fetch_one(&pool).await?;
+    assert_eq!(releases, 1);
+    store
+        .transition_connection(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+            RunnerConnectionTransition::HeartbeatRecovered,
+        )
+        .await?;
     assert_eq!(
         store
             .replacement_workspace_releases(candidate.identities().enrollment())
             .await?,
         vec![ready.clone()]
     );
+    if successor_epoch {
+        store
+            .transition_connection(
+                candidate.identities().enrollment(),
+                candidate_connection.epoch(),
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await?;
+        let successor = store
+            .open_connection(candidate.identities().enrollment())
+            .await?;
+        assert_ne!(successor.epoch(), candidate_connection.epoch());
+        assert!(
+            store
+                .replacement_workspace_releases(candidate.identities().enrollment())
+                .await?
+                .is_empty()
+        );
+        assert!(
+            store
+                .record_replacement_workspace_released(
+                    candidate.identities().enrollment(),
+                    session,
+                    ready.placement_revision,
+                    ready.runner,
+                    ready.manifest_id
+                )
+                .await
+                .is_err()
+        );
+        let released: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_released WHERE authorization_id = $1").bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(released, 0);
+        return Ok(());
+    }
     assert!(
         store
             .record_replacement_workspace_released(

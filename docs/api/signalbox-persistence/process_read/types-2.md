@@ -121,6 +121,13 @@ pub enum ProcessTranscriptEntry {
         request: signalbox_domain::ToolRequestId,
         content: string::String,
     },
+    ToolInadmissible {
+        entry_index: u64,
+        source_session: signalbox_domain::SessionId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
+        request: signalbox_domain::ToolRequestId,
+        content: string::String,
+    },
     ToolClosed {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,

@@ -505,14 +505,15 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await accepted.click()
   await expect(page.locator('#session-timeline-detail-41')).toBeHidden()
 
-  await page.getByRole('button', { name: /First/ }).click()
-  await expect(timeline).toBeFocused()
+  const first = page.getByRole('button', { name: /First/ })
+  await first.click()
+  await expect(first).toBeFocused()
   await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
   await latest.click()
-  await expect(timeline).toBeFocused()
+  await expect(latest).toBeFocused()
   await expect(completed).toHaveAttribute('aria-selected', 'true')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -1496,4 +1497,67 @@ test('distinguishes a rejected bootstrap contract from transport failure', async
   await expect(page.getByText('Contract rejected')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry bootstrap' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('restores keyboard help focus to the opener through hotkey and palette entry', async ({
+  page,
+}) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  const sessions = page.getByRole('link', { name: /Sessions/ })
+  await sessions.focus()
+  await page.keyboard.press('Shift+/')
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(sessions).toBeFocused()
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await page.getByRole('button', { name: /Open keyboard help/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.getByRole('button', { name: 'Close keyboard help' }).click()
+  await expect(sessions).toBeFocused()
+})
+
+test('retains window control focus while loading and after the new window arrives', async ({
+  page,
+}) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/sessions?workspace=true')
+  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionWorkspaceFixture.id)
+  await page.getByRole('button', { name: 'Open workspace' }).click()
+  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  let releaseWindow = () => {}
+  const windowReady = new Promise<void>((resolve) => {
+    releaseWindow = resolve
+  })
+  let requested = false
+  await page.route('**/api/sessions/**/timeline?**', async (route) => {
+    requested = true
+    await windowReady
+    await route.fallback()
+  })
+  const first = page.getByRole('button', { name: /First/ })
+  await first.focus()
+  await page.keyboard.press('Enter')
+  await expect.poll(() => requested).toBe(true)
+  await expect(first).toBeFocused()
+  releaseWindow()
+  await expect(page.getByText('Active · opened at first')).toBeVisible()
+  await expect(first).toBeFocused()
+  const latest = page.getByRole('button', { name: /Latest/ })
+  await latest.click()
+  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await expect(latest).toBeFocused()
+})
+
+test('trims the session identity before native form validation', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/sessions?workspace=true')
+  const input = page.getByRole('textbox', { name: 'Exact session ID' })
+  await input.fill(`  ${sessionWorkspaceFixture.id}  `)
+  await expect(input).toHaveValue(sessionWorkspaceFixture.id)
+  await input.press('Enter')
+  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
 })

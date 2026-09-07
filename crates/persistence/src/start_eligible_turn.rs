@@ -1024,7 +1024,7 @@ async fn handle_in_transaction(
     // rows, and no production path may take the strongest row-lock mode on the
     // session row —
     // see the lock-mode contract beside the session-row lock in
-    // `submit_input.rs::prepare_against_locked_state`.
+    // `submit_input/prepare.rs::prepare_against_locked_state`.
     let session_uuid = session_id_to_uuid(requested_session);
     let (session_exists, scheduler_session) =
         sqlx::query_as::<_, (bool, Option<Uuid>)>(crate::lock_inventory::START_ELIGIBLE_TURN)
@@ -1187,6 +1187,7 @@ async fn insert_prepared_accepted_activation(
         | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
         | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
         | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+        | InitialSemanticTranscriptEntryPayload::ToolInadmissible { .. }
         | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
@@ -1273,6 +1274,7 @@ async fn insert_prepared_accepted_activation(
             | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+            | InitialSemanticTranscriptEntryPayload::ToolInadmissible { .. }
             | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
             | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. } => {
                 return Err(StartEligibleTurnRepositoryError::HubInvariant(

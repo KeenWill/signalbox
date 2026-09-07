@@ -2093,6 +2093,7 @@ pub(crate) fn completed_tool_result_entry_indices(
             | ProcessTranscriptEntry::ProviderReasoning { .. }
             | ProcessTranscriptEntry::AssistantToolUse { .. }
             | ProcessTranscriptEntry::ToolDenied { .. }
+            | ProcessTranscriptEntry::ToolInadmissible { .. }
             | ProcessTranscriptEntry::ToolClosed { .. }
             | ProcessTranscriptEntry::TurnFailed { .. }
             | ProcessTranscriptEntry::TurnCompleted { .. }

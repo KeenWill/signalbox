@@ -1,11 +1,10 @@
+load("@postgres_suites//:defs.bzl", "SUITES")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_integration_test", "rust_postgres_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_postgres_test", "rust_quality_tests", "rust_selection_test", "rust_unit_test")
 
-CRATE_FEATURES = [
-    "postgres-integration",
-    "test-support",
-]
+CRATE_FEATURES = SUITES["persistence"]["crate_features"]
 
 CRATE_PROC_MACRO_DEPS = ["//crates/derive:signalbox_derive"]
 
@@ -21,6 +20,16 @@ TEST_DEPS = [
 ]
 
 rust_package()
+
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    crate_root = "build.rs",
+    data = glob(["migrations/*.sql"]),
+    edition = "2024",
+    lint_config = ":cargo_lints",
+    rustc_env_files = [":cargo_environment"],
+)
 
 rust_library(
     name = "signalbox_persistence",
@@ -182,23 +191,10 @@ rust_postgres_test(
 
 test_suite(
     name = "postgres_tests",
+    tags = ["manual"],
     tests = [
-        ":approval_judge_eval_postgres",
-        ":blob_postgres",
-        ":conversation_import_postgres",
-        ":conversation_listing_postgres",
-        ":git_remote_authority_postgres",
-        ":goal_postgres",
-        ":imported_conversation_e2e_postgres",
-        ":imported_session_postgres",
-        ":outbox_decode_postgres",
-        ":postgres_integration",
-        ":program_journal_postgres",
-        ":review_workflow_postgres",
-        ":runner_protocol_postgres",
-        ":search_path_postgres",
-        ":session_metadata_postgres",
-        ":session_placement_postgres",
+        "//:postgres_persistence",
+        "//:postgres_runner",
     ],
 )
 
@@ -234,3 +230,127 @@ rust_api_json(
     crate = ":signalbox_persistence",
     crate_features = CRATE_FEATURES,
 )
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_persistence",
+    crate_features = [
+        "default",
+        "postgres-integration",
+        "test-support",
+    ],
+)
+
+rust_selection_test(
+    name = "approval_judge_eval_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":approval_judge_eval_postgres",
+)
+
+rust_selection_test(
+    name = "blob_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":blob_postgres",
+)
+
+rust_selection_test(
+    name = "conversation_import_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":conversation_import_postgres",
+)
+
+rust_selection_test(
+    name = "conversation_listing_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":conversation_listing_postgres",
+)
+
+rust_selection_test(
+    name = "git_remote_authority_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":git_remote_authority_postgres",
+)
+
+rust_selection_test(
+    name = "goal_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":goal_postgres",
+)
+
+rust_selection_test(
+    name = "imported_session_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":imported_session_postgres",
+)
+
+rust_selection_test(
+    name = "imported_conversation_e2e_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":imported_conversation_e2e_postgres",
+)
+
+rust_selection_test(
+    name = "search_path_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":search_path_postgres",
+)
+
+rust_selection_test(
+    name = "outbox_decode_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":outbox_decode_postgres",
+)
+
+rust_selection_test(
+    name = "program_journal_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":program_journal_postgres",
+)
+
+rust_selection_test(
+    name = "postgres_integration_ordinary",
+    args = ["--test-threads=4"],
+    test = ":postgres_integration",
+)
+
+rust_selection_test(
+    name = "runner_protocol_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":runner_protocol_postgres",
+)
+
+rust_selection_test(
+    name = "review_workflow_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":review_workflow_postgres",
+)
+
+rust_selection_test(
+    name = "session_metadata_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":session_metadata_postgres",
+)
+
+rust_selection_test(
+    name = "session_placement_postgres_ordinary",
+    args = ["--test-threads=4"],
+    test = ":session_placement_postgres",
+)
+
+rust_integration_test(
+    name = "postgres_load",
+    srcs = glob(["benches/**/*.rs"]),
+    args = ["--test"],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
+    crate_features = [
+        "default",
+        "postgres-integration",
+        "test-support",
+    ],
+    crate_root = "benches/postgres_load.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    use_libtest_harness = False,
+    deps = TEST_DEPS,
+)
+
+rust_quality_tests(documented_crates = [":signalbox_persistence"])

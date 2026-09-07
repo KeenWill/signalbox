@@ -436,6 +436,7 @@ fn reconstitute_inner(
             }
             InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+            | InitialSemanticTranscriptEntryPayload::ToolInadmissible { .. }
             | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
             | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. } => {}
             InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
@@ -1256,6 +1257,7 @@ fn reconstitute_inner(
                                 base_entry_count,
                                 round.round_tool_attempts(),
                                 round.round_tool_denials(),
+                                &input.inadmissible_requests,
                                 &model_calls,
                                 &assistant_by_call,
                                 &snapshots,
@@ -1782,6 +1784,7 @@ fn reconstitute_inner(
                                         source_snapshot.entry_count(),
                                         round.round_tool_attempts(),
                                         round.round_tool_denials(),
+                                        &input.inadmissible_requests,
                                         &model_calls,
                                         &assistant_by_call,
                                         &snapshots,
@@ -1945,6 +1948,7 @@ fn reconstitute_inner(
                                             ..
                                         }
                                         | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                                        | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
                                         | SemanticTranscriptEntryPayload::ToolClosed { .. }
                                         | SemanticTranscriptEntryPayload::TurnCompleted { .. }
                                         | SemanticTranscriptEntryPayload::TurnFailed { .. }
@@ -2177,6 +2181,7 @@ fn reconstitute_inner(
                                     terminal.entry_count().saturating_sub(1),
                                     execution.terminal_tool_attempts(),
                                     execution.terminal_tool_denials(),
+                                    &input.inadmissible_requests,
                                     &model_calls,
                                     &assistant_by_call,
                                     &snapshots,
@@ -2201,6 +2206,7 @@ fn reconstitute_inner(
                                 failed_entry,
                                 execution.terminal_tool_attempts(),
                                 execution.terminal_tool_denials(),
+                                &input.inadmissible_requests,
                                 &model_calls,
                                 &assistant_by_call,
                                 &snapshots,
@@ -2448,6 +2454,7 @@ fn reconstitute_inner(
                                 source.entry_count(),
                                 round.round_tool_attempts(),
                                 round.round_tool_denials(),
+                                &input.inadmissible_requests,
                                 &model_calls,
                                 &assistant_by_call,
                                 &snapshots,
@@ -2665,6 +2672,7 @@ fn reconstitute_inner(
                             terminal.entry_count().saturating_sub(1),
                             terminal_execution.terminal_tool_attempts(),
                             terminal_execution.terminal_tool_denials(),
+                            &input.inadmissible_requests,
                             &model_calls,
                             &assistant_by_call,
                             &snapshots,
@@ -2691,6 +2699,7 @@ fn reconstitute_inner(
                         cancellation_entry,
                         terminal_execution.terminal_tool_attempts(),
                         terminal_execution.terminal_tool_denials(),
+                        &input.inadmissible_requests,
                         &model_calls,
                         &assistant_by_call,
                         &snapshots,
@@ -2853,6 +2862,7 @@ fn reconstitute_inner(
                                 source.entry_count(),
                                 round.round_tool_attempts(),
                                 round.round_tool_denials(),
+                                &input.inadmissible_requests,
                                 &model_calls,
                                 &assistant_by_call,
                                 &snapshots,

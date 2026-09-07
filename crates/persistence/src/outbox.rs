@@ -2683,6 +2683,7 @@ async fn load_runner_state_transition(
                 placement.state_kind AS source_state_kind,
                 placement.requested_sandbox_profile AS source_sandbox_profile,
                 placement.requested_working_directory AS source_working_directory,
+                placement.pinned_working_directory AS source_pinned_working_directory,
                 placement.selector_runner_id AS source_selector_runner_id,
                 placement.pinned_runner_id AS source_pinned_runner_id,
                 placement.lost_runner_id AS source_lost_runner_id,
@@ -2704,7 +2705,7 @@ async fn load_runner_state_transition(
                     ELSE false
                 END AS source_connection_predecessor_matches,
                 prior.lost_runner_id AS prior_lost_runner_id,
-                prior.requested_working_directory AS prior_working_directory
+                prior.pinned_working_directory AS prior_working_directory
            FROM runner_state_transition_outbox_event AS event
            JOIN runner_session_placement_record AS placement
              ON placement.session_id = event.session_id
@@ -2857,7 +2858,8 @@ async fn load_runner_state_transition(
                     && !(row.try_get::<Option<Uuid>, _>("prior_lost_runner_id")?
                         == Some(runner_uuid)
                         && row.try_get::<Option<String>, _>("prior_working_directory")?
-                            != source_working_directory))
+                            != row
+                                .try_get::<Option<String>, _>("source_pinned_working_directory")?))
         }
         DispatchedRunnerState::WorkingDirectoryChanged => {
             source_event == "runner_replaced"
@@ -2865,7 +2867,7 @@ async fn load_runner_state_transition(
                 && source_pinned == Some(runner_uuid)
                 && row.try_get::<Option<Uuid>, _>("prior_lost_runner_id")? == Some(runner_uuid)
                 && row.try_get::<Option<String>, _>("prior_working_directory")?
-                    != source_working_directory
+                    != row.try_get::<Option<String>, _>("source_pinned_working_directory")?
         }
         DispatchedRunnerState::Abandoned => {
             source_event == "abandoned"

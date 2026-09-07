@@ -2179,6 +2179,8 @@ impl Error for ProcessConnectionError {
 /// Fatal local-process runtime failure.
 #[derive(Debug)]
 pub enum ProcessRuntimeError {
+    /// OAuth claim recovery or catalog installation failed before accepting work.
+    OauthRecovery(signalbox_persistence::oauth_credential::OauthCredentialRepositoryError),
     /// The guarded listener could not accept a connection.
     Accept(io::Error),
     /// A completed snapshot spool could not be read for transmission.
@@ -2201,6 +2203,8 @@ pub enum ProcessRuntimeError {
     ConnectionTask(JoinError),
     /// The durable outbox dispatcher failed.
     Dispatch(OutboxDispatchError),
+    /// The shared runner-recovery notification listener failed.
+    RunnerRecoveryNotifications(sqlx::Error),
     /// The single dispatcher produced an impossible retry result.
     UnexpectedDispatcherRetry,
     /// The revalidated socket path could not be cleaned up.
@@ -2210,6 +2214,7 @@ pub enum ProcessRuntimeError {
 impl fmt::Display for ProcessRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::OauthRecovery(_) => "OAuth credential startup recovery failed",
             Self::Accept(_) => "the local process listener failed",
             Self::SpoolIo(_) => "the local process server could not read a snapshot spool",
             Self::Encode(_) => "the local process server could not encode a frame",
@@ -2233,6 +2238,9 @@ impl fmt::Display for ProcessRuntimeError {
             }
             Self::ConnectionTask(_) => "a local process connection task failed",
             Self::Dispatch(_) => "the durable process-update dispatcher failed",
+            Self::RunnerRecoveryNotifications(_) => {
+                "the runner recovery notification listener failed"
+            }
             Self::UnexpectedDispatcherRetry => {
                 "the process-update dispatcher unexpectedly requested retry"
             }
@@ -2249,8 +2257,10 @@ impl Error for ProcessRuntimeError {
             Self::Encode(error) => Some(error),
             Self::ConnectionTask(error) => Some(error),
             Self::Dispatch(error) => Some(error),
+            Self::RunnerRecoveryNotifications(error) => Some(error),
             Self::CleanupSocket(error) => Some(error),
-            Self::EncodeInvariant
+            Self::OauthRecovery(_)
+            | Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed
             | Self::ImportBudgetClosed
             | Self::ReviewCommandBudgetClosed
