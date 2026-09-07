@@ -15,8 +15,11 @@ const excerpt = (text: string) => ({
 
 async function sessionApi(page: Page, busy = false, selectedSessionId = sessionId) {
   const state = {
+    active: busy,
     grown: false,
     observed: false,
+    historyReads: [] as string[],
+    textReads: [] as string[],
     submissions: [] as Array<{ command_id: string; message: string }>,
   }
   let releaseFollow = () => {}
@@ -26,7 +29,9 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
   const snapshot = () => ({
     session_id: selectedSessionId,
     observed_through: state.grown || state.observed ? '44' : '43',
-    active: busy ? { turn_id: turnId, state: { kind: 'running', model_call_id: null } } : null,
+    active: state.active
+      ? { turn_id: turnId, state: { kind: 'running', model_call_id: null } }
+      : null,
     queued_turn_count: '0',
     queued_turn_ids: [],
     reconciliation: null,
@@ -58,6 +63,7 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
       })
     }
     if (url.pathname.endsWith('/timeline-detail')) {
+      state.textReads.push(url.searchParams.get('first') ?? '')
       const items: WebSessionTimelineDetail[] = [
         {
           address: { event_sequence: '41' },
@@ -87,17 +93,22 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
             usage: {},
           },
         })
+      const selected = items.filter(
+        (item) =>
+          BigInt(item.address.event_sequence) >= BigInt(url.searchParams.get('first') ?? '0'),
+      )
       return route.fulfill({
         json: {
           session_id: selectedSessionId,
-          projected_body_bytes: items.reduce((sum, item) => sum + item.projected_body_bytes, 0),
-          items,
+          projected_body_bytes: selected.reduce((sum, item) => sum + item.projected_body_bytes, 0),
+          items: selected,
           continuation: null,
         },
       })
     }
     const latest = state.grown ? '44' : '43'
-    if (url.pathname.endsWith('/timeline'))
+    if (url.pathname.endsWith('/timeline')) {
+      state.historyReads.push(url.searchParams.get('anchor') ?? '')
       return route.fulfill({
         json: {
           session_id: selectedSessionId,
@@ -121,12 +132,19 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
                   },
                 ]
               : []),
-          ],
-          projected_structured_bytes: state.grown ? 241 : 156,
-          continuation_before: null,
+          ].filter(
+            (item) =>
+              url.searchParams.get('anchor') !== 'after' ||
+              BigInt(item.address.event_sequence) > BigInt(url.searchParams.get('address') ?? '0'),
+          ),
+          projected_structured_bytes:
+            url.searchParams.get('anchor') === 'after' ? 85 : state.grown ? 241 : 156,
+          continuation_before:
+            url.searchParams.get('anchor') === 'after' ? { event_sequence: '44' } : null,
           continuation_after: null,
         },
       })
+    }
     return route.fulfill({
       json: {
         session_id: selectedSessionId,
@@ -142,7 +160,7 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
         first_address: { event_sequence: '41' },
         latest_address: { event_sequence: latest },
         observed_through: state.observed ? '44' : latest,
-        work: { active_turn_count: busy ? '1' : '0', queued_turn_count: '0' },
+        work: { active_turn_count: state.active ? '1' : '0', queued_turn_count: '0' },
       },
     })
   })
@@ -169,6 +187,8 @@ test('reads durable transcript growth and sends a message by keyboard', async ({
   await openSession(page)
   api.grow()
   await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
+  expect(api.state.historyReads).toEqual(['latest', 'after'])
+  expect(api.state.textReads).toEqual(['41', '44'])
   await page
     .getByRole('textbox', { name: 'Message to session' })
     .fill('Continue with the next step.')
@@ -180,6 +200,28 @@ test('reads durable transcript growth and sends a message by keyboard', async ({
   expect(api.state.submissions).toHaveLength(1)
   expect(api.state.submissions[0]?.message).toBe('Continue with the next step.')
   await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveValue('')
+})
+
+test('follows new active work after restoring an inactive session position', async ({ page }) => {
+  const api = await sessionApi(page)
+  await openSession(page)
+  await page.getByRole('option', { name: /41 input accepted/ }).click()
+  await expect
+    .poll(() =>
+      page.evaluate((id) => {
+        const stored = JSON.parse(localStorage.getItem('signalbox.web.preferences.v1') ?? '{}')
+        return stored.lastLogicalPositions?.[id]
+      }, sessionId),
+    )
+    .toBe('41')
+  await page.reload()
+  await expect(page.getByText('Inactive · restored logical position')).toBeVisible()
+  expect(api.state.historyReads.at(-1)).toBe('around')
+  api.state.active = true
+  api.grow()
+  await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
+  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  expect(api.state.historyReads).toEqual(['latest', 'around', 'after'])
 })
 
 test('retries an unconfirmed acceptance with the same command and text', async ({ page }) => {
@@ -217,11 +259,7 @@ test('retries an unconfirmed acceptance with the same command and text', async (
     route.fulfill({ status: 503, body: 'Timeline temporarily unavailable' }),
   )
   api.grow()
-  await expect(
-    page
-      .getByRole('alert')
-      .filter({ hasText: 'The daemon could not provide this bounded session window' }),
-  ).toBeVisible()
+  await expect(page.getByText('Live updates unavailable.')).toBeVisible()
   await page.getByRole('button', { name: 'Retry message' }).click()
   await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
   expect(attempts).toHaveLength(2)
@@ -487,7 +525,12 @@ test('resets text pagination when only the window observation changes', async ({
             address: { event_sequence: '43' },
             kind: 'turn_completed',
             projected_body_bytes: 128,
-            body: { type: 'event_fact', kind: 'turn_completed' },
+            body: {
+              type: 'turn_lifecycle',
+              turn_id: turnId,
+              lifecycle: 'terminalized',
+              cause_code: 'completed',
+            },
           }
     return route.fulfill({
       json: {
@@ -502,6 +545,10 @@ test('resets text pagination when only the window observation changes', async ({
   await openSession(page)
   await page.getByRole('button', { name: 'Next text page' }).click()
   await expect(page.getByRole('button', { name: 'First text page' })).toBeVisible()
+  await expect(page.getByText('Reading transcript text…', { exact: true })).toHaveCount(0)
+  await expect(
+    page.getByRole('region', { name: 'Transcript text' }).getByRole('alert'),
+  ).toHaveCount(0)
   expect(cursors).toEqual([null, '43'])
   api.advanceObservation()
   await expect(page.getByText('Live updates unavailable.')).toBeVisible()
@@ -510,3 +557,160 @@ test('resets text pagination when only the window observation changes', async ({
   expect(cursors.slice(2).length).toBeGreaterThan(0)
   expect(cursors.slice(2).every((cursor) => cursor === null)).toBe(true)
 })
+
+test('keeps earlier text reachable after live appending evicts a text-page entry', async ({
+  page,
+}) => {
+  const api = await sessionApi(page)
+  const latest = () => (api.state.grown ? 9 : 8)
+  await page.route(`**/api/sessions/${sessionId}`, (route) =>
+    route.fulfill({
+      json: {
+        session_id: sessionId,
+        sizes: {
+          item_count: String(latest()),
+          projected_text_bytes: String(latest() * 7),
+          projected_structured_bytes: String(latest() * 78),
+          referenced_blob_count: '0',
+          referenced_blob_bytes: '0',
+        },
+        first_address: { event_sequence: '1' },
+        latest_address: { event_sequence: String(latest()) },
+        observed_through: api.state.grown ? '44' : '43',
+        work: { active_turn_count: '0', queued_turn_count: '0' },
+      },
+    }),
+  )
+  await page.route(`**/api/sessions/${sessionId}/timeline?**`, (route) => {
+    const url = new URL(route.request().url())
+    const first =
+      url.searchParams.get('anchor') === 'after' ? Number(url.searchParams.get('address')) + 1 : 1
+    const items = Array.from({ length: latest() - first + 1 }, (_, index) => ({
+      address: { event_sequence: String(first + index) },
+      kind: 'input_accepted',
+      projected_structured_bytes: 78,
+    }))
+    return route.fulfill({
+      json: {
+        session_id: sessionId,
+        items,
+        projected_structured_bytes: items.length * 78,
+        continuation_before: first > 1 ? { event_sequence: String(first) } : null,
+        continuation_after: null,
+      },
+    })
+  })
+  const reads: string[] = []
+  await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
+    const url = new URL(route.request().url())
+    const first = Number(url.searchParams.get('cursor_address') ?? url.searchParams.get('first'))
+    const through = Number(url.searchParams.get('through'))
+    reads.push(String(first))
+    const end = Math.min(first + 7, through)
+    const items = Array.from({ length: end - first + 1 }, (_, index) => ({
+      address: { event_sequence: String(first + index) },
+      kind: 'input_accepted',
+      projected_body_bytes: 135,
+      body: {
+        type: 'user_input',
+        turn_id: turnId,
+        text: excerpt(`Entry ${first + index}`),
+        attachments: [],
+      },
+    }))
+    return route.fulfill({
+      json: {
+        session_id: sessionId,
+        items,
+        projected_body_bytes: items.length * 135,
+        continuation:
+          end < through ? { type: 'more_at', address: { event_sequence: String(end + 1) } } : null,
+      },
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${sessionId}`)
+  await expect(page.getByText('Entry 1', { exact: true })).toBeVisible()
+  api.grow()
+  await expect(page.getByText('Entry 9', { exact: true })).toBeVisible()
+  await expect(page.getByText('Entry 1', { exact: true })).toHaveCount(0)
+  expect(reads).toEqual(['1', '9'])
+  await page.getByRole('button', { name: 'First text page', exact: true }).click()
+  await expect(page.getByText('Entry 1', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Next text page', exact: true }).click()
+  await expect(page.getByText('Entry 9', { exact: true })).toBeVisible()
+  expect(reads).toEqual(['1', '9', '1', '9'])
+})
+
+for (const growth of [false, true]) {
+  test(`keeps a paginated first page through ${growth ? 'tail-growing' : 'observation-only'} resync`, async ({
+    page,
+  }) => {
+    const api = await sessionApi(page)
+    let resynchronize = () => {}
+    const ready = new Promise<void>((resolve) => {
+      resynchronize = resolve
+    })
+    const live = (observed: string) => ({
+      session_id: sessionId,
+      observed_through: observed,
+      active: null,
+      queued_turn_count: '0',
+      queued_turn_ids: [],
+      reconciliation: null,
+      runner: null,
+    })
+    let follows = 0
+    await page.route(`**/api/sessions/${sessionId}/follow`, async (route) => {
+      const initial = follows++ === 0
+      if (initial) await ready
+      const events = [
+        { kind: 'snapshot', snapshot: live(initial ? '43' : '44') },
+        ...(initial ? [{ kind: 'resync_required', cursor: '44' }] : []),
+      ]
+      await route.fulfill({
+        contentType: 'application/x-ndjson',
+        body: `${events.map((event) => JSON.stringify(event)).join('\n')}\n`,
+      })
+    })
+    let textReads = 0
+    await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
+      textReads++
+      if (textReads > 1)
+        return route.fulfill({ status: 503, body: 'Historical reread unavailable' })
+      const item = {
+        address: { event_sequence: '41' },
+        kind: 'input_accepted',
+        projected_body_bytes: 128 + initialMessage.length,
+        body: {
+          type: 'user_input',
+          turn_id: turnId,
+          text: excerpt(initialMessage),
+          attachments: [],
+        },
+      }
+      return route.fulfill({
+        json: {
+          session_id: sessionId,
+          items: [item],
+          projected_body_bytes: item.projected_body_bytes,
+          continuation: { type: 'more_at', address: { event_sequence: '43' } },
+        },
+      })
+    })
+    await openSession(page)
+    await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toBeVisible()
+    if (growth) api.grow()
+    else api.advanceObservation()
+    resynchronize()
+    await expect(
+      page
+        .getByRole('region', { name: sessionId, exact: true })
+        .getByRole('definition')
+        .filter({ hasText: /^44$/ }),
+    ).toBeVisible()
+    await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toBeVisible()
+    if (growth) expect(api.state.historyReads).toContain('after')
+    expect(textReads).toBe(1)
+  })
+}

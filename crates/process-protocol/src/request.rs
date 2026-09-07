@@ -38,6 +38,11 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
+    /// Re-read and atomically install the reloadable configuration sections.
+    ReloadConfiguration {
+        /// User-global durable mutation identity.
+        command_id: CommandId,
+    },
     /// Recover the named session on its pending successor runner.
     ReplaceLostRunner {
         /// User-global mutation identity.
@@ -771,6 +776,7 @@ impl ClientRequest {
             | Self::ReadDeploymentLimits {}
             | Self::ListSessions {}
             | Self::ReadOperatorStatus {}
+            | Self::ReloadConfiguration { .. }
             | Self::UpdateSessionPlacement { .. }
             | Self::ReadGoal { .. }
             | Self::ResumeGoal { guidance: None, .. }

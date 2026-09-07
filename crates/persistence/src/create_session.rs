@@ -197,6 +197,7 @@ impl CreateSessionRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ReloadConfiguration
                 | CommandKind::SessionLifecycle
                 | CommandKind::ReplaceLostRunner
                 | CommandKind::AbandonLostRunner
@@ -259,6 +260,7 @@ impl CreateSessionRepository {
                     | CommandKind::RegisterWorkspace
                     | CommandKind::MintGitRemote
                     | CommandKind::WithdrawGitRemote
+                    | CommandKind::ReloadConfiguration
                     | CommandKind::SessionLifecycle
                     | CommandKind::ReplaceLostRunner
                     | CommandKind::AbandonLostRunner
@@ -325,6 +327,7 @@ impl CreateSessionRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ReloadConfiguration
                 | CommandKind::SessionLifecycle
                 | CommandKind::ReplaceLostRunner
                 | CommandKind::AbandonLostRunner

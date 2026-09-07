@@ -6,6 +6,9 @@
 
 ```rust
 pub enum ClientRequest {
+    ReloadConfiguration {
+        command_id: CommandId,
+    },
     ReplaceLostRunner {
         command_id: CommandId,
         session_id: CanonicalUuid,

@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_PROC_MACRO_DEPS = ["//crates/derive:signalbox_derive"]
 
@@ -55,8 +55,8 @@ rust_doc_test(
 
 rust_integration_test(
     name = "bwrap",
-    args = ["--test-threads=4"],
     srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
     crate_root = "tests/bwrap.rs",
     data = glob(
         ["tests/**"],
@@ -114,3 +114,8 @@ rust_integration_test(
         "//crates/tools-exec:signalbox_tools_exec",
     ],
 )
+
+rust_quality_tests(documented_crates = [
+    ":signalbox_tools_exec",
+    ":signalbox-exec-supervisor",
+])

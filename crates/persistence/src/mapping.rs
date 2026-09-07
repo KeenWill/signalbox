@@ -1804,6 +1804,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
 /// Closed durable-command kinds stored by the user-global registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DurableCommandKind {
+    ReloadConfiguration,
     /// OAuth administration command.
     ProvisionOauthCredential,
     /// OAuth administration command.
@@ -1874,6 +1875,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::MintGitRemote => "mint_git_remote",
         DurableCommandKind::WithdrawGitRemote => "withdraw_git_remote",
         DurableCommandKind::ClearCredentialExclusion => "clear_credential_exclusion",
+        DurableCommandKind::ReloadConfiguration => "reload_configuration",
         DurableCommandKind::SessionLifecycle => "session_lifecycle",
         DurableCommandKind::ReplaceLostRunner => "replace_lost_runner",
         DurableCommandKind::AbandonLostRunner => "abandon_lost_runner",
@@ -1907,6 +1909,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "withdraw_git_remote" => Some(DurableCommandKind::WithdrawGitRemote),
         "clear_credential_exclusion" => Some(DurableCommandKind::ClearCredentialExclusion),
         "session_lifecycle" => Some(DurableCommandKind::SessionLifecycle),
+        "reload_configuration" => Some(DurableCommandKind::ReloadConfiguration),
         "replace_lost_runner" => Some(DurableCommandKind::ReplaceLostRunner),
         "abandon_lost_runner" => Some(DurableCommandKind::AbandonLostRunner),
         "promote_pending_runner" => Some(DurableCommandKind::PromotePendingRunner),

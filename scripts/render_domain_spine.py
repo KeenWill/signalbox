@@ -631,6 +631,15 @@ def write_files(directory, files):
         path.write_text(text)
 
 
+def json_input(crate: str, directories: list[Path]) -> Path:
+    filename = f"{crate.replace('-', '_')}.json"
+    candidates = [directory / filename for directory in directories
+                  if (directory / filename).is_file()]
+    if len(candidates) != 1:
+        raise ValueError(f'{crate}: expected one rustdoc JSON input, found {len(candidates)}')
+    return candidates[0]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--json-dir', type=Path, nargs='+', help='Read already-built rustdoc JSON instead of building')
@@ -641,12 +650,7 @@ def main():
     selected_configuration = configuration(args.source_root)
     for crate in selected_configuration['crates']:
         if args.json_dir:
-            filename = f"{crate.replace('-', '_')}.json"
-            candidates = [directory / filename for directory in args.json_dir
-                          if (directory / filename).is_file()]
-            if len(candidates) != 1:
-                raise ValueError(f'{crate}: expected one rustdoc JSON input, found {len(candidates)}')
-            paths[crate] = candidates[0]
+            paths[crate] = json_input(crate, args.json_dir)
         else:
             paths[crate] = build_json(crate, workspace=args.source_root,
                                       toolchain=selected_configuration['rustdoc_toolchain'])

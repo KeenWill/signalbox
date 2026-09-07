@@ -385,6 +385,46 @@ the delegation contracts in
 both the delegation-content ceiling and its complete normalized JSON argument
 envelope.
 
+Configuration reload is `reload_configuration { command_id }`, with a
+user-global command identity. Equal retries report busy while pending or replay
+the stored result without reading configuration again. Reloads serialize from
+file read through the terminal result. Before installation, core commits the
+complete checked replacement and prior reloadable snapshots and the checked
+rule-set digest as durable intent. Template snapshots contain accepted
+prompt-file contents.
+
+Startup reload replay shares the serial request-reload boundary. Reload pauses
+sweep admission and stops and joins active sweep attempts and affected ingestion
+tasks before rule activation and event-tail capture. Only after that activation
+commits does core reconcile convergence targets from the retained intent. On a
+stale or conflicting rule-revision rejection, recovery first validates the prior
+snapshot against the current startup-only sections. If invalid, it terminalizes
+the intent with `configuration_reload_failed` without resuming workers, and
+startup recovery fails. Otherwise it resumes ingestion and sweep admission under
+the prior snapshot before terminalizing the intent with
+`configuration_reload_failed`, without replacing the running configuration.
+Other failures after either stops leave the intent pending until recovery
+installs the replacement snapshot and resumes them before terminalizing the
+claim. The [reload-intent input](ownership-seam.md) delivers rule activation
+only, and the module activates the rules atomically and idempotently by command
+identity and digest. The activation transaction captures each repository's
+current event tail and retains it for idempotent replay. Before replay activates
+any retained effects, startup validates the retained reloadable snapshot
+together with the on-disk startup-only sections; incompatibility fails startup
+and leaves the intent pending. Startup replays any undelivered intent from its
+retained payload even if the configuration files changed, before terminalizing
+its claim.
+
+Success returns `configuration_reloaded { command_id, reloaded_sections }`, with
+exactly `model_catalog`, `session_templates`, and `repo_watch` in that order.
+Failure returns `configuration_reload_failed { command_id, phase, reason }`;
+`phase` is `read`, `validate`, `activate`, `reconcile`, or `install`, and
+`reason` is sanitized as startup logs are, with 1 through 1,024 UTF-8 bytes and
+no control characters. A pending reload returns `unavailable` with the message
+`configuration reload is busy`. The terminal client exposes
+`reload-configuration` with optional `--command-id` for retries and prints the
+installed sections or failure phase and reason.
+
 `replace_lost_runner` and `abandon_lost_runner` carry the command and session
 identities; replacement also carries a nullable complete checkout revision.
 `promote_pending_runner` carries the command identity and pending enrollment
@@ -468,7 +508,6 @@ reaching the owner-private socket is the authority.
 
 ## Planned
 
-- Configuration reload request: [design](../design/process-protocol.md).
 - Program-run cancellation request and receipt:
   [design](../design/process-protocol.md).
 - Runner creation and status requests, and the status read's failure evidence:
