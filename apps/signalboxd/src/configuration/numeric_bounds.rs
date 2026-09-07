@@ -22,6 +22,10 @@ pub struct NumericBoundsConfiguration {
 }
 
 const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
+    (
+        "repository_watch_webhook_retention",
+        NumericBoundKind::Duration,
+    ),
     ("fenced_pool_min_connections", NumericBoundKind::Integer),
     (
         "fenced_pool_floor_reconciliation_interval",
@@ -242,7 +246,17 @@ impl NumericBoundsConfiguration {
             };
             values.insert(*name, value);
         }
-        Ok(Self { values })
+        let configuration = Self { values };
+        if configuration
+            .duration("repository_watch_webhook_retention")
+            .flatten()
+            .is_none_or(|duration| duration.is_zero())
+        {
+            return Err(HubModelConfigurationError::InvalidNumericBound {
+                field: "repository_watch_webhook_retention",
+            });
+        }
+        Ok(configuration)
     }
 
     /// Returns one integer policy, with inner `None` denoting configured `"none"`.

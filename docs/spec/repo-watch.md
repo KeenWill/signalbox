@@ -110,15 +110,26 @@ ordinal and records its producer, frontier generation, and position within that
 frontier batch.
 
 Every table is derived or module-local state and its migration declares its
-growth class and release condition. The code implements no pruning pass and
-selects no retention duration.
+growth class and release condition. The code implements no pruning pass. The
+required `numeric_bounds.repository_watch_webhook_retention` duration governs
+each webhook delivery's `expires_at`, measured from `received_at`. The example
+configuration sets this bound to seven days; the daemon supplies no code
+default.
 
 Repository and pull-request UPSERTs replace one complete current projection.
 Webhook admission writes delivery metadata, exact authenticated bytes, and a
 pending disposition atomically. Reusing a delivery identity with equal content
 is a replay; different content is a conflict. Settlement changes a pending
-disposition exactly once. A frontier release supplies its observed generation
-and is stale after any intervening frontier commit.
+disposition exactly once. The authenticated listener admits exact payload bytes
+before waking the repository task. The listener admits bodies through the
+persistence ceiling of 26,214,400 bytes and rejects larger bodies with HTTP 413.
+Primary intake wakes only when settlement changes a pending disposition to
+applied; shadow intake settles as ignored without a wake. Equal delivery replays
+return HTTP 202. A settled replay neither wakes ingestion nor changes its
+disposition, including after a mode reload; a pending replay resumes intake.
+Conflicting identity reuse returns HTTP 409, and storage failures return HTTP
+503\. A frontier release supplies its observed generation and is stale after any
+intervening frontier commit.
 
 The module's repository task serializes polling and webhook wakes. Poll
 intervals are start-to-start; a wake received during an attempt waits for that

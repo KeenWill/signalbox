@@ -173,6 +173,7 @@ pub struct RepositoryWatchConfiguration {
     repositories: Box<[WatchedRepositoryConfiguration]>,
     rules: Box<[RepoWatchRule]>,
     webhook: Option<RepositoryWatchWebhookConfiguration>,
+    webhook_retention: Duration,
     convergence_sweep: Option<ConvergenceSweepConfiguration>,
 }
 
@@ -200,6 +201,10 @@ impl ConvergenceSweepConfiguration {
 }
 
 impl RepositoryWatchConfiguration {
+    pub(crate) const fn webhook_retention(&self) -> Duration {
+        self.webhook_retention
+    }
+
     /// Returns whether repository polling, webhook wakes, and dispatch are enabled.
     pub const fn enabled(&self) -> bool {
         self.enabled
@@ -471,8 +476,15 @@ pub(super) fn parse_repository_watch_configuration(
     {
         return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
     }
+    let webhook_retention = numeric_bounds
+        .duration("repository_watch_webhook_retention")
+        .flatten()
+        .ok_or(HubModelConfigurationError::InvalidNumericBound {
+            field: "repository_watch_webhook_retention",
+        })?;
     Ok(RepositoryWatchConfiguration {
         enabled,
+        webhook_retention,
         signal_reviewers: signal_reviewers.into_boxed_slice(),
         repositories: repositories.into_boxed_slice(),
         rules: rules.into_boxed_slice(),
