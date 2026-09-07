@@ -26,6 +26,10 @@ export function startSessionSynchronization(
     const sessionId = requested.sessionId
     if (sessionId === null) return
     let projection: SessionSyncState = requested
+    let retainedDraftBytes = projection.drafts.reduce(
+      (total, draft) => total + new TextEncoder().encode(draft.content).byteLength,
+      0,
+    )
     const publish = (update: Partial<SessionSyncState>) => {
       if (controller.signal.aborted) return
       if (
@@ -35,6 +39,7 @@ export function startSessionSynchronization(
         BigInt(update.cursor) < BigInt(projection.cursor)
       )
         return
+      if (update.drafts?.length === 0) retainedDraftBytes = 0
       projection = { ...projection, ...update }
       store.dispatch(actions.sessionFollowUpdated(projection))
     }
@@ -67,10 +72,7 @@ export function startSessionSynchronization(
           } else if (event.kind === 'provider_text_delta') {
             const key = `${event.turn_id}:${event.model_call_id}:${event.part_index}`
             const existing = projection.drafts.find((draft) => draft.key === key)
-            const bytes = projection.drafts.reduce(
-              (total, draft) => total + new TextEncoder().encode(draft.content).byteLength,
-              new TextEncoder().encode(event.content).byteLength,
-            )
+            const bytes = retainedDraftBytes + new TextEncoder().encode(event.content).byteLength
             if (
               (!existing && projection.drafts.length === MAX_PROVIDER_DRAFT_PARTS) ||
               bytes > MAX_PROVIDER_DRAFT_BYTES
@@ -78,6 +80,7 @@ export function startSessionSynchronization(
               publish({ phase: 'resyncing', snapshot: null, drafts: [] })
               continue
             }
+            retainedDraftBytes = bytes
             const next = { key, content: `${existing?.content ?? ''}${event.content}` }
             publish({
               drafts: existing

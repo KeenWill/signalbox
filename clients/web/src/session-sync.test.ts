@@ -207,3 +207,28 @@ it.each([
   unsubscribe()
   queries.clear()
 })
+
+it('accounts for streamed bytes without encoding accumulated draft text again', async () => {
+  const fragmentCount = 4096
+  const replacedDraftBytes = 65_536
+  vi.mocked(followSession).mockImplementation(async function* () {
+    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    yield draft('x'.repeat(replacedDraftBytes))
+    yield { kind: 'snapshot', snapshot: snapshot(draftSessionId) }
+    for (let index = 0; index < fragmentCount; index++) yield draft('x')
+  })
+  const encode = vi.spyOn(TextEncoder.prototype, 'encode')
+  const store = createAppStore()
+  const queries = new QueryClient()
+  const stop = startSessionSynchronization(store, queries)
+  store.dispatch(actions.sessionFollowRequested(draftSessionId))
+  await vi.waitFor(() =>
+    expect(selectSessionSync(store.getState()).drafts[0]?.content.length).toBe(fragmentCount),
+  )
+  expect(encode.mock.calls.reduce((sum, [text]) => sum + (text?.length ?? 0), 0)).toBe(
+    replacedDraftBytes + fragmentCount,
+  )
+  encode.mockRestore()
+  stop()
+  queries.clear()
+})
