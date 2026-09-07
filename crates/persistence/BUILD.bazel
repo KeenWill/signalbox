@@ -822,3 +822,30 @@ test_suite(
         ":session_placement_postgres",
     ],
 )
+
+rust_test(
+    name = "unit_tests",
+    size = "large",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["--test-threads=16"],
+    crate = ":signalbox_persistence",
+    crate_features = [
+        "default",
+        "postgres-integration",
+        "test-support",
+    ],
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
+    rustc_flags = [
+        "--deny=warnings",
+        "--forbid=unsafe_code",
+    ],
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
+        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
+    ] + all_crate_deps(normal_dev = True),
+)

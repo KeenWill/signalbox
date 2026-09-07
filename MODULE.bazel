@@ -59,6 +59,13 @@ use_repo(crate, "crates")
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
+    name = "patchelf",
+    build_file_content = 'exports_files(["bin/patchelf"])',
+    sha256 = "ce84f2447fb7a8679e58bc54a20dc2b01b37b5802e12c57eece772a6f14bf3f0",
+    urls = ["https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz"],
+)
+
+http_archive(
     name = "linux_test_runtime",
     build_file_content = """filegroup(
     name = "libraries",

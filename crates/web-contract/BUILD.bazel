@@ -1,6 +1,6 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 
 exports_files(["Cargo.toml"])
 
@@ -61,4 +61,53 @@ rust_binary(
         ":signalbox_web_contract",
         "//crates/application:signalbox_application",
     ] + all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "unit_tests",
+    size = "large",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["--test-threads=16"],
+    crate = ":signalbox_web_contract",
+    crate_features = [],
+    data = [
+        "tests/fixtures/example.json",
+        "//:web_contract_fixtures",
+    ],
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/web-contract"},
+    rustc_flags = [
+        "--deny=warnings",
+        "--forbid=unsafe_code",
+    ],
+    deps = [] + all_crate_deps(normal_dev = True),
+)
+
+rust_test(
+    name = "generate_web_contract_unit_tests",
+    size = "large",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["--test-threads=16"],
+    crate = ":generate-web-contract",
+    crate_features = [],
+    data = [
+        "Cargo.toml",
+        "//:Cargo.toml",
+        "//:web_contract_fixtures",
+    ],
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/web-contract"},
+    rustc_flags = [
+        "--deny=warnings",
+        "--forbid=unsafe_code",
+    ],
+    deps = [] + all_crate_deps(normal_dev = True),
 )
