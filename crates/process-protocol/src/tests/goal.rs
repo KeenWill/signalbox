@@ -4,6 +4,43 @@ use super::support::*;
 use crate::*;
 
 #[test]
+fn termination_metadata_may_be_absent_but_not_null() -> Result<(), Box<dyn std::error::Error>> {
+    for message in [
+        ServerMessage::InputSubmitted {
+            termination: None,
+            session_id: uuid(3),
+            accepted_input_id: uuid(4),
+            acceptance_position: CanonicalU64::new(1),
+            turn_id: uuid(5),
+            model_settings: settings_snapshot_fixture(),
+        },
+        ServerMessage::GoalTransitionApplied {
+            termination: None,
+            session_id: uuid(3),
+            event_ordinal: CanonicalU64::new(1),
+            generation: CanonicalU64::new(1),
+        },
+    ] {
+        let mut value = serde_json::to_value(&message)?;
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(value.clone())?,
+            message
+        );
+        value["termination"] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<ServerMessage>(value.clone()).is_err(),
+            "{value}"
+        );
+        value["termination"] = serde_json::to_value(TerminationReceipt {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            descendant_count: CanonicalU64::new(u64::MAX),
+        })?;
+        assert!(serde_json::from_value::<ServerMessage>(value).is_ok());
+    }
+    Ok(())
+}
+
+#[test]
 fn parent_alone_receipt_rejects_descendant_dispositions() {
     let receipt = ServerMessage::GoalTransitionApplied {
         session_id: uuid(3),

@@ -30,6 +30,7 @@ pub mod hub_fence;
 pub mod lifecycle_metrics;
 pub mod mapping;
 pub mod model_execution;
+pub mod oauth_credential;
 pub mod operator_status;
 pub mod outbox;
 pub mod plan;

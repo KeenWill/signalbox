@@ -69,6 +69,7 @@ on:
       - "crates/persistence/src/session_placement.rs"
       - "crates/persistence/src/start_eligible_turn.rs"
       - "crates/persistence/src/submit_input.rs"
+      - "crates/persistence/src/submit_input/**"
       - "crates/persistence/src/tool_loop.rs"
       - ".github/workflows/tool-evals.yml"
   push:
@@ -115,6 +116,7 @@ on:
       - "crates/persistence/src/session_placement.rs"
       - "crates/persistence/src/start_eligible_turn.rs"
       - "crates/persistence/src/submit_input.rs"
+      - "crates/persistence/src/submit_input/**"
       - "crates/persistence/src/tool_loop.rs"
       - ".github/workflows/tool-evals.yml"
   # One daily provider/model drift sample. GitHub schedules only the copy on

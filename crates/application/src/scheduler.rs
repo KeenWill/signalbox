@@ -538,6 +538,32 @@ impl EligibilityNudgeReceiver {
 }
 
 impl InProcessEligibilityNudge {
+    /// Waits for channel capacity instead of dropping a full-buffer hint.
+    pub async fn nudge_waiting_for_capacity(&self, session: SessionId) -> EligibilityNudgeOutcome {
+        let outcome = self.nudge_session(session);
+        if outcome != EligibilityNudgeOutcome::DroppedAtCapacity {
+            return outcome;
+        }
+        let EligibilityNudgeSender::Bounded(sender) = &self.sender else {
+            return outcome;
+        };
+        let Ok(permit) = sender.reserve().await else {
+            return EligibilityNudgeOutcome::WorkSourceClosed;
+        };
+        let mut pending = self.pending_hints();
+        if pending.contains_key(&session) {
+            return EligibilityNudgeOutcome::Coalesced;
+        }
+        pending.insert(
+            session,
+            PendingEligibilityHint {
+                queued_channel_tokens: 1,
+            },
+        );
+        permit.send(session);
+        EligibilityNudgeOutcome::Enqueued
+    }
+
     fn pending_hints(&self) -> MutexGuard<'_, HashMap<SessionId, PendingEligibilityHint>> {
         match self.pending.lock() {
             Ok(pending) => pending,
