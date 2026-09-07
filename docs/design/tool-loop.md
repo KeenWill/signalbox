@@ -38,8 +38,9 @@ approved requests when a later request parks the batch. It retires any existing
 approval and records the same retryable `closed_inadmissible` resolution and
 projection without creating an attempt row, then resumes batch evaluation.
 
-If a dedicated approval-judge call is in flight for such a request, the loss
-transition waits for that call's observation boundary and terminalizes its
+A `Prepared` dedicated approval-judge call is retired without authorization in
+the same loss transaction that closes the request. If the call is in flight, the
+loss transition waits for that call's observation boundary and terminalizes its
 result before retiring any resulting approval and closing the request. Batch
 evaluation and staged replacement cannot continue between that observation and
 the request closure.
@@ -163,7 +164,9 @@ dispatch records a retryable failure without creating an attempt row; its
 retained `closed_inadmissible` resolution projects `ToolInadmissible` and counts
 toward batch completion. Loss retires existing approvals and records that
 resolution for every unresolved runner-locus request before dispatch, including
-earlier approved requests in a parked batch, then resumes batch evaluation.
+earlier approved requests in a parked batch, then resumes batch evaluation. A
+prepared judge call is retired without authorization atomically with request
+closure; an in-flight judge call reaches its observation boundary first.
 Side-effecting offered attempts receive effect-class crash classification. A
 pure or idempotent offered attempt lost with its placement retains that attempt;
 after every other request resolves, a distinct pre-continuation takeover
