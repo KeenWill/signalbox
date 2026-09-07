@@ -589,6 +589,12 @@ from the tool-loop continuation origin, and stores its predecessor call,
 qualifying cause, and non-acceptance evidence atomically. What these rows mean
 is owned by [credential-availability](credential-availability.md).
 
+OAuth provisioning locks its profile and every retained pool co-member in
+reference order, rereads membership, and retries acquisition if membership grew.
+Pool-policy insertion locks every member in the same order. Authorization
+commits take a shared catalog lock; registration replacement takes its exclusive
+counterpart.
+
 ## Planned
 
 - Runner replacement and abandonment transactions:
@@ -606,5 +612,5 @@ is owned by [credential-availability](credential-availability.md).
   [persistence-protocol design](../design/persistence-protocol.md).
 - A producer for the session-state-changed outbox event:
   [persistence-protocol design](../design/persistence-protocol.md).
-- Daemon-owned OAuth material storage:
+- OAuth refresh replacement and recovery storage:
   [persistence-protocol design](../design/persistence-protocol.md).

@@ -186,34 +186,14 @@ plaintext or local-host exception. The tuple is compared by parsed canonical
 components, scheme, lowercased host, effective port, path, and query, never by
 configured bytes. The delivery admits only `billing_kind = "subscription"`.
 
-Provisioning is explicit and operator-invoked; the daemon performs the
-device-authorization exchange itself against the profile's configured endpoints
-and never drives the CLI's own login, because the CLI would mint a tuple baked
-into its binary rather than the one the profile declares. The command requests a
-device authorization, relays the user code and verification URI to the operator,
-polls the token endpoint under the one-POST-per-attempt and no-redirect rules,
-and on success harvests the refresh token, the identity token, and non-secret
-account metadata into one transaction. Provisioning that returns no identity
-token fails typed and stores nothing. That transaction decides account-level
-independence: it consults every profile sharing a pool-policy revision with this
-one and fails, storing nothing, when a different co-member already stores the
-harvested account identity. Interning a pool-policy revision applies the same
-rule to the membership it freezes, under the same locks; between them the two
-moments are exhaustive. The lock span is owned by
-[persistence protocol](../spec/persistence-protocol.md). Whether provisioning
-disturbs an operator's existing login is the authorization server's decision and
-not a property this delivery provides.
-
-A stored authorization is bound to the exact `client_id`, `token_url`,
-`device_authorization_url`, and ordered `scopes` it was minted under, persisted
-in the same transaction as the token generation. Every refresh and every
-dispatch compares that stored tuple with the current registration by canonical
-components, under the profile row lock and before any request is formed; a
-mismatch never sends the stored token, the generation quarantines, and recovery
-requires re-provisioning or deletion followed by provisioning. Dispatch holds
-the profile row lock from its authorization and generation check through copying
-the token into the child's scratch home; deletion acquires that lock before
-removing authorization and cached tokens.
+Every refresh and every dispatch compares the stored authorization tuple with
+the current registration by canonical components, under the profile row lock and
+before any request is formed; a mismatch never sends the stored token, the
+generation quarantines, and recovery requires re-provisioning or deletion
+followed by provisioning. Dispatch holds the profile row lock from its
+authorization and generation check through copying the token into the child's
+scratch home; deletion acquires that lock before removing authorization and
+cached tokens.
 
 The daemon is the sole refresher. It locks the profile row, reads the stored
 token, and transactionally marks that generation's refresh in progress; the
@@ -270,11 +250,7 @@ automatically.
 
 Database restore transactionally quarantines every restored `oauth` profile
 before signalboxd may start against the restored state; an ordinary restart does
-not. No present process message provisions, re-provisions, deletes, or clears
-quarantine for an `oauth` profile; the delivery needs an operator-authorized
-administrative boundary with an idempotency and response contract, owned by
-[process protocol](../spec/process-protocol.md), before an `oauth` profile is
-usable.
+not.
 
 `max_concurrent_invocations` on a `codex_home` profile is a reserved field with
 the range 1 through 1,024. Capacity reservations, contention waits, and

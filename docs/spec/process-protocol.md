@@ -388,6 +388,16 @@ receipt before current registration is evaluated, and conflicting reuse is
 rejected. The terminal client verifies the command and profile correlations and
 prints authorization details before the receipt.
 
+OAuth exchange claims retain validated authorization instructions before
+emission; invalid progress fields yield `device_endpoint_rejected`. Equal
+pending commands replay available instructions and report busy; startup records
+`abandoned` for pending exchanges. Authorization and its terminal receipt commit
+atomically after generation and current-registration checks; stale generations
+yield `superseded`, and changed registrations yield
+`failed { reason: registration_changed }`. Initial provisioning with stored
+authorization returns `already_provisioned` without an exchange; re-provisioning
+without authorization returns `not_provisioned`.
+
 ## Planned
 
 - OAuth credential provisioning, re-provisioning after rejected refresh, and

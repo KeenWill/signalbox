@@ -919,7 +919,8 @@ fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailure
     use signalbox_persistence::outbox::OutboxDispatchError;
 
     match error {
-        ProcessRuntimeError::Accept(_)
+        ProcessRuntimeError::OauthRecovery
+        | ProcessRuntimeError::Accept(_)
         | ProcessRuntimeError::SpoolIo(_)
         | ProcessRuntimeError::InsufficientPoolCapacity
         | ProcessRuntimeError::CleanupSocket(_)

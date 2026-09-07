@@ -7449,6 +7449,7 @@ async fn persist_call_pool_policy(
     call: ModelCallId,
     policy: &CredentialPoolRuntimePolicy,
 ) -> Result<(), ModelCallRepositoryError> {
+    crate::oauth_credential::lock_pool_members(connection, policy).await?;
     sqlx::query(
         "INSERT INTO model_call_credential_pool_policy
             (model_call_id, pool_name, on_pool_exhausted,
