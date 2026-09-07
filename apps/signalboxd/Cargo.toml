@@ -146,6 +146,7 @@ signalbox-persistence = { path = "../../crates/persistence", features = [
     "test-support",
 ] }
 expect-test = "1.5.1"
+expectable = { git = "https://github.com/KeenWill/expectable-rs", tag = "v0.1.0" }
 git2 = { version = "0.21.0", default-features = false, features = ["unstable-sha256"] }
 # The shared executor-driving harness lives in the application crate so sibling
 # crates do not each grow a copy; it is test-only, and it is what lets the

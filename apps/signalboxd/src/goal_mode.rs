@@ -1703,25 +1703,42 @@ context_window_tokens = 200000
     }
 
     #[test]
-    fn an_unanswered_resume_and_a_model_block_spend_no_automatic_attempt() {
-        let unanswered = automatically_resumed(failed(pursuing_goal(), 0x01));
-        let resumed_model_block = automatically_resumed(model_blocked(pursuing_goal()));
-        let failed_after_model_block = failed(resumed_model_block, 0x02);
+    fn an_unanswered_resume_spends_no_automatic_attempt() {
+        const INITIAL_FAILURE: u128 = 0x01;
+        let unanswered = automatically_resumed(failed(pursuing_goal(), INITIAL_FAILURE));
 
         assert!(automatic_resume_failure_turns(&unanswered, None).is_empty());
+    }
+
+    #[test]
+    fn a_resumed_model_block_spends_no_automatic_attempt() {
+        const RESUMED_FAILURE: u128 = 0x02;
+        let resumed_model_block = automatically_resumed(model_blocked(pursuing_goal()));
+        let failed_after_model_block = failed(resumed_model_block, RESUMED_FAILURE);
         assert!(automatic_resume_failure_turns(&failed_after_model_block, None).is_empty());
     }
 
     #[test]
     fn a_prior_goal_generation_cannot_spend_the_current_resume_budget() {
-        let superseded = pursuing_goal()
+        const INITIAL_FAILURE: u128 = 0x01;
+        const RESUMED_FAILURE: u128 = 0x02;
+        const SUPERSEDING_COMMAND: u128 = 0xc1;
+        const CURRENT_FAILURE: u128 = 0xc2;
+        let spent = failed(
+            automatically_resumed(failed(pursuing_goal(), INITIAL_FAILURE)),
+            RESUMED_FAILURE,
+        );
+        assert_eq!(spent_automatic_resume_attempts(&spent), 1);
+        let superseded = spent
             .supersede(
                 GoalStatement::try_new(String::from("replacement fixture goal"))
                     .expect("the replacement statement is admitted"),
-                GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(0xc1))),
+                GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(
+                    SUPERSEDING_COMMAND,
+                ))),
             )
-            .expect("the pursuing fixture goal can be superseded");
-        let current_failure = TurnId::from_uuid(Uuid::from_u128(0xc2));
+            .expect("the blocked fixture goal can be superseded");
+        let current_failure = TurnId::from_uuid(Uuid::from_u128(CURRENT_FAILURE));
 
         assert!(automatic_resume_failure_turns(&superseded, Some(current_failure)).is_empty());
     }
@@ -2115,18 +2132,31 @@ context_window_tokens = 200000
 
     #[test]
     fn every_model_selectable_block_reason_maps_to_its_domain_reason() {
-        assert_eq!(
-            GoalModelBlockedReasonKind::from(GoalDeclarationBlockedReason::UserInput),
-            GoalModelBlockedReasonKind::UserInputRequired
-        );
-        assert_eq!(
-            GoalModelBlockedReasonKind::from(GoalDeclarationBlockedReason::ExternalChange),
-            GoalModelBlockedReasonKind::ExternalChangeRequired
-        );
-        assert_eq!(
-            GoalModelBlockedReasonKind::from(GoalDeclarationBlockedReason::Authorization),
-            GoalModelBlockedReasonKind::AuthorizationRequired
-        );
+        #[derive(serde::Serialize)]
+        struct ReasonMapping {
+            declaration: String,
+            domain: String,
+        }
+        let rows = [
+            GoalDeclarationBlockedReason::UserInput,
+            GoalDeclarationBlockedReason::ExternalChange,
+            GoalDeclarationBlockedReason::Authorization,
+        ]
+        .map(|reason| ReasonMapping {
+            declaration: format!("{reason:?}"),
+            domain: format!("{:?}", GoalModelBlockedReasonKind::from(reason)),
+        });
+
+        expect_test::expect![[r#"
+            ┌────────────────┬────────────────────────┐
+            │ declaration    │ domain                 │
+            ├────────────────┼────────────────────────┤
+            │ UserInput      │ UserInputRequired      │
+            │ ExternalChange │ ExternalChangeRequired │
+            │ Authorization  │ AuthorizationRequired  │
+            └────────────────┴────────────────────────┘
+        "#]]
+        .assert_eq(&expectable::print(&rows));
     }
 
     /// Rooting the advertised schema in an object widened what the *schema*
@@ -2182,22 +2212,21 @@ context_window_tokens = 200000
 
     #[test]
     fn goal_declaration_construction_errors_name_each_static_boundary() {
-        assert_eq!(
-            GoalDeclarationToolConstructionError::Name.to_string(),
-            "goal_declare static name is invalid"
-        );
-        assert_eq!(
-            GoalDeclarationToolConstructionError::Schema.to_string(),
-            "goal_declare static schema is invalid"
-        );
-        assert_eq!(
-            GoalDeclarationToolConstructionError::ErrorDetail.to_string(),
-            "goal_declare static error detail is invalid"
-        );
-        assert_eq!(
-            GoalDeclarationToolConstructionError::Duplicate.to_string(),
-            "goal_declare catalog is duplicated"
-        );
+        let output = [
+            GoalDeclarationToolConstructionError::Name,
+            GoalDeclarationToolConstructionError::Schema,
+            GoalDeclarationToolConstructionError::ErrorDetail,
+            GoalDeclarationToolConstructionError::Duplicate,
+        ]
+        .map(|error| error.to_string())
+        .join("\n");
+
+        expect_test::expect![[r#"
+            goal_declare static name is invalid
+            goal_declare static schema is invalid
+            goal_declare static error detail is invalid
+            goal_declare catalog is duplicated"#]]
+        .assert_eq(&output);
     }
 
     #[test]
@@ -2261,8 +2290,6 @@ context_window_tokens = 200000
                 last: signalbox_domain::SessionInputPosition::first(),
             })
             .expect_err("acceptance position exhaustion is surfaced");
-        let undisposed = continuation_disposition(GoalTurnContinuationOutcome::AlreadyScheduled)
-            .expect("an already scheduled continuation owes no new work");
 
         assert_eq!(
             unknown_alias.operator_failure_cause_code(),
@@ -2276,6 +2303,12 @@ context_window_tokens = 200000
             acceptance_position.operator_failure_cause_code(),
             "goal_continuation_acceptance_position_exhausted"
         );
+    }
+
+    #[test]
+    fn an_already_scheduled_continuation_owes_no_new_disposition() {
+        let undisposed = continuation_disposition(GoalTurnContinuationOutcome::AlreadyScheduled)
+            .expect("an already scheduled continuation owes no new work");
         assert_eq!(undisposed, ContinuationDisposition::Undisposed);
     }
 
@@ -2299,7 +2332,7 @@ context_window_tokens = 200000
     }
 
     #[test]
-    fn goal_declaration_failure_classification_preserves_commit_ambiguity_and_callers() {
+    fn goal_declaration_failures_map_to_operator_classes() {
         let argument_drift = GoalDeclarationExecutorError::ArgumentValidationDrift;
         let database = GoalDeclarationExecutorError::Repository(GoalRepositoryError::Database(
             sqlx::Error::PoolClosed,
@@ -2307,9 +2340,11 @@ context_window_tokens = 200000
         let ambiguous = GoalDeclarationExecutorError::Repository(
             GoalRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
         );
+        // Arbitrary identity for a command recorded with another kind.
+        const WRONG_COMMAND_ID: u128 = 0xd1;
         let wrong_command =
             GoalDeclarationExecutorError::Repository(GoalRepositoryError::DifferentCommandKind {
-                command_id: DurableCommandId::from_uuid(Uuid::from_u128(0xd1)),
+                command_id: DurableCommandId::from_uuid(Uuid::from_u128(WRONG_COMMAND_ID)),
             });
 
         assert_eq!(
@@ -2332,12 +2367,25 @@ context_window_tokens = 200000
             wrong_command.operator_failure_class(),
             OperatorFailureClass::CallerOrHubBug
         );
+    }
+
+    #[test]
+    fn goal_declaration_failures_expose_repository_sources() {
+        let argument_drift = GoalDeclarationExecutorError::ArgumentValidationDrift;
+        let database = GoalDeclarationExecutorError::Repository(GoalRepositoryError::Database(
+            sqlx::Error::PoolClosed,
+        ));
+
         assert!(argument_drift.source().is_none());
         assert!(database.source().is_some());
-        assert_eq!(
-            argument_drift.to_string(),
-            "goal declaration execution failed"
-        );
+    }
+
+    #[test]
+    fn goal_declaration_failure_display_names_execution_failure() {
+        let argument_drift = GoalDeclarationExecutorError::ArgumentValidationDrift;
+
+        expect_test::expect![["goal declaration execution failed"]]
+            .assert_eq(&argument_drift.to_string());
     }
 
     #[test]
@@ -2407,14 +2455,13 @@ context_window_tokens = 200000
         assert!(unavailable_alias.source().is_none());
     }
 
-    /// The fleet's lost startup inventory retries are finite and surface the
-    /// database failure after the configured retry bound.
+    /// A simulated database outage ends inventory retries at the configured bound.
     #[tokio::test(start_paused = true)]
     async fn restart_inventory_database_failure_retries_to_the_bound() {
         let disposition = disposition_with_closed_pool().await;
         let started = tokio::time::Instant::now();
 
-        let error = disposition
+        disposition
             .reconcile_automatic_resumptions_after_restart()
             .await
             .expect_err("a closed pool cannot inventory pending resumptions");
@@ -2427,6 +2474,17 @@ context_window_tokens = 200000
                 .expect("fixture startup delay")
                 .saturating_mul(AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_inventory_surfaces_a_goal_database_failure() {
+        let disposition = disposition_with_closed_pool().await;
+
+        let error = disposition
+            .reconcile_automatic_resumptions_after_restart()
+            .await
+            .expect_err("a closed pool cannot inventory pending resumptions");
+
         assert_eq!(
             error.operator_failure_cause_code(),
             "goal_disposition_database"
@@ -2482,20 +2540,46 @@ context_window_tokens = 200000
     #[tokio::test(start_paused = true)]
     async fn exhausted_automatic_resume_budget_arms_no_delayed_attempt() {
         let disposition = disposition_with_closed_pool().await;
-        let started = tokio::time::Instant::now();
+        let output = tempfile::NamedTempFile::new().expect("capture recovery activity");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(output.reopen().expect("capture writer"))
+            .finish();
+        let _capture = tracing::subscriber::set_default(subscriber);
+        tokio::task::yield_now().await;
+        let runtime = tokio::runtime::Handle::current();
+        let tasks_before = runtime.metrics().num_alive_tasks();
 
-        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
-            disposition.arm_automatic_resumption(
-                fixture_session(),
-                GoalEventOrdinal::new(NonZeroU64::MIN),
-                AutomaticResumption::Exhausted {
-                    attempt_budget: example_attempt_budget(),
-                },
-            );
-        });
+        disposition.arm_automatic_resumption(
+            fixture_session(),
+            GoalEventOrdinal::new(NonZeroU64::MIN),
+            AutomaticResumption::Exhausted {
+                attempt_budget: example_attempt_budget(),
+            },
+        );
+        tokio::task::yield_now().await;
+        tokio::time::advance(
+            disposition
+                .numeric_bounds
+                .base_backoff
+                .expect("fixture delay"),
+        )
+        .await;
         tokio::task::yield_now().await;
 
-        assert_eq!(tokio::time::Instant::now(), started);
+        assert_eq!(
+            runtime.metrics().num_alive_tasks(),
+            tasks_before,
+            "exhaustion must not retain a delayed recovery task"
+        );
+        assert!(
+            std::fs::read_to_string(output.path())
+                .expect("captured activity")
+                .is_empty(),
+            "exhaustion must not attempt recovery against the closed database"
+        );
     }
 
     #[tokio::test]

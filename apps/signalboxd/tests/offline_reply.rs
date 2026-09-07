@@ -40,7 +40,10 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository,
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
-    goal::{GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository},
+    goal::{
+        GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRecoveryProgress,
+        GoalRepository,
+    },
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
@@ -220,26 +223,16 @@ async fn wait_for_execution_failure_block(pool: &PgPool, session: SessionId) {
     }
 }
 
-async fn wait_for_goal_event_count(
-    pool: &PgPool,
+async fn wait_for_goal_recovery_count(
+    repository: &GoalRepository,
     session: SessionId,
-    event_kind: &str,
+    count: fn(GoalRecoveryProgress) -> i64,
     expected: i64,
-) {
+) -> Result<(), signalbox_persistence::goal::GoalRepositoryError> {
     loop {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*)
-               FROM goal_event
-              WHERE session_id = $1
-                AND event_kind = $2",
-        )
-        .bind(session.into_uuid())
-        .bind(event_kind)
-        .fetch_one(pool)
-        .await
-        .unwrap_or_default();
-        if count >= expected {
-            return;
+        let progress = repository.recovery_progress(session).await?;
+        if count(progress) >= expected {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -708,11 +701,10 @@ async fn goal_failure_block_after_success(
         .load_goal(session)
         .await?
         .expect("the attached goal remains readable");
-    let goal_turn_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM goal_turn WHERE session_id = $1")
-            .bind(session.into_uuid())
-            .fetch_one(&pool)
-            .await?;
+    let goal_turn_count = GoalRepository::new(pool.clone())
+        .recovery_progress(session)
+        .await?
+        .turns();
 
     match ownership {
         signalbox_domain::SessionOwnership::Owned => {
@@ -756,10 +748,11 @@ async fn s_goal_success_continues_and_unsuccessful_turn_blocks_without_retry()
     Ok(())
 }
 
-/// Startup inventory re-arms a pending goal resumption once; another refusal blocks durably.
+/// Repeated reconciliation inventories re-arm one pending block; the resumed turn
+/// blocks durably after another refusal. This exercises the reconciliation method.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn restart_rearms_blocked_resumed_blocked_cycle_once() -> Result<(), Box<dyn Error>> {
+async fn repeated_reconciliation_resumes_a_blocked_goal_once() -> Result<(), Box<dyn Error>> {
     let GoalFailureFixture {
         container,
         pool,
@@ -771,40 +764,41 @@ async fn restart_rearms_blocked_resumed_blocked_cycle_once() -> Result<(), Box<d
     } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Owned).await?;
     let session = goal.session();
     assert_execution_failure_blocked(&goal);
-    let restarted = PostgresGoalPassDisposition::new(
+    let reconciliation = PostgresGoalPassDisposition::new(
         pool.clone(),
         support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?,
         nudge,
         GoalModeNumericBounds::new(None, None, None, None, None),
     );
-    assert_eq!(
-        restarted
-            .reconcile_automatic_resumptions_after_restart()
-            .await?,
-        usize::try_from(FIRST_RECOVERY_EVENT_COUNT)?
+    let (first, repeated) = tokio::join!(
+        reconciliation.reconcile_automatic_resumptions_after_restart(),
+        reconciliation.reconcile_automatic_resumptions_after_restart(),
     );
+    assert_eq!(first?, usize::try_from(FIRST_RECOVERY_EVENT_COUNT)?);
+    assert_eq!(repeated?, usize::try_from(FIRST_RECOVERY_EVENT_COUNT)?);
+    let repository = GoalRepository::new(pool.clone());
     timeout(
         Duration::from_secs(10),
-        wait_for_goal_event_count(&pool, session, "resumed", FIRST_RECOVERY_EVENT_COUNT),
+        wait_for_goal_recovery_count(
+            &repository,
+            session,
+            GoalRecoveryProgress::resumptions,
+            FIRST_RECOVERY_EVENT_COUNT,
+        ),
     )
-    .await?;
-    assert_eq!(
-        restarted
-            .reconcile_automatic_resumptions_after_restart()
-            .await?,
-        0
-    );
+    .await??;
 
     let observation_pool = pool.clone();
     let fatal_shutdown = fatal.clone();
     let shutdown = async move {
+        let observation_repository = GoalRepository::new(observation_pool);
         tokio::select! {
-            () = wait_for_goal_event_count(
-                &observation_pool,
+            result = wait_for_goal_recovery_count(
+                &observation_repository,
                 session,
-                "blocked",
+                GoalRecoveryProgress::execution_failure_blocks,
                 SECOND_FAILURE_EVENT_COUNT,
-            ) => {}
+            ) => { result.expect("recovery progress remains readable"); }
             () = fatal_shutdown.wait() => {}
         }
     };
@@ -817,14 +811,15 @@ async fn restart_rearms_blocked_resumed_blocked_cycle_once() -> Result<(), Box<d
         .load_goal(session)
         .await?
         .expect("the recovered goal remains readable");
-    let recovered_goal_turn_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM goal_turn WHERE session_id = $1")
-            .bind(session.into_uuid())
-            .fetch_one(&pool)
-            .await?;
+    let progress = repository.recovery_progress(session).await?;
 
     assert_execution_failure_blocked(&recovered_goal);
-    assert_eq!(recovered_goal_turn_count, RECOVERY_CYCLE_TURN_COUNT);
+    assert_eq!(progress.resumptions(), FIRST_RECOVERY_EVENT_COUNT);
+    assert_eq!(
+        progress.execution_failure_blocks(),
+        SECOND_FAILURE_EVENT_COUNT
+    );
+    assert_eq!(progress.turns(), RECOVERY_CYCLE_TURN_COUNT);
     assert_eq!(i64::try_from(operation_count())?, RECOVERY_CYCLE_TURN_COUNT);
 
     pool.close().await;

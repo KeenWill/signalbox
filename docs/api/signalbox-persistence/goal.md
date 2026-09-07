@@ -43,6 +43,18 @@ pub enum GoalTransitionOutcome {
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
+## GoalRecoveryProgress
+
+```rust
+pub struct GoalRecoveryProgress {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl goal::GoalRecoveryProgress {
+    pub const fn resumptions(self) -> i64;
+    pub const fn execution_failure_blocks(self) -> i64;
+    pub const fn turns(self) -> i64;
+}
+```
+
 ## PendingGoalExecutionFailure
 
 ```rust
@@ -162,6 +174,10 @@ impl goal::GoalRepository {
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<option::Option<signalbox_domain::Goal>, goal::GoalRepositoryError>;
+    pub async fn recovery_progress(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<goal::GoalRecoveryProgress, goal::GoalRepositoryError>;
     pub async fn session_owned(
         &self,
         session: signalbox_domain::SessionId,
