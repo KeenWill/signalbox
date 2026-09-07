@@ -1,5 +1,6 @@
 load("@python_deps//:requirements.bzl", "requirement")
 load("@rules_python//python:defs.bzl", "py_test")
+load("//tooling/bazel:native_generation.bzl", "native_generation")
 load("//tooling/bazel:source_manifest.bzl", "source_manifest")
 
 exports_files([
@@ -351,5 +352,69 @@ test_suite(
         "//crates/file-media-adapters-image:adapters",
         "//crates/file-media-adapters-text:adapters",
         "//crates/file-media-runtime:registry_conformance",
+    ],
+)
+
+native_generation(
+    name = "web_contract_output",
+    generator = "//crates/web-contract:generate-web-contract",
+)
+
+source_manifest(
+    name = "web_contract_snapshots",
+    srcs = [
+        ":web_contract_fixtures",
+        "//crates/web-contract:tests/fixtures/example.json",
+    ],
+)
+
+py_test(
+    name = "web_contract_generated",
+    size = "small",
+    srcs = ["//tooling/bazel:check_generated.py"],
+    args = [
+        "$(rootpath :web_contract_snapshots)",
+        "$(rootpath :web_contract_output)",
+    ],
+    data = [
+        ":web_contract_output",
+        ":web_contract_snapshots",
+    ],
+    main = "//tooling/bazel:check_generated.py",
+)
+
+native_generation(
+    name = "model_projection_output",
+    arguments = ["--write"],
+    generator = "//crates/model-reference-catalog:generate-reference-projections",
+)
+
+source_manifest(
+    name = "model_projection_snapshots",
+    srcs = ["//crates/model-reference-catalog:projections"],
+)
+
+py_test(
+    name = "model_projections_generated",
+    size = "small",
+    srcs = ["//tooling/bazel:check_generated.py"],
+    args = [
+        "$(rootpath :model_projection_snapshots)",
+        "$(rootpath :model_projection_output)",
+        "--source-prefix",
+        "crates/model-reference-catalog/projections",
+    ],
+    data = [
+        ":model_projection_output",
+        ":model_projection_snapshots",
+    ],
+    main = "//tooling/bazel:check_generated.py",
+)
+
+test_suite(
+    name = "generated_artifact_tests",
+    tests = [
+        ":model_projections_generated",
+        ":web_contract_generated",
     ],
 )

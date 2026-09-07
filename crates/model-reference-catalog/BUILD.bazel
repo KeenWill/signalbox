@@ -97,3 +97,9 @@ filegroup(
     srcs = glob(["**/*.rs"]),
     visibility = ["//:__pkg__"],
 )
+
+filegroup(
+    name = "projections",
+    srcs = glob(["projections/*.md"]),
+    visibility = ["//:__pkg__"],
+)
