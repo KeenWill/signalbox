@@ -211,8 +211,8 @@ covers, and the version actually invoked.
 
 The Codex smoke compares the pin's checked-in app-server error, turn-completed,
 and rate-limit notification schemas with the adapter's consumed fields, enum
-members, and required-field sets. Additions are reported; removals and changed
-required sets fail.
+members, and required fields. Additions are reported; consumed fields and enum
+members must remain present, and adapter-required fields must remain required.
 
 The compatibility smokes assert nothing about answer quality.
 

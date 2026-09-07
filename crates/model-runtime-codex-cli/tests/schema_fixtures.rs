@@ -40,9 +40,9 @@ fn strings(value: &Value) -> BTreeSet<&str> {
 }
 
 fn object_shape(expected: &Value, actual: &Value) -> Result<Vec<String>, String> {
-    if strings(&expected["required"]) != strings(&actual["required"]) {
+    if !strings(&expected["required"]).is_subset(&strings(&actual["required"])) {
         return Err(format!(
-            "required fields changed: adapter={} pinned={}",
+            "adapter-required fields no longer required: adapter={} pinned={}",
             expected["required"], actual["required"]
         ));
     }
@@ -77,7 +77,7 @@ fn derived<T: schemars::JsonSchema>() -> Value {
 }
 
 #[test]
-fn pinned_notifications_preserve_consumed_fields_and_required_sets() {
+fn pinned_notifications_preserve_consumed_and_adapter_required_fields() {
     let errors = schema("ErrorNotification");
     let turns = schema("TurnCompletedNotification");
     let rates = schema("AccountRateLimitsUpdatedNotification");
@@ -202,7 +202,7 @@ fn check_errors(schema: &Value) {
 }
 
 #[test]
-fn optional_additions_are_reported_and_removals_or_required_changes_fail() {
+fn additions_are_allowed_and_consumed_field_or_requirement_removals_fail() {
     let expected = serde_json::json!({"required":["id"],"properties":{"id":{},"optional":{}}});
     let mut actual = expected.clone();
     actual["properties"]["future"] = serde_json::json!({});
@@ -211,6 +211,11 @@ fn optional_additions_are_reported_and_removals_or_required_changes_fail() {
         Ok(vec!["future".to_owned()])
     );
     actual["required"] = serde_json::json!(["id", "future"]);
+    assert_eq!(
+        object_shape(&expected, &actual),
+        Ok(vec!["future".to_owned()])
+    );
+    actual["required"] = serde_json::json!(["future"]);
     assert!(object_shape(&expected, &actual).is_err());
     actual = expected.clone();
     actual["properties"]
