@@ -2,256 +2,225 @@
 
 # review_workflow
 
-## ReviewPassKind
+## ReviewExternalLinkAssociation
 
 ```rust
-pub enum ReviewPassKind {
-    ImportExternalContext,
-    ReadOnlyReview,
-    Judge,
-    Dedupe,
-    Publish,
-    Fix,
-    PropagateStack,
+pub enum ReviewExternalLinkAssociation {
+    Target(ReviewTargetId),
+    Run(ReviewRunRef),
+    Finding(ReviewFindingRef),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ReviewExternalLinkAssociation {
+    pub const fn target(self) -> ReviewTargetId;
+}
+```
+
+## ReviewExternalObjectKind
+
+```rust
+pub enum ReviewExternalObjectKind {
+    ChangeRequest,
+    Commit,
+    Review,
+    ReviewThread,
+    ReviewComment,
+    ChangeRequestComment,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
 
-## ReviewPassState
+## ReviewExternalLinkAttachment
 
 ```rust
-pub enum ReviewPassState {
-    Queued,
-    Running {
-        turn: TurnId,
-    },
-    Succeeded {
-        turn: TurnId,
-        output_frontier: ContextFrontierId,
-        result: option::Option<ReviewPassResult>,
-    },
-    Failed {
-        turn: TurnId,
-    },
-    Blocked {
-        turn: TurnId,
-        result: option::Option<ReviewPassResult>,
-    },
-    Cancelled {
-        turn: option::Option<TurnId>,
-    },
-}
+pub struct ReviewExternalLinkAttachment {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewPassTurnOutcome
-
-```rust
-pub enum ReviewPassTurnOutcome {
-    Active,
-    Completed,
-    Refused,
-    Failed,
-    Cancelled,
-    ReconciliationRequired,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewPassTurnEvidence
-
-```rust
-pub struct ReviewPassTurnEvidence {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassTurnEvidence {
+impl ReviewExternalLinkAttachment {
     pub const fn new(
-        turn: TurnId,
-        session: SessionId,
-        accepted_input: AcceptedInputId,
-        outcome: ReviewPassTurnOutcome,
-        terminal_frontier: option::Option<ContextFrontierId>,
+        link: ReviewExternalLinkId,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+        external_object: ReviewKey,
     ) -> Self;
-    pub const fn turn(self) -> TurnId;
-    pub const fn session(self) -> SessionId;
-    pub const fn accepted_input(self) -> AcceptedInputId;
-    pub const fn outcome(self) -> ReviewPassTurnOutcome;
-    pub const fn terminal_frontier(self) -> option::Option<ContextFrontierId>;
-}
-```
-
-## ReviewPassAcceptedInputEvidence
-
-```rust
-pub struct ReviewPassAcceptedInputEvidence {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassAcceptedInputEvidence {
-    pub const fn new(
-        accepted_input: AcceptedInputId,
-        session: SessionId,
-        origin_turn: option::Option<TurnId>,
-    ) -> Self;
-    pub const fn accepted_input(self) -> AcceptedInputId;
-    pub const fn session(self) -> SessionId;
-    pub const fn origin_turn(self) -> option::Option<TurnId>;
-}
-```
-
-## ReviewPassReconstitutionInput
-
-```rust
-pub struct ReviewPassReconstitutionInput {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassReconstitutionInput {
-    pub const fn new(
-        reference: ReviewPassRef,
-        kind: ReviewPassKind,
-        workflow_run: ReviewRunRef,
-        workflow: ReviewWorkflowKind,
-        session: SessionId,
-        accepted_input: AcceptedInputId,
-        accepted_input_evidence: ReviewPassAcceptedInputEvidence,
-        state: ReviewPassState,
-        turn_evidence: option::Option<ReviewPassTurnEvidence>,
-    ) -> Self;
-    pub const fn reference(&self) -> ReviewPassRef;
-    pub const fn kind(&self) -> ReviewPassKind;
-    pub const fn workflow_run(&self) -> ReviewRunRef;
-    pub const fn workflow(&self) -> ReviewWorkflowKind;
-    pub const fn session(&self) -> SessionId;
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn accepted_input_evidence(&self) -> ReviewPassAcceptedInputEvidence;
-    pub const fn state(&self) -> &ReviewPassState;
-    pub const fn turn_evidence(&self) -> option::Option<ReviewPassTurnEvidence>;
-}
-```
-
-## ReviewPass
-
-```rust
-pub struct ReviewPass {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPass {
-    pub fn try_new(
-        reference: ReviewPassRef,
-        kind: ReviewPassKind,
-        run: &mut ReviewRun,
-        session: SessionId,
-        accepted_input: ReviewPassAcceptedInputEvidence,
-    ) -> result::Result<Self, ReviewPassConstructionError>;
-    pub fn try_reconstitute(
-        input: ReviewPassReconstitutionInput,
-    ) -> result::Result<Self, ReviewPassReconstitutionError>;
-    pub fn transition(
-        self,
-        next: ReviewPassState,
-        turn_evidence: option::Option<ReviewPassTurnEvidence>,
-    ) -> result::Result<Self, ReviewPassTransitionError>;
-    pub fn bind_result(
-        self,
-        result: ReviewPassResult,
-    ) -> result::Result<Self, ReviewPassTransitionError>;
-    pub const fn reference(&self) -> ReviewPassRef;
-    pub const fn kind(&self) -> ReviewPassKind;
-    pub const fn session(&self) -> SessionId;
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn origin_turn(&self) -> TurnId;
-    pub const fn state(&self) -> &ReviewPassState;
-}
-```
-
-## ReviewPassConstructionFailure
-
-```rust
-pub enum ReviewPassConstructionFailure {
-    ForeignRun,
-    RunWorkflowMismatch,
-    RunNotQueued,
-    RunAlreadyHasPass,
-    AcceptedInputSessionMismatch,
-    AcceptedInputHasNoOriginTurn,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewPassConstructionError
-
-```rust
-pub struct ReviewPassConstructionError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassConstructionError {
-    pub const fn reference(&self) -> ReviewPassRef;
-    pub const fn kind(&self) -> ReviewPassKind;
-    pub const fn workflow(&self) -> ReviewWorkflowKind;
+    pub const fn link(&self) -> ReviewExternalLinkId;
+    pub const fn pass(&self) -> ReviewPassRef;
+    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
     pub const fn run_evidence(&self) -> ReviewRunEvidence;
-    pub const fn sessions(&self) -> (SessionId, SessionId);
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn origin_turn(&self) -> option::Option<TurnId>;
-    pub const fn failure(&self) -> ReviewPassConstructionFailure;
+    pub const fn external_object(&self) -> &ReviewKey;
 }
 ```
 
-## ReviewPassReconstitutionFailure
+## ReviewExternalObjectState
 
 ```rust
-pub enum ReviewPassReconstitutionFailure {
-    ForeignWorkflowRun,
-    RunWorkflowMismatch,
-    AcceptedInputEvidenceMismatch,
-    AcceptedInputSessionMismatch,
-    AcceptedInputHasNoOriginTurn,
-    MissingTurnEvidence,
-    UnexpectedTurnEvidence,
-    TurnMismatch,
-    TurnOriginMismatch,
-    TurnSessionMismatch,
-    TurnAcceptedInputMismatch,
-    TurnOutcomeMismatch,
-    TurnFrontierShapeMismatch,
-    OutputFrontierMismatch,
-    IncompatibleResult,
-    ForeignResultTarget,
+pub enum ReviewExternalObjectState {
+    Current,
+    Outdated,
+    Resolved,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## ReviewExternalLinkObservation
+
+```rust
+pub struct ReviewExternalLinkObservation {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLinkObservation {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        ordinal: ReviewEventOrdinal,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+        state: ReviewExternalObjectState,
+    ) -> Self;
+    pub const fn link(&self) -> ReviewExternalLinkId;
+    pub const fn ordinal(&self) -> ReviewEventOrdinal;
+    pub const fn pass(&self) -> ReviewPassRef;
+    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
+    pub const fn run_evidence(&self) -> ReviewRunEvidence;
+    pub const fn state(&self) -> ReviewExternalObjectState;
+}
+```
+
+## ReviewExternalLinkClaim
+
+```rust
+pub struct ReviewExternalLinkClaim {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLinkClaim {
+    pub const fn new(pass: ReviewPassEvidence, run: ReviewRunEvidence) -> Self;
+    pub const fn pass(&self) -> ReviewPassRef;
+    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
+    pub const fn run_evidence(&self) -> ReviewRunEvidence;
+}
+```
+
+## ReviewExternalLink
+
+```rust
+pub struct ReviewExternalLink {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLink {
+    pub fn try_reserve(
+        id: ReviewExternalLinkId,
+        association: ReviewExternalLinkAssociation,
+        provider: ReviewKey,
+        object_kind: ReviewExternalObjectKind,
+        target: &ReviewTarget,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionFailure>;
+    pub fn try_reconstitute(
+        id: ReviewExternalLinkId,
+        association: ReviewExternalLinkAssociation,
+        provider: ReviewKey,
+        object_kind: ReviewExternalObjectKind,
+        attachment: option::Option<ReviewExternalLinkAttachment>,
+        observations: vec::Vec<ReviewExternalLinkObservation>,
+        claims: vec::Vec<ReviewExternalLinkClaim>,
+        target: &ReviewTarget,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionFailure>;
+    pub fn attach(
+        self,
+        attachment: ReviewExternalLinkAttachment,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn observe(
+        self,
+        observation: ReviewExternalLinkObservation,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn confirm_unchanged(
+        self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn block_publication(
+        self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
+    pub const fn id(&self) -> ReviewExternalLinkId;
+    pub const fn association(&self) -> ReviewExternalLinkAssociation;
+    pub const fn provider(&self) -> &ReviewKey;
+    pub const fn object_kind(&self) -> ReviewExternalObjectKind;
+    pub const fn attachment(&self) -> option::Option<&ReviewExternalLinkAttachment>;
+    pub fn observations(&self) -> &[ReviewExternalLinkObservation];
+    pub fn claims(&self) -> &[ReviewExternalLinkClaim];
+}
+```
+
+## ReviewExternalObjectClaim
+
+```rust
+pub struct ReviewExternalObjectClaim {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalObjectClaim {
+    pub fn try_new(
+        link: &ReviewExternalLink,
+        target: &ReviewTarget,
+    ) -> result::Result<Self, ReviewExternalObjectClaimError>;
+    pub fn validate_reassociation(
+        &self,
+        candidate: &Self,
+    ) -> result::Result<(), ReviewExternalObjectClaimError>;
+    pub const fn target(&self) -> ReviewTargetId;
+    pub const fn external_object(&self) -> &ReviewKey;
+}
+```
+
+## ReviewExternalObjectClaimError
+
+```rust
+pub enum ReviewExternalObjectClaimError {
+    ForeignTarget,
+    ProviderMismatch,
+    NotAttached,
+    DifferentObject,
+    SameTarget,
+    UnrelatedTarget,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
-## ReviewPassReconstitutionError
+## ReviewExternalLinkTransitionError
 
 ```rust
-pub struct ReviewPassReconstitutionError {/* private */}
+pub struct ReviewExternalLinkTransitionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassReconstitutionError {
-    pub const fn failure(&self) -> ReviewPassReconstitutionFailure;
-    pub const fn input(&self) -> &ReviewPassReconstitutionInput;
-    pub fn into_input(self) -> ReviewPassReconstitutionInput;
+impl ReviewExternalLinkTransitionError {
+    pub const fn current(&self) -> &ReviewExternalLink;
+    pub const fn failure(&self) -> ReviewExternalLinkTransitionFailure;
+    pub fn into_parts(self) -> (ReviewExternalLink, ReviewExternalLinkTransitionFailure);
 }
 ```
 
-## ReviewPassTransitionFailure
+## ReviewExternalLinkTransitionFailure
 
 ```rust
-pub enum ReviewPassTransitionFailure {
-    Evidence(ReviewPassReconstitutionFailure),
-    InvalidTransition,
-    TurnChanged,
-    TurnNotActive,
-    IncompatibleResult,
-    ResultAlreadyBound,
+pub enum ReviewExternalLinkTransitionFailure {
+    ForeignAssociationTarget,
+    ProviderMismatch,
+    AlreadyAttached,
+    ForeignAttachmentLink,
+    ForeignObservationLink,
+    ForeignPass,
+    IncompatibleAttachmentPass,
+    AttachmentPassEvidenceMismatch,
+    IncompatibleAttachmentRunEvidence,
+    IncompatibleObservationPass,
+    ObservationPassEvidenceMismatch,
+    IncompatibleObservationRunEvidence,
+    IncompatiblePublicationBlockPass,
+    IncompatiblePublicationBlockRunEvidence,
+    UnchangedObservation,
+    ConflictingPassEvidence,
+    ConflictingRunEvidence,
+    NotAttached,
+    NoncontiguousOrdinal {
+        expected: option::Option<ReviewEventOrdinal>,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewPassTransitionError
-
-```rust
-pub struct ReviewPassTransitionError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewPassTransitionError {
-    pub const fn failure(&self) -> ReviewPassTransitionFailure;
-    pub fn states(&self) -> (ReviewPassState, ReviewPassState);
-    pub const fn turn_evidence(&self) -> option::Option<ReviewPassTurnEvidence>;
-    pub const fn current(&self) -> &ReviewPass;
-    pub fn into_current(self) -> ReviewPass;
-}
 ```
 
 ## ReviewFindingDiffSide
@@ -586,225 +555,256 @@ impl ReviewFindingTransitionError {
 }
 ```
 
-## ReviewExternalLinkAssociation
+## ReviewPassKind
 
 ```rust
-pub enum ReviewExternalLinkAssociation {
-    Target(ReviewTargetId),
-    Run(ReviewRunRef),
-    Finding(ReviewFindingRef),
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ReviewExternalLinkAssociation {
-    pub const fn target(self) -> ReviewTargetId;
-}
-```
-
-## ReviewExternalObjectKind
-
-```rust
-pub enum ReviewExternalObjectKind {
-    ChangeRequest,
-    Commit,
-    Review,
-    ReviewThread,
-    ReviewComment,
-    ChangeRequestComment,
+pub enum ReviewPassKind {
+    ImportExternalContext,
+    ReadOnlyReview,
+    Judge,
+    Dedupe,
+    Publish,
+    Fix,
+    PropagateStack,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
 
-## ReviewExternalLinkAttachment
+## ReviewPassState
 
 ```rust
-pub struct ReviewExternalLinkAttachment {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkAttachment {
-    pub const fn new(
-        link: ReviewExternalLinkId,
-        pass: ReviewPassRef,
-        pass_evidence: ReviewPassEvidence,
-        run: ReviewRunEvidence,
-        external_object: ReviewKey,
-    ) -> Self;
-    pub const fn link(&self) -> ReviewExternalLinkId;
-    pub const fn pass(&self) -> ReviewPassRef;
-    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
-    pub const fn run_evidence(&self) -> ReviewRunEvidence;
-    pub const fn external_object(&self) -> &ReviewKey;
-}
-```
-
-## ReviewExternalObjectState
-
-```rust
-pub enum ReviewExternalObjectState {
-    Current,
-    Outdated,
-    Resolved,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## ReviewExternalLinkObservation
-
-```rust
-pub struct ReviewExternalLinkObservation {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkObservation {
-    pub const fn new(
-        link: ReviewExternalLinkId,
-        ordinal: ReviewEventOrdinal,
-        pass: ReviewPassRef,
-        pass_evidence: ReviewPassEvidence,
-        run: ReviewRunEvidence,
-        state: ReviewExternalObjectState,
-    ) -> Self;
-    pub const fn link(&self) -> ReviewExternalLinkId;
-    pub const fn ordinal(&self) -> ReviewEventOrdinal;
-    pub const fn pass(&self) -> ReviewPassRef;
-    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
-    pub const fn run_evidence(&self) -> ReviewRunEvidence;
-    pub const fn state(&self) -> ReviewExternalObjectState;
-}
-```
-
-## ReviewExternalLinkClaim
-
-```rust
-pub struct ReviewExternalLinkClaim {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkClaim {
-    pub const fn new(pass: ReviewPassEvidence, run: ReviewRunEvidence) -> Self;
-    pub const fn pass(&self) -> ReviewPassRef;
-    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
-    pub const fn run_evidence(&self) -> ReviewRunEvidence;
-}
-```
-
-## ReviewExternalLink
-
-```rust
-pub struct ReviewExternalLink {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLink {
-    pub fn try_reserve(
-        id: ReviewExternalLinkId,
-        association: ReviewExternalLinkAssociation,
-        provider: ReviewKey,
-        object_kind: ReviewExternalObjectKind,
-        target: &ReviewTarget,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionFailure>;
-    pub fn try_reconstitute(
-        id: ReviewExternalLinkId,
-        association: ReviewExternalLinkAssociation,
-        provider: ReviewKey,
-        object_kind: ReviewExternalObjectKind,
-        attachment: option::Option<ReviewExternalLinkAttachment>,
-        observations: vec::Vec<ReviewExternalLinkObservation>,
-        claims: vec::Vec<ReviewExternalLinkClaim>,
-        target: &ReviewTarget,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionFailure>;
-    pub fn attach(
-        self,
-        attachment: ReviewExternalLinkAttachment,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
-    pub fn observe(
-        self,
-        observation: ReviewExternalLinkObservation,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
-    pub fn confirm_unchanged(
-        self,
-        pass: ReviewPassEvidence,
-        run: ReviewRunEvidence,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
-    pub fn block_publication(
-        self,
-        pass: ReviewPassEvidence,
-        run: ReviewRunEvidence,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
-    pub const fn id(&self) -> ReviewExternalLinkId;
-    pub const fn association(&self) -> ReviewExternalLinkAssociation;
-    pub const fn provider(&self) -> &ReviewKey;
-    pub const fn object_kind(&self) -> ReviewExternalObjectKind;
-    pub const fn attachment(&self) -> option::Option<&ReviewExternalLinkAttachment>;
-    pub fn observations(&self) -> &[ReviewExternalLinkObservation];
-    pub fn claims(&self) -> &[ReviewExternalLinkClaim];
-}
-```
-
-## ReviewExternalObjectClaim
-
-```rust
-pub struct ReviewExternalObjectClaim {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalObjectClaim {
-    pub fn try_new(
-        link: &ReviewExternalLink,
-        target: &ReviewTarget,
-    ) -> result::Result<Self, ReviewExternalObjectClaimError>;
-    pub fn validate_reassociation(
-        &self,
-        candidate: &Self,
-    ) -> result::Result<(), ReviewExternalObjectClaimError>;
-    pub const fn target(&self) -> ReviewTargetId;
-    pub const fn external_object(&self) -> &ReviewKey;
-}
-```
-
-## ReviewExternalObjectClaimError
-
-```rust
-pub enum ReviewExternalObjectClaimError {
-    ForeignTarget,
-    ProviderMismatch,
-    NotAttached,
-    DifferentObject,
-    SameTarget,
-    UnrelatedTarget,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewExternalLinkTransitionError
-
-```rust
-pub struct ReviewExternalLinkTransitionError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkTransitionError {
-    pub const fn current(&self) -> &ReviewExternalLink;
-    pub const fn failure(&self) -> ReviewExternalLinkTransitionFailure;
-    pub fn into_parts(self) -> (ReviewExternalLink, ReviewExternalLinkTransitionFailure);
-}
-```
-
-## ReviewExternalLinkTransitionFailure
-
-```rust
-pub enum ReviewExternalLinkTransitionFailure {
-    ForeignAssociationTarget,
-    ProviderMismatch,
-    AlreadyAttached,
-    ForeignAttachmentLink,
-    ForeignObservationLink,
-    ForeignPass,
-    IncompatibleAttachmentPass,
-    AttachmentPassEvidenceMismatch,
-    IncompatibleAttachmentRunEvidence,
-    IncompatibleObservationPass,
-    ObservationPassEvidenceMismatch,
-    IncompatibleObservationRunEvidence,
-    IncompatiblePublicationBlockPass,
-    IncompatiblePublicationBlockRunEvidence,
-    UnchangedObservation,
-    ConflictingPassEvidence,
-    ConflictingRunEvidence,
-    NotAttached,
-    NoncontiguousOrdinal {
-        expected: option::Option<ReviewEventOrdinal>,
+pub enum ReviewPassState {
+    Queued,
+    Running {
+        turn: TurnId,
+    },
+    Succeeded {
+        turn: TurnId,
+        output_frontier: ContextFrontierId,
+        result: option::Option<ReviewPassResult>,
+    },
+    Failed {
+        turn: TurnId,
+    },
+    Blocked {
+        turn: TurnId,
+        result: option::Option<ReviewPassResult>,
+    },
+    Cancelled {
+        turn: option::Option<TurnId>,
     },
 }
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPassTurnOutcome
+
+```rust
+pub enum ReviewPassTurnOutcome {
+    Active,
+    Completed,
+    Refused,
+    Failed,
+    Cancelled,
+    ReconciliationRequired,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPassTurnEvidence
+
+```rust
+pub struct ReviewPassTurnEvidence {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassTurnEvidence {
+    pub const fn new(
+        turn: TurnId,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        outcome: ReviewPassTurnOutcome,
+        terminal_frontier: option::Option<ContextFrontierId>,
+    ) -> Self;
+    pub const fn turn(self) -> TurnId;
+    pub const fn session(self) -> SessionId;
+    pub const fn accepted_input(self) -> AcceptedInputId;
+    pub const fn outcome(self) -> ReviewPassTurnOutcome;
+    pub const fn terminal_frontier(self) -> option::Option<ContextFrontierId>;
+}
+```
+
+## ReviewPassAcceptedInputEvidence
+
+```rust
+pub struct ReviewPassAcceptedInputEvidence {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassAcceptedInputEvidence {
+    pub const fn new(
+        accepted_input: AcceptedInputId,
+        session: SessionId,
+        origin_turn: option::Option<TurnId>,
+    ) -> Self;
+    pub const fn accepted_input(self) -> AcceptedInputId;
+    pub const fn session(self) -> SessionId;
+    pub const fn origin_turn(self) -> option::Option<TurnId>;
+}
+```
+
+## ReviewPassReconstitutionInput
+
+```rust
+pub struct ReviewPassReconstitutionInput {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassReconstitutionInput {
+    pub const fn new(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        workflow_run: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        accepted_input_evidence: ReviewPassAcceptedInputEvidence,
+        state: ReviewPassState,
+        turn_evidence: option::Option<ReviewPassTurnEvidence>,
+    ) -> Self;
+    pub const fn reference(&self) -> ReviewPassRef;
+    pub const fn kind(&self) -> ReviewPassKind;
+    pub const fn workflow_run(&self) -> ReviewRunRef;
+    pub const fn workflow(&self) -> ReviewWorkflowKind;
+    pub const fn session(&self) -> SessionId;
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn accepted_input_evidence(&self) -> ReviewPassAcceptedInputEvidence;
+    pub const fn state(&self) -> &ReviewPassState;
+    pub const fn turn_evidence(&self) -> option::Option<ReviewPassTurnEvidence>;
+}
+```
+
+## ReviewPass
+
+```rust
+pub struct ReviewPass {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPass {
+    pub fn try_new(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        run: &mut ReviewRun,
+        session: SessionId,
+        accepted_input: ReviewPassAcceptedInputEvidence,
+    ) -> result::Result<Self, ReviewPassConstructionError>;
+    pub fn try_reconstitute(
+        input: ReviewPassReconstitutionInput,
+    ) -> result::Result<Self, ReviewPassReconstitutionError>;
+    pub fn transition(
+        self,
+        next: ReviewPassState,
+        turn_evidence: option::Option<ReviewPassTurnEvidence>,
+    ) -> result::Result<Self, ReviewPassTransitionError>;
+    pub fn bind_result(
+        self,
+        result: ReviewPassResult,
+    ) -> result::Result<Self, ReviewPassTransitionError>;
+    pub const fn reference(&self) -> ReviewPassRef;
+    pub const fn kind(&self) -> ReviewPassKind;
+    pub const fn session(&self) -> SessionId;
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn origin_turn(&self) -> TurnId;
+    pub const fn state(&self) -> &ReviewPassState;
+}
+```
+
+## ReviewPassConstructionFailure
+
+```rust
+pub enum ReviewPassConstructionFailure {
+    ForeignRun,
+    RunWorkflowMismatch,
+    RunNotQueued,
+    RunAlreadyHasPass,
+    AcceptedInputSessionMismatch,
+    AcceptedInputHasNoOriginTurn,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPassConstructionError
+
+```rust
+pub struct ReviewPassConstructionError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassConstructionError {
+    pub const fn reference(&self) -> ReviewPassRef;
+    pub const fn kind(&self) -> ReviewPassKind;
+    pub const fn workflow(&self) -> ReviewWorkflowKind;
+    pub const fn run_evidence(&self) -> ReviewRunEvidence;
+    pub const fn sessions(&self) -> (SessionId, SessionId);
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn origin_turn(&self) -> option::Option<TurnId>;
+    pub const fn failure(&self) -> ReviewPassConstructionFailure;
+}
+```
+
+## ReviewPassReconstitutionFailure
+
+```rust
+pub enum ReviewPassReconstitutionFailure {
+    ForeignWorkflowRun,
+    RunWorkflowMismatch,
+    AcceptedInputEvidenceMismatch,
+    AcceptedInputSessionMismatch,
+    AcceptedInputHasNoOriginTurn,
+    MissingTurnEvidence,
+    UnexpectedTurnEvidence,
+    TurnMismatch,
+    TurnOriginMismatch,
+    TurnSessionMismatch,
+    TurnAcceptedInputMismatch,
+    TurnOutcomeMismatch,
+    TurnFrontierShapeMismatch,
+    OutputFrontierMismatch,
+    IncompatibleResult,
+    ForeignResultTarget,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPassReconstitutionError
+
+```rust
+pub struct ReviewPassReconstitutionError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassReconstitutionError {
+    pub const fn failure(&self) -> ReviewPassReconstitutionFailure;
+    pub const fn input(&self) -> &ReviewPassReconstitutionInput;
+    pub fn into_input(self) -> ReviewPassReconstitutionInput;
+}
+```
+
+## ReviewPassTransitionFailure
+
+```rust
+pub enum ReviewPassTransitionFailure {
+    Evidence(ReviewPassReconstitutionFailure),
+    InvalidTransition,
+    TurnChanged,
+    TurnNotActive,
+    IncompatibleResult,
+    ResultAlreadyBound,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewPassTransitionError
+
+```rust
+pub struct ReviewPassTransitionError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewPassTransitionError {
+    pub const fn failure(&self) -> ReviewPassTransitionFailure;
+    pub fn states(&self) -> (ReviewPassState, ReviewPassState);
+    pub const fn turn_evidence(&self) -> option::Option<ReviewPassTurnEvidence>;
+    pub const fn current(&self) -> &ReviewPass;
+    pub fn into_current(self) -> ReviewPass;
+}
 ```
 
 ## ReviewFindingStatus

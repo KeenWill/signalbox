@@ -68,6 +68,8 @@ pub mod model_adapter;
 mod process_runtime;
 mod repo_watch_credentials;
 pub mod repo_watch_dispatch;
+pub mod repo_watch_runtime;
+mod repo_watch_webhook;
 mod review_orchestration_runtime;
 pub mod runner_protocol_runtime;
 mod session_delegation;

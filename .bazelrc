@@ -1,4 +1,5 @@
 build --incompatible_strict_action_env
 test --test_output=errors
+test --run_under=//tooling/bazel:native_runtime
 
 try-import %workspace%/.bazelrc.local

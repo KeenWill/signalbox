@@ -87,11 +87,11 @@ template and the timing policy, and each repository lists its
 predicate described in [review workflows](review-workflows.md). The sweep
 evaluates one revalidated snapshot and uses that verdict for its decision.
 
-The v2 module is not composed into the daemon runtime: the daemon starts no
-module worker and exposes no module operator route. Planned dispatch actions and
-lifecycle reactions are retained in strictly increasing, unique action-ordinal
-order. The module submitter recovers exact retained payloads and invokes core
-session handlers through the daemon's command adapter.
+The daemon composes the repository-watch module when `[repository_watch]` is
+configured and enabled. Dispatch actions and lifecycle reactions are retained in
+strictly increasing, unique action-ordinal order. The module submitter recovers
+exact retained payloads and invokes core session handlers through the daemon's
+command adapter.
 
 ## Design decisions
 
@@ -110,15 +110,26 @@ ordinal and records its producer, frontier generation, and position within that
 frontier batch.
 
 Every table is derived or module-local state and its migration declares its
-growth class and release condition. The code implements no pruning pass and
-selects no retention duration.
+growth class and release condition. The code implements no pruning pass. The
+required `numeric_bounds.repository_watch_webhook_retention` duration governs
+each webhook delivery's `expires_at`, measured from `received_at`. The example
+configuration sets this bound to seven days; the daemon supplies no code
+default.
 
 Repository and pull-request UPSERTs replace one complete current projection.
 Webhook admission writes delivery metadata, exact authenticated bytes, and a
 pending disposition atomically. Reusing a delivery identity with equal content
 is a replay; different content is a conflict. Settlement changes a pending
-disposition exactly once. A frontier release supplies its observed generation
-and is stale after any intervening frontier commit.
+disposition exactly once. The authenticated listener admits exact payload bytes
+before waking the repository task. The listener admits bodies through the
+persistence ceiling of 26,214,400 bytes and rejects larger bodies with HTTP 413.
+Primary intake wakes only when settlement changes a pending disposition to
+applied; shadow intake settles as ignored without a wake. Equal delivery replays
+return HTTP 202. A settled replay neither wakes ingestion nor changes its
+disposition, including after a mode reload; a pending replay resumes intake.
+Conflicting identity reuse returns HTTP 409, and storage failures return HTTP
+503\. A frontier release supplies its observed generation and is stale after any
+intervening frontier commit.
 
 The module's repository task serializes polling and webhook wakes. Poll
 intervals are start-to-start; a wake received during an attempt waits for that
@@ -126,8 +137,28 @@ attempt to finish and does not postpone the periodic poll deadline. Each attempt
 reloads its committed comparison baseline and frontier, including compacted
 merged pull requests and their head repository identities, fetches a complete
 observation, and commits the differ's facts with their poll or webhook lineage.
-Failed observations leave the prior committed state intact. The daemon does not
-start these tasks, a webhook listener, or a command worker.
+Workflow reads query completed runs by distinct current head SHA for the default
+branch and retained pull-request base and same-repository head branches; prior
+completions for those branches remain comparison input. Each observation admits
+at most 1,000 REST and GraphQL requests combined; exhausting that budget rejects
+the incomplete observation. Check inventories exceeding GitHub's 1,000-suite
+commit limit and workflow searches exceeding GitHub's 1,000-result cap also
+reject the observation. Failed observations leave the prior committed state
+intact. The daemon starts these tasks, the configured webhook listener, and one
+serialized command worker beside the convergence sweep, and drains them before
+closing its database.
+
+The webhook listener authenticates the configured hook identity, secret, and
+repository before accepting a delivery. An empty resolved webhook secret is
+unavailable. Primary hooks wake the repository task; shadow hooks acknowledge
+without waking it. The runtime's `reload_configuration` reconciles rule
+revisions and replaces listener settings inside the reload. Enabled rule
+templates must resolve before composition or reload. Stale or conflicting rule
+revisions fail reload without replacing the running configuration. Same-address
+changes swap the path and hook map atomically; address changes bind a
+replacement before retiring the running listener, and a bind failure preserves
+the running settings. In-flight deliveries retry against the replacement
+configuration.
 
 Lifecycle reactions accept only `session_terminal` or `goal_changed` inputs and
 only `release_start` or sticky-stop lifecycle commands. These are the command

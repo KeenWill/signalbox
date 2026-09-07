@@ -12,6 +12,26 @@ use crate::message::AssistantPart;
 use crate::target::ProviderReportedModel;
 use crate::usage::TokenUsage;
 
+/// One provider-reported capacity window, independent of transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimitWindow {
+    /// Remaining percentage as reported, without clamping provider evidence.
+    pub remaining_percent: i64,
+    /// Length of the accounting window, when reported.
+    pub window_duration: Option<Duration>,
+    /// Reset instant, when reported.
+    pub resets_at: Option<SystemTime>,
+}
+
+/// The latest complete collection of capacity windows observed on a call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimitSnapshot {
+    /// Adapter observation time, used to order concurrent reports.
+    pub observed_at: SystemTime,
+    /// Provider windows in adapter-defined stable order.
+    pub windows: Vec<RateLimitWindow>,
+}
+
 /// The terminal report for one executed operation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TerminalReport<C> {

@@ -1,20 +1,41 @@
 # Bazel
 
-Install [Bazelisk](https://github.com/bazelbuild/bazelisk) and a C/C++ compiler
-with the platform development libraries. Bazelisk selects `.bazelversion`;
-`rules_rust` downloads the Rust compiler pinned in `MODULE.bazel`. Rust and
-rustfmt share that module's version constant. Renovate groups updates to it with
-`rust-toolchain.toml`; manual toolchain changes update both files.
+Install [Bazelisk](https://github.com/bazelbuild/bazelisk). Bazelisk selects
+`.bazelversion`; `rules_rust` downloads the Rust compiler pinned in
+`MODULE.bazel`. Rust and rustfmt share that module's version constant. Renovate
+groups updates to it with `rust-toolchain.toml`; manual toolchain changes update
+both files.
 
 ```bash
-bazel build //crates/newtype:signalbox_newtype
+bazel build //:rust_build
 bazel test //:bazel_tests
 ```
 
-The current Bazel suite contains the newtype unit tests. Cargo commands and CI
-cover the full workspace. See [Build and test](spec/build-and-test.md).
+Bazel builds the workspace libraries and binaries on x86-64 Linux with all
+features enabled, including test-support surfaces and fixture binaries, matching
+Cargo's all-features CI build. These targets do not validate default-feature
+release artifacts. The unit suite covers the workspace libraries and binaries.
+Cargo commands and CI cover the full workspace. See
+[Build and test](spec/build-and-test.md).
 
-To use an accessible remote cache, pass its endpoint explicitly:
+`crate_universe` reads the workspace Cargo manifests and `Cargo.lock` to
+generate third-party dependency targets. Change dependencies with Cargo as
+usual; the next Bazel invocation refreshes their generated definitions. The
+Cargo host tools use the same Rust version constant as compilation and rustfmt.
+
+The syscall crate is a Cargo workspace member with its own unsafe-code lint
+policy. This lets the importer treat all in-repository crates as first-party
+packages rather than generating machine-specific external path dependencies.
+
+The Linux build downloads a pinned GCC toolchain and sysroot. V8 uses a
+checksum-pinned archive selected from `Cargo.lock`; Bazel resolves each new
+release and records its digest in `MODULE.bazel.lock`. Commit that lockfile
+after dependency updates. The V8 patch keeps native build outputs inside the
+declared output directory. The Rust test launcher uses pinned patchelf to give
+temporary executable copies the pinned Ubuntu loader and library paths. This
+preserves self-reexecution and lets declared helper binaries run with a cleared
+environment. Clients require compatible x86-64 Linux kernels. To select an
+accessible cache:
 
 ```bash
 bazel test --remote_cache=grpc://CACHE_HOST:9092 //:bazel_tests
@@ -23,5 +44,26 @@ bazel test --remote_cache=grpc://CACHE_HOST:9092 //:bazel_tests
 Local endpoint settings can also live in the ignored `.bazelrc.local`. Each
 worktree uses its own Bazel output directory; the remote service shares action
 results and artifacts. No shared writable output directory or local disk cache
-is configured. Native linker and system-library differences can prevent reuse
-between hosts; this setup does not yet pin that part of the toolchain.
+is configured. Self-hosted CI uses the `BAZEL_REMOTE_CACHE` repository variable
+when configured; hosted jobs run without the private cache. On a private
+Tailscale client, use `--remote_cache=grpc://bazel-cache:9092`.
+
+The runtime launcher applies to the Rust unit-test binaries. The convergence
+CLI, Claude/Codex adapter, and daemon unit targets use host utilities and carry
+Bazel's `external` tag so their tests always execute while compilation remains
+cacheable. The daemon socket tests also run outside the sandbox to inspect the
+host's real ownership mapping. Other tests declare their fixture files as Bazel
+inputs. Cargo continues to run the integration tests and doctests.
+
+The PostgreSQL suite builds the persistence dependency closure and runs its 16
+PostgreSQL test binaries with a digest-pinned PostgreSQL image. Migrations and
+the example configuration are declared compilation inputs. With Docker:
+
+```bash
+bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //crates/persistence:postgres_tests
+```
+
+Each test binary has its own cached result. PostgreSQL targets are manual so
+`//:bazel_tests` remains the unit suite. The additive `bazel-postgres` CI job
+runs one binary at a time, with 16 test threads per binary; Cargo retains the
+full PostgreSQL gate.

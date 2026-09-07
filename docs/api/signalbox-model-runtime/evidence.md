@@ -2,6 +2,27 @@
 
 # evidence
 
+## RateLimitWindow
+
+```rust
+pub struct RateLimitWindow {
+    pub remaining_percent: i64,
+    pub window_duration: option::Option<time::Duration>,
+    pub resets_at: option::Option<time::SystemTime>,
+}
+// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
+```
+
+## RateLimitSnapshot
+
+```rust
+pub struct RateLimitSnapshot {
+    pub observed_at: time::SystemTime,
+    pub windows: vec::Vec<RateLimitWindow>,
+}
+// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
+```
+
 ## TerminalReport
 
 ```rust

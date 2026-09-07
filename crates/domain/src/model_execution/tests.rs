@@ -2,6 +2,7 @@
 
 use std::num::NonZeroU64;
 
+use super::tool_round::initial_tool_approval_matches_posture;
 use super::*;
 use crate::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
@@ -23,6 +24,10 @@ use crate::{
         provider_model_identity, semantic_transcript_entry_id, session_id, tool_attempt_id,
         tool_request_id, turn_attempt_id, turn_id,
     },
+};
+use crate::{
+    AttemptEnd, DangerousToolAutoApproval, InitialToolApproval, SteeringReclassificationReason,
+    ToolRequest, ToolUsingAssistantResponse,
 };
 use crate::{FrozenModelSelection, ResolvedProviderTarget, ToolRequestId};
 
@@ -582,6 +587,7 @@ fn correlated_observation(
         provider_failure_cause: None,
         retry_after: None,
         non_acceptance_proven: false,
+        rate_limits: None,
     }
 }
 

@@ -436,6 +436,8 @@ pub enum ProviderModelCallFailureCause {
 pub struct CorrelatedModelCallTerminalObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl CorrelatedModelCallTerminalObservation {
+    pub fn with_rate_limits(self, snapshot: option::Option<ProviderRateLimitSnapshot>) -> Self;
+    pub fn rate_limits(&self) -> option::Option<&ProviderRateLimitSnapshot>;
     pub const fn call(&self) -> ModelCallId;
     pub const fn correlation(&self) -> &IssuedModelCallCorrelation;
     pub const fn observation(&self) -> &ModelCallTerminalObservation;

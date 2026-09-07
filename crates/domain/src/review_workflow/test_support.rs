@@ -1,5 +1,16 @@
 //! Shared review fixtures for `docs/spec/review-workflows.md`.
 
+use super::finding::finding_transition;
+use crate::AcceptedInputId;
+use crate::ContextFrontierId;
+use crate::ReviewExternalLinkId;
+use crate::ReviewFindingId;
+use crate::ReviewPassId;
+use crate::ReviewRunId;
+use crate::ReviewTargetId;
+use crate::SessionId;
+use crate::TurnId;
+
 use super::*;
 use uuid::Uuid;
 

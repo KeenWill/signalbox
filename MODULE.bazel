@@ -1,6 +1,16 @@
 module(name = "signalbox")
 
 bazel_dep(name = "rules_rust", version = "0.74.0")
+bazel_dep(name = "gcc_toolchain", version = "0.12.0")
+
+gcc = use_extension("@gcc_toolchain//toolchain:module_extensions.bzl", "gcc_toolchains")
+gcc.toolchain(
+    name = "gcc_linux_x86_64",
+    target_arch = "x86_64",
+)
+use_repo(gcc, "gcc_linux_x86_64")
+
+register_toolchains("@gcc_linux_x86_64//:all")
 
 RUST_VERSION = "1.98.1"
 
@@ -13,3 +23,56 @@ rust.toolchain(
 use_repo(rust, "rust_toolchains")
 
 register_toolchains("@rust_toolchains//:all")
+
+host_tools = use_extension("@rules_rust//rust:extensions.bzl", "rust_host_tools")
+host_tools.host_tools(
+    name = "signalbox_rust_host_tools",
+    version = RUST_VERSION,
+)
+use_repo(host_tools, "signalbox_rust_host_tools")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+
+v8 = use_extension("//tooling/bazel:v8.bzl", "v8")
+use_repo(v8, "rusty_v8_archive")
+
+crate.annotation(
+    build_script_data = ["@rusty_v8_archive//file"],
+    build_script_env = {
+        "RUSTY_V8_ARCHIVE": "$(execpath @rusty_v8_archive//file)",
+        "RUSTY_V8_SRC_BINDING_PATH": "../gen/src_binding_simdutf_release_x86_64-unknown-linux-gnu.rs",
+    },
+    crate = "v8",
+    label_injections = {"@rusty_v8_archive": "@rusty_v8_archive"},
+    patch_args = ["-p1"],
+    patches = ["//tooling/bazel:patches/v8-build-output.patch"],
+)
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    host_tools = "@signalbox_rust_host_tools",
+    manifests = ["//:Cargo.toml"],
+    supported_platform_triples = ["x86_64-unknown-linux-gnu"],
+)
+use_repo(crate, "crates")
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "patchelf",
+    build_file_content = 'exports_files(["bin/patchelf"])',
+    sha256 = "ce84f2447fb7a8679e58bc54a20dc2b01b37b5802e12c57eece772a6f14bf3f0",
+    urls = ["https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz"],
+)
+
+http_archive(
+    name = "linux_test_runtime",
+    build_file_content = """filegroup(
+    name = "libraries",
+    srcs = glob(["usr/lib/x86_64-linux-gnu/*.so*"], allow_empty = False),
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "c1e67ef7b17a6300e136118bd1dc04725009cb376c1aad10abcf8cd453628d58",
+    urls = ["https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.4-base-amd64.tar.gz"],
+)

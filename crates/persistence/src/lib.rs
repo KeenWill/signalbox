@@ -23,6 +23,7 @@ pub mod conversation_import_discovery;
 pub mod conversation_listing;
 pub mod create_session;
 pub mod create_session_from_imported_frontier;
+pub mod credential_capacity;
 pub mod goal;
 pub mod goal_turn;
 pub mod hub_fence;

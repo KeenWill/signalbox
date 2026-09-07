@@ -18,12 +18,13 @@
 | conversation_listing | 4 | 0 | 0 | [conversation_listing](conversation_listing.md) |
 | create_session | 4 | 0 | 0 | [create_session](create_session.md) |
 | create_session_from_imported_frontier | 4 | 0 | 0 | [create_session_from_imported_frontier](create_session_from_imported_frontier.md) |
+| credential_capacity | 0 | 0 | 1 | [credential_capacity](credential_capacity.md) |
 | goal | 7 | 0 | 0 | [goal](goal.md) |
 | goal_turn | 2 | 0 | 0 | [goal_turn](goal_turn.md) |
 | hub_fence | 4 | 0 | 3 | [hub_fence](hub_fence.md) |
 | lifecycle_metrics | 8 | 0 | 0 | [lifecycle_metrics](lifecycle_metrics.md) |
 | mapping | 6 | 0 | 29 | [mapping](mapping.md) |
-| model_execution | 14 | 0 | 0 | [model_execution](model_execution.md) |
+| model_execution | 15 | 0 | 0 | [model_execution](model_execution.md) |
 | operator_status | 6 | 0 | 0 | [operator_status](operator_status.md) |
 | outbox | 31 | 0 | 7 | [types](outbox/types.md), [types-2](outbox/types-2.md), [functions](outbox/functions.md) |
 | plan | 3 | 0 | 0 | [plan](plan.md) |
