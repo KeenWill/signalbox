@@ -445,3 +445,46 @@ fn an_unconsumed_item_can_use_a_constant_discriminator() {
     tag.insert("const".into(), serde_json::json!("plan"));
     assert!(schema_shape::object_shape(&expected, &actual, &actual).is_ok());
 }
+
+#[test]
+fn closed_turn_statuses_accept_equivalent_constant_unions() {
+    let expected = derived::<frame::TurnCompleted>();
+    let mut actual = schema("TurnCompletedNotification");
+    let statuses = actual["definitions"]["TurnStatus"]["enum"]
+        .as_array()
+        .unwrap();
+    let alternatives: Vec<_> = statuses
+        .iter()
+        .map(|status| serde_json::json!({"const": status}))
+        .collect();
+    actual["definitions"]["TurnStatus"] = serde_json::json!({"oneOf": alternatives});
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_ok());
+    actual["definitions"]["TurnStatus"]["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"const":"futureStatus"}));
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
+}
+
+#[test]
+fn catch_all_items_can_explicitly_exclude_every_consumed_tag() {
+    let expected = derived::<frame::TurnCompleted>();
+    let mut actual = schema("TurnCompletedNotification");
+    actual["definitions"]["ThreadItem"]["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "type":"object", "required":["type"], "properties":{
+                "type":{"type":"string", "not":{"enum":["agentMessage","userMessage","hookPrompt"]}}
+            }
+        }));
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_ok());
+    let catch_all = actual["definitions"]["ThreadItem"]["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap();
+    catch_all["properties"]["type"]["not"]["enum"] =
+        serde_json::json!(["userMessage", "hookPrompt"]);
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_err());
+}

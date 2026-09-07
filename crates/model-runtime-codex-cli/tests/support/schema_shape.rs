@@ -85,6 +85,33 @@ fn alternatives(value: &Value) -> Option<Vec<Value>> {
     })
 }
 
+// Closed string enums may use enum or unions of singleton const schemas.
+fn string_members(schema: &Value, root: &Value) -> Option<BTreeSet<String>> {
+    let schema = dereference(schema, root);
+    if let Some(branches) = alternatives(schema) {
+        let mut members = BTreeSet::new();
+        for branch in branches {
+            members.extend(string_members(&branch, root)?);
+        }
+        return Some(members);
+    }
+    if schema.get("type").is_some_and(|kind| kind != "string") {
+        return None;
+    }
+    let mut members = if let Some(values) = schema["enum"].as_array() {
+        values
+            .iter()
+            .map(|value| value.as_str().map(str::to_owned))
+            .collect::<Option<BTreeSet<_>>>()?
+    } else {
+        BTreeSet::from([schema["const"].as_str()?.to_owned()])
+    };
+    if let Some(constant) = schema.get("const") {
+        members.retain(|member| constant.as_str() == Some(member.as_str()));
+    }
+    Some(members)
+}
+
 fn integer_bounds(value: &Value) -> (i128, i128) {
     let format_bounds = value["format"]
         .as_str()
@@ -167,6 +194,11 @@ pub(super) fn compatible(
             return error_info(error_schema, expected_root, actual, actual_root, true).is_ok();
         }
     }
+    if expected["enum"].is_array() {
+        return string_members(expected, expected_root).is_some_and(|members| {
+            string_members(actual, actual_root).is_some_and(|actual| actual == members)
+        });
+    }
     if let Some(variants) = alternatives(actual) {
         return variants
             .iter()
@@ -181,11 +213,6 @@ pub(super) fn compatible(
     let actual_type = actual["type"].as_str();
     if expected_type != actual_type
         && !(expected_type == Some("number") && actual_type == Some("integer"))
-    {
-        return false;
-    }
-    if expected["enum"].is_array()
-        && (!actual["enum"].is_array() || strings(&actual["enum"]) != strings(&expected["enum"]))
     {
         return false;
     }
@@ -324,17 +351,23 @@ fn turn_items(
         return Ok(found);
     }
     let tag = dereference(&actual["properties"]["type"], actual_root);
+    let consumed_tags = ["agentMessage", "userMessage", "hookPrompt"];
+    if tag
+        .get("not")
+        .and_then(|excluded| string_members(excluded, actual_root))
+        .is_some_and(|excluded| consumed_tags.iter().all(|tag| excluded.contains(*tag)))
+    {
+        return Ok(false);
+    }
     let tags = tag["enum"]
         .as_array()
         .map(Vec::as_slice)
         .or_else(|| tag.get("const").map(std::slice::from_ref))
         .ok_or("item schema must identify its possible tags")?;
-    if tags.iter().any(|tag| {
-        matches!(
-            tag.as_str(),
-            Some("agentMessage" | "userMessage" | "hookPrompt")
-        )
-    }) {
+    if tags
+        .iter()
+        .any(|tag| tag.as_str().is_some_and(|tag| consumed_tags.contains(&tag)))
+    {
         let discriminator = serde_json::json!({
             "type":"object", "required":["type"],
             "properties":{"type":{"type":"string"}}
