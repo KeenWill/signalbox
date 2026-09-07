@@ -2676,6 +2676,26 @@ async fn wait_for_blocked_reload_activation(pool: &PgPool) -> Result<(), Box<dyn
     Ok(())
 }
 
+/// Waits until reconciliation cannot yet restore eligibility through its target transaction.
+async fn wait_for_blocked_target_reconciliation(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT FROM pg_locks
+                 WHERE relation = 'convergence_sweep_target'::regclass AND NOT granted)",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
 async fn webhook_delivery_status(
     hook: &RuntimeHookFixture<'_>,
     secret: &[u8],
@@ -3652,10 +3672,26 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     let disable = ReloadConfiguration {
         command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
     };
-    assert_eq!(
-        reload.reload(disable).await?,
-        ReloadLookup::Recorded(ReloadResult::Reloaded)
+    let mut target_lock = core_pool.begin().await?;
+    sqlx::query("LOCK TABLE convergence_sweep_target IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *target_lock)
+        .await?;
+    let (disabled, published_before_restoration) = tokio::join!(reload.reload(disable), async {
+        wait_for_blocked_target_reconciliation(&core_pool).await?;
+        let published = !reload
+            .catalogs()
+            .models
+            .repository_watch()
+            .expect("watch")
+            .enabled();
+        target_lock.commit().await?;
+        Ok::<_, Box<dyn Error>>(published)
+    });
+    assert!(
+        published_before_restoration?,
+        "replacement catalogs precede eligibility restoration"
     );
+    assert_eq!(disabled?, ReloadLookup::Recorded(ReloadResult::Reloaded));
     assert!(tokio::net::TcpStream::connect(hook.address).await.is_err());
     hook.enabled = true;
     hook.rule_version = 1;
