@@ -429,3 +429,19 @@ fn notification_roots_cannot_become_nullable() {
         );
     }
 }
+
+#[test]
+fn an_unconsumed_item_can_use_a_constant_discriminator() {
+    let expected = derived::<frame::TurnCompleted>();
+    let mut actual = schema("TurnCompletedNotification");
+    let item = actual["definitions"]["ThreadItem"]["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|item| strings(&item["properties"]["type"]["enum"]).contains("plan"))
+        .unwrap();
+    let tag = item["properties"]["type"].as_object_mut().unwrap();
+    tag.remove("enum");
+    tag.insert("const".into(), serde_json::json!("plan"));
+    assert!(schema_shape::object_shape(&expected, &actual, &actual).is_ok());
+}

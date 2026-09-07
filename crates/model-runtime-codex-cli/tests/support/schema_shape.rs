@@ -326,6 +326,8 @@ fn turn_items(
     let tag = dereference(&actual["properties"]["type"], actual_root);
     let tags = tag["enum"]
         .as_array()
+        .map(Vec::as_slice)
+        .or_else(|| tag.get("const").map(std::slice::from_ref))
         .ok_or("item schema must identify its possible tags")?;
     if tags.iter().any(|tag| {
         matches!(
