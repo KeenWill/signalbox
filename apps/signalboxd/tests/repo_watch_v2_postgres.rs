@@ -2553,6 +2553,7 @@ fn runtime_configuration(
 [repository_watch]
 version = 1
 enabled = {enabled}
+signal_reviewers = []
 [repository_watch.webhook]
 bind_address = "{address}"
 path = "{path}"
@@ -2566,7 +2567,7 @@ webhook_mode = "primary"
 [[repository_watch.rules]]
 id = "ci"
 version = 1
-singleton_per = "repository"
+singleton_per = "repo"
 cooldown_seconds = 0
 [repository_watch.rules.matcher]
 event_kinds = ["branch_workflow_run_completed"]
@@ -2599,7 +2600,10 @@ async fn webhook_status(
         &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret),
         RUNTIME_WEBHOOK_BODY.as_bytes(),
     );
-    Ok(reqwest::Client::new()
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    Ok(reqwest::Client::builder()
+        .no_proxy()
+        .build()?
         .post(format!("http://{}{}", hook.address, hook.path))
         .header("x-github-hook-id", hook.id)
         .header(
