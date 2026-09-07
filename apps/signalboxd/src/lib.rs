@@ -65,6 +65,7 @@ mod lifecycle_deadline_runtime;
 mod lifecycle_metrics_runtime;
 mod local_socket;
 pub mod model_adapter;
+mod oauth;
 mod process_runtime;
 mod repo_watch_checkout;
 mod repo_watch_credentials;
@@ -114,7 +115,7 @@ pub use conversation_introspection::{
 pub use credential_pools::{
     CredentialDelivery, CredentialHomeAdmissionFailure, CredentialPool, CredentialPoolAction,
     CredentialPoolExhaustion, CredentialPoolMember, CredentialPoolTieBreak, CredentialPoolTrigger,
-    CredentialProfile,
+    CredentialProfile, OauthDelivery,
 };
 pub use daemon_tools::{
     BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonToolCatalog,

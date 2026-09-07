@@ -77,8 +77,8 @@ pub enum OauthCredentialHandlingOutcome {
 
 ```rust
 pub enum OauthCredentialRepositoryError {
-    Database(error::Error),
-    CommitAmbiguous(error::Error),
+    Database,
+    CommitAmbiguous,
     Corruption,
     InvalidProfile,
 }
@@ -90,7 +90,7 @@ impl error::Error for oauth_credential::OauthCredentialRepositoryError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl convert::From<error::Error> for oauth_credential::OauthCredentialRepositoryError {
-    fn from(error: error::Error) -> Self;
+    fn from(_error: error::Error) -> Self;
 }
 ```
 
@@ -110,4 +110,100 @@ impl oauth_credential::OauthCredentialRepository {
         oauth_credential::OauthCredentialRepositoryError,
     >;
 }
+impl oauth_credential::OauthCredentialRepository {
+    pub async fn replace_registrations(
+        &self,
+        registrations: &[(string::String, oauth_credential::OauthRegistration)],
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn begin_exchange(
+        &self,
+        command: &oauth_credential::OauthCredentialCommand,
+        registration: result::Result<
+            &oauth_credential::OauthRegistration,
+            oauth_credential::OauthCredentialFailure,
+        >,
+    ) -> result::Result<
+        oauth_credential::OauthStartOutcome,
+        oauth_credential::OauthCredentialRepositoryError,
+    >;
+    pub async fn retain_progress(
+        &self,
+        exchange: &oauth_credential::OauthExchange,
+        progress: &oauth_credential::OauthProgress,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn progress(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+    ) -> result::Result<
+        option::Option<oauth_credential::OauthProgress>,
+        oauth_credential::OauthCredentialRepositoryError,
+    >;
+    pub async fn complete_exchange(
+        &self,
+        exchange: &oauth_credential::OauthExchange,
+        authorization: result::Result<
+            &oauth_credential::OauthAuthorization,
+            oauth_credential::OauthCredentialFailure,
+        >,
+    ) -> result::Result<
+        oauth_credential::OauthCredentialOutcome,
+        oauth_credential::OauthCredentialRepositoryError,
+    >;
+    pub async fn abandon_pending(
+        &self,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+}
+```
+
+## OauthRegistration
+
+```rust
+pub struct OauthRegistration {
+    pub client_id: string::String,
+    pub token_url: string::String,
+    pub device_authorization_url: string::String,
+    pub scopes: vec::Vec<string::String>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## OauthProgress
+
+```rust
+pub struct OauthProgress {
+    pub user_code: string::String,
+    pub verification_uri: string::String,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## OauthAuthorization
+
+```rust
+pub struct OauthAuthorization {
+    pub refresh_token: string::String,
+    pub identity_token: string::String,
+    pub account_identity: value::Value,
+}
+// derives: clone::Clone
+impl fmt::Debug for oauth_credential::OauthAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+```
+
+## OauthExchange
+
+```rust
+pub struct OauthExchange {/* private */}
+// derives: clone::Clone, fmt::Debug
+```
+
+## OauthStartOutcome
+
+```rust
+pub enum OauthStartOutcome {
+    Started(oauth_credential::OauthExchange),
+    Existing(oauth_credential::OauthCredentialHandlingOutcome),
+}
+// derives: clone::Clone, fmt::Debug
 ```

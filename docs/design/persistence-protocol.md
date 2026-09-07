@@ -90,11 +90,8 @@ identity token and one that returns none, without a second commit and without
 mixing tokens from different exchanges. The replace-and-clear commit publishes
 the durable member-availability update that wakes a parked deadline-free
 exhausted wait, as every accepted exclusion clear does in its own transaction,
-and a clear that removes no exclusion publishes nothing. Provisioning locks its
-own profile row and every co-member profile row in one reference-ordered
-acquisition, rereads membership under those locks and repeats when the set has
-grown, and interning a pool-policy revision locks every member's profile row in
-the same order. Delivery of OAuth material to a model call is owned by
+and a clear that removes no exclusion publishes nothing. Delivery of OAuth
+material to a model call is owned by
 [configuration-and-credentials](../spec/configuration-and-credentials.md).
 
 ## Compatibility constraints

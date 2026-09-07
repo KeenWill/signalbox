@@ -150,6 +150,17 @@ impl ProcessRuntime {
     /// Serves requests and dispatches durable updates until `shutdown` changes
     /// to true or its sender closes.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), ProcessRuntimeError> {
+        let oauth = signalbox_persistence::oauth_credential::OauthCredentialRepository::new(
+            self.pool.clone(),
+        );
+        oauth
+            .abandon_pending()
+            .await
+            .map_err(ProcessRuntimeError::OauthRecovery)?;
+        oauth
+            .replace_registrations(&self.model_configuration.oauth_registrations())
+            .await
+            .map_err(ProcessRuntimeError::OauthRecovery)?;
         let fanouts = self.fanouts;
         let connection_dependencies = ConnectionDependencies {
             recovery_reporter: self.recovery_reporter,

@@ -445,14 +445,16 @@ post-reservation ceiling enforced by the daemon, and the loader does not derive
 either value from the other.
 
 The daemon refers to a credential by its non-secret name everywhere except at
-the point of use. No credential value, credential file path, or database URL
-appears in a log, an error, or a durable record. For a profile whose credential
-value the daemon resolves, the daemon redacts that exact value from provider
-text before it truncates the text; a delivery that gives the daemon no value
-receives credential-shape redaction instead. A credential for one repository
-never authorizes a request to another. That isolation comes from how a
-credential is provisioned or from the repository entry a runner selects; the
-daemon's code-host tools use one fixed credential reference.
+the point of use. OAuth authorization tables hold the refresh and identity
+tokens the delivery needs; no credential value appears in a log, an error, or
+any other durable record. No credential file path or database URL appears in a
+log, an error, or a durable record. For a profile whose credential value the
+daemon resolves, the daemon redacts that exact value from provider text before
+it truncates the text; a delivery that gives the daemon no value receives
+credential-shape redaction instead. A credential for one repository never
+authorizes a request to another. That isolation comes from how a credential is
+provisioned or from the repository entry a runner selects; the daemon's
+code-host tools use one fixed credential reference.
 
 Errors, logs, and diagnostic evidence contain classes, counts, and canonical
 identifiers. They never contain source bytes, host or credential paths, raw or
@@ -713,6 +715,14 @@ The optional `[convergence]` table deserializes the
 validation of nonempty reviewer identities after bot-suffix normalization.
 Convergence reads and the sweep require this policy; other code-host operations
 do not use it.
+
+OAuth provisioning runs the configured device exchange, retains refresh and
+identity tokens with the canonical configuration tuple and generation, and
+stores no authorization when the response lacks an identity token. Authorization
+commits and pool-policy membership insertion serialize account-independence
+checks against every retained co-membership. Configuration rejects OAuth as
+undelivered, so provisioning handlers remain unreachable until dispatch support
+admits it.
 
 ## Planned
 

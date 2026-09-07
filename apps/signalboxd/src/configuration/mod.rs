@@ -1227,6 +1227,23 @@ impl HubModelConfiguration {
         self.credential_profiles.get(name)
     }
 
+    pub(crate) fn oauth_registrations(
+        &self,
+    ) -> Vec<(
+        String,
+        signalbox_persistence::oauth_credential::OauthRegistration,
+    )> {
+        self.credential_profiles
+            .values()
+            .filter_map(|profile| match profile.delivery() {
+                CredentialDelivery::Oauth(delivery) => {
+                    Some((profile.name().to_owned(), delivery.registration()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Returns one declared credential pool by its exact name.
     pub fn credential_pool(&self, name: &str) -> Option<&CredentialPool> {
         self.credential_pools.get(name)
