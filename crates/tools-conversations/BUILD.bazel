@@ -1,6 +1,6 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_library")
 
 exports_files(["Cargo.toml"])
 
@@ -17,34 +17,24 @@ extract_cargo_lints(
 )
 
 rust_library(
-    name = "signalbox_domain",
+    name = "signalbox_tools_conversations",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
+    compile_data = [],
+    crate_features = [],
+    crate_root = "src/lib.rs",
     edition = crate_edition(),
     lint_config = ":cargo_lints",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
+    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
     rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
     ],
     visibility = ["//:__subpackages__"],
-    deps = all_crate_deps(normal = True),
-)
-
-rust_test(
-    name = "unit_tests",
-    size = "small",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    crate = ":signalbox_domain",
-    lint_config = ":cargo_lints",
-    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
-    rustc_flags = [
-        "--forbid=unsafe_code",
-        "--deny=warnings",
-    ],
-    deps = all_crate_deps(normal_dev = True),
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/domain:signalbox_domain",
+        "//crates/tool-contract:signalbox_tool_contract",
+    ] + all_crate_deps(normal = True),
 )

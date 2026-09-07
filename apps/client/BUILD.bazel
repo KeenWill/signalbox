@@ -1,6 +1,6 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
 
 exports_files(["Cargo.toml"])
 
@@ -17,34 +17,42 @@ extract_cargo_lints(
 )
 
 rust_library(
-    name = "signalbox_domain",
+    name = "signalbox_client",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
+    compile_data = [],
+    crate_features = [],
+    crate_root = "src/lib.rs",
     edition = crate_edition(),
     lint_config = ":cargo_lints",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
+    proc_macro_deps = [] + all_crate_deps(proc_macro = True),
     rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
     ],
     visibility = ["//:__subpackages__"],
-    deps = all_crate_deps(normal = True),
+    deps = ["//crates/process-protocol:signalbox_process_protocol"] + all_crate_deps(normal = True),
 )
 
-rust_test(
-    name = "unit_tests",
-    size = "small",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    crate = ":signalbox_domain",
+rust_binary(
+    name = "signalbox",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = [],
+    crate_features = [],
+    crate_root = "src/main.rs",
+    edition = crate_edition(),
     lint_config = ":cargo_lints",
-    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    proc_macro_deps = [] + all_crate_deps(proc_macro = True),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
     ],
-    deps = all_crate_deps(normal_dev = True),
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":signalbox_client",
+        "//crates/process-protocol:signalbox_process_protocol",
+    ] + all_crate_deps(normal = True),
 )

@@ -1,8 +1,14 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//cargo:defs.bzl", "extract_cargo_lints")
+load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 exports_files(["Cargo.toml"])
+
+cargo_toml_env_vars(
+    name = "cargo_environment",
+    src = "Cargo.toml",
+    workspace = "//:Cargo.toml",
+)
 
 extract_cargo_lints(
     name = "cargo_lints",
@@ -22,6 +28,7 @@ rust_library(
     edition = crate_edition(),
     lint_config = ":cargo_lints",
     proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -59,6 +66,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -105,6 +113,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -151,6 +160,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -197,6 +207,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -243,6 +254,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -289,6 +301,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -335,6 +348,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -381,6 +395,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -427,6 +442,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -473,6 +489,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -519,6 +536,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -568,6 +586,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -617,6 +636,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -666,6 +686,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -712,6 +733,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -758,6 +780,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",

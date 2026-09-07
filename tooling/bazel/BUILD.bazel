@@ -5,3 +5,5 @@ native_runtime(
     libraries = "@linux_test_runtime//:libraries",
     visibility = ["//visibility:public"],
 )
+
+exports_files(["patches/v8-build-output.patch"])

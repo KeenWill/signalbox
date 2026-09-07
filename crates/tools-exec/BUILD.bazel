@@ -1,6 +1,6 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
 
 exports_files(["Cargo.toml"])
 
@@ -17,9 +17,12 @@ extract_cargo_lints(
 )
 
 rust_library(
-    name = "signalbox_tools_plan",
+    name = "signalbox_tools_exec",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
+    compile_data = [],
+    crate_features = [],
+    crate_root = "src/lib.rs",
     edition = crate_edition(),
     lint_config = ":cargo_lints",
     proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
@@ -32,7 +35,30 @@ rust_library(
     deps = [
         "//crates/application:signalbox_application",
         "//crates/domain:signalbox_domain",
-        "//crates/newtype:signalbox_newtype",
+        "//crates/tool-contract:signalbox_tool_contract",
+    ] + all_crate_deps(normal = True),
+)
+
+rust_binary(
+    name = "signalbox-exec-supervisor",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = [],
+    crate_features = [],
+    crate_root = "src/bin/signalbox-exec-supervisor.rs",
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
+    rustc_env_files = [":cargo_environment"],
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":signalbox_tools_exec",
+        "//crates/application:signalbox_application",
+        "//crates/domain:signalbox_domain",
         "//crates/tool-contract:signalbox_tool_contract",
     ] + all_crate_deps(normal = True),
 )
