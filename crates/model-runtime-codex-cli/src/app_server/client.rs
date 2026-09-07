@@ -150,6 +150,11 @@ impl Client {
             }
             Phase::TurnStart => {
                 let response: TurnStartResponse = decode(result)?;
+                self.activity.assistant_output_observed |= response
+                    .turn
+                    .items
+                    .iter()
+                    .any(item_precludes_non_acceptance);
                 self.check_turn(&response.turn.id)?;
                 self.phase = Phase::Running;
                 Ok(Event::Ignored)
@@ -210,14 +215,17 @@ impl Client {
                 let event: TokenUsageUpdated = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn_id)?;
                 let total = &event.token_usage.total;
-                if total.input_tokens > 0
-                    || total.cached_input_tokens > 0
-                    || total
-                        .cache_write_input_tokens
-                        .is_some_and(|count| count > 0)
-                    || total.output_tokens != 0
-                    || total.reasoning_output_tokens != 0
-                    || total.total_tokens > 0
+                if [
+                    total.input_tokens,
+                    total.cached_input_tokens,
+                    total.cache_write_input_tokens,
+                    total.output_tokens,
+                    total.reasoning_output_tokens,
+                    total.total_tokens,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|count| count > 0)
                 {
                     self.activity.assistant_output_observed = true;
                 }
