@@ -155,6 +155,14 @@ impl BlobStorageConfiguration {
         (name, &self.stores[name])
     }
 
+    /// Returns every store name some semantic write route currently selects.
+    ///
+    /// Reading the parsed route map keeps callers from restating the class
+    /// inventory, so a store named only by a later class stays routed.
+    pub fn routed_stores(&self) -> impl Iterator<Item = &BlobStoreName> + '_ {
+        self.routes.values()
+    }
+
     /// Reports whether every durable store identity remains configured.
     pub fn resolves_recorded_stores<'a>(
         &self,

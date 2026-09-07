@@ -21,7 +21,7 @@ pub use context_compaction::{
     ContextCompactionModelResult, RuntimeContextCompactionModel,
 };
 
-use std::{collections::HashMap, error::Error, fmt, future::Future, sync::Arc};
+use std::{collections::HashMap, fmt, future::Future, sync::Arc};
 
 use signalbox_application::{
     ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallInputTokenCount,
@@ -33,8 +33,9 @@ use signalbox_domain::{
     AuthorizedModelCall, CodexCliServiceTier as DomainCodexCliServiceTier, ContextFrontierId,
     DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, FastMode as DomainFastMode,
     FrozenModelSelection, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
-    OpenAiServiceTier as DomainOpenAiServiceTier, ProviderModelCallFailureCause,
-    ProviderReportedTokenUsage, ReasoningLevel as DomainReasoningLevel, ResolvedProviderTarget,
+    OpenAiServiceTier as DomainOpenAiServiceTier, ProviderCompactionBlock,
+    ProviderModelCallFailureCause, ProviderReportedTokenUsage,
+    ReasoningLevel as DomainReasoningLevel, ResolvedProviderTarget,
     ServiceTier as DomainServiceTier, SessionId, ToolArgumentsKind,
     ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind, ToolName as DomainToolName,
     ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId, TurnId, ValidatedModelSettings,
@@ -106,6 +107,11 @@ impl ProviderTextDelta {
     pub fn text(&self) -> &str {
         &self.text
     }
+
+    /// Shares the already-redacted provider text without copying its allocation.
+    pub fn shared_text(&self) -> Arc<str> {
+        Arc::clone(&self.text)
+    }
 }
 
 /// Best-effort presentation sink for already-redacted provider text deltas.
@@ -124,13 +130,14 @@ impl ProviderTextDeltaSink for DiscardProviderTextDeltas {
     fn publish(&self, _delta: ProviderTextDelta) {}
 }
 
-/// One exact provider-model spelling and baseline request limit for a durable
-/// domain target.
+/// One exact provider-model spelling, delivery capability, and request limits
+/// for a durable domain target.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeModelDefinition {
     target: ResolvedProviderTarget,
     provider_model: String,
     fast_target: Option<ResolvedProviderTarget>,
+    provider_compaction_supported: bool,
     max_output_tokens: u32,
     context_window_tokens: u32,
 }
@@ -159,6 +166,7 @@ impl RuntimeModelDefinition {
             target,
             provider_model,
             fast_target: None,
+            provider_compaction_supported: false,
             max_output_tokens,
             context_window_tokens,
         })
@@ -186,6 +194,17 @@ impl RuntimeModelDefinition {
         self.fast_target
     }
 
+    /// Declares provider compaction for this exact durable target.
+    pub const fn with_provider_compaction(mut self) -> Self {
+        self.provider_compaction_supported = true;
+        self
+    }
+
+    /// Returns whether this exact durable target supports provider compaction.
+    pub const fn provider_compaction_supported(&self) -> bool {
+        self.provider_compaction_supported
+    }
+
     /// Returns the required provider output-token ceiling.
     pub const fn max_output_tokens(&self) -> u32 {
         self.max_output_tokens
@@ -197,33 +216,23 @@ impl RuntimeModelDefinition {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A runtime delivery definition cannot construct a request-safe mapping.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeModelDefinitionError {
+    #[error("provider model spelling is empty or padded")]
     /// The provider model spelling was empty or padded.
     InvalidProviderModel,
+    #[error("provider output-token limit is zero")]
     /// A provider request requires a positive output-token ceiling.
     InvalidOutputLimit,
+    #[error("provider context-window limit is zero")]
     /// Automatic guarding requires a positive declared context window.
     InvalidContextWindow,
+    #[error("provider output-token limit exceeds its context window")]
     /// The reserved output alone cannot exceed the declared context window.
     OutputLimitExceedsContextWindow,
 }
-
-impl fmt::Display for RuntimeModelDefinitionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidProviderModel => "provider model spelling is empty or padded",
-            Self::InvalidOutputLimit => "provider output-token limit is zero",
-            Self::InvalidContextWindow => "provider context-window limit is zero",
-            Self::OutputLimitExceedsContextWindow => {
-                "provider output-token limit exceeds its context window"
-            }
-        })
-    }
-}
-
-impl Error for RuntimeModelDefinitionError {}
 
 /// Immutable runtime delivery mappings indexed by durable exact target.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -280,14 +289,17 @@ impl RuntimeModelCatalog {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Two deployment definitions assigned conflicting meanings to one target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeModelCatalogError {
+    #[error("runtime model catalog contains a conflicting target")]
     /// One target named distinct provider spellings or output limits.
     ConflictingTarget {
         /// The target whose immutable meaning conflicted.
         target: ResolvedProviderTarget,
     },
+    #[error("runtime model catalog contains a missing mapped fast target")]
     /// A mapped fast target has no runtime delivery definition.
     MissingFastTarget {
         /// Source target declaring mapped fast serving.
@@ -296,19 +308,6 @@ pub enum RuntimeModelCatalogError {
         fast_target: ResolvedProviderTarget,
     },
 }
-
-impl fmt::Display for RuntimeModelCatalogError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ConflictingTarget { .. } => "runtime model catalog contains a conflicting target",
-            Self::MissingFastTarget { .. } => {
-                "runtime model catalog contains a missing mapped fast target"
-            }
-        })
-    }
-}
-
-impl Error for RuntimeModelCatalogError {}
 
 fn runtime_delivery_definitions(
     models: &RuntimeModelCatalog,
@@ -345,11 +344,10 @@ pub enum ProviderTargetRelation {
 /// table of known provider identifiers:
 ///
 /// - equal spellings are [`Exact`](ProviderTargetRelation::Exact);
-/// - the configured spelling followed by `-` and a *dated snapshot qualifier*
-///   is [`AliasConcretion`](ProviderTargetRelation::AliasConcretion) — the
-///   configured family made concrete;
-/// - everything else is
-///   [`DifferentLineage`](ProviderTargetRelation::DifferentLineage).
+/// - the configured spelling followed by `-` and a *dated snapshot qualifier* is
+///   [`AliasConcretion`](ProviderTargetRelation::AliasConcretion) — the configured family made
+///   concrete;
+/// - everything else is [`DifferentLineage`](ProviderTargetRelation::DifferentLineage).
 ///
 /// A dated snapshot qualifier is `YYYYMMDD` or `YYYY-MM-DD`; calendar
 /// validity is deliberately not checked, because the shape alone makes the
@@ -486,7 +484,7 @@ model_call_cause_tokens! {
 ///
 /// A projection of the runtime's `LossCause` down to a stable token: the
 /// runtime's own variants retain provider-controlled transport and parser
-/// text, which never reaches operator telemetry (INV-035).
+/// text, which never reaches operator telemetry.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BoundaryLossCode {
     /// Cancellation fired after send commenced.
@@ -550,7 +548,7 @@ impl BoundaryLossCode {
 ///
 /// Every value renders as a fixed operator-facing token
 /// ([`as_str`](Self::as_str)); no provider response text, request or response
-/// body, credential material, or user content can reach it (INV-035). The
+/// body, credential material, or user content can reach it. The
 /// runtime's own exhaustive `ProviderErrorKind` classification is carried
 /// verbatim rather than restated, so the adapter taxonomy of
 /// docs/spec/runtime-substrate.md and this operator vocabulary cannot drift
@@ -804,67 +802,51 @@ pub struct RuntimeModelCallCapability<Prepared> {
     resolved_target: ResolvedTarget,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized adapter defect; provider response text and credentials are never
 /// retained in this error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeModelCallProviderError {
+    #[error("resolved model target has no runtime mapping")]
     /// A durably resolved target had no matching runtime mapping.
     UnconfiguredTarget,
+    #[error("model runtime preparation reported a defect")]
     /// Runtime preparation reported a local adapter defect.
     PreparationDefect,
+    #[error("model runtime returned a different correlation")]
     /// The runtime returned a different caller-owned correlation identity.
     CorrelationMismatch,
+    #[error("authorized model call differs from the prepared capability")]
     /// Durable authorization did not match the prepared one-shot request.
     AuthorizationMismatch,
+    #[error("model runtime observation carried a different correlation")]
     /// A runtime observation did not carry the caller-owned call identity.
     ObservationCorrelationMismatch,
+    #[error("provider served a different model lineage than the configured target")]
     /// The provider served a model from a different lineage than the
     /// configured target — a substitution the daemon never authorized, and a
     /// distinct outcome from an alias made concrete.
     ProviderTargetSubstituted,
+    #[error("provider completion contains unsupported assistant material")]
     /// Definitive response material is outside the first text-only slice.
     UnsupportedCompletionMaterial,
+    #[error("provider completion contains invalid assistant text")]
     /// A runtime text part cannot construct exact domain assistant text.
     InvalidAssistantText,
+    #[error("application tool schema is invalid at the runtime bridge")]
     /// A checked application schema could not form a runtime JSON value.
     InvalidToolSchema,
+    #[error("provider completion contains an invalid tool proposal")]
     /// Runtime tool material could not form a bounded domain proposal.
     InvalidToolProposal,
 }
-
-impl fmt::Display for RuntimeModelCallProviderError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::UnconfiguredTarget => "resolved model target has no runtime mapping",
-            Self::PreparationDefect => "model runtime preparation reported a defect",
-            Self::CorrelationMismatch => "model runtime returned a different correlation",
-            Self::AuthorizationMismatch => {
-                "authorized model call differs from the prepared capability"
-            }
-            Self::ObservationCorrelationMismatch => {
-                "model runtime observation carried a different correlation"
-            }
-            Self::ProviderTargetSubstituted => {
-                "provider served a different model lineage than the configured target"
-            }
-            Self::UnsupportedCompletionMaterial => {
-                "provider completion contains unsupported assistant material"
-            }
-            Self::InvalidAssistantText => "provider completion contains invalid assistant text",
-            Self::InvalidToolSchema => "application tool schema is invalid at the runtime bridge",
-            Self::InvalidToolProposal => "provider completion contains an invalid tool proposal",
-        })
-    }
-}
-
-impl Error for RuntimeModelCallProviderError {}
 
 impl RuntimeModelCallProviderError {
     /// The stable, sanitized operator-facing cause of this fail-closed
     /// outcome.
     ///
     /// The shared operator taxonomy
-    /// (docs/spec/runtime-substrate.md#operator-failure-taxonomy) says only
+    /// (docs/spec/runtime-substrate.md) says only
     /// *how bad* a failure is; this says *what happened*, without exposing
     /// provider text or user content.
     pub const fn cause_code(self) -> ModelCallCauseCode {
@@ -908,6 +890,7 @@ struct AcceptanceObservations<AcceptancePossible, Correlation> {
     telemetry: ModelCallTelemetry,
     text_deltas: Option<ProviderTextDeltaContext>,
     observations: Vec<Observation<Correlation>>,
+    rate_limits: Option<signalbox_domain::ProviderRateLimitSnapshot>,
 }
 
 struct ProviderTextDeltaContext {
@@ -923,6 +906,31 @@ where
     AcceptancePossible: FnOnce(),
     Correlation: PartialEq,
 {
+    fn observe_rate_limits(
+        &mut self,
+        correlation: Correlation,
+        snapshot: signalbox_model_runtime::RateLimitSnapshot,
+    ) {
+        if correlation != self.expected_correlation {
+            self.correlation_mismatch = true;
+            return;
+        }
+        self.rate_limits = Some(signalbox_domain::ProviderRateLimitSnapshot::new(
+            snapshot.observed_at,
+            snapshot
+                .windows
+                .into_iter()
+                .map(|window| {
+                    signalbox_domain::ProviderRateLimitWindow::new(
+                        window.remaining_percent,
+                        window.window_duration,
+                        window.resets_at,
+                    )
+                })
+                .collect(),
+        ));
+    }
+
     fn observe(&mut self, observation: Observation<Correlation>) {
         if observation.correlation != self.expected_correlation {
             self.correlation_mismatch = true;
@@ -997,47 +1005,22 @@ impl<R> fmt::Debug for RuntimeModelCallProvider<R> {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized exact-count adapter failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeInputTokenCountError {
+    #[error("model input token estimation failed")]
+    #[operator(class = CallerOrHubBug, code = "model_input_count_unconfigured_target")]
     /// The durable target has no runtime mapping.
     UnconfiguredTarget,
+    #[error("model input token estimation failed")]
+    #[operator(class = CallerOrHubBug, code = "model_input_count_invalid_tool_schema")]
     /// A checked application schema could not form runtime JSON.
     InvalidToolSchema,
+    #[error("model input token estimation failed")]
+    #[operator(class = CallerOrHubBug, code = "model_input_count_correlation_mismatch")]
     /// The runtime returned a different caller-owned correlation.
     CorrelationMismatch,
-    /// The provider-native count request did not return a validated count.
-    CountFailed,
-}
-
-impl fmt::Display for RuntimeInputTokenCountError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("exact model input token counting failed")
-    }
-}
-
-impl Error for RuntimeInputTokenCountError {}
-
-impl ClassifyOperatorFailure for RuntimeInputTokenCountError {
-    fn operator_failure_class(&self) -> OperatorFailureClass {
-        match self {
-            Self::CountFailed => OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false,
-            },
-            Self::UnconfiguredTarget | Self::InvalidToolSchema | Self::CorrelationMismatch => {
-                OperatorFailureClass::CallerOrHubBug
-            }
-        }
-    }
-
-    fn operator_failure_cause_code(&self) -> &'static str {
-        match self {
-            Self::UnconfiguredTarget => "model_input_count_unconfigured_target",
-            Self::InvalidToolSchema => "model_input_count_invalid_tool_schema",
-            Self::CorrelationMismatch => "model_input_count_correlation_mismatch",
-            Self::CountFailed => "model_input_count_provider_failure",
-        }
-    }
 }
 
 fn runtime_model_settings(
@@ -1123,7 +1106,12 @@ where
             request.model_settings().effective().fast_mode(),
         )
         .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
-        let messages = render_runtime_messages(operation.messages());
+        let messages = render_runtime_messages(
+            operation.messages(),
+            operation.reasoning_provenance(),
+            &self.models,
+        )
+        .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
         let tools = runtime_tool_definitions(operation.tools()).map_err(|error| {
             report_invalid_runtime_tool_schema(telemetry, &error);
             RuntimeInputTokenCountError::InvalidToolSchema
@@ -1142,26 +1130,40 @@ where
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
         runtime_operation.delivery = DeliveryMode::Streamed;
-        match self
-            .runtime
-            .count_input_tokens(runtime_operation, CancellationSignal::when(cancellation))
-            .await
-        {
-            signalbox_model_runtime::InputTokenCountOutcome::Counted {
-                correlation: returned,
-                input_tokens,
-            } if returned == correlation => Ok(ModelCallInputTokenCount::Counted(input_tokens)),
-            signalbox_model_runtime::InputTokenCountOutcome::Cancelled {
-                correlation: returned,
-            } if returned == correlation => Ok(ModelCallInputTokenCount::Cancelled),
-            signalbox_model_runtime::InputTokenCountOutcome::Failed {
-                correlation: returned,
-            } if returned == correlation => Err(RuntimeInputTokenCountError::CountFailed),
-            signalbox_model_runtime::InputTokenCountOutcome::Counted { .. }
-            | signalbox_model_runtime::InputTokenCountOutcome::Cancelled { .. }
-            | signalbox_model_runtime::InputTokenCountOutcome::Failed { .. } => {
-                Err(RuntimeInputTokenCountError::CorrelationMismatch)
-            }
+        runtime_operation.provider_compaction_supported =
+            effective_definition.provider_compaction_supported();
+        classify_runtime_input_count(
+            self.runtime
+                .count_input_tokens(runtime_operation, CancellationSignal::when(cancellation))
+                .await,
+            correlation,
+        )
+    }
+}
+
+fn classify_runtime_input_count(
+    outcome: signalbox_model_runtime::InputTokenCountOutcome<ModelCallId>,
+    correlation: ModelCallId,
+) -> Result<ModelCallInputTokenCount, RuntimeInputTokenCountError> {
+    match outcome {
+        signalbox_model_runtime::InputTokenCountOutcome::Counted {
+            correlation: returned,
+            input_tokens,
+        } if returned == correlation => Ok(ModelCallInputTokenCount::Counted(input_tokens)),
+        signalbox_model_runtime::InputTokenCountOutcome::Cancelled {
+            correlation: returned,
+        } if returned == correlation => Ok(ModelCallInputTokenCount::Cancelled),
+        signalbox_model_runtime::InputTokenCountOutcome::Unavailable {
+            correlation: returned,
+        } if returned == correlation => Ok(ModelCallInputTokenCount::Unavailable),
+        signalbox_model_runtime::InputTokenCountOutcome::Failed {
+            correlation: returned,
+        } if returned == correlation => Ok(ModelCallInputTokenCount::Unavailable),
+        signalbox_model_runtime::InputTokenCountOutcome::Counted { .. }
+        | signalbox_model_runtime::InputTokenCountOutcome::Cancelled { .. }
+        | signalbox_model_runtime::InputTokenCountOutcome::Unavailable { .. }
+        | signalbox_model_runtime::InputTokenCountOutcome::Failed { .. } => {
+            Err(RuntimeInputTokenCountError::CorrelationMismatch)
         }
     }
 }
@@ -1213,7 +1215,18 @@ where
             target: call.target(),
             frontier: call.frontier().snapshot(),
         };
-        let messages = render_runtime_messages(operation.messages());
+        let messages = render_runtime_messages(
+            operation.messages(),
+            operation.reasoning_provenance(),
+            &self.models,
+        )
+        .ok_or_else(|| {
+            fail_closed(
+                telemetry,
+                RuntimeModelCallProviderError::UnconfiguredTarget,
+                None,
+            )
+        })?;
         let tools = runtime_tool_definitions(operation.tools()).map_err(|error| {
             report_invalid_runtime_tool_schema(telemetry, &error);
             fail_closed(
@@ -1241,6 +1254,8 @@ where
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
         runtime_operation.delivery = DeliveryMode::Streamed;
+        runtime_operation.provider_compaction_supported =
+            effective_definition.provider_compaction_supported();
         match self
             .runtime
             .prepare(runtime_operation, CancellationSignal::when(cancellation))
@@ -1318,6 +1333,7 @@ where
                 sink: Arc::clone(&self.text_deltas),
             }),
             observations: Vec::new(),
+            rate_limits: None,
         };
         let report = self
             .runtime
@@ -1336,6 +1352,7 @@ where
             ));
         }
         let usage = provider_reported_token_usage(&report.evidence);
+        let rate_limits = observations.rate_limits.take();
         let retry_after = match &report.evidence {
             TerminalEvidence::ProviderError(error) => error.exchange.retry_after,
             _ => None,
@@ -1355,7 +1372,7 @@ where
         })?;
         report_classified_outcome(telemetry, &classified);
         let correlation = authorized.observation_correlation();
-        Ok(match classified.cause {
+        Ok((match classified.cause {
             ModelCallCauseCode::ProviderError(kind) => correlation
                 .bind_provider_failure_observation_with_retry_after(
                     provider_failure_cause(kind),
@@ -1365,6 +1382,7 @@ where
                 ),
             _ => correlation.bind_terminal_observation_with_usage(classified.observation, usage),
         })
+        .with_rate_limits(rate_limits))
     }
 }
 
@@ -1469,6 +1487,8 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
     }
     match classified.observation {
         ModelCallTerminalObservation::Completed { .. }
+        | ModelCallTerminalObservation::CompletedWithProviderCompaction { .. }
+        | ModelCallTerminalObservation::CompletedWithProviderReasoning { .. }
         | ModelCallTerminalObservation::CompletedWithTools { .. } => {
             tracing::debug!(
                 cause_code = classified.cause.as_str(),
@@ -1490,7 +1510,11 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
     }
 }
 
-fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<ConversationMessage> {
+fn render_runtime_messages(
+    messages: &[ModelConversationMessage],
+    provenance: &[signalbox_application::ProviderReasoningProvenance],
+    models: &RuntimeModelCatalog,
+) -> Option<Vec<ConversationMessage>> {
     let mut rendered = Vec::new();
     let mut assistant_call = None;
     let mut collecting_tool_results = false;
@@ -1584,6 +1608,56 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 }
                 collecting_tool_results = false;
             }
+            ModelConversationMessage::ProviderCompaction {
+                producing_call,
+                block,
+                ..
+            } => {
+                let part = MessagePart::ProviderCompaction {
+                    block_json: block.as_json().to_owned(),
+                };
+                if assistant_call == Some(*producing_call) {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    }
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::Assistant,
+                        parts: vec![part],
+                    });
+                    assistant_call = Some(*producing_call);
+                }
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::ProviderReasoning {
+                source,
+                producing_call,
+                item,
+            } => {
+                let origin = provenance.iter().find(|origin| {
+                    origin.source == *source && origin.producing_call == *producing_call
+                })?;
+                let producer = models.resolve(origin.producing_target)?;
+                let part = MessagePart::ProviderReasoning {
+                    item_json: item.as_json().to_owned(),
+                    producing_target: ResolvedTarget::new(producer.provider_model()),
+                    producing_credential: CredentialReference::new(
+                        origin.producing_credential.as_str(),
+                    ),
+                };
+                if assistant_call == Some(*producing_call) {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    }
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::Assistant,
+                        parts: vec![part],
+                    });
+                    assistant_call = Some(*producing_call);
+                }
+                collecting_tool_results = false;
+            }
             ModelConversationMessage::AssistantToolUse {
                 producing_call,
                 request,
@@ -1651,7 +1725,7 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
             }
         }
     }
-    rendered
+    Some(rendered)
 }
 
 fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
@@ -1675,10 +1749,16 @@ fn decode_checked_raw_json(
     serde_json::value::RawValue::from_string(value.to_owned())
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error(
+    "application tool schema is invalid at the runtime bridge: {}",
+    tool_name
+)]
 /// One application tool definition carried a schema that is not valid JSON.
 #[derive(Debug)]
 pub struct InvalidRuntimeToolSchema {
     tool_name: String,
+    #[source]
     source: serde_json::Error,
 }
 
@@ -1686,22 +1766,6 @@ impl InvalidRuntimeToolSchema {
     /// Returns the safe application tool name whose schema was rejected.
     pub fn tool_name(&self) -> &str {
         &self.tool_name
-    }
-}
-
-impl fmt::Display for InvalidRuntimeToolSchema {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "application tool schema is invalid at the runtime bridge: {}",
-            self.tool_name
-        )
-    }
-}
-
-impl Error for InvalidRuntimeToolSchema {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.source)
     }
 }
 
@@ -1771,6 +1835,7 @@ fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
             let kind = match error.kind() {
                 ToolExecutionErrorKind::UnknownTool => "unknown_tool",
                 ToolExecutionErrorKind::InvalidArguments => "invalid_arguments",
+                ToolExecutionErrorKind::PreauthorizationRejected => "preauthorization_rejected",
                 ToolExecutionErrorKind::ExecutionFailed => "execution_failed",
                 ToolExecutionErrorKind::ResultTooLarge => "result_too_large",
                 ToolExecutionErrorKind::CrashLost => "crash_lost",
@@ -1861,6 +1926,14 @@ pub fn render_delegation_outcome(outcome: &DelegationOutcome) -> String {
             generation.get(),
             command.into_uuid()
         ),
+        signalbox_domain::DelegationProvenanceReconstitutionInput::ParentLifecycleCommand {
+            session,
+            command,
+        } => format!(
+            r#"{{"type":"parent_lifecycle_command","parent_session_id":"{}","command_id":"{}","descendant_scope":"parent_and_descendants"}}"#,
+            session.into_uuid(),
+            command.into_uuid()
+        ),
     };
     format!(r#"{{"outcome":"{outcome_kind}","reason":"{reason}","provenance":{provenance}}}"#)
 }
@@ -1941,11 +2014,24 @@ fn classify_terminal(
         })
     };
 
+    let (evidence, retained_input_tokens, retained_output_tokens) = match evidence {
+        TerminalEvidence::CompletedWithProviderCompaction {
+            completion,
+            retained_input_tokens,
+            retained_output_tokens,
+        } => (
+            TerminalEvidence::Completed(completion),
+            Some(retained_input_tokens),
+            Some(retained_output_tokens),
+        ),
+        evidence => (evidence, None, None),
+    };
     match evidence {
         TerminalEvidence::Completed(completion) => {
             let finish = completion.finish;
             let mut response_parts = Vec::new();
-            let mut text_parts = Vec::new();
+            let mut has_provider_compaction = false;
+            let mut has_provider_reasoning = false;
             let mut tool_count = 0usize;
             for part in completion.content {
                 match part {
@@ -1956,8 +2042,26 @@ fn classify_terminal(
                                 RuntimeModelCallProviderError::InvalidAssistantText,
                             )
                         })?;
-                        text_parts.push(text.clone());
                         response_parts.push(AssistantResponsePart::Text(text));
+                    }
+                    AssistantPart::ProviderReasoning { item_json } => {
+                        let item = signalbox_domain::ProviderReasoningItem::try_new(item_json)
+                            .map_err(|_| {
+                                ClassificationFailure::bare(
+                                    RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                                )
+                            })?;
+                        has_provider_reasoning = true;
+                        response_parts.push(AssistantResponsePart::ProviderReasoning(item));
+                    }
+                    AssistantPart::ProviderCompaction { block_json } => {
+                        let block = ProviderCompactionBlock::try_new(block_json).map_err(|_| {
+                            ClassificationFailure::bare(
+                                RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                            )
+                        })?;
+                        has_provider_compaction = true;
+                        response_parts.push(AssistantResponsePart::ProviderCompaction(block));
                     }
                     AssistantPart::ToolCall(proposal) => {
                         tool_count += 1;
@@ -2021,12 +2125,46 @@ fn classify_terminal(
                         ModelCallCauseCode::FinishContradictsContent,
                     );
                 }
-                classify(
-                    ModelCallTerminalObservation::Completed {
-                        assistant_text: text_parts,
-                    },
-                    ModelCallCauseCode::Completed,
-                )
+                if has_provider_compaction {
+                    let Some(retained_input_tokens) = retained_input_tokens else {
+                        return Err(ClassificationFailure::bare(
+                            RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                        ));
+                    };
+                    classify(
+                        ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                            response: response_parts,
+                            retained_input_tokens,
+                            retained_output_tokens: retained_output_tokens.ok_or_else(|| {
+                                ClassificationFailure::bare(
+                                    RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                                )
+                            })?,
+                        },
+                        ModelCallCauseCode::Completed,
+                    )
+                } else if has_provider_reasoning {
+                    classify(
+                        ModelCallTerminalObservation::CompletedWithProviderReasoning {
+                            response: response_parts,
+                        },
+                        ModelCallCauseCode::Completed,
+                    )
+                } else {
+                    let assistant_text = response_parts
+                        .into_iter()
+                        .filter_map(|part| match part {
+                            AssistantResponsePart::Text(text) => Some(text),
+                            AssistantResponsePart::ProviderCompaction(_)
+                            | AssistantResponsePart::ProviderReasoning(_)
+                            | AssistantResponsePart::ToolCall(_) => None,
+                        })
+                        .collect();
+                    classify(
+                        ModelCallTerminalObservation::Completed { assistant_text },
+                        ModelCallCauseCode::Completed,
+                    )
+                }
             } else {
                 if !matches!(finish, CompletionFinish::ToolUse) {
                     return classify(
@@ -2042,15 +2180,71 @@ fn classify_terminal(
                     );
                 };
                 classify(
-                    ModelCallTerminalObservation::CompletedWithTools { response },
+                    ModelCallTerminalObservation::CompletedWithTools {
+                        response,
+                        retained_input_tokens,
+                        retained_output_tokens,
+                    },
                     ModelCallCauseCode::Completed,
                 )
             }
         }
-        TerminalEvidence::Refused(_) => classify(
-            ModelCallTerminalObservation::Refused,
-            ModelCallCauseCode::Refused,
-        ),
+        TerminalEvidence::Refused(refusal) => {
+            if refusal.content.iter().any(|part| {
+                matches!(
+                    part,
+                    AssistantPart::ToolCall(_) | AssistantPart::SuppressedToolCall(_)
+                )
+            }) {
+                return classify(
+                    ModelCallTerminalObservation::KnownFailed,
+                    ModelCallCauseCode::FinishContradictsContent,
+                );
+            }
+            let provider_compaction = refusal
+                .content
+                .into_iter()
+                .filter_map(|part| match part {
+                    AssistantPart::ProviderCompaction { block_json } => Some(block_json),
+                    AssistantPart::ProviderReasoning { .. }
+                    | AssistantPart::Text(_)
+                    | AssistantPart::Thinking { .. }
+                    | AssistantPart::RedactedThinking { .. }
+                    | AssistantPart::ToolCall(_)
+                    | AssistantPart::SuppressedToolCall(_) => None,
+                })
+                .map(|block_json| {
+                    ProviderCompactionBlock::try_new(block_json).map_err(|_| {
+                        ClassificationFailure::bare(
+                            RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if provider_compaction.is_empty() {
+                classify(
+                    ModelCallTerminalObservation::Refused,
+                    ModelCallCauseCode::Refused,
+                )
+            } else {
+                let (Some(retained_input_tokens), Some(retained_output_tokens)) = (
+                    refusal.retained_input_tokens,
+                    refusal.retained_output_tokens,
+                ) else {
+                    return Err(ClassificationFailure::bare(
+                        RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                    ));
+                };
+                classify(
+                    ModelCallTerminalObservation::RefusedWithProviderCompaction {
+                        provider_compaction,
+                        retained_input_tokens,
+                        retained_output_tokens,
+                    },
+                    ModelCallCauseCode::Refused,
+                )
+            }
+        }
         TerminalEvidence::ProviderError(error) => classify(
             ModelCallTerminalObservation::KnownFailed,
             ModelCallCauseCode::ProviderError(error.kind),
@@ -2079,6 +2273,11 @@ fn classify_terminal(
             ModelCallTerminalObservation::Ambiguous,
             ModelCallCauseCode::BoundaryLoss(BoundaryLossCode::of(&loss.cause)),
         ),
+        TerminalEvidence::CompletedWithProviderCompaction { .. } => {
+            Err(ClassificationFailure::bare(
+                RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+            ))
+        }
     }
 }
 
@@ -2104,6 +2303,9 @@ fn reported_identities<'evidence>(
 fn reported_model(evidence: &TerminalEvidence) -> Option<&ProviderReportedModel> {
     match evidence {
         TerminalEvidence::Completed(value) => value.reported_model.as_ref(),
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+            completion.reported_model.as_ref()
+        }
         TerminalEvidence::Refused(value) => value.reported_model.as_ref(),
         TerminalEvidence::ProviderError(value) => value.reported_model.as_ref(),
         TerminalEvidence::CancellationConfirmed(value) => value.reported_model.as_ref(),
@@ -2115,6 +2317,7 @@ fn reported_model(evidence: &TerminalEvidence) -> Option<&ProviderReportedModel>
 fn provider_reported_token_usage(evidence: &TerminalEvidence) -> ProviderReportedTokenUsage {
     let usage = match evidence {
         TerminalEvidence::Completed(value) => value.usage,
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => completion.usage,
         TerminalEvidence::Refused(value) => value.usage,
         TerminalEvidence::ProviderError(value) => value.usage,
         TerminalEvidence::BoundaryLoss(value) => value.usage,
@@ -2138,6 +2341,7 @@ mod tests {
     };
 
     use expect_test::expect;
+    use expectable::print;
     use signalbox_application::{
         ClassifyOperatorFailure, ModelConversationMessage, ModelToolResultContent,
     };
@@ -2153,7 +2357,6 @@ mod tests {
         ToolExecutionErrorKind, ToolRequest, ToolRequestId, ToolRequestOrdinal,
         ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
     };
-    use signalbox_expect_table::table;
     use signalbox_model_runtime::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
         CompletionFinish, ConversationMessage, CredentialAccessError, CredentialAccessFailure,
@@ -2171,13 +2374,113 @@ mod tests {
         RuntimeInputTokenCountError, RuntimeModelCallProviderError, RuntimeModelCatalog,
         RuntimeModelCatalogError, RuntimeModelDefinition, RuntimeModelDefinitionError,
         classify_terminal as classify_terminal_with_limit, decode_checked_raw_json,
-        provider_reported_token_usage, render_runtime_messages, runtime_delivery_definitions,
-        runtime_model_settings,
+        provider_reported_token_usage,
+        render_runtime_messages as render_runtime_messages_with_provenance,
+        runtime_delivery_definitions, runtime_model_settings,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
     const SYNTHETIC_MALFORMED_TOOL_SCHEMA: &str = "{";
     const SYNTHETIC_INVALID_TOOL_NAME: &str = "synthetic_invalid_tool";
+
+    fn capacity_sink() -> AcceptanceObservations<fn(), ModelCallId> {
+        AcceptanceObservations {
+            expected_correlation: call(),
+            correlation_mismatch: false,
+            acceptance_possible: None,
+            telemetry: telemetry(),
+            text_deltas: None,
+            observations: Vec::new(),
+            rate_limits: None,
+        }
+    }
+
+    #[test]
+    fn capacity_bridge_retains_latest_snapshot_through_both_redacting_sinks() {
+        use signalbox_model_runtime::{
+            CredentialRedactingSink, CredentialValue, RateLimitSnapshot, RateLimitWindow,
+            RedactingSink,
+        };
+        use std::time::{Duration, SystemTime};
+
+        let observed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let resets_at = observed_at + Duration::from_secs(900);
+        let mut sink = capacity_sink();
+        sink.observe_rate_limits(
+            call(),
+            RateLimitSnapshot {
+                observed_at: observed_at - Duration::from_secs(1),
+                windows: vec![RateLimitWindow {
+                    remaining_percent: 91,
+                    window_duration: None,
+                    resets_at: None,
+                }],
+            },
+        );
+        let credential = CredentialValue::new(b"synthetic-capacity-test-secret".to_vec());
+        {
+            let mut exact = CredentialRedactingSink::new(&mut sink, &credential);
+            let mut shaped = RedactingSink::new(&mut exact);
+            shaped.observe_rate_limits(
+                call(),
+                RateLimitSnapshot {
+                    observed_at,
+                    windows: vec![
+                        RateLimitWindow {
+                            remaining_percent: 23,
+                            window_duration: Some(Duration::from_secs(18_000)),
+                            resets_at: Some(resets_at),
+                        },
+                        RateLimitWindow {
+                            remaining_percent: 0,
+                            window_duration: None,
+                            resets_at: None,
+                        },
+                    ],
+                },
+            );
+        }
+        sink.observe(Observation {
+            correlation: call(),
+            fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+        });
+        let retained = sink
+            .rate_limits
+            .expect("capacity survives both redacting sinks");
+        assert_eq!(*retained.observed_at(), observed_at);
+        assert_eq!(retained.windows().len(), 2);
+        assert_eq!(*retained.windows()[0].remaining_percent(), 23);
+        assert_eq!(
+            *retained.windows()[0].window_duration(),
+            Some(Duration::from_secs(18_000))
+        );
+        assert_eq!(*retained.windows()[0].resets_at(), Some(resets_at));
+        assert_eq!(*retained.windows()[1].remaining_percent(), 0);
+        assert_eq!(*retained.windows()[1].window_duration(), None);
+        assert_eq!(*retained.windows()[1].resets_at(), None);
+    }
+
+    #[test]
+    fn capacity_bridge_rejects_evidence_for_another_call() {
+        use signalbox_model_runtime::{RateLimitSnapshot, RateLimitWindow};
+        let mut sink = capacity_sink();
+        sink.observe_rate_limits(
+            ModelCallId::from_uuid(Uuid::from_u128(99)),
+            RateLimitSnapshot {
+                observed_at: std::time::SystemTime::UNIX_EPOCH,
+                windows: vec![RateLimitWindow {
+                    remaining_percent: 7,
+                    window_duration: None,
+                    resets_at: None,
+                }],
+            },
+        );
+        assert!(
+            sink.correlation_mismatch,
+            "misbound evidence must fail the invocation closed"
+        );
+        assert_eq!(sink.rate_limits, None);
+    }
 
     fn call() -> ModelCallId {
         ModelCallId::from_uuid(Uuid::from_u128(1))
@@ -2212,6 +2515,12 @@ mod tests {
 
     fn target(value: u128) -> ResolvedProviderTarget {
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(value)))
+    }
+
+    fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<ConversationMessage> {
+        let models = RuntimeModelCatalog::try_from_definitions([]).expect("empty fixture catalog");
+        render_runtime_messages_with_provenance(messages, &[], &models)
+            .expect("fixture messages need no producing-target mappings")
     }
 
     fn source(value: u128) -> SemanticTranscriptEntryRef {
@@ -2349,11 +2658,10 @@ mod tests {
         .into_request()
     }
 
-    /// S28 / INV-038 / INV-039: the outward runtime bridge consumes imported
-    /// messages under their rendered role and exact text without consulting or
-    /// manufacturing native execution provenance.
+    /// the outward runtime bridge consumes imported messages under their rendered role and exact
+    /// text without consulting or manufacturing native execution provenance.
     #[test]
-    fn s28_inv038_inv039_imported_messages_map_to_provider_neutral_text_roles() {
+    fn imported_messages_map_to_provider_neutral_text_roles() {
         let source = SemanticTranscriptEntryRef::from_source(
             SessionId::from_uuid(Uuid::from_u128(2)),
             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(3)),
@@ -2382,11 +2690,10 @@ mod tests {
         );
     }
 
-    /// S33 / INV-046: the provider bridge renders the durable identity boundary
-    /// as the exact injected user-role session event selected by the recorded
-    /// context-lifecycle decision.
+    /// the provider bridge renders the durable identity boundary as the exact injected user-role
+    /// session event selected by the recorded context-lifecycle decision.
     #[test]
-    fn s33_inv046_model_identity_boundary_is_an_injected_user_message() {
+    fn model_identity_boundary_is_an_injected_user_message() {
         let source = source(12);
         let defaults_version = SessionConfigurationDefaultsVersion::try_from_u64(3)
             .expect("the fixture epoch is positive");
@@ -2484,11 +2791,10 @@ mod tests {
             usage: TokenUsage::unreported(),
         })
     }
-    /// S10 / INV-002 / INV-005: one provider response and its ordered result
-    /// batch remain grouped, while malformed arguments use replay-safe JSON
-    /// without replacing their exact durable request evidence.
+    /// one provider response and its ordered result batch remain grouped, while malformed arguments
+    /// use replay-safe JSON without replacing their exact durable request evidence.
     #[test]
-    fn s10_inv002_inv005_tool_history_is_grouped_and_replay_safe() {
+    fn tool_history_is_grouped_and_replay_safe() {
         let first = request(20, "{}");
         let malformed = request(21, "{\"timezone\":");
         let scalar = request(22, "7");
@@ -2591,10 +2897,10 @@ mod tests {
         assert_eq!(rendered[1].parts.len(), 3);
     }
 
-    /// INV-026: the application-owned dispatch permit is released exactly
+    /// the application-owned dispatch permit is released exactly
     /// when the runtime first reports that provider acceptance is possible.
     #[test]
-    fn inv026_send_commenced_releases_acceptance_callback_once() {
+    fn send_commenced_releases_acceptance_callback_once() {
         let release_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&release_count);
         let mut sink = AcceptanceObservations {
@@ -2606,6 +2912,7 @@ mod tests {
             telemetry: telemetry(),
             text_deltas: None,
             observations: Vec::new(),
+            rate_limits: None,
         };
 
         sink.observe(Observation {
@@ -2627,10 +2934,10 @@ mod tests {
         assert_eq!(sink.observations.len(), 3);
     }
 
-    /// INV-026: cross-wired acceptance evidence cannot release another
+    /// cross-wired acceptance evidence cannot release another
     /// attempt's dispatch/stop gate.
     #[test]
-    fn inv026_cross_wired_send_commenced_retains_acceptance_callback() {
+    fn cross_wired_send_commenced_retains_acceptance_callback() {
         let release_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&release_count);
         let mut sink = AcceptanceObservations {
@@ -2642,6 +2949,7 @@ mod tests {
             telemetry: telemetry(),
             text_deltas: None,
             observations: Vec::new(),
+            rate_limits: None,
         };
 
         sink.observe(Observation {
@@ -2666,11 +2974,11 @@ mod tests {
         }
     }
 
-    /// INV-035: correctly correlated text crosses the bridge exactly as the
+    /// correctly correlated text crosses the bridge exactly as the
     /// adapter sink supplied it, while cross-wired text stays on the evidence
     /// path and never reaches presentation delivery.
     #[test]
-    fn inv035_text_delta_delivery_is_additive_and_correlation_checked() {
+    fn text_delta_delivery_is_additive_and_correlation_checked() {
         let expected_call = call();
         let expected_session = SessionId::from_uuid(Uuid::from_u128(10));
         let expected_turn = TurnId::from_uuid(Uuid::from_u128(11));
@@ -2693,6 +3001,7 @@ mod tests {
                 sink: Arc::new(recorded.clone()),
             }),
             observations: Vec::new(),
+            rate_limits: None,
         };
         let mismatched = Observation {
             correlation: ModelCallId::from_uuid(Uuid::from_u128(2)),
@@ -2754,19 +3063,22 @@ mod tests {
         );
     }
 
-    /// S02 / INV-014 / INV-025: runtime terminal evidence maps to the exact
-    /// physical disposition without retryability or error-string inference.
+    /// runtime terminal evidence maps to the exact physical disposition without retryability or
+    /// error-string inference.
     #[test]
-    fn s02_inv014_inv025_terminal_evidence_classification_is_total() {
+    fn terminal_evidence_classification_is_total() {
         let exchange = ExchangeFacts::default();
         assert_eq!(
             classify_terminal(
                 TerminalEvidence::Refused(RefusalEvidence {
+                    reason: signalbox_model_runtime::RefusalReason::Unspecified,
                     exchange: exchange.clone(),
                     message_id: None,
                     reported_model: None,
                     content: Vec::new(),
                     usage: TokenUsage::unreported(),
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
                 }),
                 &[],
                 &configured("model-exact"),
@@ -2853,10 +3165,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-014: only exact text from a matching reported target becomes
-    /// assistant content; empty blocks create no invalid empty entry.
+    /// only exact text from a matching reported target becomes assistant content; empty blocks
+    /// create no invalid empty entry.
     #[test]
-    fn s02_inv014_matching_completion_preserves_text_parts() {
+    fn matching_completion_preserves_text_parts() {
         assert_eq!(
             classify_terminal(
                 completion(
@@ -2883,17 +3195,327 @@ mod tests {
         );
     }
 
-    /// S10 / INV-002 / INV-005: runtime-native tool calls become ordered,
-    /// normalized domain proposals without retaining provider identifiers.
     #[test]
-    fn s10_inv002_inv005_tool_completion_crosses_as_provider_neutral_proposals() {
+    fn reasoning_completion_enters_the_durable_vocabulary_without_compaction_usage() {
+        let raw = r#"{ "type":"reasoning", "id":"rs_fixture", "summary":[], "encrypted_content":"opaque" }"#;
+        let classified = classify_terminal(
+            completion(
+                "model-exact",
+                vec![
+                    AssistantPart::Text("before".to_string()),
+                    AssistantPart::ProviderReasoning {
+                        item_json: raw.to_string(),
+                    },
+                    AssistantPart::Text("after".to_string()),
+                ],
+            ),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("encrypted reasoning is representable");
+        let ModelCallTerminalObservation::CompletedWithProviderReasoning { response } =
+            classified.observation
+        else {
+            panic!("reasoning does not require compaction iteration counts");
+        };
+        assert_eq!(response.len(), 3);
+        let signalbox_domain::AssistantResponsePart::ProviderReasoning(item) = &response[1] else {
+            panic!("reasoning keeps its response position");
+        };
+        assert_eq!(item.as_json(), raw);
+    }
+
+    #[test]
+    fn reasoning_projection_fails_when_the_current_target_exists_but_the_producer_is_missing() {
+        let current_target = target(41);
+        let producing_target = target(42);
+        let models = RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            current_target,
+            "current-model".to_string(),
+            64,
+            1024,
+        )
+        .expect("current target fixture")])
+        .expect("current target catalog");
+        let provenance = [signalbox_application::ProviderReasoningProvenance {
+            source: source(31),
+            producing_call: call(),
+            producing_target,
+            producing_credential: signalbox_application::ModelCallCredentialReference::new(
+                "producer-primary",
+            ),
+        }];
+        let messages = [
+            ModelConversationMessage::AssistantToolUse {
+                source: source(30),
+                producing_call: call(),
+                request: request(20, "{}"),
+            },
+            ModelConversationMessage::ProviderReasoning {
+                source: source(31),
+                producing_call: call(),
+                item: signalbox_domain::ProviderReasoningItem::try_new(
+                    r#"{"type":"reasoning","id":"rs_required","encrypted_content":"opaque"}"#
+                        .to_string(),
+                )
+                .expect("durable reasoning fixture"),
+            },
+        ];
+        assert_eq!(
+            render_runtime_messages_with_provenance(&messages, &provenance, &models),
+            None
+        );
+    }
+
+    #[test]
+    fn durable_reasoning_replays_between_calls_in_the_same_assistant_message() {
+        let raw = r#"{ "type":"reasoning", "id":"rs_fixture", "summary":[], "encrypted_content":"opaque" }"#;
+        let first = request(20, "{}");
+        let second = request(21, "{}");
+        let models = RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            target(42),
+            "producer-fast-model".to_string(),
+            64,
+            1024,
+        )
+        .expect("producer fixture")])
+        .expect("producer catalog");
+        let provenance = [signalbox_application::ProviderReasoningProvenance {
+            source: source(31),
+            producing_call: call(),
+            producing_target: target(42),
+            producing_credential: signalbox_application::ModelCallCredentialReference::new(
+                "producer-primary",
+            ),
+        }];
+        let rendered = render_runtime_messages_with_provenance(
+            &[
+                ModelConversationMessage::AssistantToolUse {
+                    source: source(30),
+                    producing_call: call(),
+                    request: first.clone(),
+                },
+                ModelConversationMessage::ProviderReasoning {
+                    source: source(31),
+                    producing_call: call(),
+                    item: signalbox_domain::ProviderReasoningItem::try_new(raw.to_string())
+                        .expect("durable fixture"),
+                },
+                ModelConversationMessage::AssistantToolUse {
+                    source: source(32),
+                    producing_call: call(),
+                    request: second.clone(),
+                },
+            ],
+            &provenance,
+            &models,
+        )
+        .expect("the producing target is configured");
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].parts.len(), 3);
+        assert_eq!(
+            rendered[0].parts[1],
+            signalbox_model_runtime::MessagePart::ProviderReasoning {
+                item_json: raw.to_string(),
+                producing_target: signalbox_model_runtime::ResolvedTarget::new(
+                    "producer-fast-model"
+                ),
+                producing_credential: signalbox_model_runtime::CredentialReference::new(
+                    "producer-primary"
+                ),
+            }
+        );
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_first) = &rendered[0].parts[0]
+        else {
+            panic!("first tool retained");
+        };
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_second) = &rendered[0].parts[2]
+        else {
+            panic!("second tool retained");
+        };
+        assert_eq!(
+            replayed_first.id.as_str(),
+            first.id().into_uuid().to_string()
+        );
+        assert_eq!(
+            replayed_second.id.as_str(),
+            second.id().into_uuid().to_string()
+        );
+    }
+
+    #[test]
+    fn provider_compaction_completion_preserves_retained_iteration_usage() {
+        let completion = CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::ProviderCompaction {
+                block_json: String::from(
+                    r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                ),
+            }],
+            usage: TokenUsage {
+                input_tokens: Some(140),
+                output_tokens: Some(8),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            },
+        };
+
+        let classified = classify_terminal(
+            TerminalEvidence::CompletedWithProviderCompaction {
+                completion,
+                retained_input_tokens: 37,
+                retained_output_tokens: 8,
+            },
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("provider compaction completion is representable");
+
+        assert!(matches!(
+            classified.observation,
+            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                retained_input_tokens: 37,
+                retained_output_tokens: 8,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn refused_provider_compaction_is_retained_without_refusal_text() {
+        let classified = classify_terminal(
+            TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: Some(ProviderReportedModel::new("model-exact")),
+                content: vec![
+                    AssistantPart::ProviderCompaction {
+                        block_json: String::from(
+                            r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                        ),
+                    },
+                    AssistantPart::Text(String::from("I cannot continue.")),
+                ],
+                usage: TokenUsage::unreported(),
+                retained_input_tokens: Some(37),
+                retained_output_tokens: Some(8),
+            }),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("provider compaction before refusal is representable");
+
+        let ModelCallTerminalObservation::RefusedWithProviderCompaction {
+            provider_compaction,
+            retained_input_tokens,
+            retained_output_tokens,
+        } = classified.observation
+        else {
+            panic!("compacting refusal must retain its semantic block");
+        };
+        assert_eq!(provider_compaction.len(), 1);
+        assert_eq!(retained_input_tokens, 37);
+        assert_eq!(retained_output_tokens, 8);
+    }
+
+    #[test]
+    fn refused_provider_compaction_with_tool_use_is_a_finish_mismatch() {
+        let classified = classify_terminal(
+            TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: Some(ProviderReportedModel::new("model-exact")),
+                content: vec![
+                    AssistantPart::ProviderCompaction {
+                        block_json: String::from(
+                            r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                        ),
+                    },
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("provider-call-opaque"),
+                        name: ToolName::new("current_time"),
+                        arguments_json: String::from("{}"),
+                    }),
+                ],
+                usage: TokenUsage::unreported(),
+                retained_input_tokens: Some(37),
+                retained_output_tokens: Some(8),
+            }),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("refusal and tool-use mismatch is classifiable");
+
+        assert_eq!(
+            classified.observation,
+            ModelCallTerminalObservation::KnownFailed
+        );
+        assert_eq!(
+            classified.cause,
+            ModelCallCauseCode::FinishContradictsContent
+        );
+    }
+
+    #[test]
+    fn provider_compaction_tool_completion_preserves_retained_iteration_usage() {
+        let completion = CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::ToolUse,
+            content: vec![
+                AssistantPart::ProviderCompaction {
+                    block_json: String::from(
+                        r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                    ),
+                },
+                AssistantPart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("provider-call-opaque"),
+                    name: ToolName::new("current_time"),
+                    arguments_json: String::from("{}"),
+                }),
+            ],
+            usage: TokenUsage::default(),
+        };
+
+        let classified = classify_terminal(
+            TerminalEvidence::CompletedWithProviderCompaction {
+                completion,
+                retained_input_tokens: 37,
+                retained_output_tokens: 8,
+            },
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("provider compaction tool completion is representable");
+
+        assert!(matches!(
+            classified.observation,
+            ModelCallTerminalObservation::CompletedWithTools {
+                retained_input_tokens: Some(37),
+                retained_output_tokens: Some(8),
+                ..
+            }
+        ));
+    }
+
+    /// runtime-native tool calls become ordered, normalized domain proposals without retaining
+    /// provider identifiers.
+    #[test]
+    fn tool_completion_crosses_as_provider_neutral_proposals() {
         let classified = classify_terminal(
             tool_completion("model-exact"),
             &[],
             &configured("model-exact"),
         )
         .expect("tool-use completion is supported");
-        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+            classified.observation
         else {
             panic!("tool-use finish produces a same-turn tool round");
         };
@@ -2911,12 +3533,11 @@ mod tests {
         ));
     }
 
-    /// S02 / INV-014: a Claude 5-family tool completion carrying the
-    /// omitted-display empty thinking part classifies as a tool round — the
-    /// empty part is dropped like an empty text block instead of failing the
-    /// whole legitimate completion closed.
+    /// a Claude 5-family tool completion carrying the omitted-display empty thinking part
+    /// classifies as a tool round — the empty part is dropped like an empty text block instead of
+    /// failing the whole legitimate completion closed.
     #[test]
-    fn s02_inv014_empty_thinking_part_is_dropped_from_a_tool_completion() {
+    fn empty_thinking_part_is_dropped_from_a_tool_completion() {
         let classified = classify_terminal(
             completion_with_finish(
                 "model-exact",
@@ -2937,7 +3558,8 @@ mod tests {
             &configured("model-exact"),
         )
         .expect("an empty thinking part must not fail a tool completion closed");
-        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+            classified.observation
         else {
             panic!("the tool completion still yields its same-turn tool round");
         };
@@ -2949,11 +3571,10 @@ mod tests {
         ));
     }
 
-    /// S02 / INV-014: thinking with actual text still fails the bridge
-    /// closed — dropping it would silently erase response material for which
-    /// no durable semantic representation exists.
+    /// thinking with actual text still fails the bridge closed — dropping it would silently erase
+    /// response material for which no durable semantic representation exists.
     #[test]
-    fn s02_inv014_nonempty_thinking_part_still_fails_closed() {
+    fn nonempty_thinking_part_still_fails_closed() {
         let outcome = classify_terminal(
             completion(
                 "model-exact",
@@ -2975,10 +3596,10 @@ mod tests {
         ));
     }
 
-    /// S10 / INV-002: tool-call content and the `ToolUse` finish reason must
-    /// agree before either terminal completion observation is constructed.
+    /// tool-call content and the `ToolUse` finish reason must agree before either terminal
+    /// completion observation is constructed.
     #[test]
-    fn s10_inv002_mismatched_tool_finish_is_known_failed() {
+    fn mismatched_tool_finish_is_known_failed() {
         assert_eq!(
             classify_terminal(
                 completion(
@@ -3031,7 +3652,8 @@ mod tests {
         )
         .expect("suppressed tool material has a bounded terminal classification");
 
-        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+            classified.observation
         else {
             panic!("suppressed tool material yields a same-turn denial round");
         };
@@ -3061,10 +3683,10 @@ mod tests {
         );
     }
 
-    /// INV-014: malformed tool proposals are terminal known failures, so the
+    /// malformed tool proposals are terminal known failures, so the
     /// provider operation cannot remain durably in flight.
     #[test]
-    fn inv014_invalid_tool_proposals_close_as_known_failure() {
+    fn invalid_tool_proposals_close_as_known_failure() {
         let invalid_name = TerminalEvidence::Completed(CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
@@ -3120,12 +3742,12 @@ mod tests {
         assert_invalid_tool_proposal_closes(mismatched_finish);
     }
 
-    /// INV-014: either early or terminal evidence of a *different lineage*
+    /// either early or terminal evidence of a *different lineage*
     /// prevents response material from becoming authoritative, and the
     /// substitution is its own recorded outcome rather than an ordinary
     /// provider failure.
     #[test]
-    fn inv014_cross_model_substitution_precedes_completion() {
+    fn cross_model_substitution_precedes_completion() {
         let early = vec![Observation {
             correlation: call(),
             fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
@@ -3164,16 +3786,16 @@ mod tests {
         );
     }
 
-    /// S20 / INV-014: an alias resolved to its own canonical dated form is
-    /// the same logical target. The exchange completes, and the concrete
-    /// identity that actually served it is retained as sanitized evidence.
+    /// an alias resolved to its own canonical dated form is the same logical target. The exchange
+    /// completes, and the concrete identity that actually served it is retained as sanitized
+    /// evidence.
     ///
     /// This is the regression pin for the live wedge: before the
     /// normalization law, a configured undated alias whose response echoed
     /// the dated identity failed the adapter stage closed, terminalized the
     /// call ambiguously, and stopped the daemon.
     #[test]
-    fn s20_inv014_alias_resolved_to_its_dated_form_is_the_same_target() {
+    fn alias_resolved_to_its_dated_form_is_the_same_target() {
         let early = vec![Observation {
             correlation: call(),
             fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
@@ -3208,10 +3830,10 @@ mod tests {
         );
     }
 
-    /// S20 / INV-014: an exactly matching identity needs no normalization
-    /// record, so nothing is manufactured for it.
+    /// an exactly matching identity needs no normalization record, so nothing is manufactured for
+    /// it.
     #[test]
-    fn s20_inv014_exact_identity_records_no_concretion() {
+    fn exact_identity_records_no_concretion() {
         let classified = classify_terminal(
             completion(
                 "claude-haiku-4-5",
@@ -3225,11 +3847,7 @@ mod tests {
         assert_eq!(classified.concrete_target, None);
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct RelationRow {
         configured: &'static str,
         reported: &'static str,
@@ -3255,10 +3873,10 @@ mod tests {
             .collect()
     }
 
-    /// S20 / INV-014: the discriminator between an alias made concrete and a
-    /// substituted lineage, stated as a table.
+    /// the discriminator between an alias made concrete and a substituted lineage, stated as a
+    /// table.
     #[test]
-    fn s20_inv014_provider_target_relation_rule_is_stated_by_example() {
+    fn distinguishes_exact_targets_alias_concretion_and_different_lineages() {
         let rows = relation_rows(&[
             ("claude-haiku-4-5", "claude-haiku-4-5"),
             ("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
@@ -3287,17 +3905,13 @@ mod tests {
             │ claude-opus-4            │ claude-opus-4-5             │ DifferentLineage │
             │ claude-opus-4-5          │ claude-opus-4-5-20251101    │ AliasConcretion  │
             │ claude-opus-4-5-20251101 │ claude-opus-4-5             │ DifferentLineage │
-            │ ""                       │ claude-haiku-4-5-20251001   │ DifferentLineage │
+            │                          │ claude-haiku-4-5-20251001   │ DifferentLineage │
             └──────────────────────────┴─────────────────────────────┴──────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct CauseRow {
         outcome: &'static str,
         cause_code: &'static str,
@@ -3320,11 +3934,11 @@ mod tests {
             .collect()
     }
 
-    /// INV-035: every classified outcome carries a stable, sanitized operator
+    /// every classified outcome carries a stable, sanitized operator
     /// cause token; no provider text, response body, or credential material
     /// can reach one.
     #[test]
-    fn inv035_every_classified_outcome_carries_a_stable_sanitized_cause_code() {
+    fn every_classified_outcome_carries_a_stable_sanitized_cause_code() {
         let rows = cause_rows(vec![
             (
                 "completed",
@@ -3333,11 +3947,14 @@ mod tests {
             (
                 "refused",
                 TerminalEvidence::Refused(RefusalEvidence {
+                    reason: signalbox_model_runtime::RefusalReason::Unspecified,
                     exchange: ExchangeFacts::default(),
                     message_id: None,
                     reported_model: None,
                     content: Vec::new(),
                     usage: TokenUsage::unreported(),
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
                 }),
             ),
             (
@@ -3392,13 +4009,13 @@ mod tests {
             │ boundary_loss(transport_failed)      │ boundary_loss_transport_failed │
             └──────────────────────────────────────┴────────────────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 
-    /// INV-035: a fail-closed substitution carries the same sanitized cause
+    /// a fail-closed substitution carries the same sanitized cause
     /// vocabulary as a classified outcome.
     #[test]
-    fn inv035_substitution_failure_carries_its_sanitized_cause_code() {
+    fn substitution_failure_carries_its_sanitized_cause_code() {
         let failure = classify_terminal(
             completion("claude-opus-4-8", vec![]),
             &[],
@@ -3413,11 +4030,7 @@ mod tests {
         assert_eq!(failure.served_target.as_deref(), Some("claude-opus-4-8"));
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct PreparationRow {
         failure: &'static str,
         cause_code: &'static str,
@@ -3435,12 +4048,12 @@ mod tests {
             .collect()
     }
 
-    /// INV-035: a trustworthy pre-send preparation failure — the outcome the
+    /// a trustworthy pre-send preparation failure — the outcome the
     /// application commits as `KnownFailed` before any provider traffic —
     /// carries the same stable, sanitized cause vocabulary as a terminal
     /// classification, without its adapter-rendered detail text.
     #[test]
-    fn inv035_preparation_failures_carry_stable_sanitized_cause_codes() {
+    fn preparation_failures_carry_stable_sanitized_cause_codes() {
         let rows = preparation_rows(vec![
             (
                 "unsupported_operation",
@@ -3494,13 +4107,13 @@ mod tests {
             │ credential_unusable                 │ credential_unusable    │
             └─────────────────────────────────────┴────────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 
-    /// INV-035: a hostile provider-reported identity is bounded before it can
+    /// a hostile provider-reported identity is bounded before it can
     /// reach an operator log line.
     #[test]
-    fn inv035_diagnostic_model_identity_is_bounded() {
+    fn diagnostic_model_identity_is_bounded() {
         let configured = "claude-haiku-4-5";
         let reported = format!("{configured}-{}", "1".repeat(8));
         assert_eq!(
@@ -3529,9 +4142,18 @@ mod tests {
             RuntimeInputTokenCountError::CorrelationMismatch.operator_failure_cause_code(),
             "model_input_count_correlation_mismatch"
         );
+    }
+
+    #[test]
+    fn failed_input_estimate_falls_through_to_durable_call_path() {
         assert_eq!(
-            RuntimeInputTokenCountError::CountFailed.operator_failure_cause_code(),
-            "model_input_count_provider_failure"
+            super::classify_runtime_input_count(
+                signalbox_model_runtime::InputTokenCountOutcome::Failed {
+                    correlation: call(),
+                },
+                call(),
+            ),
+            Ok(signalbox_application::ModelCallInputTokenCount::Unavailable)
         );
     }
 
@@ -3652,6 +4274,7 @@ mod tests {
             200_000,
         )
         .expect("ordinary fixture definition is valid")
+        .with_provider_compaction()
         .with_fast_target(target(2));
         let fast = RuntimeModelDefinition::try_new(
             target(2),
@@ -3686,6 +4309,12 @@ mod tests {
                 .max_output_tokens(),
             selected_output_limit
         );
+        assert!(
+            catalog
+                .effective_definition(source, FastMode::Disabled)
+                .expect("ordinary target resolves")
+                .provider_compaction_supported()
+        );
         assert_eq!(
             catalog
                 .effective_definition(source, FastMode::Enabled)
@@ -3699,6 +4328,12 @@ mod tests {
                 .expect("mapped fast target resolves")
                 .max_output_tokens(),
             serving_output_limit
+        );
+        assert!(
+            !catalog
+                .effective_definition(source, FastMode::Enabled)
+                .expect("mapped fast target resolves")
+                .provider_compaction_supported()
         );
     }
 

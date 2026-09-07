@@ -212,6 +212,14 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::ReadGoal { .. }
         | ClientRequest::ResumeGoal { .. }
         | ClientRequest::StopGoal { .. }
+        | ClientRequest::StopSession { .. }
+        | ClientRequest::SupersedeSession { .. }
+        | ClientRequest::AbandonSession { .. }
+        | ClientRequest::CloseSessionFailed { .. }
+        | ClientRequest::ResumeSession { .. }
+        | ClientRequest::AdoptSession { .. }
+        | ClientRequest::ReleaseSession { .. }
+        | ClientRequest::ReleaseStart { .. }
         | ClientRequest::SupersedeGoal { .. }
         | ClientRequest::SubmitInput { .. }
         | ClientRequest::CompactSession { .. }
@@ -263,7 +271,10 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::ReadReviewOrchestration { .. }
         | ClientRequest::StopTurn { .. }
         | ClientRequest::DecideToolRequest { .. }
-        | ClientRequest::OverrideDeniedToolRequest { .. } => false,
+        | ClientRequest::OverrideDeniedToolRequest { .. }
+        | ClientRequest::ProvisionOauthCredential { .. }
+        | ClientRequest::ReprovisionOauthCredential { .. }
+        | ClientRequest::DeleteOauthCredential { .. } => false,
     }
 }
 
@@ -307,7 +318,7 @@ mod tests {
     use std::{error::Error, time::Duration};
 
     use signalbox_process_protocol::{ErrorCode, ErrorDetail, encode_server_line};
-    use tokio::{io::AsyncWriteExt as _, time::timeout};
+    use tokio::time::timeout;
 
     use super::*;
 

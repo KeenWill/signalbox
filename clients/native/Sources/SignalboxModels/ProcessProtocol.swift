@@ -2901,14 +2901,20 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
   case activeRunning(
     currentAttemptID: SignalboxCanonicalUUID, currentModelCall: SignalboxCurrentModelCall?)
   case activeAwaitingModelCallRecovery(
-    endedAttemptID: SignalboxCanonicalUUID, recoveryModelCallID: SignalboxCanonicalUUID)
+    endedAttemptID: SignalboxCanonicalUUID,
+    recoveryModelCallID: SignalboxCanonicalUUID,
+    automaticReconciliationAttempts: SignalboxCanonicalUInt64,
+    operatorActionRequired: Bool)
   case activeAwaitingToolApproval(toolRequestID: SignalboxCanonicalUUID)
   case activeAwaitingChild(
     awaitRequestID: SignalboxCanonicalUUID,
     spawningRequestID: SignalboxCanonicalUUID,
     childSessionID: SignalboxCanonicalUUID)
   case activeAwaitingToolRecovery(
-    endedAttemptID: SignalboxCanonicalUUID, recoveryToolAttemptID: SignalboxCanonicalUUID)
+    endedAttemptID: SignalboxCanonicalUUID,
+    recoveryToolAttemptID: SignalboxCanonicalUUID,
+    automaticReconciliationAttempts: SignalboxCanonicalUInt64,
+    operatorActionRequired: Bool)
   case failed(
     terminalFrontierID: SignalboxCanonicalUUID,
     terminalAttemptID: SignalboxCanonicalUUID?,
@@ -3018,12 +3024,18 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
         )
       case "active_awaiting_model_call_recovery":
         try tagged.rejectUnadmittedFields(
-          ["type", "ended_attempt_id", "recovery_model_call_id"],
+          [
+            "type", "ended_attempt_id", "recovery_model_call_id",
+            "automatic_reconciliation_attempts", "operator_action_required",
+          ],
           decoder: decoder
         )
         self = .activeAwaitingModelCallRecovery(
           endedAttemptID: try decoder.decode("ended_attempt_id"),
-          recoveryModelCallID: try decoder.decode("recovery_model_call_id")
+          recoveryModelCallID: try decoder.decode("recovery_model_call_id"),
+          automaticReconciliationAttempts: try decoder.decode(
+            "automatic_reconciliation_attempts"),
+          operatorActionRequired: try decoder.decode("operator_action_required")
         )
       case "active_awaiting_tool_approval":
         try tagged.rejectUnadmittedFields(
@@ -3043,12 +3055,18 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
         )
       case "active_awaiting_tool_recovery":
         try tagged.rejectUnadmittedFields(
-          ["type", "ended_attempt_id", "recovery_tool_attempt_id"],
+          [
+            "type", "ended_attempt_id", "recovery_tool_attempt_id",
+            "automatic_reconciliation_attempts", "operator_action_required",
+          ],
           decoder: decoder
         )
         self = .activeAwaitingToolRecovery(
           endedAttemptID: try decoder.decode("ended_attempt_id"),
-          recoveryToolAttemptID: try decoder.decode("recovery_tool_attempt_id")
+          recoveryToolAttemptID: try decoder.decode("recovery_tool_attempt_id"),
+          automaticReconciliationAttempts: try decoder.decode(
+            "automatic_reconciliation_attempts"),
+          operatorActionRequired: try decoder.decode("operator_action_required")
         )
       case "failed":
         try tagged.rejectUnadmittedFields(

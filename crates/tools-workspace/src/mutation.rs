@@ -315,11 +315,14 @@ impl WorkspaceFileMutation {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why an adapter could not commit a prevalidated mutation batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceMutationCommitError {
+    #[error("workspace changed before atomic commit")]
     /// A captured precondition changed before commit.
     Conflict,
+    #[error("workspace path {:?} rejected: {reason}", path.as_str())]
     /// A path escaped or violated the injected-root boundary.
     PathRejected {
         /// Affected relative path.
@@ -327,30 +330,13 @@ pub enum WorkspaceMutationCommitError {
         /// Typed rejection evidence.
         reason: WorkspacePathRejection,
     },
+    #[error("atomic workspace commit failed")]
     /// The filesystem failed before any target effect was observed.
     Filesystem,
+    #[error("atomic workspace commit outcome is ambiguous")]
     /// A post-effect failure made the final workspace state unknowable.
     Ambiguous,
 }
-
-impl fmt::Display for WorkspaceMutationCommitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Conflict => formatter.write_str("workspace changed before atomic commit"),
-            Self::PathRejected { path, reason } => {
-                write!(
-                    formatter,
-                    "workspace path {:?} rejected: {reason}",
-                    path.as_str()
-                )
-            }
-            Self::Filesystem => formatter.write_str("atomic workspace commit failed"),
-            Self::Ambiguous => formatter.write_str("atomic workspace commit outcome is ambiguous"),
-        }
-    }
-}
-
-impl Error for WorkspaceMutationCommitError {}
 
 /// Injected atomic filesystem authority for workspace mutation tools.
 ///
@@ -384,34 +370,26 @@ pub trait WorkspaceMutationFileSystem: Clone + Send + Sync + 'static {
     ) -> Result<(), WorkspaceMutationCommitError>;
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A static mutation declaration could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceMutationToolConstructionError {
+    #[error("workspace mutation-tool static name is invalid")]
     /// One static contract name was invalid.
     Name,
+    #[error("workspace mutation-tool static schema is invalid")]
     /// One static contract schema was invalid.
     Schema,
+    #[error("workspace mutation-tool static detail is invalid")]
     /// One static error detail was invalid.
     ErrorDetail,
+    #[error("workspace mutation-tool catalog is duplicated")]
     /// The catalog unexpectedly contained a duplicate.
     Duplicate,
+    #[error("workspace mutation-tool root is invalid")]
     /// The injected root could not be pinned.
     Root,
 }
-
-impl fmt::Display for WorkspaceMutationToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Name => "workspace mutation-tool static name is invalid",
-            Self::Schema => "workspace mutation-tool static schema is invalid",
-            Self::ErrorDetail => "workspace mutation-tool static detail is invalid",
-            Self::Duplicate => "workspace mutation-tool catalog is duplicated",
-            Self::Root => "workspace mutation-tool root is invalid",
-        })
-    }
-}
-
-impl Error for WorkspaceMutationToolConstructionError {}
 
 /// Compiled mutation catalog and executor around one injected root authority.
 pub struct WorkspaceMutationTools<FileSystem: WorkspaceMutationFileSystem> {
@@ -615,25 +593,17 @@ pub struct WorkspaceMutationExecutor<FileSystem: WorkspaceMutationFileSystem> {
     commit_failed_detail: ToolExecutionErrorDetail,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A checked catalog/executor assumption failed inside the mutation family.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceMutationExecutorError {
+    #[error("workspace mutation argument validation drifted")]
     /// Executor argument decoding disagreed with catalog validation.
     ArgumentValidationDrift,
+    #[error("workspace mutation result encoding failed")]
     /// Compact result encoding unexpectedly failed.
     ResultEncoding,
 }
-
-impl fmt::Display for WorkspaceMutationExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ArgumentValidationDrift => "workspace mutation argument validation drifted",
-            Self::ResultEncoding => "workspace mutation result encoding failed",
-        })
-    }
-}
-
-impl Error for WorkspaceMutationExecutorError {}
 
 impl ClassifyOperatorFailure for WorkspaceMutationExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {

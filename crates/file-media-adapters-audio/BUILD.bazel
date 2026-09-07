@@ -1,0 +1,34 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_unit_test")
+
+rust_package()
+
+rust_library(
+    name = "signalbox_file_media_adapters_audio",
+    crate_root = "src/lib.rs",
+    deps = [
+        "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
+        "//crates/file-media-runtime:signalbox_file_media_runtime",
+    ],
+)
+
+rust_binary(
+    name = "signalbox-file-media-audio-worker",
+    crate_root = "src/bin/signalbox-file-media-audio-worker.rs",
+    deps = [
+        ":signalbox_file_media_adapters_audio",
+        "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
+        "//crates/file-media-runtime:signalbox_file_media_runtime",
+    ],
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_file_media_adapters_audio",
+)
+
+rust_unit_test(
+    name = "signalbox_file_media_audio_worker_unit_tests",
+    crate = ":signalbox-file-media-audio-worker",
+)

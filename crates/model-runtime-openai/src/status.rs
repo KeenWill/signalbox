@@ -2,7 +2,7 @@
 //!
 //! The runtime-substrate spec requires each real adapter to define an
 //! exhaustive, mutually exclusive mapping of its provider-native terminal
-//! statuses and payloads. Chat Completions carries the specific condition in
+//! statuses and payloads. Responses carries the specific condition in
 //! `error.code` or `error.type` while the HTTP status carries the category,
 //! so envelope classification treats HTTP 401 as credential rejection
 //! outright, then consults a recognized code, then a recognized type, then the
@@ -21,7 +21,7 @@ pub(crate) fn classify_error(status: u16, code: Option<&str>) -> ProviderErrorKi
     }
     match code {
         Some("invalid_api_key") => ProviderErrorKind::CredentialRejected,
-        Some("invalid_request_error") => ProviderErrorKind::InvalidRequest,
+        Some("invalid_request_error" | "invalid_prompt") => ProviderErrorKind::InvalidRequest,
         Some("model_not_found") => ProviderErrorKind::TargetNotFound,
         Some("insufficient_quota") => ProviderErrorKind::QuotaExhausted,
         Some("context_length_exceeded") => ProviderErrorKind::RequestTooLarge,
@@ -64,8 +64,8 @@ pub(crate) fn classify_error_envelope(
     classify_error(status, None)
 }
 
-/// Classifies an error envelope and grants substitution proof only when the
-/// precedence-selected native availability token agrees with HTTP 429.
+/// Classifies an error envelope and grants non-acceptance proof only when the
+/// precedence-selected native transient token agrees with its HTTP status.
 pub(crate) fn classify_error_envelope_with_proof(
     status: u16,
     code: Option<&str>,
@@ -80,27 +80,28 @@ pub(crate) fn classify_error_envelope_with_proof(
         (true, false) => error_type,
         (true, true) => std::option::Option::None,
     };
-    let non_acceptance_proven = status == 429
+    let non_acceptance_proven = (status == 429
         && matches!(
             selected_token,
             Some("rate_limit_exceeded" | "rate_limit_error" | "insufficient_quota")
-        );
+        ))
+        || (status == 500
+            && matches!(
+                selected_token,
+                Some("server_error" | "internal_server_error")
+            ));
     (kind, non_acceptance_proven)
 }
 
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
     use signalbox_model_runtime::ProviderErrorKind;
 
     use super::{classify_error, classify_error_envelope, classify_error_envelope_with_proof};
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct ClassificationRow {
         status: u16,
         code: &'static str,
@@ -157,6 +158,14 @@ mod tests {
             (ProviderErrorKind::CredentialRejected, false)
         );
         assert_eq!(
+            classify_error_envelope_with_proof(500, Some("server_error"), None),
+            (ProviderErrorKind::ProviderInternal, true)
+        );
+        assert_eq!(
+            classify_error_envelope_with_proof(503, Some("server_error"), None),
+            (ProviderErrorKind::ProviderInternal, false)
+        );
+        assert_eq!(
             classify_error_envelope_with_proof(
                 429,
                 Some("invalid_request_error"),
@@ -171,6 +180,7 @@ mod tests {
         let rows = classification_rows(&[
             (401, "invalid_api_key"),
             (0, "invalid_request_error"),
+            (0, "invalid_prompt"),
             (404, "model_not_found"),
             (429, "insufficient_quota"),
             (400, "context_length_exceeded"),
@@ -196,6 +206,7 @@ mod tests {
             ├────────┼─────────────────────────┼────────────────────┤
             │    401 │ invalid_api_key         │ CredentialRejected │
             │      0 │ invalid_request_error   │ InvalidRequest     │
+            │      0 │ invalid_prompt          │ InvalidRequest     │
             │    404 │ model_not_found         │ TargetNotFound     │
             │    429 │ insufficient_quota      │ QuotaExhausted     │
             │    400 │ context_length_exceeded │ RequestTooLarge    │
@@ -215,7 +226,7 @@ mod tests {
             │    429 │ brand_new_code          │ RateLimited        │
             └────────┴─────────────────────────┴────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 
     #[test]

@@ -1,0 +1,56 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+
+CRATE_COMPILE_DATA = [
+    "tests/fixtures/example.json",
+    "tests/fixtures/session-closed-rates.json",
+]
+
+rust_package(exports = [
+    "Cargo.toml",
+    "tests/fixtures/example.json",
+])
+
+rust_library(
+    name = "signalbox_web_contract",
+    compile_data = CRATE_COMPILE_DATA,
+    crate_root = "src/lib.rs",
+    deps = ["//crates/application:signalbox_application"],
+)
+
+rust_binary(
+    name = "generate-web-contract",
+    compile_data = CRATE_COMPILE_DATA,
+    crate_root = "src/bin/generate-web-contract.rs",
+    deps = [
+        ":signalbox_web_contract",
+        "//crates/application:signalbox_application",
+    ],
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_web_contract",
+    data = [
+        "tests/fixtures/example.json",
+        "//:web_contract_fixtures",
+    ],
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/web-contract"},
+)
+
+rust_unit_test(
+    name = "generate_web_contract_unit_tests",
+    crate = ":generate-web-contract",
+    data = [
+        "Cargo.toml",
+        "//:Cargo.toml",
+        "//:web_contract_fixtures",
+    ],
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/web-contract"},
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_web_contract",
+)

@@ -51,9 +51,8 @@ impl ResolvedProviderTarget {
 
 /// The exact provider/model target pinned as a durable turn fact.
 ///
-/// docs/spec/model-call-execution.md pins this fact before the first
-/// `ModelCallId` is created and requires every call in the turn to use it.
-/// S20 / S21 / INV-014: raw parts cannot claim that a turn pinned a target:
+/// docs/spec/model-call-execution.md pins this fact before the first `ModelCallId` is created and
+/// requires every call in the turn to use it. raw parts cannot claim that a turn pinned a target:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{PinnedProviderTarget, ResolvedProviderTarget, TurnId};
@@ -171,11 +170,10 @@ pub enum CurrentModelCallState {
 
 /// One current, nonterminal model call.
 ///
-/// The sole entry is the crate-private prepared constructor consuming the
-/// turn's [`PinnedProviderTarget`] and borrowing a resolved frontier snapshot,
-/// so target-resolution failure — which pins no fact — can never produce a
-/// call, and no field admits a targetless or frontierless call. S02 / S20 /
-/// S21 / INV-014 / INV-015: a call record cannot be forged around those facts:
+/// The sole entry is the crate-private prepared constructor consuming the turn's
+/// [`PinnedProviderTarget`] and borrowing a resolved frontier snapshot, so target-resolution
+/// failure — which pins no fact — can never produce a call, and no field admits a targetless or
+/// frontierless call. a call record cannot be forged around those facts:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{
@@ -777,8 +775,8 @@ mod tests {
         assert_eq!(provider_model_identity(1).into_uuid(), uuid);
     }
 
-    /// S20 / S21 / INV-014: the pinned turn fact preserves its exact turn
-    /// and target, and any target or turn difference is a different fact.
+    /// the pinned turn fact preserves its exact turn and target, and any target or turn difference
+    /// is a different fact.
     #[test]
     fn pinned_fact_preserves_the_exact_turn_and_target() {
         let turn = turn_id(1);
@@ -796,9 +794,8 @@ mod tests {
         );
     }
 
-    /// S02 / S20 / INV-014 / INV-015: every prepared call records its exact
-    /// resolved target and frontier at creation, while two calls in one turn
-    /// can retain distinct prefix-related frontier identities.
+    /// every prepared call records its exact resolved target and frontier at creation, while two
+    /// calls in one turn can retain distinct prefix-related frontier identities.
     #[test]
     fn prepared_call_records_the_target_and_exact_frontier_at_creation() {
         let first_snapshot = frontier_snapshot(1);
@@ -822,8 +819,7 @@ mod tests {
         assert!(first_snapshot.is_semantic_prefix_of(&later_snapshot));
     }
 
-    /// S02 / INV-004 / INV-006 / INV-014 / INV-015: send authorization is
-    /// valid only from `Prepared` and preserves the complete call record.
+    /// send authorization is valid only from `Prepared` and preserves the complete call record.
     #[test]
     fn begin_in_flight_accepts_only_prepared_and_preserves_the_record() {
         let snapshot = frontier_snapshot(1);
@@ -848,9 +844,8 @@ mod tests {
         );
     }
 
-    /// S07 / S21 / INV-006 / INV-015: best-effort cancellation request is
-    /// valid only from `InFlight`; it preserves the exact frontier, and
-    /// unsent and already-requested calls are rejected unchanged.
+    /// best-effort cancellation request is valid only from `InFlight`; it preserves the exact
+    /// frontier, and unsent and already-requested calls are rejected unchanged.
     #[test]
     fn cancellation_request_accepts_only_in_flight_calls() {
         let snapshot = frontier_snapshot(1);
@@ -879,8 +874,7 @@ mod tests {
         );
     }
 
-    /// S04 / S21 / INV-006 / INV-014 / INV-029: `Prepared` classifies only
-    /// known failure without a proof; cancellation of the unsent call
+    /// `Prepared` classifies only known failure without a proof; cancellation of the unsent call
     /// requires the exact applied interrupt proof for this call's turn.
     #[test]
     fn prepared_terminal_matrix_requires_the_exact_proof_for_cancellation() {
@@ -962,9 +956,8 @@ mod tests {
         );
     }
 
-    /// S02 / S04 / S21 / S23 / INV-006 / INV-015 / INV-025: issued calls
-    /// accept every classified disposition and preserve their frontier;
-    /// ambiguity stays distinct instead of being coerced to failure.
+    /// issued calls accept every classified disposition and preserve their frontier; ambiguity
+    /// stays distinct instead of being coerced to failure.
     #[test]
     fn issued_calls_accept_every_classified_disposition() {
         assert_accepts_classified_disposition(in_flight(), ModelCallDisposition::Completed);
@@ -1007,7 +1000,7 @@ mod tests {
         assert_eq!(ended.frontier(), current.frontier());
     }
 
-    /// INV-004 / INV-014 / INV-015: terminal history preserves the identity,
+    /// terminal history preserves the identity,
     /// turn, exact pinned target, and exact frontier of the current call it
     /// consumed.
     #[test]

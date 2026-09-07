@@ -1,0 +1,44 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_integration_test", "rust_unit_test")
+
+CRATE_DEPS = [
+    ":signalbox_file_media_adapter_archives",
+    "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
+    "//crates/file-media-runtime:signalbox_file_media_runtime",
+]
+
+rust_package()
+
+rust_library(
+    name = "signalbox_file_media_adapter_archives",
+    crate_root = "src/lib.rs",
+    deps = [
+        "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
+        "//crates/file-media-runtime:signalbox_file_media_runtime",
+    ],
+)
+
+rust_binary(
+    name = "signalbox-file-media-archives-worker",
+    crate_root = "src/bin/signalbox-file-media-archives-worker.rs",
+    deps = CRATE_DEPS,
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_file_media_adapter_archives",
+)
+
+rust_unit_test(
+    name = "signalbox_file_media_archives_worker_unit_tests",
+    crate = ":signalbox-file-media-archives-worker",
+)
+
+rust_integration_test(
+    name = "archive_adapter",
+    size = "small",
+    srcs = glob(["tests/**/*.rs"]),
+    crate_root = "tests/archive_adapter.rs",
+    deps = CRATE_DEPS,
+)

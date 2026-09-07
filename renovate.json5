@@ -7,19 +7,110 @@
   "extends": ["config:recommended"],
   "dependencyDashboard": true,
   "internalChecksFilter": "strict",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^MODULE\\.bazel$/",
+        "/^docs\\/api\\/crates\\.toml$/"
+      ],
+      "matchStrings": [
+        "(?:RUSTDOC_TOOLCHAIN|rustdoc_toolchain) = \"(?<currentValue>nightly-[^\"]+)\""
+      ],
+      "depNameTemplate": "rust-doc-toolchain",
+      "datasourceTemplate": "rust-version",
+      "versioningTemplate": "rust-release-channel"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^tooling\\/postgres_test_image\\.rs$/"],
+      "matchStrings": ["POSTGRES_IMAGE_TAG: &str =\\s*\"(?<currentValue>[^\"@]+)@(?<currentDigest>sha256:[a-f0-9]+)\""],
+      "depNameTemplate": "postgres",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker",
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^MODULE\\.bazel$/"],
+      "matchStrings": ["RUST_VERSION = \"(?<currentValue>[^\"]+)\""],
+      "depNameTemplate": "rust",
+      "datasourceTemplate": "rust-version",
+      "versioningTemplate": "rust-release-channel",
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/(?:bazel|rust)\\.yml$/"],
+      "matchStrings": ["bazelisk-version: (?<currentValue>[0-9.]+)"],
+      "depNameTemplate": "bazelbuild/bazelisk",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$",
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^tooling/codex-cli/release\\.json$/"],
+      "matchStrings": ["\"release\": \"rust-v(?<currentValue>[^\"]+)\""],
+      "depNameTemplate": "KeenWill/codex",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^rust-v(?<version>.*)$",
+      "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-signalbox\\.(?<build>\\d+)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^tooling/codex-cli/release\\.json$/"],
+      // Release digests are commit SHAs; attachments resolves the tarball SHA-256.
+      // Replace only the checksum so the grouped tag update stays independent.
+      "matchStringsStrategy": "recursive",
+      "matchStrings": [
+        "\"release\": \"(?<currentValue>rust-v[^\"]+)\"[\\s\\S]*",
+        "\"sha256\": \"(?<currentDigest>[a-f0-9]{64})\""
+      ],
+      "depNameTemplate": "KeenWill/codex",
+      "datasourceTemplate": "github-release-attachments",
+      "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-signalbox\\.(?<build>\\d+)$",
+      "autoReplaceStringTemplate": "\"sha256\": \"{{newDigest}}\""
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^tooling/codex-cli/release\\.json$/"],
+      // BINARY_SHA256SUMS names the extracted codex binary.
+      // Replace only the checksum so the grouped tag update stays independent.
+      "matchStringsStrategy": "recursive",
+      "matchStrings": [
+        "\"release\": \"(?<currentValue>rust-v[^\"]+)\"[\\s\\S]*",
+        "\"executableSha256\": \"(?<currentDigest>[a-f0-9]{64})\""
+      ],
+      "depNameTemplate": "KeenWill/codex",
+      "datasourceTemplate": "github-release-attachments",
+      "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-signalbox\\.(?<build>\\d+)$",
+      "autoReplaceStringTemplate": "\"executableSha256\": \"{{newDigest}}\""
+    },
+  ],
   // The cargo manager's default file pattern ((^|/)Cargo\.toml$) already
   // covers the root manifest and every workspace member under crates/ and
   // apps/, so no path configuration is needed for full workspace coverage.
-  // The npm manager's default file pattern ((^|/)package\.json$) covers every
-  // npm manifest in the tree. Two of them are not Node projects: each of
-  // tooling/codex-cli and crates/model-runtime-claude-cli exists solely to pin
-  // one wrapped CLI executable to an exact version, and each pin bump is
-  // proven against the real CLI by that adapter's own compatibility smoke
-  // (.github/workflows/codex-smoke.yml and .github/workflows/claude-smoke.yml).
-  // See the Codex CLI and Claude Code CLI provider adapter sections of
-  // docs/spec/runtime-substrate.md. The third, clients/web, is a real Node
-  // project with a real dependency tree; its cooldown rules are below.
+  // Codex tracks fork releases and their asset checksums together. Claude Code
+  // still uses its npm manifest; clients/web is a Node dependency tree.
   "packageRules": [
+    {
+      "matchDatasources": [
+        "rust-version"
+      ],
+      "matchPackageNames": [
+        "rust-doc-toolchain"
+      ],
+      "groupName": "Rust documentation toolchain"
+    },
+    {
+      "matchPackageNames": ["KeenWill/codex"],
+      "groupName": "Codex CLI",
+      "ignoreUnstable": false,
+      "automerge": false,
+    },
+    {
+      "matchDatasources": ["rust-version"],
+      "matchPackageNames": ["rust"],
+      "groupName": "Rust toolchain",
+    },
     {
       "matchManagers": ["cargo"],
       "matchUpdateTypes": ["patch", "minor"],
@@ -43,8 +134,36 @@
       "platformAutomerge": true,
     },
     {
+      // deno_error is not an independent dependency: its sole use is naming
+      // deno_core's error type (use deno_error::JsErrorBox in
+      // crates/program-runtime), and every deno_core release since 0.388.0
+      // pins deno_error exactly — 0.409.0, 0.410.0 and 0.411.0 all require
+      // "=0.7.1". It can only ever move when deno_core moves, so Renovate must
+      // not propose it on its own — that produced the unresolvable PR #921
+      // chasing 0.7.3, a misnumbered release (published 1.4s before 0.7.2)
+      // the deno ecosystem never adopted.
+      //
+      // Renovate cannot express this coupling for us. groupName only collects
+      // updates into a shared branch/PR; it does not solve one dependency's
+      // version against another's requirement, so a group would still offer
+      // deno_error's registry maximum rather than the version deno_core pins.
+      // The built-in "deno" monorepo group does not help either: it keys on
+      // the denoland/deno repository, and deno_error ships from
+      // denoland/deno_error, so the two are separate groups by construction.
+      //
+      // Consequence to expect: when a future deno_core release moves its
+      // pinned deno_error requirement, Renovate's deno_core PR will bump only
+      // deno_core and its lockfile update will fail to resolve against the
+      // stale "=0.7.1" here. Bump this pin by hand in that same branch to
+      // whatever the new deno_core requires. That failure is deliberate and
+      // visible; it is not a regression introduced by disabling the crate.
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["deno_error"],
+      "enabled": false,
+    },
+    {
       // Baseline for every npm manifest: exact pins, human-reviewed merges.
-      // For the two CLI-pin manifests this is deliberately the whole policy —
+      // For the Claude Code CLI pin this is deliberately the whole policy —
       // no minimum-release-age gate, unlike the cargo policy above. The
       // wrapped CLI releases far too often for calendar age to mean anything,
       // and what makes a pin bump safe is evidence, not waiting: the adapter
@@ -66,6 +185,26 @@
       // cooldown as cargo: a newly cut release waits out the window in which
       // a compromised or broken version is typically caught and yanked before
       // Renovate proposes it here.
+      //
+      // "pin" is deliberately absent, even though pin updates adopt whatever
+      // version is newest at refresh time — that is how Renovate advanced the
+      // Node.js engine pin to 26.8.1 the day it was released (PR #1014).
+      // Matching "pin" here would not close that gap, it would only add noise.
+      // Renovate builds a pin update as a bare literal carrying just
+      // updateType/isPin/newValue/newVersion/newMajor (the rangeStrategy ===
+      // "pin" branch of lib/workers/repository/process/lookup/index.ts),
+      // bypassing generateUpdate(), which is the only place a non-digest
+      // update is ever given a releaseTimestamp. With no timestamp and
+      // minimumReleaseAgeBehaviour "timestamp-required", the branch worker
+      // marks the update pending unconditionally and can never clear it
+      // (lib/workers/repository/update/branch/index.ts), so the PR is still
+      // raised at once (prCreation defaults to "immediate") but carries a
+      // renovate/stability-days check that never goes green. Upstream tracks
+      // the missing timestamp as renovatebot/renovate#40288.
+      //
+      // Operational rule until #40288 lands: a pin PR that moves an engine or
+      // runtime version merges only once the pinned version is itself 7 days
+      // old. The human merging it checks the release date — Renovate cannot.
       "matchManagers": ["npm"],
       "matchFileNames": ["clients/web/**"],
       "matchUpdateTypes": ["patch", "minor"],

@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+use http::{HeaderName, HeaderValue};
 use opentelemetry::{
     Context as OTelContext, KeyValue,
     trace::{SpanBuilder, TraceContextExt as _, Tracer as _, TracerProvider as _},
@@ -36,6 +37,9 @@ use opentelemetry_sdk::{
 use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder};
 use signalbox_application::{SchedulerOccupancyObserver, SchedulerOldestInFlightPass};
 use signalbox_model_provider_runtime::ModelCallCauseToken;
+use signalbox_persistence::lifecycle_metrics::{
+    LifecycleMetricsReport, LifecycleRate, LifecycleWeeklyMetrics,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -204,8 +208,8 @@ enum EndpointTransport {
 }
 
 struct OtlpHeader {
-    name: String,
-    value: String,
+    name: HeaderName,
+    value: HeaderValue,
 }
 
 struct OtlpConfiguration {
@@ -452,17 +456,24 @@ fn parse_headers(content: &str) -> Result<Vec<OtlpHeader>, TelemetryConfiguratio
         let (name, value) = line
             .split_once('=')
             .ok_or_else(|| header_error(TelemetryConfigurationFailure::InvalidHeader))?;
-        let normalized = name.to_ascii_lowercase();
-        if !valid_header_name(name) || !valid_header_value(value) {
+        if name.len() > MAX_HEADER_NAME_BYTES
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
+            || value.is_empty()
+            || value.len() > MAX_HEADER_VALUE_BYTES
+            || !value.bytes().all(|byte| (b' '..=b'~').contains(&byte))
+        {
             return Err(header_error(TelemetryConfigurationFailure::InvalidHeader));
         }
-        if !names.insert(normalized.clone()) {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| header_error(TelemetryConfigurationFailure::InvalidHeader))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|_| header_error(TelemetryConfigurationFailure::InvalidHeader))?;
+        if !names.insert(name.clone()) {
             return Err(header_error(TelemetryConfigurationFailure::DuplicateHeader));
         }
-        headers.push(OtlpHeader {
-            name: normalized,
-            value: value.to_owned(),
-        });
+        headers.push(OtlpHeader { name, value });
     }
     Ok(headers)
 }
@@ -482,19 +493,6 @@ fn validate_header_transport(
 
 fn header_error(failure: TelemetryConfigurationFailure) -> TelemetryConfigurationError {
     TelemetryConfigurationError::new(OTLP_HEADERS_FILE_ENVIRONMENT, failure)
-}
-
-fn valid_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= MAX_HEADER_NAME_BYTES
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
-}
-fn valid_header_value(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_HEADER_VALUE_BYTES
-        && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
 }
 
 /// Owns the provider and its bounded background batch processor.
@@ -573,8 +571,14 @@ fn build_http_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
     let headers = configuration
         .headers
         .iter()
-        .map(|header| (header.name.clone(), header.value.clone()))
-        .collect::<HashMap<_, _>>();
+        .map(|header| {
+            header
+                .value
+                .to_str()
+                .map(|value| (header.name.as_str().to_owned(), value.to_owned()))
+                .map_err(|_| ())
+        })
+        .collect::<Result<HashMap<_, _>, _>>()?;
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::blocking::Client::builder()
         .timeout(OTLP_EXPORT_TIMEOUT)
@@ -613,14 +617,23 @@ fn build_grpc_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
 fn grpc_metadata(headers: &[OtlpHeader]) -> Result<MetadataMap, ()> {
     let mut metadata = MetadataMap::new();
     for header in headers {
-        if header.name.ends_with("-bin") {
-            let name = header.name.parse::<BinaryMetadataKey>().map_err(|_| ())?;
-            let mut value = BinaryMetadataValue::from_bytes(header.value.as_bytes());
+        let value = header.value.to_str().map_err(|_| ())?;
+        if header.name.as_str().ends_with("-bin") {
+            let name = header
+                .name
+                .as_str()
+                .parse::<BinaryMetadataKey>()
+                .map_err(|_| ())?;
+            let mut value = BinaryMetadataValue::from_bytes(value.as_bytes());
             value.set_sensitive(true);
             metadata.insert_bin(name, value);
         } else {
-            let name = header.name.parse::<AsciiMetadataKey>().map_err(|_| ())?;
-            let mut value = header.value.parse::<AsciiMetadataValue>().map_err(|_| ())?;
+            let name = header
+                .name
+                .as_str()
+                .parse::<AsciiMetadataKey>()
+                .map_err(|_| ())?;
+            let mut value = value.parse::<AsciiMetadataValue>().map_err(|_| ())?;
             value.set_sensitive(true);
             metadata.insert(name, value);
         }
@@ -1065,6 +1078,9 @@ pub struct TelemetryMetrics {
     scheduler_oldest_age_seconds: IntGauge,
     scheduler_oldest_info: IntGaugeVec,
     scheduler_oldest: Arc<Mutex<Option<SchedulerOldestInFlightPass>>>,
+    lifecycle_rate_ppm: IntGaugeVec,
+    lifecycle_nonterminal_past_deadline: IntGauge,
+    lifecycle_export_fresh: IntGauge,
 }
 
 impl TelemetryMetrics {
@@ -1092,6 +1108,24 @@ impl TelemetryMetrics {
             &["disposition"],
         )
         .map_err(|_| metrics_error())?;
+        let lifecycle_rate_ppm = IntGaugeVec::new(
+            Opts::new(
+                "signalbox_session_lifecycle_rate_parts_per_million",
+                "Latest complete weekly session-lifecycle metric, in parts per million.",
+            ),
+            &["metric"],
+        )
+        .map_err(|_| metrics_error())?;
+        let lifecycle_nonterminal_past_deadline = IntGauge::with_opts(Opts::new(
+            "signalbox_sessions_nonterminal_past_deadline",
+            "Owned non-terminal sessions past their armed deadline obligation; target zero.",
+        ))
+        .map_err(|_| metrics_error())?;
+        let lifecycle_export_fresh = IntGauge::with_opts(Opts::new(
+            "signalbox_session_lifecycle_export_fresh",
+            "Whether the latest lifecycle metric export succeeded.",
+        ))
+        .map_err(|_| metrics_error())?;
         let scheduler_occupancy = IntGauge::with_opts(Opts::new(
             "signalbox_scheduler_passes_in_flight",
             "Authoritative scheduler passes currently holding admission slots.",
@@ -1118,6 +1152,15 @@ impl TelemetryMetrics {
             .map_err(|_| metrics_error())?;
         registry
             .register(Box::new(model_terminal.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(lifecycle_rate_ppm.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(lifecycle_nonterminal_past_deadline.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(lifecycle_export_fresh.clone()))
             .map_err(|_| metrics_error())?;
         registry
             .register(Box::new(scheduler_occupancy.clone()))
@@ -1156,7 +1199,72 @@ impl TelemetryMetrics {
             scheduler_oldest_age_seconds,
             scheduler_oldest_info,
             scheduler_oldest: Arc::new(Mutex::new(None)),
+            lifecycle_rate_ppm,
+            lifecycle_nonterminal_past_deadline,
+            lifecycle_export_fresh,
         })
+    }
+
+    /// Publishes one lifecycle-metrics report onto the exported gauges.
+    ///
+    /// A rate with no population is withdrawn rather than exported as a zero
+    /// the durable columns do not claim. The deadline count is instantaneous
+    /// and always publishes, and a completed pass marks the series fresh.
+    pub(crate) fn observe_lifecycle_metrics(&self, report: &LifecycleMetricsReport) {
+        self.lifecycle_nonterminal_past_deadline
+            .set(clamp_gauge(report.nonterminal_past_deadline()));
+        self.set_rate(
+            "session_completion_failure_rate",
+            report.latest_measured(LifecycleWeeklyMetrics::completion_failure),
+        );
+        self.set_rate(
+            "failed_unknown_share",
+            report.latest_measured(LifecycleWeeklyMetrics::failed_unknown_share),
+        );
+        self.set_rate(
+            "overflow_incidence",
+            report.latest_measured(LifecycleWeeklyMetrics::overflow_incidence),
+        );
+        self.set_rate(
+            "finish_given_overflow",
+            report.latest_measured(LifecycleWeeklyMetrics::finish_given_overflow),
+        );
+        self.set_rate(
+            "wall_rate",
+            report.latest_measured(LifecycleWeeklyMetrics::wall_rate),
+        );
+        self.set_rate(
+            "turn_cause_completeness",
+            report.latest_measured(LifecycleWeeklyMetrics::turn_cause_completeness),
+        );
+        self.set_rate(
+            "model_call_cause_completeness",
+            report.latest_measured(LifecycleWeeklyMetrics::model_call_cause_completeness),
+        );
+        self.lifecycle_export_fresh.set(1);
+    }
+
+    /// Records that the last export failed, so a reader can tell a stale
+    /// series from a current one.
+    pub(crate) fn invalidate_lifecycle_metrics(&self) {
+        self.lifecycle_export_fresh.set(0);
+    }
+
+    fn set_rate(&self, metric: &str, rate: Option<LifecycleRate>) {
+        let Some(parts_per_million) = rate.and_then(LifecycleRate::parts_per_million) else {
+            // A rate the report no longer measures is withdrawn rather than
+            // left standing: the export is fresh, so a series it still carries
+            // would be read as a current value.
+            let _ = self.lifecycle_rate_ppm.remove_label_values(&[metric]);
+            return;
+        };
+        let Ok(gauge) = self
+            .lifecycle_rate_ppm
+            .get_metric_with_label_values(&[metric])
+        else {
+            return;
+        };
+        gauge.set(clamp_gauge(parts_per_million));
     }
 
     pub(crate) fn observe_turn_started(&self) {
@@ -1197,6 +1305,15 @@ impl TelemetryMetrics {
         );
         TextEncoder::new().encode_to_string(&self.registry.gather())
     }
+}
+
+/// Presents one unsigned count on a signed Prometheus gauge without wrapping
+/// it into a negative reliability number.
+const fn clamp_gauge(value: u64) -> i64 {
+    if value > i64::MAX as u64 {
+        return i64::MAX;
+    }
+    value as i64
 }
 
 impl SchedulerOccupancyObserver for TelemetryMetrics {
@@ -1786,6 +1903,39 @@ mod tests {
             .expect("endpoint enables exporter");
 
         runtime.shutdown();
+    }
+
+    #[test]
+    fn otlp_headers_reject_http_tokens_outside_the_configuration_alphabet() {
+        let error = parse_headers("x!name=value")
+            .err()
+            .expect("punctuation is not admitted");
+        assert_eq!(
+            error.failure(),
+            super::TelemetryConfigurationFailure::InvalidHeader
+        );
+    }
+
+    #[test]
+    fn otlp_headers_reject_tabs_in_values() {
+        let error = parse_headers("x-name=left\tright")
+            .err()
+            .expect("tabs are not printable ASCII");
+        assert_eq!(
+            error.failure(),
+            super::TelemetryConfigurationFailure::InvalidHeader
+        );
+    }
+
+    #[test]
+    fn otlp_headers_accept_the_documented_name_and_value_alphabets() {
+        let headers = parse_headers("X.name_with-123=printable value !~")
+            .expect("documented header characters are admitted");
+        assert_eq!(headers[0].name.as_str(), "x.name_with-123");
+        assert_eq!(
+            headers[0].value.to_str().expect("ASCII value"),
+            "printable value !~"
+        );
     }
 
     #[test]

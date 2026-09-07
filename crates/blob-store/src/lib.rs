@@ -275,6 +275,13 @@ pub trait BlobStore: Send + Sync {
     /// Opens one recorded object as a stream without materializing it.
     fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob>;
 
+    /// Verifies one exact object generation, then rewinds and returns that generation.
+    fn open_verified<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+    ) -> BlobStoreFuture<'a, OpenedBlob>;
+
     /// Re-verifies one exact object generation while retaining one bounded range.
     fn open_range<'a>(
         &'a self,
@@ -292,6 +299,8 @@ pub enum BlobStoreFailureKind {
     NotFound,
     /// Stored or supplied bytes do not match the expected digest and length.
     VerificationFailed,
+    /// Publication may have completed, but exact verification could not decide.
+    PublicationAmbiguous,
     /// Backend I/O failed without proving absence or corruption.
     Unavailable,
 }
@@ -339,7 +348,7 @@ impl BlobVerificationFailure {
 pub struct BlobStoreError {
     kind: BlobStoreFailureKind,
     operation: &'static str,
-    verification: Option<BlobVerificationFailure>,
+    verification: Option<Box<BlobVerificationFailure>>,
     source: Option<Box<dyn Error + Send + Sync>>,
 }
 
@@ -374,12 +383,22 @@ impl BlobStoreError {
         }
     }
 
+    /// Constructs a failure whose publication effect could not be reconciled.
+    pub const fn publication_ambiguous(operation: &'static str) -> Self {
+        Self {
+            kind: BlobStoreFailureKind::PublicationAmbiguous,
+            operation,
+            verification: None,
+            source: None,
+        }
+    }
+
     /// Constructs a verification failure retaining expected and observed facts.
     pub fn verification(operation: &'static str, failure: BlobVerificationFailure) -> Self {
         Self {
             kind: BlobStoreFailureKind::VerificationFailed,
             operation,
-            verification: Some(failure),
+            verification: Some(Box::new(failure)),
             source: None,
         }
     }
@@ -391,7 +410,10 @@ impl BlobStoreError {
 
     /// Returns retained verification facts for a verification failure.
     pub const fn verification_failure(&self) -> Option<BlobVerificationFailure> {
-        self.verification
+        match &self.verification {
+            Some(failure) => Some(**failure),
+            None => None,
+        }
     }
 }
 
@@ -402,7 +424,7 @@ impl fmt::Display for BlobStoreError {
             "blob store {} failed: {:?}",
             self.operation, self.kind
         )?;
-        if let Some(failure) = self.verification {
+        if let Some(failure) = &self.verification {
             write!(
                 formatter,
                 "; expected {} bytes at {}, observed {} bytes",

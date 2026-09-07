@@ -31,17 +31,17 @@ use signalbox_domain::{
     ToolApprovalDecision, ToolApprovalPosture, ToolApprovalResolutionReconstitutionInput,
     ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
     ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
-    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchAuthority,
-    ToolDispatchGeneration, ToolEffectClass, ToolExecutionError, ToolName, ToolRequestId,
-    ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
+    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
+    ToolEffectClass, ToolExecutionError, ToolName, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
 };
 
 use crate::{
     ClassifyOperatorFailure, CorrelatedDurableChildWait, CorrelatedToolExecutorEvidence,
     PrepareToolContinuationOutcome, RetainedToolAttemptObservationStatus,
-    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolCrashClosureIdentities,
-    ToolExecutionInvocation, ToolExecutionTransaction, ToolExecutor, ToolExecutorDisposition,
-    ToolExecutorEvidence,
+    ToolAttemptAuthorizationOutcome, ToolAttemptAuthorizationStatus, ToolContinuationIdentities,
+    ToolCrashClosureIdentities, ToolExecutionInvocation, ToolExecutionTransaction, ToolExecutor,
+    ToolExecutorDisposition, ToolExecutorEvidence, ToolPreauthorization,
 };
 
 use std::sync::{Arc, Mutex};
@@ -279,9 +279,12 @@ where
         _session: SessionId,
         _turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> Result<ToolDispatchAuthority, Self::Error> {
+        _preauthorization: ToolPreauthorization,
+    ) -> Result<ToolAttemptAuthorizationOutcome, Self::Error> {
         self.batch
             .authorize_dispatch(attempt)
+            .map(Box::new)
+            .map(ToolAttemptAuthorizationOutcome::Authorized)
             .map_err(|_| self.failures.domain_rejection.clone())
     }
 

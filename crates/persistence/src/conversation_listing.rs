@@ -5,8 +5,6 @@
 //! transaction — no materialized view, cache, or analytical artifact — so
 //! every listed row is transactionally fresh (docs/spec/process-protocol.md).
 
-use std::{error::Error, fmt};
-
 use signalbox_application::{
     ConversationListCursor, ConversationListItem, ConversationListQuery, ConversationLister,
     ConversationPageReader,
@@ -16,8 +14,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     conversation_import::{
-        DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
-        decode_format, positive_u64,
+        DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_UNDERIVABLE, decode_format, positive_u64,
     },
     mapping::{PositiveOrdinalMappingError, defaults_version_from_numeric},
 };
@@ -35,10 +32,7 @@ const IMPORTED_ORIGIN_RANK: i32 = 1;
 /// exclusive cursor identity and origin rank, `$3` selects native rows, `$4`
 /// includes archived native rows, `$5` is the exact case-sensitive title
 /// substring, and `$6` selects imported rows. A `NULL` native title or
-/// resolved-absent imported display title matches no title filter, while a
-/// transitional `pending` row survives every title filter so the serving
-/// decode fails closed on it rather than letting a filtered page silently
-/// omit an unresolved row.
+/// resolved-absent imported display title matches no title filter.
 const UNIFIED_PAGE_ITEM_SQL: &str = "SELECT unified.origin_rank, unified.conversation_id,
            unified.title, unified.archived, unified.defaults_version,
            unified.source_format, unified.converter_version,
@@ -73,11 +67,7 @@ const UNIFIED_PAGE_ITEM_SQL: &str = "SELECT unified.origin_rank, unified.convers
                imported.display_title_state
           FROM imported_conversation AS imported
          WHERE $6
-           AND (
-               $5::text IS NULL
-               OR imported.display_title_state = 'pending'
-               OR strpos(imported.display_title, $5) > 0
-           )
+           AND ($5::text IS NULL OR strpos(imported.display_title, $5) > 0)
     ) AS unified
     WHERE (
         $1::uuid IS NULL
@@ -103,11 +93,7 @@ const UNIFIED_PAGE_PROBE_SQL: &str = "SELECT EXISTS (
                imported.imported_conversation_id AS conversation_id
           FROM imported_conversation AS imported
          WHERE $6
-           AND (
-               $5::text IS NULL
-               OR imported.display_title_state = 'pending'
-               OR strpos(imported.display_title, $5) > 0
-           )
+           AND ($5::text IS NULL OR strpos(imported.display_title, $5) > 0)
     ) AS unified
     WHERE (
         $1::uuid IS NULL
@@ -115,11 +101,14 @@ const UNIFIED_PAGE_PROBE_SQL: &str = "SELECT EXISTS (
     )
     )";
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable unified-listing row failed checked decoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationListingCorruption {
+    #[error("missing unified conversation-listing {field_0}")]
     /// One required durable value is absent.
     Missing(&'static str),
+    #[error("unsupported unified conversation-listing {field}: {value}")]
     /// A closed discriminator is unsupported.
     Unsupported {
         /// Durable field being decoded.
@@ -127,6 +116,7 @@ pub enum ConversationListingCorruption {
         /// Unsupported non-content spelling.
         value: String,
     },
+    #[error("invalid unified conversation-listing {field}: {reason}")]
     /// One stored positive ordinal cannot construct its domain value.
     InvalidOrdinal {
         /// Durable field being decoded.
@@ -134,77 +124,24 @@ pub enum ConversationListingCorruption {
         /// Why the numeric value is invalid.
         reason: PositiveOrdinalMappingError,
     },
+    #[error("stored imported display title violates its shape contract")]
     /// A stored display title violates the derived-shape contract.
     InvalidDisplayTitle,
-    /// A serving read observed a display title the startup backfill owns.
-    UnresolvedDisplayTitle,
+    #[error("inconsistent unified conversation-listing state: {field_0}")]
     /// Two durable facts that must agree do not.
     Inconsistent(&'static str),
 }
 
-impl fmt::Display for ConversationListingCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => {
-                write!(formatter, "missing unified conversation-listing {field}")
-            }
-            Self::Unsupported { field, value } => {
-                write!(
-                    formatter,
-                    "unsupported unified conversation-listing {field}: {value}"
-                )
-            }
-            Self::InvalidOrdinal { field, reason } => {
-                write!(
-                    formatter,
-                    "invalid unified conversation-listing {field}: {reason}"
-                )
-            }
-            Self::InvalidDisplayTitle => {
-                formatter.write_str("stored imported display title violates its shape contract")
-            }
-            Self::UnresolvedDisplayTitle => formatter.write_str(
-                "unified listing observed a pending display title the startup backfill owns",
-            ),
-            Self::Inconsistent(relationship) => {
-                write!(
-                    formatter,
-                    "inconsistent unified conversation-listing state: {relationship}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ConversationListingCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL unified conversation-listing failure.
 #[derive(Debug)]
 pub enum ConversationListingRepositoryError {
+    #[error("unified conversation listing failed: {field_0}")]
     /// PostgreSQL could not complete the read.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Durable data cannot satisfy the unified-listing contract.
-    Corruption(ConversationListingCorruption),
-}
-
-impl fmt::Display for ConversationListingRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => {
-                write!(formatter, "unified conversation listing failed: {error}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ConversationListingRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] ConversationListingCorruption),
 }
 
 impl From<sqlx::Error> for ConversationListingRepositoryError {
@@ -466,11 +403,7 @@ fn decode_list_item(
     }
 }
 
-/// Requires a resolved display-title state and validates the stored shape.
-///
-/// The startup backfill resolves every transitional `'pending'` row before
-/// the daemon serves, so a serving read observing one fails closed rather
-/// than presenting a row whose derivation never ran.
+/// Requires a final display-title state and validates the stored shape.
 fn decode_resolved_display_title(
     title: Option<String>,
     display_title_state: &str,
@@ -490,9 +423,6 @@ fn decode_resolved_display_title(
                 .into());
             }
             Ok(None)
-        }
-        DISPLAY_TITLE_STATE_PENDING => {
-            Err(ConversationListingCorruption::UnresolvedDisplayTitle.into())
         }
         other => Err(ConversationListingCorruption::Unsupported {
             field: "display-title state",

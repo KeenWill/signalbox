@@ -1,5 +1,12 @@
 import { expect, type Page, test } from '@playwright/test'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+import { useDeterministicImportApi } from './import-api-fixture'
+
+const importsProductFixture = {
+  path: '/imports',
+  loadedImports: '100',
+  latestLoadedPosition: '51',
+} as const
 
 const sessionWorkspaceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
@@ -16,8 +23,68 @@ const settingsPreferenceFixture = {
   restoreAction: 'Restore defaults',
 } as const
 
-const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+const emptyAttentionFixture = {
+  continuation_after_session_id: null,
+  cursor: '0',
+  summaries: [],
+} as const
+const emptySessionCatalogFixture = {
+  continuation: null,
+  cursor: '0',
+  sort: 'last_activity_descending',
+  summaries: [],
+  total: '0',
+} as const
+
+const useDeterministicAttention = async (page: Page) => {
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: emptyAttentionFixture })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', (route) => route.fulfill({ json: emptyAttentionFixture }))
+}
+
+const useDeterministicBootstrap = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/sessions?**', (route) =>
+    route.fulfill({ json: emptySessionCatalogFixture }),
+  )
+  await useDeterministicAttention(page)
+}
+
+const useRecoveringBootstrap = async (page: Page) => {
+  const state = { unavailable: true, attempts: 0 }
+  await page.route('**/api/bootstrap', (route) => {
+    state.attempts += 1
+    return state.unavailable
+      ? route.fulfill({ status: 503, body: 'temporarily unavailable' })
+      : route.fulfill({ json: bootstrapFixture })
+  })
+  return { recover: () => (state.unavailable = false), attempts: () => state.attempts }
+}
+
+// Playwright matches route handlers most-recently-registered first and retires a `times: 1`
+// handler after its single use, so the transport refuses the first admission and serves the
+// deterministic bootstrap on every retry. The sequence lives here so a test body reads as
+// straight-line code instead of branching on an attempt counter.
+const useBootstrapRecoveringAfterOneOutage = async (page: Page) => {
+  const admission = { attempts: 0 }
+  await page.route('**/api/bootstrap', (route) => {
+    admission.attempts += 1
+    return route.fulfill({ json: bootstrapFixture })
+  })
+  await page.route(
+    '**/api/bootstrap',
+    (route) => {
+      admission.attempts += 1
+      return route.fulfill({ status: 503, body: 'temporarily unavailable' })
+    },
+    { times: 1 },
+  )
+  return admission
+}
 
 const useDeterministicSession = async (
   page: Page,
@@ -92,6 +159,47 @@ const watchBrowser = (page: Page) => {
 const platformModifier = (page: Page) =>
   page.evaluate(() => (/Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control'))
 
+const expectedContractStatus = `${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`
+
+test('applies saved visual preferences before the first rendered frame', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      'signalbox.web.preferences.v1',
+      JSON.stringify({
+        layout: 'workbench',
+        density: 'comfortable',
+        detail: 'condensed',
+        theme: 'light',
+        paneSizes: { navigation: 218, inspector: 252 },
+        lastLogicalPositions: {},
+      }),
+    )
+    const observed: string[] = []
+    Object.defineProperty(window, '__visualPreferenceMutations', { value: observed })
+    document.addEventListener('DOMContentLoaded', () => {
+      requestAnimationFrame(() => {
+        observed.push(
+          `${document.documentElement.dataset.theme}:${document.documentElement.dataset.density}`,
+        )
+      })
+    })
+  })
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+  await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as typeof window & { __visualPreferenceMutations: string[] })
+            .__visualPreferenceMutations[0],
+      ),
+    )
+    .toBe('light:comfortable')
+})
+
 test('opens the product at Attention with generated-contract transport status', async ({
   page,
 }) => {
@@ -102,7 +210,7 @@ test('opens the product at Attention with generated-contract transport status', 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page).toHaveTitle('Attention · Signalbox')
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
-  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.getByText(expectedContractStatus)).toBeVisible()
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
     'aria-current',
     'page',
@@ -124,6 +232,16 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   await expect(page).toHaveTitle('Sessions · Signalbox')
   await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('focuses Scenario studio after cross-route navigation', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await expect(page.locator('main.workspace')).toBeFocused()
 })
 
 test('restores the scenario title after leaving product routes', async ({ page }) => {
@@ -149,7 +267,7 @@ test('gates Sessions on the validated bootstrap capability', async ({ page }) =>
       },
     }),
   )
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
@@ -166,7 +284,7 @@ test('gates Sessions on valid timeline limits', async ({ page }) => {
       },
     }),
   )
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
@@ -188,22 +306,16 @@ test('leaves focus in place when Escape has no surface to unwind', async ({ page
 
 test('retries a failed product bootstrap after the daemon recovers', async ({ page }) => {
   const problems = watchBrowser(page)
-  let attempts = 0
-  await page.route('**/api/bootstrap', (route) => {
-    attempts += 1
-    if (attempts === 1) {
-      return route.fulfill({ status: 503, body: 'temporarily unavailable' })
-    }
-    return route.fulfill({ json: bootstrapFixture })
-  })
-  await page.goto('/sessions')
+  const scenario = await useRecoveringBootstrap(page)
+  await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText('Transport unavailable')).toBeVisible()
-  await page.getByRole('button', { name: 'Retry contract' }).click()
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  scenario.recover()
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
 
   await expect(page.getByText('Timeline reads available')).toBeVisible()
   await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
-  expect(attempts).toBe(2)
+  expect(scenario.attempts()).toBe(2)
   expect(problems.pageErrors).toEqual([])
   expect(
     problems.consoleErrors.every((message) =>
@@ -223,7 +335,60 @@ test('completes route switching from the command palette without a mouse', async
   await page.getByRole('button', { name: /Go to Sessions/ }).focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('restores focus after closing the command palette', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const trigger = page.getByRole('button', { name: 'Open command palette' })
+  await trigger.click()
+  await page.keyboard.press('Escape')
+  await expect(trigger).toBeFocused()
+})
+
+test('returns a hotkey-opened palette to its invoking control', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const sessions = page.getByRole('link', { name: /Sessions/ })
+  await sessions.focus()
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await page.keyboard.press('Escape')
+
+  await expect(sessions).toBeFocused()
+})
+
+test('renders a truthful search bootstrap failure', async ({ page }) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ status: 503 }))
+  await page.goto('/search')
+
+  await expect(
+    page.getByRole('heading', { name: 'Search availability could not be checked' }),
+  ).toBeVisible()
+  await expect(page.getByText('Checking whether bounded search is available…')).toHaveCount(0)
+})
+
+test('does not offer the palette opener inside the open palette', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+
+  await expect(palette.getByRole('button', { name: /Open command palette/ })).toHaveCount(0)
+})
+
+test('sets route-aware product document titles', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/search')
+  await expect(page).toHaveTitle('Search · Signalbox')
+
+  await page.getByRole('link', { name: /Attention/ }).click()
+  await expect(page).toHaveTitle('Attention · Signalbox')
 })
 
 test('uses a navigation sheet on a phone viewport with a semantic close control', async ({
@@ -284,7 +449,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -292,6 +457,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
+  await expect(page.getByRole('form', { name: 'Message composer' })).toBeVisible()
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
   await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
     'aria-selected',
@@ -299,7 +465,11 @@ test('opens and inspects a bounded production session without a mouse', async ({
   )
   await expect(timeline).toHaveAttribute('aria-activedescendant', 'session-timeline-option-41')
   const latest = page.getByRole('button', { name: /Latest/ })
+  const reconnect = page.getByRole('button', { name: 'Reconnect live updates' })
+  await expect(reconnect).toBeVisible()
   await latest.focus()
+  await page.keyboard.press('Tab')
+  await expect(reconnect).toBeFocused()
   await page.keyboard.press('Tab')
   await expect(timeline).toBeFocused()
   await latest.focus()
@@ -317,12 +487,23 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(completed).toHaveAttribute('aria-describedby', 'session-timeline-disclosure-43')
   await expect(page.locator('#session-timeline-disclosure-43')).toHaveText('Expanded')
   await expect(page.locator('#session-timeline-detail-43')).toBeVisible()
-  await expect(page.getByText('Header only; rich event detail is not exposed')).toBeVisible()
+  await expect(
+    page.getByText('Durable event metadata; message text appears in the transcript above'),
+  ).toBeVisible()
   const inspector = page.getByLabel('Inspector')
   await expect(inspector.getByText(sessionWorkspaceFixture.id, { exact: true })).toBeVisible()
   await expect(inspector.getByText('43', { exact: true })).toBeVisible()
   await expect(inspector.getByText('turn completed', { exact: true })).toBeVisible()
   await expect(inspector.getByText('78', { exact: true })).toBeVisible()
+
+  const accepted = page.getByRole('option', { name: /41 input accepted/ })
+  await accepted.click()
+  await expect(page.locator('#session-timeline-detail-41')).toBeVisible()
+  await expect(
+    page.getByRole('region', { name: 'transcript attachments unavailable' }),
+  ).toBeVisible()
+  await accepted.click()
+  await expect(page.locator('#session-timeline-detail-41')).toBeHidden()
 
   await page.getByRole('button', { name: /First/ }).click()
   await expect(timeline).toBeFocused()
@@ -340,7 +521,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -351,6 +532,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   await page.getByRole('link', { name: /Settings/ }).click()
   await page.getByRole('radio', { name: 'Full' }).check()
   await page.getByRole('link', { name: /Sessions/ }).click()
+  await page.getByRole('button', { name: 'Open workspace by ID' }).click()
   const reopenedSessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await reopenedSessionId.fill(sessionWorkspaceFixture.id)
   await reopenedSessionId.press('Enter')
@@ -363,7 +545,7 @@ test('keeps palette selection commands focused on the Session timeline', async (
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -387,7 +569,7 @@ test('preserves the saved row when reopening the current Session fails', async (
   let failTimeline = false
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page, () => failTimeline)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -425,7 +607,7 @@ test('preserves the saved row when revisiting a cached Session fails', async ({ 
     page,
     (sessionId) => failRevisitedSession && sessionId === sessionWorkspaceFixture.id,
   )
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -464,7 +646,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   let failTimeline = false
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page, () => failTimeline)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -497,7 +679,7 @@ test('rejects conflicting retained Session evidence after a boundary refetch', a
     (_sessionId, address) =>
       contradictRetainedEvent && address === '43' ? 'turn_cancelled' : undefined,
   )
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -601,7 +783,717 @@ test('closes phone navigation after selecting a route', async ({ page }) => {
   await page.getByRole('button', { name: 'Open navigation' }).click()
   const navigation = page.getByRole('dialog', { name: 'Product navigation' })
   await navigation.getByRole('link', { name: /Sessions/ }).click()
-  await expect(page).toHaveURL(/\/sessions$/)
   await expect(navigation).toBeHidden()
+  await expect(page).toHaveURL(/\/sessions$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('runs product navigation sequences but leaves Mod+K to an editing field', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/search')
+
+  const search = page.getByRole('textbox', { name: 'Search text' })
+  await search.focus()
+  await search.evaluate((element) => {
+    element.addEventListener('keydown', (event) => {
+      queueMicrotask(() => {
+        element.dataset.modKDefaultPrevented = String(event.defaultPrevented)
+      })
+    })
+  })
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
+  await expect(search).toHaveAttribute('data-mod-k-default-prevented', 'false')
+
+  // The landed shell keeps `surface.escape` away from every editable product control, so Escape
+  // does not release the field and the sequence stays ordinary text input. Narrowing that guard is
+  // deferred on KeenWill/signalbox#1316.
+  await search.press('Escape')
+  await page.keyboard.press('g')
+  await page.keyboard.press('a')
+  await expect(page).toHaveURL(/\/search$/)
+
+  // Away from the editing context the same sequence runs.
+  await page.getByRole('button', { name: 'Open command palette' }).focus()
+  await page.keyboard.press('g')
+  await page.keyboard.press('a')
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('main')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('suppresses product navigation sequences while an overlay owns input', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+})
+
+test('leaves unavailable scenario sequences inert on product routes', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const paletteButton = page.getByRole('button', { name: 'Open command palette' })
+  await paletteButton.focus()
+  await page.keyboard.press('g')
+  await page.keyboard.press('g')
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(paletteButton).toBeFocused()
+})
+
+test('suppresses ordinary view hotkeys while an overlay owns input', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.keyboard.press('Shift+D')
+  await page.keyboard.press('Shift+T')
+  await page.keyboard.press('Shift+W')
+  await expect(page.locator('html')).toHaveAttribute('data-density', 'compact')
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+  await expect(page.locator('.product-shell')).toHaveClass(/layout-workbench/)
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
+})
+
+test('restores focus before focus layout hides product navigation', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('link', { name: 'Attention' }).focus()
+  await page.keyboard.press('Shift+W')
+
+  await expect(page.locator('.product-shell')).toHaveClass(/layout-focus/)
+  await expect(page.getByRole('main')).toBeFocused()
+})
+
+test('changes visible product spacing with the density control', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/search')
+
+  const surface = page.locator('.surface-body')
+  const compactPadding = await surface.evaluate((element) => getComputedStyle(element).paddingTop)
+  await page.getByRole('button', { name: 'Use comfortable density' }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
+  const comfortablePadding = await surface.evaluate(
+    (element) => getComputedStyle(element).paddingTop,
+  )
+  expect(comfortablePadding).not.toBe(compactPadding)
+})
+
+test('retries an initial bootstrap failure', async ({ page }) => {
+  const problems = watchBrowser(page)
+  const expectedFailureMessage =
+    'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
+  await useBootstrapRecoveringAfterOneOutage(page)
+  // Attention reads start as soon as the retried bootstrap is admitted; serving them
+  // deterministically keeps the staged outage the only console error this scenario sees.
+  await useDeterministicAttention(page)
+  await page.goto('/attention')
+
+  // A refused admission answers with a status, so `readBootstrap` raises a plain error and the
+  // shell classifies it as an unavailable bootstrap rather than an unreachable transport.
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await expect(page.getByText(expectedContractStatus)).toBeVisible()
+  await expect(page.getByRole('status')).toBeFocused()
+  expect(problems.pageErrors).toEqual([])
+  expect(problems.consoleErrors.filter((message) => message !== expectedFailureMessage)).toEqual([])
+})
+
+test('distinguishes an incompatible bootstrap contract from an outage', async ({ page }) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.goto('/attention')
+
+  // A schema-invalid payload decodes into a contract error, which the shell reports as a rejected
+  // contract. Addressed by text because a deferred surface also publishes a `status` region.
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+})
+
+test('shows transcript-detail commands only on Settings among product routes', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('button', { name: /Show full transcript detail/ })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+
+  await page.goto('/settings')
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('button', { name: /Show full transcript detail/ })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps Settings single-column when a vertical scrollbar reduces content width', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 840, height: 480 })
+  await page.goto('/settings')
+
+  const navigationWidth = page
+    .getByRole('group', { name: 'Workbench panes' })
+    .getByRole('slider')
+    .nth(0)
+  await navigationWidth.fill('360')
+
+  const settingsGrid = page.locator('.settings-grid')
+  expect(
+    await settingsGrid.evaluate(
+      (element) => getComputedStyle(element).gridTemplateColumns.split(' ').length,
+    ),
+  ).toBe(1)
+  const settingsSurface = page.locator('.settings-surface')
+  expect(
+    await settingsSurface.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('applies saved pane widths to the scenario workspace', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/settings')
+
+  const paneSliders = page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider')
+  await paneSliders.nth(0).fill('300')
+  await paneSliders.nth(1).fill('400')
+  await page.setViewportSize({ width: 1000, height: 800 })
+  await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '300px')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+
+  await expect(page.locator('.navigation-pane')).toHaveCSS('width', '300px')
+  await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toBeHidden()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toHaveCSS('width', '400px')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps Settings available without consulting daemon bootstrap', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let bootstrapRequests = 0
+  await page.route('**/api/bootstrap', (route) => {
+    bootstrapRequests += 1
+    return route.abort()
+  })
+
+  await page.goto('/settings')
+
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible()
+  await expect(page.getByText('Browser-local preferences', { exact: true })).toBeVisible()
+  await expect(page.getByText('Transport unavailable')).toHaveCount(0)
+  expect(bootstrapRequests).toBe(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('offers Scenario Studio through the product command palette', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await page.getByRole('button', { name: /Go to Scenario Studio/ }).click()
+
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not start Attention reads when bootstrap validation fails', async ({ page }) => {
+  let attentionRequests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.route('**/api/attention**', (route) => {
+    attentionRequests += 1
+    return route.abort()
+  })
+
+  await page.goto('/attention')
+
+  await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  expect(attentionRequests).toBe(0)
+})
+
+test('does not start Attention reads for incompatible bootstrap values', async ({ page }) => {
+  let attentionRequests = 0
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        limits: { ...bootstrapFixture.limits, max_ndjson_item_bytes: 32_768 },
+      },
+    }),
+  )
+  await page.route('**/api/attention**', (route) => {
+    attentionRequests += 1
+    return route.abort()
+  })
+
+  await page.goto('/attention')
+
+  await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  expect(attentionRequests).toBe(0)
+})
+
+test('retries a transient Attention bootstrap failure in place', async ({ page }) => {
+  const admission = await useBootstrapRecoveringAfterOneOutage(page)
+  await useDeterministicAttention(page)
+  await page.goto('/attention')
+
+  await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await page.getByRole('button', { name: 'Retry contract check' }).click()
+
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '0 sessions' })).toBeVisible()
+  expect(admission.attempts).toBe(2)
+})
+
+test('gives iconless Attention contract errors the full empty-state width', async ({ page }) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.goto('/attention')
+
+  const message = page
+    .getByRole('heading', { name: 'Attention contract unavailable' })
+    .locator('..')
+  await expect(message).toHaveCSS('grid-column-start', '1')
+  await expect(message).toHaveCSS('grid-column-end', '-1')
+})
+
+test('mounts Imports inside the product shell without a second navigation or header', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  await expect(page.getByRole('heading', { name: 'Imports', level: 1 })).toBeVisible()
+  await expect(page.locator('.product-shell')).toHaveCount(1)
+  await expect(page.locator('.imports-shell-product')).toHaveCount(1)
+  await expect(page.locator('.imports-navigation')).toHaveCount(0)
+  await expect(page.locator('.imports-header')).toHaveCount(0)
+  await expect(page.getByRole('main')).toHaveCount(1)
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toHaveAttribute(
+    'data-total-loaded',
+    importsProductFixture.loadedImports,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('operates the bounded Imports surface and leaves through one command palette', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  const importRows = page.getByRole('rowgroup', { name: 'Imported conversation rows' })
+  await expect(importRows).toHaveAttribute('data-total-loaded', importsProductFixture.loadedImports)
+  expect(await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__)).toBeUndefined()
+  const entries = page.getByRole('listbox', { name: 'Imported source entries' })
+  await entries.focus()
+  await entries.press('End')
+  await expect(entries.getByRole('option', { selected: true })).toHaveAttribute(
+    'aria-posinset',
+    importsProductFixture.latestLoadedPosition,
+  )
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toHaveCount(1)
+  await page.getByRole('button', { name: /Go to Settings/ }).click()
+  await expect(page).toHaveURL(/\/settings$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('withholds Imports until bootstrap admission succeeds', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let importRequests = 0
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ status: 503, body: 'temporarily unavailable' }),
+  )
+  await page.route('**/api/imports/**', (route) => {
+    importRequests += 1
+    return route.abort()
+  })
+  await page.goto(importsProductFixture.path)
+
+  await expect(
+    page.getByRole('heading', {
+      name: 'Imports are unavailable until bootstrap admission succeeds',
+    }),
+  ).toBeVisible()
+  // A refused admission answers with a status, so the shell classifies it as an unavailable
+  // bootstrap rather than as an unreachable transport or a rejected contract.
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await expect(page.locator('.imports-shell-product')).toHaveCount(0)
+  expect(importRequests).toBe(0)
+  expect(problems.pageErrors).toEqual([])
+})
+
+test('mounts Imports after the daemon contract recovers', async ({ page }) => {
+  const problems = watchBrowser(page)
+  const admission = await useBootstrapRecoveringAfterOneOutage(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  expect(admission.attempts).toBe(2)
+  expect(problems.pageErrors).toEqual([])
+})
+
+test('serves exact source-session searches through the deterministic adapter', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  const rows = page.getByRole('rowgroup', { name: 'Imported conversation rows' })
+  await expect(rows).toHaveAttribute('data-total-loaded', importsProductFixture.loadedImports)
+  await page
+    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
+    .fill('source-session-0')
+  await page.getByRole('checkbox', { name: 'Use exact source session filter' }).check()
+
+  await expect(rows).toHaveAttribute('data-total-loaded', '1')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('lights up the imports command family only on the Imports surface', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette.getByRole('button', { name: /Select next imported frontier/ })).toBeVisible()
+  await palette.getByRole('button', { name: /Go to Sessions/ }).click()
+  await expect(page).toHaveURL(/\/sessions$/)
+
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(palette.getByRole('button', { name: /Select next imported frontier/ })).toHaveCount(
+    0,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('suspends Imports hotkeys while the palette owns keyboard scope', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  // An open palette hides the rest of the page from the accessibility tree, so address the list
+  // structurally rather than by role.
+  const entries = page.locator('[aria-label="Imported source entries"]')
+  await entries.focus()
+  const initialSelection = await entries.getAttribute('aria-activedescendant')
+  expect(initialSelection).not.toBeNull()
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  await page.keyboard.press('j')
+  await expect(entries).toHaveAttribute('aria-activedescendant', initialSelection ?? '')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('advances the imported frontier exactly once per product hotkey', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  const entries = page.getByRole('listbox', { name: 'Imported source entries' })
+  await entries.focus()
+  await expect(entries.getByRole('option', { selected: true })).toHaveAttribute(
+    'aria-posinset',
+    '1',
+  )
+  await page.keyboard.press('j')
+  await expect(entries.getByRole('option', { selected: true })).toHaveAttribute(
+    'aria-posinset',
+    '2',
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('applies product presentation controls to the mounted Imports surface', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Use comfortable density' }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
+  await page.getByRole('button', { name: 'Use light theme' }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('scrolls short Imports workbenches instead of clipping the inspector', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.setViewportSize({ width: 1200, height: 560 })
+  await page.goto(importsProductFixture.path)
+
+  const main = page.locator('.product-main-imports')
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  expect(await main.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
+  await main.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await expect(page.getByRole('heading', { name: 'Import inspector' })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('switches Imports layout before the product pane clips', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.setViewportSize({ width: 920, height: 844 })
+  await page.goto(importsProductFixture.path)
+
+  const workspace = page.locator('.imports-workspace-product')
+  await expect(workspace).toBeVisible()
+  expect(await workspace.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('stacks Imports from the available product pane width', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      'signalbox.web.preferences.v1',
+      JSON.stringify({
+        layout: 'workbench',
+        density: 'compact',
+        detail: 'condensed',
+        theme: 'dark',
+        paneSizes: { navigation: 360, inspector: 480 },
+      }),
+    )
+  })
+  await page.setViewportSize({ width: 1280, height: 844 })
+  await page.goto(importsProductFixture.path)
+
+  const workspace = page.locator('.imports-workspace-product')
+  const inspectorBody = page.locator('.import-inspector-body')
+  await expect(workspace).toBeVisible()
+  await expect(inspectorBody).toHaveCSS('grid-template-columns', /^(?!.* ).+$/)
+  expect(await workspace.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('locks product navigation while an ambiguous continuation command is retained', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.route('**/api/imports/*/continuations', (route) =>
+    route.fulfill({
+      status: 503,
+      json: {
+        error: {
+          kind: 'application',
+          code: 'continuation_commit_ambiguous',
+          message: 'The commit outcome is ambiguous.',
+        },
+      },
+    }),
+  )
+  await page.goto(importsProductFixture.path)
+
+  await page
+    .getByRole('textbox', { name: 'Initial model selection UUID' })
+    .fill('00000000-0000-7000-8000-000000000777')
+  await page.getByRole('button', { name: 'Resume' }).click()
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+
+  const settingsLink = page.getByRole('link', { name: /Settings/ })
+  await expect(settingsLink).toHaveAttribute('aria-disabled', 'true')
+  await settingsLink.click({ force: true })
+  await expect(page).toHaveURL(/\/imports$/)
+  await page.keyboard.press('g')
+  await page.keyboard.press(',')
+  await expect(page).toHaveURL(/\/imports$/)
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  const expectedResourceError =
+    'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
+  expect(problems.pageErrors).toEqual([])
+  expect(problems.consoleErrors.every((error) => error === expectedResourceError)).toBe(true)
+})
+
+test('runs advertised product navigation sequences', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.getByRole('main')).toBeFocused()
+  await page.keyboard.press('g')
+  await page.keyboard.press(',')
+  await expect(page).toHaveURL(/\/settings$/)
+  await expect(page).toHaveTitle('Settings · Signalbox')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not run product navigation sequences while a modal owns focus', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await palette.getByRole('button', { name: /Go to Sessions/ }).focus()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(palette).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not run product view hotkeys while a modal owns focus', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  const presentationBefore = await page.evaluate(() => ({
+    theme: document.documentElement.dataset.theme,
+    density: document.documentElement.dataset.density,
+  }))
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await palette.getByRole('button', { name: /Go to Sessions/ }).focus()
+  await page.keyboard.press('Shift+T')
+  await page.keyboard.press('Shift+D')
+  await page.keyboard.press('Shift+W')
+  expect(
+    await page.evaluate(() => ({
+      theme: document.documentElement.dataset.theme,
+      density: document.documentElement.dataset.density,
+    })),
+  ).toEqual(presentationBefore)
+  await expect(palette).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not run product view hotkeys while the artifact sheet owns focus', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+  const presentationBefore = await page.evaluate(() => ({
+    theme: document.documentElement.dataset.theme,
+    density: document.documentElement.dataset.density,
+  }))
+
+  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
+  const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
+  await expect(sheet).toBeVisible()
+  await sheet.getByRole('button', { name: 'Close artifact inspector' }).focus()
+  await page.keyboard.press('Shift+T')
+  await page.keyboard.press('Shift+D')
+  await page.keyboard.press('Shift+W')
+
+  expect(
+    await page.evaluate(() => ({
+      theme: document.documentElement.dataset.theme,
+      density: document.documentElement.dataset.density,
+    })),
+  ).toEqual(presentationBefore)
+  await expect(sheet).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('unwinds the phone navigation sheet with Escape', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  const openNavigation = page.getByRole('button', { name: 'Open navigation' })
+  await openNavigation.click()
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
+  await expect(openNavigation).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('closes the phone navigation sheet before entering Scenario studio', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('link', { name: /Scenario studio/ }).click()
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await expect(navigation).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('retries a transient bootstrap failure without reloading', async ({ page }) => {
+  const problems = watchBrowser(page)
+  const scenario = await useRecoveringBootstrap(page)
+  // Attention reads start as soon as the retried bootstrap is admitted; serving them
+  // deterministically keeps the staged bootstrap outage the only console error this scenario sees.
+  await useDeterministicAttention(page)
+  await page.goto('/attention')
+
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  scenario.recover()
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await expect(
+    page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
+  ).toBeVisible()
+  await expect(page.getByRole('status')).toBeFocused()
+  expect(problems.pageErrors).toEqual([])
+  expect(
+    problems.consoleErrors.every((message) =>
+      message.includes('Failed to load resource: the server responded with a status of 503'),
+    ),
+  ).toBe(true)
+})
+
+test('distinguishes a rejected bootstrap contract from transport failure', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.goto('/attention')
+
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry bootstrap' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

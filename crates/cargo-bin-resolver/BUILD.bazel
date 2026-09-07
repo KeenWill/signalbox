@@ -1,0 +1,15 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary")
+load("//tooling/bazel:testing.bzl", "rust_unit_test")
+
+rust_package()
+
+rust_binary(
+    name = "signalbox-cargo-bin-resolver",
+    crate_root = "src/main.rs",
+)
+
+rust_unit_test(
+    name = "signalbox_cargo_bin_resolver_unit_tests",
+    crate = ":signalbox-cargo-bin-resolver",
+)

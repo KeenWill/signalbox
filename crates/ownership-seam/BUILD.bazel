@@ -1,0 +1,43 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_integration_test", "rust_unit_test")
+
+CRATE_FEATURES = ["test-support"]
+
+rust_package()
+
+rust_library(
+    name = "signalbox_ownership_seam",
+    crate_features = CRATE_FEATURES,
+    crate_root = "src/lib.rs",
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/domain:signalbox_domain",
+        "//crates/persistence:signalbox_persistence",
+    ],
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_ownership_seam",
+    crate_features = CRATE_FEATURES,
+)
+
+rust_integration_test(
+    name = "lifecycle_vocabulary",
+    size = "small",
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/lifecycle_vocabulary.rs",
+    deps = [
+        ":signalbox_ownership_seam",
+        "//crates/application:signalbox_application",
+        "//crates/domain:signalbox_domain",
+        "//crates/persistence:signalbox_persistence",
+    ],
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_ownership_seam",
+    crate_features = CRATE_FEATURES,
+)

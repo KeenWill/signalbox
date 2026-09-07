@@ -1,22 +1,23 @@
 //! Codex CLI subscription adapter for the Layer-1 model runtime specified in
 //! `docs/spec/runtime-substrate.md`.
 //!
-//! One prepared operation becomes one fresh `codex exec --json --ephemeral`
+//! One prepared operation becomes one fresh `codex app-server --stdio`
 //! process. Process spawn is this adapter's irrevocable-dispatch boundary:
 //! preparation performs no spawn, execution never respawns, and a process
 //! that ends without definitive Codex terminal evidence is never completion.
 //!
 //! The CLI owns subscription authentication. This crate invokes the binary
-//! and neither locates nor reads its credential store. Provider-controlled
+//! without reading its credential store. Provider-controlled
 //! output is sanitized for credential-shaped material before it crosses the
 //! adapter boundary.
 
+mod app_server;
 mod config;
 mod event;
+mod executable_pin;
 #[cfg(test)]
 mod redaction;
 mod runtime;
-mod status;
 mod translate;
 mod wire;
 

@@ -1,6 +1,6 @@
 //! The first compiled hub-local tool: deterministic current-time lookup.
 
-use std::{error::Error, fmt, future::Future, time::SystemTime};
+use std::{fmt, future::Future, time::SystemTime};
 
 use jiff::{
     Timestamp,
@@ -53,31 +53,23 @@ impl CurrentTimeClock for SystemCurrentTimeClock {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A static `current_time` declaration could not be compiled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurrentTimeToolConstructionError {
+    #[error("current_time static name is invalid")]
     /// The static tool name was rejected.
     Name,
+    #[error("current_time static schema is invalid")]
     /// The static JSON Schema was rejected.
     Schema,
+    #[error("current_time static error detail is invalid")]
     /// A static sanitized error detail was rejected.
     ErrorDetail,
+    #[error("current_time catalog is duplicated")]
     /// The one-entry catalog unexpectedly reported a duplicate.
     Duplicate,
 }
-
-impl fmt::Display for CurrentTimeToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Name => formatter.write_str("current_time static name is invalid"),
-            Self::Schema => formatter.write_str("current_time static schema is invalid"),
-            Self::ErrorDetail => formatter.write_str("current_time static error detail is invalid"),
-            Self::Duplicate => formatter.write_str("current_time catalog is duplicated"),
-        }
-    }
-}
-
-impl Error for CurrentTimeToolConstructionError {}
 
 /// Compiled catalog entry and matching executor for `current_time`.
 ///
@@ -167,32 +159,20 @@ pub struct CurrentTimeExecutor<Clock> {
     offset_not_rfc3339_detail: ToolExecutionErrorDetail,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A checked catalog/executor assumption failed inside `current_time`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurrentTimeExecutorError {
+    #[error("current_time argument validation drifted")]
     /// The executor could not reproduce catalog argument validation.
     ArgumentValidationDrift,
+    #[error("current_time timestamp formatting failed")]
     /// The static RFC 3339 formatting operation failed.
     TimestampFormatting,
+    #[error("current_time result encoding failed")]
     /// Compact JSON result encoding unexpectedly failed.
     ResultEncoding,
 }
-
-impl fmt::Display for CurrentTimeExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ArgumentValidationDrift => {
-                formatter.write_str("current_time argument validation drifted")
-            }
-            Self::TimestampFormatting => {
-                formatter.write_str("current_time timestamp formatting failed")
-            }
-            Self::ResultEncoding => formatter.write_str("current_time result encoding failed"),
-        }
-    }
-}
-
-impl Error for CurrentTimeExecutorError {}
 
 impl ClassifyOperatorFailure for CurrentTimeExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
@@ -528,9 +508,12 @@ mod tests {
             _session: SessionId,
             _turn: TurnId,
             attempt: signalbox_domain::ToolAttemptId,
-        ) -> Result<signalbox_domain::ToolDispatchAuthority, Self::Error> {
+            _preauthorization: signalbox_application::ToolPreauthorization,
+        ) -> Result<signalbox_application::ToolAttemptAuthorizationOutcome, Self::Error> {
             self.batch
                 .authorize_dispatch(attempt)
+                .map(Box::new)
+                .map(signalbox_application::ToolAttemptAuthorizationOutcome::Authorized)
                 .map_err(|_| CurrentTimeExecutorError::ArgumentValidationDrift)
         }
 
@@ -602,10 +585,9 @@ mod tests {
         }
     }
 
-    /// S15: the first compiled declaration is exactly auto-approved and
-    /// effect-free.
+    /// the first compiled declaration is exactly auto-approved and effect-free.
     #[test]
-    fn s15_current_time_definition_carries_exact_policy() {
+    fn current_time_definition_carries_exact_policy() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
             .expect("static current_time tool compiles")
             .into_parts();
@@ -619,11 +601,10 @@ mod tests {
         assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
     }
 
-    /// S15: the derived schema remains byte-identical to the canonical
-    /// artifact produced from the hand-written schema that shipped before
-    /// derivation.
+    /// the derived schema remains byte-identical to the canonical artifact produced from the
+    /// hand-written schema that shipped before derivation.
     #[test]
-    fn s15_current_time_derived_schema_is_byte_identical_to_shipped_schema() {
+    fn current_time_derived_schema_is_byte_identical_to_shipped_schema() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
             .expect("static current_time tool compiles")
             .into_parts();
@@ -651,10 +632,10 @@ mod tests {
         );
     }
 
-    /// S15: an explicit `timezone: null` is not the omitted-member default;
-    /// the declared plain-string schema and the decoder reject it together.
+    /// an explicit `timezone: null` is not the omitted-member default; the declared plain-string
+    /// schema and the decoder reject it together.
     #[test]
-    fn s15_current_time_rejects_explicit_null_timezone() {
+    fn current_time_rejects_explicit_null_timezone() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
             .expect("static current_time tool compiles")
             .into_parts();
@@ -666,10 +647,9 @@ mod tests {
         ));
     }
 
-    /// S15: the declaration schema accepts the empty object and rejects
-    /// unexpected fields.
+    /// the declaration schema accepts the empty object and rejects unexpected fields.
     #[test]
-    fn s15_current_time_schema_rejects_unexpected_fields() {
+    fn current_time_schema_rejects_unexpected_fields() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
             .expect("static current_time tool compiles")
             .into_parts();
@@ -688,10 +668,10 @@ mod tests {
         ));
     }
 
-    /// S15: executor dispatch observes its injected clock exactly once instead
-    /// of consulting ambient wall-clock state.
+    /// executor dispatch observes its injected clock exactly once instead of consulting ambient
+    /// wall-clock state.
     #[tokio::test]
-    async fn s15_current_time_executor_uses_only_the_injected_clock() {
+    async fn current_time_executor_uses_only_the_injected_clock() {
         let clock_reads = Arc::new(AtomicUsize::new(0));
         let observed_reads = Arc::clone(&clock_reads);
         let clock = move || {
@@ -730,18 +710,18 @@ mod tests {
         ));
     }
 
-    /// S15: an omitted timezone resolves to the exact UTC default.
+    /// an omitted timezone resolves to the exact UTC default.
     #[test]
-    fn s15_current_time_defaults_to_utc() {
+    fn current_time_defaults_to_utc() {
         let resolved = resolve_arguments(&arguments("{}"))
             .expect("the empty object selects the default timezone");
 
         assert_eq!(resolved.selected_name, "UTC");
     }
 
-    /// S15: successful output is the exact compact JSON contract.
+    /// successful output is the exact compact JSON contract.
     #[test]
-    fn s15_current_time_result_encoding_is_exact_and_compact() {
+    fn current_time_result_encoding_is_exact_and_compact() {
         let evidence = current_time_evidence(
             SystemTime::UNIX_EPOCH,
             &arguments(r#"{"timezone":"UTC"}"#),
@@ -758,9 +738,9 @@ mod tests {
         );
     }
 
-    /// S15: negative civil years cannot enter the RFC 3339 success shape.
+    /// negative civil years cannot enter the RFC 3339 success shape.
     #[test]
-    fn s15_current_time_rejects_negative_rfc3339_year() {
+    fn current_time_rejects_negative_rfc3339_year() {
         let before_year_zero =
             SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(62_198_841_600);
         let evidence = current_time_evidence(
@@ -779,10 +759,10 @@ mod tests {
         );
     }
 
-    /// S15: IANA lookup preserves a recognized alias and applies the zone's
-    /// offset to the injected instant.
+    /// IANA lookup preserves a recognized alias and applies the zone's offset to the injected
+    /// instant.
     #[test]
-    fn s15_current_time_preserves_selected_iana_alias() {
+    fn current_time_preserves_selected_iana_alias() {
         let evidence = current_time_evidence(
             SystemTime::UNIX_EPOCH,
             &arguments(r#"{"timezone":"US/Eastern"}"#),
@@ -799,9 +779,9 @@ mod tests {
         );
     }
 
-    /// S15: unknown IANA names fail catalog validation before execution.
+    /// unknown IANA names fail catalog validation before execution.
     #[test]
-    fn s15_current_time_rejects_unknown_iana_zone() {
+    fn current_time_rejects_unknown_iana_zone() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
             .expect("static current_time tool compiles")
             .into_parts();
@@ -816,9 +796,9 @@ mod tests {
         ));
     }
 
-    /// S15: Jiff's non-IANA unknown-zone sentinel is not a valid tool argument.
+    /// Jiff's non-IANA unknown-zone sentinel is not a valid tool argument.
     #[test]
-    fn s15_current_time_rejects_unknown_zone_sentinel() {
+    fn current_time_rejects_unknown_zone_sentinel() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
             .expect("static current_time tool compiles")
             .into_parts();
@@ -833,9 +813,9 @@ mod tests {
         ));
     }
 
-    /// S15: auxiliary TZif paths are not IANA zone or link identifiers.
+    /// auxiliary TZif paths are not IANA zone or link identifiers.
     #[test]
-    fn s15_current_time_rejects_auxiliary_zoneinfo_paths() {
+    fn current_time_rejects_auxiliary_zoneinfo_paths() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
             .expect("static current_time tool compiles")
             .into_parts();
@@ -847,9 +827,9 @@ mod tests {
         assert_auxiliary_zoneinfo_path_rejected(&catalog, definition, "right/UTC");
     }
 
-    /// S15: a present timezone must be a string.
+    /// a present timezone must be a string.
     #[test]
-    fn s15_current_time_rejects_non_string_timezone() {
+    fn current_time_rejects_non_string_timezone() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
             .expect("static current_time tool compiles")
             .into_parts();
@@ -861,10 +841,10 @@ mod tests {
         ));
     }
 
-    /// S15: an injected instant outside the supported civil-time range is a
-    /// typed known failure rather than executor infrastructure failure.
+    /// an injected instant outside the supported civil-time range is a typed known failure rather
+    /// than executor infrastructure failure.
     #[test]
-    fn s15_current_time_reports_out_of_range_clock_as_known_failure() {
+    fn current_time_reports_out_of_range_clock_as_known_failure() {
         let outside_jiff_range =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(253_402_300_800);
 
@@ -882,10 +862,10 @@ mod tests {
         );
     }
 
-    /// S15: a historical sub-minute IANA offset is a typed known failure
-    /// rather than a minute-truncated timestamp for another instant.
+    /// a historical sub-minute IANA offset is a typed known failure rather than a minute-truncated
+    /// timestamp for another instant.
     #[test]
-    fn s15_current_time_rejects_offset_rfc3339_cannot_represent() {
+    fn current_time_rejects_offset_rfc3339_cannot_represent() {
         let start_of_1900_utc = SystemTime::UNIX_EPOCH
             .checked_sub(std::time::Duration::from_secs(2_208_988_800))
             .expect("fixture instant is representable");

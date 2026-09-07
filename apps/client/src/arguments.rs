@@ -53,6 +53,7 @@ pub(crate) enum SendDeliveryArgument {
 
 #[derive(Debug)]
 pub(crate) enum Command {
+    Credential(CredentialCommand),
     Create {
         selection: Option<ModelSelection>,
         template: Option<String>,
@@ -409,8 +410,37 @@ struct Cli {
     command: CliCommand,
 }
 
+#[derive(Debug, ClapArgs)]
+struct CredentialArguments {
+    #[command(subcommand)]
+    command: CredentialCommand,
+}
+
+/// Operator-invoked OAuth administration.
+#[derive(Debug, Subcommand)]
+pub(crate) enum CredentialCommand {
+    /// Begin device authorization for a credential profile.
+    Provision(CredentialTarget),
+    /// Replace the profile's stored authorization through device authorization.
+    Reprovision(CredentialTarget),
+    /// Delete the profile's retained OAuth authorization.
+    Delete(CredentialTarget),
+}
+
+#[derive(Debug, ClapArgs)]
+pub(crate) struct CredentialTarget {
+    /// Credential profile name, 1 through 256 UTF-8 bytes without padding or NUL.
+    #[arg(value_name = "PROFILE")]
+    pub(crate) profile: String,
+    /// Durable UUID for retries; omission generates and prints a new identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    pub(crate) command_id: Option<CommandId>,
+}
+
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Provision, replace, or delete an OAuth credential.
+    Credential(CredentialArguments),
     /// Create a session.
     Create(CreateArguments),
     /// Append an explicit immutable placement update.
@@ -425,7 +455,7 @@ enum CliCommand {
     Session(SessionDelegationArguments),
     /// Commission, inspect, or transition one session goal.
     Goal(GoalArguments),
-    /// Show what repository-watch automation is working on now.
+    /// Show lifecycle health metrics and current deadline violations.
     Status,
     /// List current sessions.
     List,
@@ -501,6 +531,7 @@ struct BlobReadArguments {
     /// Zero-based byte offset.
     #[arg(long = "offset", value_name = "DECIMAL")]
     offset_bytes: u64,
+    /// Positive byte count of the range to read; `help` states the ceiling.
     #[arg(
         long = "length",
         value_name = "DECIMAL",
@@ -709,10 +740,12 @@ struct GoalResumeArguments {
     /// Session whose blocked goal resumes.
     #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
     session_id: CanonicalUuid,
-    /// Optional exact next-turn guidance; at most 1 MiB of UTF-8. Omit both guidance options to use the immutable statement.
+    /// Optional exact next-turn guidance; at most 1 MiB of UTF-8. Omit both guidance options to
+    /// use the immutable statement.
     #[arg(long, value_name = "TEXT")]
     guidance: Option<String>,
-    /// Read optional next-turn guidance from one file; at most 1 MiB of UTF-8. Omit both guidance options to use the immutable statement.
+    /// Read optional next-turn guidance from one file; at most 1 MiB of UTF-8. Omit both guidance
+    /// options to use the immutable statement.
     #[arg(long, value_name = "FILE")]
     guidance_file: Option<PathBuf>,
     /// Reuse an exact non-reserved durable command identity.
@@ -964,7 +997,8 @@ struct RecordReviewFindingEventArguments {
     /// Active turn recording the event.
     #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
     turn_id: CanonicalUuid,
-    /// Output frontier the event is recorded against; omitted only for a blocked-with-reason event.
+    /// Output frontier the event is recorded against; omitted only for a blocked-with-reason
+    /// event.
     #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
     output_frontier_id: Option<CanonicalUuid>,
     /// Finding the event applies to.
@@ -1905,6 +1939,7 @@ pub(crate) fn parse(
                 content: delegation_text_argument(arguments.content, arguments.content_file)?,
             },
         }),
+        CliCommand::Credential(arguments) => Command::Credential(arguments.command),
         CliCommand::Goal(arguments) => Command::Goal(match arguments.command {
             GoalSubcommand::Attach(arguments) => GoalCommand::Attach {
                 session_id: arguments.session_id,
@@ -2540,7 +2575,6 @@ fn delegation_text_argument(
 }
 
 fn template_name(value: &str) -> Result<String, String> {
-    // numeric-bound: guard - mirrors the canonical session-template name wire grammar
     const MAX_UTF8_BYTES: usize = 128;
 
     let first_is_admitted = value
@@ -2639,7 +2673,6 @@ fn review_line_number(value: &str) -> Result<CanonicalU64, String> {
 }
 
 fn review_confidence(value: &str) -> Result<CanonicalU64, String> {
-    // numeric-bound: not-a-bound - fixed full-scale basis-point representation
     const MAXIMUM_REVIEW_CONFIDENCE_BASIS_POINTS: u64 = 10_000;
 
     let parsed = canonical_u64(value)?;
@@ -3253,10 +3286,10 @@ mod tests {
         ));
     }
 
-    /// S30: model replacement recovery accepts only the complete set of
-    /// pre-mutation facts printed by the client.
+    /// model replacement recovery accepts only the complete set of pre-mutation facts printed by
+    /// the client.
     #[test]
-    fn s30_model_recovery_flags_are_one_complete_defaults_observation() {
+    fn model_recovery_flags_are_one_complete_defaults_observation() {
         let session = "00000000-0000-0000-0000-000000000001";
         let selection = "00000000-0000-0000-0000-000000000002";
         assert!(
@@ -3303,10 +3336,10 @@ mod tests {
         ));
     }
 
-    /// S07: stop recovery accepts only the complete printed observation —
-    /// command identity, defaults version, and the exact expected turn.
+    /// stop recovery accepts only the complete printed observation — command identity, defaults
+    /// version, and the exact expected turn.
     #[test]
-    fn s07_stop_recovery_flags_are_one_complete_observation() {
+    fn stop_recovery_flags_are_one_complete_observation() {
         let session = "00000000-0000-0000-0000-000000000001";
         let turn = "00000000-0000-0000-0000-000000000002";
 
@@ -3363,9 +3396,9 @@ mod tests {
         ));
     }
 
-    /// S19: the stop verb exposes the explicit descendant-cascade choice.
+    /// the stop verb exposes the explicit descendant-cascade choice.
     #[test]
-    fn s19_stop_descendants_flag_selects_cascade() {
+    fn stop_descendants_flag_selects_cascade() {
         let session = "00000000-0000-0000-0000-000000000001";
         let parsed = parse(["stop", session, "--descendants"].map(Into::into))
             .expect("the descendant-cascade choice parses");
@@ -3380,9 +3413,9 @@ mod tests {
         assert!(descendants);
     }
 
-    /// S19: goal stop exposes the same explicit descendant-cascade choice.
+    /// goal stop exposes the same explicit descendant-cascade choice.
     #[test]
-    fn s19_goal_stop_descendants_flag_selects_cascade() {
+    fn goal_stop_descendants_flag_selects_cascade() {
         let session = "00000000-0000-0000-0000-000000000001";
         let parsed = parse(["goal", "stop", session, "--descendants"].map(Into::into))
             .expect("the goal descendant-cascade choice parses");
@@ -3397,10 +3430,10 @@ mod tests {
         assert!(descendants);
     }
 
-    /// S10: both decision verbs bind the session and the exact pending
-    /// request, and deny requires its explicit reason.
+    /// both decision verbs bind the session and the exact pending request, and deny requires its
+    /// explicit reason.
     #[test]
-    fn s10_decision_verbs_bind_session_request_and_deny_reason() {
+    fn decision_verbs_bind_session_request_and_deny_reason() {
         let session = "00000000-0000-0000-0000-000000000001";
         let tool_request = "00000000-0000-0000-0000-000000000002";
 

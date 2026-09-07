@@ -28,7 +28,9 @@ use testcontainers_modules::{
 };
 use uuid::Uuid;
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+#[path = "../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+use postgres_test_image::POSTGRES_IMAGE_TAG;
 const DATABASE_NAME: &str = "signalbox_program_host";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
@@ -166,11 +168,11 @@ await now(new Uint8Array([{DIVERGENT_REQUEST_BYTE}]));
     ))
 }
 
-/// INV-067: a real isolate consumes recorded deliveries and appends only after the durable tail.
+/// a real isolate consumes recorded deliveries and appends only after the durable tail.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv067_isolate_replays_then_transitions_to_live_at_the_durable_tail()
--> Result<(), Box<dyn Error>> {
+async fn isolate_replays_then_transitions_to_live_at_the_durable_tail() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     let repository = ProgramJournalRepository::new(pool.clone());
     let run = run_id();
@@ -271,10 +273,10 @@ async fn inv067_isolate_replays_then_transitions_to_live_at_the_durable_tail()
     Ok(())
 }
 
-/// INV-068: isolate divergence is typed, persisted once, and replays as the same fault.
+/// isolate divergence is typed, persisted once, and replays as the same fault.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv068_isolate_divergence_persists_and_replays_the_nondeterminism_fault()
+async fn isolate_divergence_persists_and_replays_the_nondeterminism_fault()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let repository = ProgramJournalRepository::new(pool.clone());

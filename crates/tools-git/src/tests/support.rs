@@ -206,13 +206,14 @@ impl WorkspaceFileSystem for ReplacingRootFileSystem {
         )
     }
 
-    fn read_file_prefix(
+    fn read_file_range(
         &self,
         root: &WorkspaceRoot,
         path: &Path,
+        offset: u64,
         max_bytes: usize,
     ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
-        LocalWorkspaceFileSystem.read_file_prefix(root, path, max_bytes)
+        LocalWorkspaceFileSystem.read_file_range(root, path, offset, max_bytes)
     }
 }
 
@@ -246,13 +247,14 @@ impl WorkspaceFileSystem for ObservingIndexLockFileSystem {
         )
     }
 
-    fn read_file_prefix(
+    fn read_file_range(
         &self,
         root: &WorkspaceRoot,
         path: &Path,
+        offset: u64,
         max_bytes: usize,
     ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
-        let read = LocalWorkspaceFileSystem.read_file_prefix(root, path, max_bytes)?;
+        let read = LocalWorkspaceFileSystem.read_file_range(root, path, offset, max_bytes)?;
         self.lock_observed.store(
             self.root_path.join(".git/index.lock").is_file(),
             Ordering::SeqCst,
@@ -297,13 +299,14 @@ impl WorkspaceFileSystem for ConcurrentRootOpenFileSystem {
         )
     }
 
-    fn read_file_prefix(
+    fn read_file_range(
         &self,
         root: &WorkspaceRoot,
         path: &Path,
+        offset: u64,
         max_bytes: usize,
     ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
-        LocalWorkspaceFileSystem.read_file_prefix(root, path, max_bytes)
+        LocalWorkspaceFileSystem.read_file_range(root, path, offset, max_bytes)
     }
 }
 
@@ -460,7 +463,9 @@ fn decode_hex_fixture(bytes: &[u8]) -> Vec<u8> {
         .filter(u8::is_ascii_hexdigit)
         .collect::<Vec<_>>();
     digits
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Some((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?))
         .collect::<Option<Vec<_>>>()
         .expect("real Git hex fixture contains complete byte pairs")

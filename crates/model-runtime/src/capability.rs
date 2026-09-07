@@ -19,6 +19,7 @@ pub struct ModelCapabilities {
     reasoning_levels: BTreeSet<ReasoningLevel>,
     fast_mode: Option<FastModeTarget>,
     service_tiers: BTreeSet<ServiceTier>,
+    reasoning_replay_family: Option<String>,
 }
 
 impl ModelCapabilities {
@@ -32,7 +33,19 @@ impl ModelCapabilities {
             reasoning_levels,
             fast_mode,
             service_tiers,
+            reasoning_replay_family: None,
         }
+    }
+
+    /// Declares the operator-configured family for opaque reasoning replay.
+    pub fn with_reasoning_replay_family(mut self, family: Option<String>) -> Self {
+        self.reasoning_replay_family = family;
+        self
+    }
+
+    /// Borrows the declared reasoning replay family, if any.
+    pub fn reasoning_replay_family(&self) -> Option<&str> {
+        self.reasoning_replay_family.as_deref()
     }
 
     /// Borrows supported reasoning levels.
@@ -341,10 +354,10 @@ mod tests {
         .expect("the fixture catalog has one exact target")
     }
 
-    /// S37 / INV-051: validation uses the exact target record and rejects an
-    /// unsupported explicit level before an adapter can prepare traffic.
+    /// validation uses the exact target record and rejects an unsupported explicit level before an
+    /// adapter can prepare traffic.
     #[test]
-    fn s37_inv051_exact_target_capability_rejects_unsupported_reasoning() {
+    fn exact_target_capability_rejects_unsupported_reasoning() {
         let mut settings = ModelSettings::new(128);
         settings.reasoning_level = Some(ReasoningLevel::Medium);
 
@@ -360,10 +373,9 @@ mod tests {
         );
     }
 
-    /// S37 / INV-054: a mapped fast target is returned only from its exact
-    /// declared capability record.
+    /// a mapped fast target is returned only from its exact declared capability record.
     #[test]
-    fn s37_inv054_capability_returns_only_the_declared_fast_target() {
+    fn capability_returns_only_the_declared_fast_target() {
         let selected = ResolvedTarget::new("fixture-standard");
         let mapped = ResolvedTarget::new("fixture-fast");
         let capabilities = ModelCapabilities::new(
@@ -411,10 +423,9 @@ mod tests {
             .assert_eq(&tier.to_string());
     }
 
-    /// S37 / INV-054: a same-target request control cannot masquerade as a
-    /// distinct serving-identity mapping.
+    /// a same-target request control cannot masquerade as a distinct serving-identity mapping.
     #[test]
-    fn s37_inv054_capability_catalog_rejects_self_mapped_fast_target() {
+    fn capability_catalog_rejects_self_mapped_fast_target() {
         let selected = ResolvedTarget::new("fixture-model");
         let definition = ModelCapabilityDefinition::new(
             selected.clone(),

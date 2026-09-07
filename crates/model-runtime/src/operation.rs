@@ -68,14 +68,28 @@ pub enum DeliveryMode {
     Streamed,
 }
 
+/// Whether a provider adapter may ask the provider to compact this operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderCompactionMode {
+    /// Provider-side compaction may be enabled when the resolved target supports it.
+    Allowed,
+    /// Provider-side compaction must not be enabled for this operation.
+    Suppressed,
+}
+
 /// How the provider may choose among the declared tools.
+///
+/// Whether a choice binds as a transport control or only as an instruction is
+/// the selected adapter's property; an adapter that cannot force one records
+/// that advisory exception in the runtime-substrate contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolChoice {
     /// The model decides whether to call a declared tool.
     Automatic,
-    /// The model must call some declared tool.
+    /// Every proposal must name some declared tool, and at least one is
+    /// wanted.
     AnyTool,
-    /// The model must call the named tool.
+    /// Every proposal must name this tool.
     Named(ToolName),
 }
 
@@ -121,6 +135,11 @@ pub struct ModelOperation<C> {
     pub output_contract: Option<StructuredOutputContract>,
     /// Buffered or streamed delivery.
     pub delivery: DeliveryMode,
+    /// Whether the adapter may enable provider-side compaction.
+    pub provider_compaction: ProviderCompactionMode,
+    /// Whether the exact effective target supports provider-side compaction
+    /// and replay of its provider-qualified blocks.
+    pub provider_compaction_supported: bool,
 }
 
 impl<C> ModelOperation<C> {
@@ -147,6 +166,8 @@ impl<C> ModelOperation<C> {
             tool_choice: ToolChoice::Automatic,
             output_contract: None,
             delivery: DeliveryMode::Buffered,
+            provider_compaction: ProviderCompactionMode::Allowed,
+            provider_compaction_supported: false,
         }
     }
 

@@ -1,0 +1,29 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+
+CRATE_FEATURES = ["cli-process"]
+
+rust_package()
+
+rust_library(
+    name = "signalbox_model_runtime",
+    compile_data = [
+        "src/testdata/redaction-corpus.classifications",
+        "src/testdata/redaction-corpus.txt",
+    ],
+    crate_features = CRATE_FEATURES,
+    crate_root = "src/lib.rs",
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_model_runtime",
+    crate_features = CRATE_FEATURES,
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_model_runtime",
+    crate_features = CRATE_FEATURES,
+)

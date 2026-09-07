@@ -28,31 +28,23 @@ const INVALID_ARGUMENTS_DETAIL: &str =
     "expected one complete admitted title, tags, attributes, and archived snapshot";
 const SESSION_NOT_FOUND_DETAIL: &str = "session metadata target does not exist";
 
+#[derive(signalbox_derive::OperatorError)]
 /// A static `session_status_update` declaration could not be compiled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionStatusToolConstructionError {
+    #[error("session_status_update static name is invalid")]
     /// The static name was rejected.
     Name,
+    #[error("session_status_update static schema is invalid")]
     /// The static schema was rejected.
     Schema,
+    #[error("session_status_update static error detail is invalid")]
     /// One static sanitized error detail was rejected.
     ErrorDetail,
+    #[error("session_status_update catalog is duplicated")]
     /// The one-entry catalog unexpectedly reported a duplicate.
     Duplicate,
 }
-
-impl fmt::Display for SessionStatusToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Name => "session_status_update static name is invalid",
-            Self::Schema => "session_status_update static schema is invalid",
-            Self::ErrorDetail => "session_status_update static error detail is invalid",
-            Self::Duplicate => "session_status_update catalog is duplicated",
-        })
-    }
-}
-
-impl Error for SessionStatusToolConstructionError {}
 
 /// Compiled catalog entry and matching executor for session status replacement.
 ///
@@ -243,31 +235,23 @@ impl PostgresSessionStatusWriter {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized PostgreSQL metadata-writer failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PostgresSessionStatusWriterError {
+    #[error("session status command identity is invalid")]
     /// Request correlation did not form a valid durable command identity.
     InvalidCommandIdentity,
+    #[error("session status database operation failed")]
     /// PostgreSQL failed outside the final ambiguous commit acknowledgement.
     Database,
+    #[error("session status command identity collided")]
     /// A freshly derived command identity collided with durable identity.
     IdentityCollision,
+    #[error("session status durable facts are inconsistent")]
     /// Stored metadata command facts were inconsistent.
     Corruption,
 }
-
-impl fmt::Display for PostgresSessionStatusWriterError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidCommandIdentity => "session status command identity is invalid",
-            Self::Database => "session status database operation failed",
-            Self::IdentityCollision => "session status command identity collided",
-            Self::Corruption => "session status durable facts are inconsistent",
-        })
-    }
-}
-
-impl Error for PostgresSessionStatusWriterError {}
 
 impl ClassifyOperatorFailure for PostgresSessionStatusWriterError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
@@ -337,49 +321,26 @@ pub struct SessionStatusExecutor<Writer> {
     session_not_found_detail: ToolExecutionErrorDetail,
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[operator(
+    display_bound = "WriterError : fmt :: Display",
+    error_bound = "WriterError : Error + 'static"
+)]
 /// Failure inside the session-status executor.
 #[derive(Debug)]
 pub enum SessionStatusExecutorError<WriterError> {
+    #[error("session_status_update argument validation drifted")]
     /// Executor argument decoding disagreed with catalog validation.
     ArgumentValidationDrift,
+    #[error(transparent)]
     /// The injected writer failed without trustworthy tool evidence.
-    Writer(WriterError),
+    Writer(#[source] WriterError),
+    #[error("session_status_update writer contract was violated")]
     /// The writer returned an applied snapshot for different admitted facts.
     WriterContract,
+    #[error("session_status_update result encoding failed")]
     /// Compact result encoding unexpectedly failed.
     ResultEncoding,
-}
-
-impl<WriterError> fmt::Display for SessionStatusExecutorError<WriterError>
-where
-    WriterError: fmt::Display,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ArgumentValidationDrift => {
-                formatter.write_str("session_status_update argument validation drifted")
-            }
-            Self::Writer(error) => error.fmt(formatter),
-            Self::WriterContract => {
-                formatter.write_str("session_status_update writer contract was violated")
-            }
-            Self::ResultEncoding => {
-                formatter.write_str("session_status_update result encoding failed")
-            }
-        }
-    }
-}
-
-impl<WriterError> Error for SessionStatusExecutorError<WriterError>
-where
-    WriterError: Error + 'static,
-{
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Writer(error) => Some(error),
-            Self::ArgumentValidationDrift | Self::WriterContract | Self::ResultEncoding => None,
-        }
-    }
 }
 
 impl<WriterError> ClassifyOperatorFailure for SessionStatusExecutorError<WriterError>

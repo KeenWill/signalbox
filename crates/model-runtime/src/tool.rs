@@ -74,7 +74,7 @@ impl ToolDefinition {
         description: impl Into<String>,
         mut input_schema: serde_json::Value,
     ) -> Self {
-        crate::json::sort_object_keys(&mut input_schema);
+        input_schema.sort_all_objects();
         // Invariant: `serde_json::Value` contains only JSON values, so its
         // `Serialize` implementation cannot reject this conversion. The
         // `explicit_schema_serializes_as_raw_json` test exercises this exact

@@ -28,7 +28,6 @@ pub(crate) const DIMENSION_LIMIT_EXCEEDED_REASON: &str = "dimension_limit_exceed
 pub(crate) const PIXEL_LIMIT_EXCEEDED_REASON: &str = "pixel_limit_exceeded";
 
 /// Maximum encoded bytes one image adapter accepts.
-// numeric-bound: ceiling - protects worker memory and decode latency from oversized inputs
 pub const MAX_IMAGE_SOURCE_BYTES: u64 = 262_144;
 
 #[derive(Clone, Copy, Debug)]
@@ -36,7 +35,6 @@ pub(crate) struct AdapterFormat {
     reader_name: &'static str,
     media_type: &'static str,
     image_format: ImageFormat,
-    matches_signature: fn(&[u8]) -> bool,
 }
 
 impl AdapterFormat {
@@ -51,10 +49,6 @@ impl AdapterFormat {
     const fn image_format(self) -> ImageFormat {
         self.image_format
     }
-
-    fn matches_signature(self, prefix: &[u8]) -> bool {
-        (self.matches_signature)(prefix)
-    }
 }
 
 const ADAPTER_FORMATS: [AdapterFormat; 4] = [
@@ -62,27 +56,21 @@ const ADAPTER_FORMATS: [AdapterFormat; 4] = [
         reader_name: "png",
         media_type: "image/png",
         image_format: ImageFormat::Png,
-        matches_signature: |prefix| prefix.starts_with(b"\x89PNG\r\n\x1a\n"),
     },
     AdapterFormat {
         reader_name: "jpeg",
         media_type: "image/jpeg",
         image_format: ImageFormat::Jpeg,
-        matches_signature: |prefix| prefix.starts_with(&[0xff, 0xd8, 0xff]),
     },
     AdapterFormat {
         reader_name: "webp",
         media_type: "image/webp",
         image_format: ImageFormat::WebP,
-        matches_signature: |prefix| {
-            prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WEBP".as_slice())
-        },
     },
     AdapterFormat {
         reader_name: "gif",
         media_type: "image/gif",
         image_format: ImageFormat::Gif,
-        matches_signature: |prefix| prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a"),
     },
 ];
 

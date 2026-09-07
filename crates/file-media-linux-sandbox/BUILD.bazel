@@ -1,0 +1,22 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+
+rust_package()
+
+rust_library(
+    name = "signalbox_file_media_linux_sandbox",
+    crate_root = "src/lib.rs",
+    rustc_flags = ["--deny=warnings"],
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_file_media_linux_sandbox",
+    rustc_flags = ["--deny=warnings"],
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_file_media_linux_sandbox",
+)

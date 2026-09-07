@@ -1,6 +1,398 @@
-//! Model call usage evidence, credential references, provider failure causes, and interrupt or stop history.
+//! Model call usage evidence, credential references, provider failure causes, and interrupt or stop
+//! history.
 
 use crate::*;
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn replayed_provider_reasoning_is_counted_only_without_output_coverage()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    for (offset, compacted, output_tokens) in [
+        (0, false, Some(8)),
+        (0x100, true, None),
+        (0x200, false, None),
+    ] {
+        let seed = 0x6dc0 + offset;
+        let (fixture, repository, authorized) =
+            authorize_checkpointed_model_call(&pool, seed).await?;
+        let correlation = authorized.observation_correlation();
+        let raw =
+            r#"{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"opaque"}"#;
+        let reasoning = AssistantResponsePart::ProviderReasoning(
+            signalbox_domain::ProviderReasoningItem::try_new(raw.to_string())
+                .expect("reasoning fixture"),
+        );
+        let (observation, entries) = if compacted {
+            let block = ProviderCompactionBlock::try_new(String::from(
+                r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+            ))
+            .expect("compaction fixture");
+            (
+                ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                    response: vec![AssistantResponsePart::ProviderCompaction(block), reasoning],
+                    retained_input_tokens: 19,
+                    retained_output_tokens: 3,
+                },
+                2,
+            )
+        } else {
+            (
+                ModelCallTerminalObservation::CompletedWithProviderReasoning {
+                    response: vec![reasoning],
+                },
+                1,
+            )
+        };
+        let frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24));
+        repository
+            .apply_terminal_observation(
+                fixture.session,
+                correlation.bind_terminal_observation_with_usage(
+                    observation,
+                    ProviderReportedTokenUsage::unreported()
+                        .with_input_tokens(Some(70))
+                        .with_output_tokens(output_tokens),
+                ),
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    (0..entries)
+                        .map(|index| {
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 20 + index))
+                        })
+                        .collect(),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                    frontier,
+                )),
+                |_| panic!("no pending steering"),
+            )
+            .await?;
+        let reported = repository
+            .latest_reported_usage(
+                fixture.session,
+                correlation.target(),
+                FastMode::Disabled,
+                compacted,
+                frontier,
+            )
+            .await?
+            .expect("provider input usage retained");
+        assert_eq!(
+            reported.projected_unreported_content_bytes(),
+            if compacted || output_tokens.is_some() {
+                0
+            } else {
+                u64::try_from(raw.len())?
+            }
+        );
+    }
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn completed_provider_reasoning_retains_order_and_projects_a_marker()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6da0;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let item_json = String::from(
+        " { \"encrypted_content\": \"opaque continuation\", \"id\": \"rs_1\", \"type\": \"reasoning\", \"summary\": [] } ",
+    );
+    let item = signalbox_domain::ProviderReasoningItem::try_new(item_json.clone())
+        .expect("the fixture carries a complete reasoning item");
+    let reasoning_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21));
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(
+            ModelCallTerminalObservation::CompletedWithProviderReasoning {
+                response: vec![
+                    AssistantResponsePart::Text(
+                        AssistantText::try_new(String::from("before"))
+                            .expect("nonempty fixture text"),
+                    ),
+                    AssistantResponsePart::ProviderReasoning(item),
+                    AssistantResponsePart::Text(
+                        AssistantText::try_new(String::from("after"))
+                            .expect("nonempty fixture text"),
+                    ),
+                ],
+            },
+        );
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation.clone(),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 20)),
+                    reasoning_entry,
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
+                ],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+            )),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?;
+    assert_eq!(
+        repository
+            .reread_terminal_observation(fixture.session, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted,
+    );
+    let retained: (Option<Decimal>, Option<Decimal>) = sqlx::query_as(
+        "SELECT retained_input_tokens, retained_output_tokens FROM model_call WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retained, (None, None));
+    let stored: Vec<(String, String, Decimal, Option<Decimal>)> = sqlx::query_as(
+        "SELECT payload_kind, assistant_text_value, assistant_response_part_ordinal,
+                assistant_response_text_start_bytes
+           FROM semantic_transcript_entry WHERE producing_model_call_id = $1
+          ORDER BY assistant_response_part_ordinal",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        stored,
+        vec![
+            (
+                String::from("assistant_text"),
+                String::from("before"),
+                Decimal::ZERO,
+                Some(Decimal::ZERO)
+            ),
+            (
+                String::from("provider_reasoning"),
+                item_json,
+                Decimal::ONE,
+                None
+            ),
+            (
+                String::from("assistant_text"),
+                String::from("after"),
+                Decimal::from(2),
+                Some(Decimal::from(6))
+            ),
+        ]
+    );
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the completed turn remains readable");
+    assert!(snapshot.entries().iter().any(|entry| matches!(entry,
+        ProcessTranscriptEntry::ProviderReasoning { entry, turn, model_call, .. }
+            if *entry == reasoning_entry && *turn == fixture.turn && *model_call == fixture.call
+    )));
+
+    let later_credential = ModelCallCredentialReference::new("later-primary");
+    let producer_target = authorized.observation_correlation().target();
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+        producer_target,
+    )])
+    .expect("the later call uses the same configured model");
+    let later_repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, later_credential.clone());
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 40,
+                seed + 1,
+                "continue with another credential",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 42))),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 43),
+            starting_frontier: Uuid::from_u128(seed + 44),
+            initial_attempt: Uuid::from_u128(seed + 45),
+        },
+    )
+    .await?;
+    let later_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 46));
+    let outcome = later_repository
+        .prepare_initial_call(
+            fixture.session,
+            later_call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 47)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 48)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 49)),
+            |_| panic!("no pending steering"),
+        )
+        .await?;
+    assert!(
+        matches!(outcome, PrepareInitialModelCallOutcome::Checkpointed(call) if call == later_call)
+    );
+    let PrepareInitialModelCallOutcome::Ready {
+        request,
+        credential_reference,
+        system_prompt,
+        tool_entries,
+        reasoning_provenance,
+        ..
+    } = later_repository
+        .prepare_initial_call(
+            fixture.session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 50)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 51)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 52)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 53)),
+            |_| panic!("no pending steering"),
+        )
+        .await?
+    else {
+        panic!("the checkpoint reloads with producer facts");
+    };
+    assert_eq!(credential_reference, later_credential);
+    assert_eq!(
+        reasoning_provenance.as_ref(),
+        &[signalbox_application::ProviderReasoningProvenance {
+            source: SemanticTranscriptEntryRef::from_source(fixture.session, reasoning_entry),
+            producing_call: fixture.call,
+            producing_target: producer_target,
+            producing_credential: model_credential_reference(),
+        }]
+    );
+    assert!(matches!(signalbox_application::PreparedModelOperation::render(
+        (*request).clone(), credential_reference.clone(), system_prompt.clone(), Box::new([]), &tool_entries, &[],
+    ), Err(signalbox_application::ModelFrontierRenderingError::MissingOrMismatchedReasoningProvenance { .. })));
+    let operation = signalbox_application::PreparedModelOperation::render(
+        *request,
+        credential_reference,
+        system_prompt,
+        Box::new([]),
+        &tool_entries,
+        &reasoning_provenance,
+    )
+    .expect("producer-qualified reasoning renders");
+    assert_eq!(
+        operation.reasoning_provenance(),
+        reasoning_provenance.as_ref()
+    );
+    assert!(operation.messages().iter().any(|message| matches!(message,
+        signalbox_application::ModelConversationMessage::ProviderReasoning { producing_call, .. } if *producing_call == fixture.call
+    )));
+
+    let mut corruption = pool.begin().await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER USER")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query("UPDATE semantic_transcript_entry SET assistant_text_value = $1 WHERE semantic_entry_id = $2")
+        .bind(r#"{"type":"reasoning","id":"rs_1","encrypted_content":null}"#)
+        .bind(reasoning_entry.into_uuid()).execute(&mut *corruption).await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ENABLE TRIGGER USER")
+        .execute(&mut *corruption)
+        .await?;
+    corruption.commit().await?;
+    assert!(
+        ProcessReadRepository::new(pool.clone())
+            .read_transcript(fixture.session)
+            .await
+            .is_err()
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn steered_completion_accepts_interleaved_provider_reasoning() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6db0;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 30));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 29)),
+                fixture.session,
+                UserContent::try_text(String::from("steer after this response"))
+                    .expect("valid steering text"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.turn,
+                },
+            ),
+            steering_input,
+            None,
+        )
+        .await?;
+    let item = signalbox_domain::ProviderReasoningItem::try_new(String::from(
+        r#"{"type":"reasoning","id":"rs_steered","encrypted_content":"opaque"}"#,
+    ))
+    .expect("the fixture carries encrypted reasoning");
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 32));
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(
+            ModelCallTerminalObservation::CompletedWithProviderReasoning {
+                response: vec![
+                    AssistantResponsePart::Text(
+                        AssistantText::try_new(String::from("before"))
+                            .expect("nonempty fixture text"),
+                    ),
+                    AssistantResponsePart::ProviderReasoning(item),
+                    AssistantResponsePart::Text(
+                        AssistantText::try_new(String::from("after"))
+                            .expect("nonempty fixture text"),
+                    ),
+                ],
+            },
+        );
+    let outcome = repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 20)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
+                ],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+            )),
+            |accepted| {
+                assert_eq!(accepted, steering_input);
+                successor
+            },
+        )
+        .await?;
+    let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+        panic!("the steered response completes");
+    };
+    assert_eq!(
+        completed.reclassified_pending_steering()[0].turn(),
+        successor
+    );
+    assert!(
+        ProcessReadRepository::new(pool.clone())
+            .read_transcript(fixture.session)
+            .await?
+            .is_some()
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
 
 fn expect_ready_model_call(
     outcome: PrepareInitialModelCallOutcome,
@@ -11,11 +403,11 @@ fn expect_ready_model_call(
     }
 }
 
-/// INV-014: the credential-reference column is total; the migrated schema
+/// the credential-reference column is total; the migrated schema
 /// rejects a NULL stored reference.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv014_model_call_credential_reference_is_total() -> Result<(), Box<dyn Error>> {
+async fn model_call_credential_reference_is_total() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
     let is_nullable: String = sqlx::query_scalar(
@@ -211,6 +603,8 @@ async fn ambiguous_model_call_usage_is_available_to_pre_activation_compaction()
         .latest_reported_usage(
             fixture.session,
             correlation.target(),
+            FastMode::Disabled,
+            false,
             correlation.frontier(),
         )
         .await?
@@ -218,6 +612,7 @@ async fn ambiguous_model_call_usage_is_available_to_pre_activation_compaction()
 
     assert_eq!(retained.usage(), reported_usage);
     assert!(!retained.input_includes_cache_tokens());
+    assert!(retained.input_is_retained());
     assert!(!retained.output_is_retained());
     assert_eq!(retained.projected_unreported_content_bytes(), 0);
 
@@ -226,9 +621,1195 @@ async fn ambiguous_model_call_usage_is_available_to_pre_activation_compaction()
     Ok(())
 }
 
+/// A provider compaction completed before a refusal is still the durable
+/// context replacement. The refusal prose is omitted, while the opaque block,
+/// retained-iteration usage, and exact terminal frontier commit together.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn refused_response_commits_prior_provider_compaction() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d78;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let correlation = authorized.observation_correlation();
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"retained summary","encrypted_content":"opaque"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let compaction_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 20));
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 21));
+    let reported_usage = ProviderReportedTokenUsage::unreported()
+        .with_input_tokens(Some(81))
+        .with_output_tokens(Some(9));
+    let observation = correlation.bind_terminal_observation_with_usage(
+        ModelCallTerminalObservation::RefusedWithProviderCompaction {
+            provider_compaction: vec![compaction.clone()],
+            retained_input_tokens: 23,
+            retained_output_tokens: 4,
+        },
+        reported_usage,
+    );
+
+    let outcome = repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation.clone(),
+            ModelCallTerminalIdentities::Refused(
+                RefusedModelCallTurnIdentities::new(terminal_frontier)
+                    .with_provider_compaction_entries(vec![compaction_entry]),
+            ),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::Refused(refused) = outcome else {
+        panic!("the compacting refusal must remain refused");
+    };
+    assert_eq!(refused.provider_compaction_entries().len(), 1);
+    assert_eq!(
+        repository
+            .reread_terminal_observation(fixture.session, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    let durable: (String, Decimal, Decimal, String, Decimal) = sqlx::query_as(
+        "SELECT call.terminal_disposition_kind,
+                call.retained_input_tokens,
+                call.retained_output_tokens,
+                entry.assistant_text_value,
+                entry.assistant_response_part_ordinal
+           FROM model_call AS call
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = call.session_id
+            AND entry.producing_model_call_id = call.model_call_id
+          WHERE call.model_call_id = $1
+            AND entry.semantic_entry_id = $2
+            AND entry.payload_kind = 'provider_compaction'",
+    )
+    .bind(fixture.call.into_uuid())
+    .bind(compaction_entry.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable.0, "refused");
+    assert_eq!(durable.1, Decimal::from(23_u64));
+    assert_eq!(durable.2, Decimal::from(4_u64));
+    assert_eq!(durable.3, compaction.as_json());
+    assert_eq!(durable.4, Decimal::ZERO);
+
+    let retained = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            FastMode::Disabled,
+            true,
+            terminal_frontier,
+        )
+        .await?
+        .expect("refused provider compaction remains the latest context baseline");
+    assert_eq!(retained.usage(), reported_usage);
+    assert_eq!(retained.retained_input_tokens(), Some(23));
+    assert_eq!(retained.retained_output_tokens(), Some(4));
+    assert!(
+        !retained.output_is_retained(),
+        "refusal output never enters the next request"
+    );
+    let disabled = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            FastMode::Disabled,
+            false,
+            terminal_frontier,
+        )
+        .await?
+        .expect("aggregate usage remains a conservative fallback");
+    assert_eq!(disabled.usage(), reported_usage);
+    assert_eq!(disabled.retained_input_tokens(), None);
+    assert_eq!(disabled.retained_output_tokens(), None);
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(eligible.is_empty());
+    assert!(!continuation);
+
+    // Replace the valid compaction suffix to exercise the final-state constraint directly.
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE semantic_transcript_entry
+            SET payload_kind = 'provider_reasoning', assistant_text_value = $2
+          WHERE semantic_entry_id = $1",
+    )
+    .bind(compaction_entry.into_uuid())
+    .bind(r#"{"type":"reasoning","id":"rs_refused","encrypted_content":"opaque"}"#)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let invalid_suffix =
+        sqlx::query("SELECT assert_turn_lifecycle_final_state_without_steering($1)")
+            .bind(fixture.turn.into_uuid())
+            .execute(&pool)
+            .await
+            .expect_err("a refused frontier cannot retain provider reasoning");
+    assert_eq!(
+        invalid_suffix
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into()),
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn steered_refusal_commits_ordered_provider_compaction_suffix() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d7a;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 30));
+    let recorded = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 29)),
+                fixture.session,
+                UserContent::try_text(String::from("steer before compacting refusal"))
+                    .expect("fixture steering is valid"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.turn,
+                },
+            ),
+            steering_input,
+            None,
+        )
+        .await?;
+    assert!(matches!(
+        recorded,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+
+    let correlation = authorized.observation_correlation();
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"steered retained summary"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 32));
+    let observation = correlation.bind_terminal_observation_with_usage(
+        ModelCallTerminalObservation::RefusedWithProviderCompaction {
+            provider_compaction: vec![compaction],
+            retained_input_tokens: 31,
+            retained_output_tokens: 2,
+        },
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(44))
+            .with_output_tokens(Some(2)),
+    );
+    let outcome = repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Refused(
+                RefusedModelCallTurnIdentities::new(ContextFrontierId::from_uuid(Uuid::from_u128(
+                    seed + 21,
+                )))
+                .with_provider_compaction_entries(vec![
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 20)),
+                ]),
+            ),
+            |accepted| {
+                assert_eq!(accepted, steering_input);
+                successor
+            },
+        )
+        .await?;
+    let ModelCallTerminalOutcome::Refused(refused) = outcome else {
+        panic!("the steered compacting response must remain refused");
+    };
+    assert_eq!(refused.reclassified_pending_steering().len(), 1);
+    assert_eq!(refused.reclassified_pending_steering()[0].turn(), successor);
+
+    // Replace the valid compaction suffix to exercise the final-state constraint directly.
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE semantic_transcript_entry
+            SET payload_kind = 'provider_reasoning', assistant_text_value = $2
+          WHERE semantic_entry_id = $1",
+    )
+    .bind(Uuid::from_u128(seed + 20))
+    .bind(r#"{"type":"reasoning","id":"rs_refused","encrypted_content":"opaque"}"#)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let invalid_suffix = sqlx::query("SELECT assert_steering_turn_terminal_final_state($1)")
+        .bind(fixture.turn.into_uuid())
+        .execute(&pool)
+        .await
+        .expect_err("a refused frontier cannot retain provider reasoning");
+    assert_eq!(
+        invalid_suffix
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into()),
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The historical mode label does not disqualify usage evidence when both
+/// modes resolve to the same effective serving target.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn latest_reported_usage_crosses_fast_modes_for_the_same_effective_target()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d79;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let correlation = authorized.observation_correlation();
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"base summary","encrypted_content":"opaque"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22));
+    let observation = correlation.bind_terminal_observation_with_usage(
+        ModelCallTerminalObservation::CompletedWithProviderCompaction {
+            response: vec![AssistantResponsePart::ProviderCompaction(compaction)],
+            retained_input_tokens: 19,
+            retained_output_tokens: 3,
+        },
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(70))
+            .with_output_tokens(Some(3)),
+    );
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                terminal_frontier,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    assert!(
+        repository
+            .latest_reported_usage(
+                fixture.session,
+                correlation.target(),
+                FastMode::Disabled,
+                true,
+                terminal_frontier,
+            )
+            .await?
+            .is_some()
+    );
+    assert!(
+        repository
+            .latest_reported_usage(
+                fixture.session,
+                correlation.target(),
+                FastMode::Enabled,
+                true,
+                terminal_frontier,
+            )
+            .await?
+            .is_some(),
+        "the historical fast-mode spelling cannot hide same-target usage evidence"
+    );
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(eligible.is_empty());
+    assert!(!continuation);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn effective_target_baseline_rejects_changed_alternate_mapping() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d7a;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 3));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 4));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let selected_target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let old_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 30),
+    ));
+    let new_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 31),
+    ));
+
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared_with_fast_target(
+            seed + 7,
+            seed + 1,
+            selection,
+            old_fast_target,
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 8,
+                seed + 1,
+                "alternate target baseline",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 9)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 10),
+            starting_frontier: Uuid::from_u128(seed + 11),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        selected_target,
+    )])
+    .expect("one mapped-fast fixture target forms a catalog");
+    let old_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, old_fast_target)]))
+    .expect("the original alternate target has a credential family");
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(old_families);
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                session,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 12)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 14)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 16)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(session, call).await?
+    else {
+        panic!("the mapped-fast fixture call authorizes")
+    };
+    let stored_effective_target: Uuid = sqlx::query_scalar(
+        "SELECT effective_provider_model_identity_id
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored_effective_target,
+        old_fast_target.identity().into_uuid()
+    );
+
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"old fast summary","encrypted_content":"opaque"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22));
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation_with_usage(
+            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                response: vec![AssistantResponsePart::ProviderCompaction(compaction)],
+                retained_input_tokens: 19,
+                retained_output_tokens: 3,
+            },
+            ProviderReportedTokenUsage::unreported()
+                .with_input_tokens(Some(70))
+                .with_output_tokens(Some(3)),
+        );
+    repository
+        .apply_terminal_observation(
+            session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                terminal_frontier,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let equivalent_selected_target = ResolvedProviderTarget::naming(
+        ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 32)),
+    );
+    let equivalent_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (
+            equivalent_selected_target,
+            Arc::<str>::from("test-model-family"),
+            None,
+        ),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| {
+        catalog.with_fast_targets([
+            (selected_target, old_fast_target),
+            (equivalent_selected_target, old_fast_target),
+        ])
+    })
+    .expect("both selections share one effective target");
+    let equivalent_selection = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(equivalent_families);
+    assert!(
+        equivalent_selection
+            .latest_reported_usage(
+                session,
+                equivalent_selected_target,
+                FastMode::Enabled,
+                true,
+                terminal_frontier,
+            )
+            .await?
+            .is_some(),
+        "a different selection that maps to the same serving target reuses the baseline"
+    );
+
+    let new_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (new_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
+    .expect("the replacement alternate target has a credential family");
+    let restarted =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_session_credentials(new_families);
+    assert!(
+        restarted
+            .latest_reported_usage(
+                session,
+                selected_target,
+                FastMode::Enabled,
+                true,
+                terminal_frontier,
+            )
+            .await?
+            .is_none(),
+        "a replacement alternate target cannot reuse the old serving target's baseline"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A prepared call refreshes its serving-target attribution when current
+/// configuration does not contradict the frozen credential family or the
+/// headroom limits that admitted it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn effective_target_authorization_records_changed_mapping_after_restart()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d79;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 3));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 4));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let selected_target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let old_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 30),
+    ));
+    let new_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 31),
+    ));
+
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared_with_fast_target(
+            seed + 7,
+            seed + 1,
+            selection,
+            old_fast_target,
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 8,
+                seed + 1,
+                "prepared alternate target",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 9)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 10),
+            starting_frontier: Uuid::from_u128(seed + 11),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        selected_target,
+    )])
+    .expect("one mapped-fast fixture target forms a catalog");
+    let old_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, old_fast_target)]))
+    .expect("the original alternate target has a credential family");
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(old_families)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        100,
+    )]);
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                session,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 12)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 14)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 16)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+    let prepared_evidence: (
+        Option<String>,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<bool>,
+    ) = sqlx::query_as(
+        "SELECT prepared_credential_model_family,
+                    prepared_max_output_tokens,
+                    prepared_context_window_tokens,
+                    prepared_provider_compaction_replay
+               FROM model_call
+              WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        prepared_evidence,
+        (
+            Some("test-model-family".to_owned()),
+            Some(Decimal::from(10)),
+            Some(Decimal::from(100)),
+            Some(false),
+        )
+    );
+
+    let mutation = sqlx::query(
+        "UPDATE model_call
+            SET effective_provider_model_identity_id = $1
+          WHERE model_call_id = $2",
+    )
+    .bind(new_fast_target.identity().into_uuid())
+    .bind(call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a prepared call's effective target is immutable");
+    assert_eq!(
+        mutation.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let mutation = sqlx::query(
+        "UPDATE model_call
+            SET prepared_context_window_tokens = 99
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a prepared call's headroom evidence is immutable");
+    assert_eq!(
+        mutation.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let mut constraint_transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE model_call DISABLE TRIGGER model_call_changes_are_guarded")
+        .execute(&mut *constraint_transaction)
+        .await?;
+    let partial_limit = sqlx::query(
+        "UPDATE model_call
+            SET prepared_max_output_tokens = NULL
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .execute(&mut *constraint_transaction)
+    .await
+    .expect_err("partial prepared limit evidence violates its completeness constraint");
+    assert_eq!(
+        partial_limit
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("model_call_prepared_limit_evidence_complete")
+    );
+    constraint_transaction.rollback().await?;
+
+    let changed_same_target_family = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (
+            old_fast_target,
+            Arc::<str>::from("other-model-family"),
+            None,
+        ),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, old_fast_target)]))
+    .expect("the unchanged target has a different credential family after restart");
+    let changed_family = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(changed_same_target_family)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        100,
+    )]);
+    assert!(matches!(
+        changed_family.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
+    let unchanged_target_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, old_fast_target)]))
+    .expect("the unchanged target retains its credential family");
+    let narrower_same_target = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(unchanged_target_families.clone())
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        50,
+    )]);
+    assert!(matches!(
+        narrower_same_target.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
+    let changed_replay = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(unchanged_target_families)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        100,
+    )
+    .with_provider_compaction_replay()]);
+    assert!(matches!(
+        changed_replay.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
+    let different_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (
+            new_fast_target,
+            Arc::<str>::from("other-model-family"),
+            None,
+        ),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
+    .expect("the replacement alternate target has a distinct credential family");
+    let incompatible = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(different_families);
+    assert!(matches!(
+        incompatible.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+    let unchanged: (String, Uuid, String) = sqlx::query_as(
+        "SELECT state_kind, effective_provider_model_identity_id, credential_reference
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        unchanged,
+        (
+            "prepared".to_owned(),
+            old_fast_target.identity().into_uuid(),
+            "test-model-primary".to_owned(),
+        )
+    );
+
+    let narrower_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (new_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
+    .expect("both alternate targets share the fixture credential family");
+    let narrower = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(narrower_families)
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        selected_target,
+        FastMode::Enabled,
+        10,
+        50,
+    )]);
+    assert!(matches!(
+        narrower.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
+    let new_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (new_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
+    .expect("the replacement alternate target has a credential family");
+    let restarted =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_session_credentials(new_families)
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                selected_target,
+                FastMode::Enabled,
+                10,
+                100,
+            )]);
+    assert!(matches!(
+        restarted.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::Authorized(_)
+    ));
+    let durable: (String, Uuid) = sqlx::query_as(
+        "SELECT state_kind, effective_provider_model_identity_id
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        durable,
+        (
+            "in_flight".to_owned(),
+            new_fast_target.identity().into_uuid()
+        )
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn latest_reported_usage_excludes_unreplayed_provider_compaction_bytes()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d7b;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let correlation = authorized.observation_correlation();
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            correlation.bind_terminal_observation_with_usage(
+                ModelCallTerminalObservation::Completed {
+                    assistant_text: vec![
+                        AssistantText::try_new(String::from("reported baseline reply"))
+                            .expect("fixture assistant text is valid"),
+                    ],
+                },
+                ProviderReportedTokenUsage::unreported()
+                    .with_input_tokens(Some(80))
+                    .with_output_tokens(Some(3)),
+            ),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let second_turn = TurnId::from_uuid(Uuid::from_u128(seed + 42));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 40,
+                seed + 1,
+                "request after another target compacted",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 41)),
+            Some(second_turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 43),
+            starting_frontier: Uuid::from_u128(seed + 44),
+            initial_attempt: Uuid::from_u128(seed + 45),
+        },
+    )
+    .await?;
+    let second_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 46));
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                fixture.session,
+                second_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 47)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 48)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 49)),
+                |_| panic!("the fixture has no pending steering to reclassify"),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == second_call
+    ));
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                fixture.session,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 50)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 51)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 52)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 53)),
+                |_| panic!("the fixture has no pending steering to reclassify"),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Ready { .. }
+    ));
+    let AuthorizeModelCallOutcome::Authorized(second_authorized) = repository
+        .authorize_send(fixture.session, second_call)
+        .await?
+    else {
+        panic!("the retained second call authorizes");
+    };
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"opaque bytes omitted after target switch","encrypted_content":"ciphertext"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let compaction_bytes = u64::try_from(compaction.as_json().len())?;
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 56));
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            second_authorized
+                .observation_correlation()
+                .bind_terminal_observation(
+                    ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                        response: vec![AssistantResponsePart::ProviderCompaction(compaction)],
+                        retained_input_tokens: 15,
+                        retained_output_tokens: 2,
+                    },
+                ),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 54,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 55)),
+                terminal_frontier,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let replayed = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            FastMode::Disabled,
+            true,
+            terminal_frontier,
+        )
+        .await?
+        .expect("the earlier reported call remains the baseline");
+    let omitted = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            FastMode::Disabled,
+            false,
+            terminal_frontier,
+        )
+        .await?
+        .expect("the earlier reported call remains the baseline");
+    assert_eq!(
+        replayed.projected_unreported_content_bytes(),
+        omitted
+            .projected_unreported_content_bytes()
+            .saturating_add(compaction_bytes)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unreported_tool_round_counts_replayed_provider_reasoning() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6e7b;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let correlation = authorized.observation_correlation();
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            correlation.bind_terminal_observation_with_usage(
+                ModelCallTerminalObservation::Completed {
+                    assistant_text: vec![
+                        AssistantText::try_new(String::from("reported baseline reply"))
+                            .expect("fixture assistant text is valid"),
+                    ],
+                },
+                ProviderReportedTokenUsage::unreported()
+                    .with_input_tokens(Some(80))
+                    .with_output_tokens(Some(3)),
+            ),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let second_turn = TurnId::from_uuid(Uuid::from_u128(seed + 42));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 40,
+                seed + 1,
+                "request before unreported tool round",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 41)),
+            Some(second_turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 43),
+            starting_frontier: Uuid::from_u128(seed + 44),
+            initial_attempt: Uuid::from_u128(seed + 45),
+        },
+    )
+    .await?;
+    let second_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 46));
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                fixture.session,
+                second_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 47)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 48)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 49)),
+                |_| panic!("the fixture has no pending steering to reclassify"),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == second_call
+    ));
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                fixture.session,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 50)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 51)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 52)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 53)),
+                |_| panic!("the fixture has no pending steering to reclassify"),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Ready { .. }
+    ));
+    let AuthorizeModelCallOutcome::Authorized(second_authorized) = repository
+        .authorize_send(fixture.session, second_call)
+        .await?
+    else {
+        panic!("the retained second call authorizes");
+    };
+    let raw_reasoning = r#"{"type":"reasoning","id":"rs_unreported","summary":[],"encrypted_content":"opaque continuation"}"#;
+    let reasoning = signalbox_domain::ProviderReasoningItem::try_new(String::from(raw_reasoning))
+        .expect("complete reasoning fixture");
+    let response = ToolUsingAssistantResponse::try_from_parts(vec![
+        AssistantResponsePart::ProviderReasoning(reasoning),
+        AssistantResponsePart::ToolCall(ToolCallProposal::new(
+            ToolName::try_new(String::from("current_time")).expect("fixture tool name"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments"),
+        )),
+    ])
+    .expect("response carries a tool call");
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 57));
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            second_authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+                    response,
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
+                }),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![
+                    ToolResponsePartIdentity::provider_reasoning(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 54)),
+                    ),
+                    ToolResponsePartIdentity::tool_call(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 55)),
+                        ToolRequestId::from_uuid(Uuid::from_u128(seed + 56)),
+                        InitialToolApproval::Confirm,
+                    ),
+                ],
+                terminal_frontier,
+                None,
+            )),
+            |_| panic!("no pending steering"),
+        )
+        .await?;
+    let reported = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            FastMode::Disabled,
+            false,
+            terminal_frontier,
+        )
+        .await?
+        .expect("the older usage-bearing call remains the baseline");
+    assert_eq!(reported.usage().input_tokens(), Some(80));
+    assert_eq!(
+        reported.projected_unreported_content_bytes(),
+        u64::try_from(
+            "request before unreported tool round".len()
+                + "current_time".len()
+                + "{}".len()
+                + raw_reasoning.len()
+        )?
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A successful dedicated compaction call becomes the provider-confirmed
 /// baseline until a later ordinary call reports usage. Its retained summary is
-/// already represented by reported output tokens and is not counted twice.
+/// already represented by reported output tokens and is not counted twice,
+/// while the reported input measures the source text that summary replaced and
+/// is retained by nothing.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn context_compaction_usage_is_available_to_pre_activation_compaction()
@@ -333,6 +1914,8 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
         .latest_reported_usage(
             fixture.session,
             target,
+            FastMode::Disabled,
+            false,
             ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
         )
         .await?
@@ -344,10 +1927,78 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
         .with_cache_read_input_tokens(Some(19));
     assert_eq!(retained.usage(), expected_usage);
     assert!(retained.input_includes_cache_tokens());
+    assert!(
+        !retained.input_is_retained(),
+        "the summarized-away source the compaction reported as input is gone"
+    );
     assert!(retained.output_is_retained());
     assert_eq!(
         retained.projected_unreported_content_bytes(),
         u64::try_from(retained_source_suffix.len() + suffix.len())?
+    );
+
+    let fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 0x50),
+    ));
+    let fast_targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+        target,
+    )])
+    .expect("one dedicated-compaction target forms a catalog");
+    let equivalent_selected_target = ResolvedProviderTarget::naming(
+        ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 0x51)),
+    );
+    let equivalent_families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (
+            equivalent_selected_target,
+            Arc::<str>::from("test-model-family"),
+            None,
+        ),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(equivalent_selected_target, target)]))
+    .expect("the alternate selection maps to the compaction serving target");
+    let equivalent_selection = PostgresModelCallRepository::new(
+        pool.clone(),
+        fast_targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(equivalent_families);
+    assert!(
+        equivalent_selection
+            .latest_reported_usage(
+                fixture.session,
+                equivalent_selected_target,
+                FastMode::Enabled,
+                false,
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
+            )
+            .await?
+            .is_some(),
+        "a dedicated compaction remains eligible through another selection for its serving target"
+    );
+
+    let fast_families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(target, fast_target)]))
+    .expect("the replacement fast target shares the fixture credential family");
+    let restarted =
+        PostgresModelCallRepository::new(pool.clone(), fast_targets, model_credential_reference())
+            .with_session_credentials(fast_families);
+    assert!(
+        restarted
+            .latest_reported_usage(
+                fixture.session,
+                target,
+                FastMode::Enabled,
+                false,
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
+            )
+            .await?
+            .is_none(),
+        "a dedicated compaction from another effective target is not a baseline"
     );
 
     let mutation_error = sqlx::query(
@@ -364,6 +2015,264 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
             .as_database_error()
             .and_then(|error| error.constraint()),
         Some("context_compaction_input_semantics_immutable")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The queued-turn preflight scores the exact input it is about to send. Its
+/// production caller previews an activation whose starting frontier and origin
+/// entry no transaction has committed, so the reported-usage read takes the
+/// preview's own model-visible membership and the content of the entries it
+/// minted rather than a frontier identity durable rows cannot resolve.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn queued_turn_activation_preview_scores_its_own_input() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d80;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let correlation = authorized.observation_correlation();
+    let reported_usage = ProviderReportedTokenUsage::unreported()
+        .with_input_tokens(Some(4_000))
+        .with_output_tokens(Some(0));
+    let assistant = AssistantText::try_new(String::from("preview headroom historical reply"))
+        .expect("fixture assistant text is admitted");
+    let observation = correlation.bind_terminal_observation_with_usage(
+        ModelCallTerminalObservation::Completed {
+            assistant_text: vec![assistant],
+        },
+        reported_usage,
+    );
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    // Twenty-two ASCII characters and one two-byte "é": 24 UTF-8 bytes.
+    let queued_input = "queued preview suffix é";
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x40,
+                seed + 1,
+                queued_input,
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x42))),
+        )
+        .await?;
+    let previewed_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x45));
+    let preview = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            fixture.session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x43)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x44)),
+                previewed_frontier,
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x46)),
+            ),
+        )
+        .await?
+        .expect("the queued turn has one uncommitted activation preview");
+    let prospective = repository
+        .preview_activation_operation(
+            preview.prepared(),
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 0x47)),
+        )
+        .await?
+        .expect("the preview reconstitutes its prospective first call");
+    let operation = prospective.render(Box::new([]))?;
+    assert_eq!(
+        operation.request().call().frontier().snapshot(),
+        previewed_frontier,
+        "the preview call carries the starting frontier no transaction committed"
+    );
+    let committed_frontiers: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM context_frontier
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(previewed_frontier.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(committed_frontiers, 0);
+
+    let reported = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            FastMode::Disabled,
+            false,
+            prospective.prospective_input(),
+        )
+        .await?
+        .expect("the completed call reported input usage");
+
+    assert_eq!(reported.usage(), reported_usage);
+    assert!(reported.input_is_retained());
+    assert!(reported.output_is_retained());
+    assert_eq!(reported.projected_unreported_content_bytes(), 24);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Compaction coverage follows model-visible projected order. A successor
+/// compaction that summarizes its predecessor's summary leaves that summary
+/// invisible, so the retained-content allowance excludes it even though the
+/// summary was appended physically after the successor's through-entry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn successor_compaction_coverage_follows_projected_order() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d88;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let assistant = AssistantText::try_new(String::from("summarized away by the successor"))
+        .expect("fixture assistant text is admitted");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![assistant],
+        });
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let compaction_repository = ContextCompactionRepository::new(pool.clone());
+    let PrepareContextCompactionOutcome::Prepared(predecessor) = compaction_repository
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x30)),
+            session: fixture.session,
+            requested_through_position: Some(1),
+            automatic_for_turn: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+            target,
+            input_includes_cache_tokens: true,
+            credential_reference: String::from("predecessor compaction credential"),
+            call: ModelCallId::from_uuid(Uuid::from_u128(seed + 0x31)),
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(seed + 0x32)),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x33)),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x34)),
+        })
+        .await?
+    else {
+        panic!("the completed turn has a compactable frontier")
+    };
+    compaction_repository.authorize(&predecessor).await?;
+    compaction_repository
+        .complete(
+            &predecessor,
+            "predecessor summary the successor summarizes away",
+            ContextCompactionTokenUsage::unreported()
+                .with_input_tokens(Some(101))
+                .with_output_tokens(Some(11)),
+        )
+        .await?;
+
+    let PrepareContextCompactionOutcome::Prepared(successor) = compaction_repository
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x38)),
+            session: fixture.session,
+            requested_through_position: Some(2),
+            automatic_for_turn: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+            target,
+            input_includes_cache_tokens: true,
+            credential_reference: String::from("successor compaction credential"),
+            call: ModelCallId::from_uuid(Uuid::from_u128(seed + 0x39)),
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(seed + 0x3a)),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x3b)),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x3c)),
+        })
+        .await?
+    else {
+        panic!("the predecessor summary and its retained suffix compact again")
+    };
+    compaction_repository.authorize(&successor).await?;
+    compaction_repository
+        .complete(
+            &successor,
+            "successor summary",
+            ContextCompactionTokenUsage::unreported()
+                .with_input_tokens(Some(103))
+                .with_output_tokens(Some(13)),
+        )
+        .await?;
+
+    // Twenty-eight ASCII characters and one two-byte "é": 30 UTF-8 bytes.
+    let appended_input = "successor compaction suffix é";
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x40,
+                seed + 1,
+                appended_input,
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x42))),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 0x43),
+            starting_frontier: Uuid::from_u128(seed + 0x44),
+            initial_attempt: Uuid::from_u128(seed + 0x45),
+        },
+    )
+    .await?;
+
+    let retained = repository
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            FastMode::Disabled,
+            false,
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
+        )
+        .await?
+        .expect("the successor compaction usage becomes the current baseline");
+
+    assert!(!retained.input_is_retained());
+    assert_eq!(
+        retained.projected_unreported_content_bytes(),
+        30,
+        "only the appended input remains model-visible after the successor compaction"
     );
 
     pool.close().await;
@@ -448,11 +2357,11 @@ async fn request_too_large_failure_forces_one_successor_compaction() -> Result<(
     Ok(())
 }
 
-/// INV-006: cancellation evidence cannot carry provider usage because neither
+/// cancellation evidence cannot carry provider usage because neither
 /// cancellation-confirmed nor pre-send cancellation reports token evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_cancelled_model_call_usage_is_unreported() -> Result<(), Box<dyn Error>> {
+async fn cancelled_model_call_usage_is_unreported() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0x6d80, true).await?;
     let reported_output_tokens = Decimal::from(1_u64);
@@ -481,11 +2390,11 @@ async fn inv006_cancelled_model_call_usage_is_unreported() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-006: a call terminalized directly from Prepared cannot carry usage because
+/// a call terminalized directly from Prepared cannot carry usage because
 /// no provider send was authorized.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_unsent_model_call_usage_is_unreported() -> Result<(), Box<dyn Error>> {
+async fn unsent_model_call_usage_is_unreported() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0x6e00, false).await?;
     let reported_input_tokens = Decimal::from(1_u64);
@@ -514,11 +2423,11 @@ async fn inv006_unsent_model_call_usage_is_unreported() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// INV-006: a call terminalized directly from Prepared cannot carry a
+/// a call terminalized directly from Prepared cannot carry a
 /// provider-failure cause because no provider send was authorized.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_unsent_model_call_provider_failure_cause_is_absent() -> Result<(), Box<dyn Error>> {
+async fn unsent_model_call_provider_failure_cause_is_absent() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0x6e80, false).await?;
 
@@ -545,11 +2454,11 @@ async fn inv006_unsent_model_call_provider_failure_cause_is_absent() -> Result<(
     Ok(())
 }
 
-/// INV-014: a reference pinned on a new model call cannot be replaced or
+/// a reference pinned on a new model call cannot be replaced or
 /// cleared.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv014_model_call_credential_reference_is_immutable() -> Result<(), Box<dyn Error>> {
+async fn model_call_credential_reference_is_immutable() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0x6f00, false).await?;
 
@@ -632,6 +2541,7 @@ async fn definitive_attachment_failure_closes_its_call_with_a_durable_cause()
         .fail_prepared_call(
             fixture.session,
             fixture.call,
+            PreparedModelCallFailureCause::CapabilityKnownFailure,
             Some(AttachmentPreparationFailure::Missing),
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 14)),
@@ -729,12 +2639,12 @@ async fn definitive_attachment_failure_closes_its_call_with_a_durable_cause()
     Ok(())
 }
 
-/// INV-006: an uncertain capability-failure closure is reconciled from exact
+/// an uncertain capability-failure closure is reconciled from exact
 /// durable Prepared or complete known-failure state, including its terminal
 /// attempt and call provenance, before any resubmission.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_committed()
+async fn model_call_prepared_failure_reread_distinguishes_pending_and_committed()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7000;
@@ -757,6 +2667,7 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
                 active_phase_kind = NULL,
                 current_attempt_id = NULL,
                 terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed',
                 terminal_attempt_id = NULL,
                 terminal_model_call_id = $1
           WHERE turn_id = $2",
@@ -784,6 +2695,7 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
         .fail_prepared_call(
             fixture.session,
             fixture.call,
+            PreparedModelCallFailureCause::CapabilityKnownFailure,
             None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 14)),
@@ -838,14 +2750,16 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
         ))
     ));
 
-    sqlx::query("ALTER TABLE turn_failed_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_failed_outbox_event WHERE turn_id = $1")
-        .bind(fixture.turn.into_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE turn_failed_outbox_event ENABLE TRIGGER USER")
+    sqlx::query(
+        "DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'failed' AND turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -889,14 +2803,16 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
         RetainedModelCallObservationStatus::AlreadyCommitted
     );
 
-    sqlx::query("ALTER TABLE turn_failed_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_failed_outbox_event WHERE turn_id = $1")
-        .bind(issued.turn.into_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE turn_failed_outbox_event ENABLE TRIGGER USER")
+    sqlx::query(
+        "DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'failed' AND turn_id = $1",
+    )
+    .bind(issued.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -913,14 +2829,13 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
     Ok(())
 }
 
-/// INV-006 / INV-014 / INV-037: retained prepared failure and ambiguous
+/// retained prepared failure and ambiguous
 /// authorization rereads accept an exact interrupt-caused cancellation of the
 /// still-Prepared call as authoritative no-work, and reject an incomplete
 /// cancellation closure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
--> Result<(), Box<dyn Error>> {
+async fn failure_rereads_accept_prepared_cancellation() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7580;
     let fixture = checkpoint_restart_model_call(&pool, seed, false).await?;
@@ -982,14 +2897,14 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
         ModelCallAuthorizationReread::Cancelled
     );
 
-    sqlx::query("ALTER TABLE turn_cancelled_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_cancelled_outbox_event WHERE turn_id = $1")
+    sqlx::query("DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'cancelled' AND turn_id = $1")
         .bind(fixture.turn.into_uuid())
         .execute(&pool)
         .await?;
-    sqlx::query("ALTER TABLE turn_cancelled_outbox_event ENABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -1066,14 +2981,16 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
         terminal_call.disposition(),
         ProcessFailedModelCallDisposition::Cancelled
     );
-    sqlx::query("ALTER TABLE turn_failed_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_failed_outbox_event WHERE turn_id = $1")
-        .bind(cancelled.turn.into_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE turn_failed_outbox_event ENABLE TRIGGER USER")
+    sqlx::query(
+        "DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'failed' AND turn_id = $1",
+    )
+    .bind(cancelled.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -1109,8 +3026,9 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
     );
     let refused_sequence: Decimal = sqlx::query_scalar(
         "SELECT event_sequence
-           FROM turn_refused_outbox_event
-          WHERE turn_id = $1",
+           FROM turn_terminal_outbox_event
+          WHERE disposition_kind = 'refused'
+          AND turn_id = $1",
     )
     .bind(refused.turn.into_uuid())
     .fetch_one(&pool)
@@ -1140,23 +3058,23 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
         .execute(&pool)
         .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1 - 1,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(refused_sequence)
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
@@ -1185,14 +3103,14 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
     sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("ALTER TABLE turn_refused_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_refused_outbox_event WHERE turn_id = $1")
+    sqlx::query("DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'refused' AND turn_id = $1")
         .bind(refused.turn.into_uuid())
         .execute(&pool)
         .await?;
-    sqlx::query("ALTER TABLE turn_refused_outbox_event ENABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -1256,11 +3174,9 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
     Ok(())
 }
 
-/// S03 / S09 / INV-006 / INV-008 / INV-012 / INV-014 / INV-015: interrupting
-/// an issued call atomically records its stop proof and cancellation request;
-/// the durable signal resolves, physical cancellation closes the turn with its
-/// exact attempt history, and both command and observation replays converge on
-/// the recorded outcome.
+/// interrupting an issued call atomically records its stop proof and cancellation request; the
+/// durable signal resolves, physical cancellation closes the turn with its exact attempt history,
+/// and both command and observation replays converge on the recorded outcome.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result<(), Box<dyn Error>>
@@ -1403,8 +3319,9 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
               WHERE cancelled_turn_id = $1
                 AND payload_kind = 'turn_cancelled'),
             (SELECT count(*)
-               FROM turn_cancelled_outbox_event
-              WHERE turn_id = $1)",
+               FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'cancelled'
+              AND turn_id = $1)",
     )
     .bind(fixture.turn.into_uuid())
     .bind(fixture.attempt.into_uuid())
@@ -1501,10 +3418,8 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
     Ok(())
 }
 
-/// S04 / S07 / INV-025 / INV-029 / INV-032 / INV-037: ambiguity observed
-/// before or after an applied interrupt terminalizes as exact proof-bearing
-/// reconciliation, and retained observation and origin rereads recognize the
-/// committed closure.
+/// ambiguity observed before or after an applied interrupt terminalizes as exact proof-bearing
+/// reconciliation, and retained observation and origin rereads recognize the committed closure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Result<(), Box<dyn Error>>
@@ -1577,8 +3492,9 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
                 AND state_kind = 'terminal'
                 AND terminal_disposition_kind = 'reconciliation_required'),
             (SELECT count(*)
-               FROM turn_reconciliation_required_outbox_event
-              WHERE turn_id = $2
+               FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'reconciliation_required'
+              AND turn_id = $2
                 AND model_call_id = $3)",
     )
     .bind(fixture.attempt.into_uuid())
@@ -1710,8 +3626,9 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
                 AND state_kind = 'terminal'
                 AND terminal_disposition_kind = 'reconciliation_required'),
             (SELECT count(*)
-               FROM turn_reconciliation_required_outbox_event
-              WHERE turn_id = $2
+               FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'reconciliation_required'
+              AND turn_id = $2
                 AND model_call_id = $3)",
     )
     .bind(waiting.attempt.into_uuid())
@@ -1975,9 +3892,8 @@ async fn provider_failure_cause_round_trips_through_persistence_and_process_read
     Ok(())
 }
 
-/// S07 / S08 / INV-006 / INV-012 / INV-037: the stop-request migration keeps
-/// each stopping rejection paired with its immutable delivery and admits only
-/// a known-failed call as failed post-cancellation provenance.
+/// the stop-request migration keeps each stopping rejection paired with its immutable delivery and
+/// admits only a known-failed call as failed post-cancellation provenance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Result<(), Box<dyn Error>>
@@ -2116,10 +4032,9 @@ async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Resul
     Ok(())
 }
 
-/// S03 / S04 / S07 / INV-006 / INV-012 / INV-029: completion and restart can
-/// win after a durable stop request without erasing the applied interrupt.
-/// Terminal reload accepts the completion race, while restart retains an
-/// ambiguous call in proof-bearing terminal reconciliation.
+/// completion and restart can win after a durable stop request without erasing the applied
+/// interrupt. Terminal reload accepts the completion race, while restart retains an ambiguous call
+/// in proof-bearing terminal reconciliation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<(), Box<dyn Error>>
@@ -2265,8 +4180,9 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
                 AND state_kind = 'terminal'
                 AND terminal_disposition_kind = 'ambiguous'),
             (SELECT count(*)
-               FROM turn_reconciliation_required_outbox_event
-              WHERE turn_id = $1
+               FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'reconciliation_required'
+              AND turn_id = $1
                 AND model_call_id = $2)",
     )
     .bind(restarted.turn.into_uuid())
@@ -2274,6 +4190,135 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
     .fetch_one(&pool)
     .await?;
     assert_eq!(restart_terminal_shape, (1, 1, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Steering into a stopping turn is accepted, not rejected for state; the
+/// cancellation boundary reclassifies it into a queued successor and settles
+/// it `delivered`, as it settles the interrupt's own origin.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn steering_accepted_while_stopping_is_reclassified_at_cancellation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7a00;
+    let (fixture, model_repository, _, authorized) =
+        authorize_checkpointed_model_call_with_prepared(&pool, seed).await?;
+    let inputs = SubmitInputRepository::new(pool.clone());
+    let interrupt_command = seed + 19;
+    let steering_command = seed + 30;
+    let successor_turn = TurnId::from_uuid(Uuid::from_u128(seed + 21));
+    let interrupt_outcome = inputs
+        .handle(
+            input_with_delivery(
+                interrupt_command,
+                seed + 1,
+                "stop issued call",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 20)),
+            Some(successor_turn),
+        )
+        .await?;
+    assert!(matches!(
+        interrupt_outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+
+    let steering_outcome = inputs
+        .handle(
+            input_with_delivery(
+                steering_command,
+                seed + 1,
+                "steer the stopping turn",
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 31)),
+            None,
+        )
+        .await?;
+    assert!(
+        matches!(
+            steering_outcome,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::PendingSteering(_)
+            ))
+        ),
+        "a stopping turn still accepts steering: {steering_outcome:?}"
+    );
+
+    let reclassified_turn = TurnId::from_uuid(Uuid::from_u128(seed + 32));
+    let terminal = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Cancelled),
+            ModelCallTerminalIdentities::PhysicalCancellation(
+                PhysicalCancellationModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 23)),
+                ),
+            ),
+            |_| reclassified_turn,
+        )
+        .await?;
+    assert!(matches!(terminal, ModelCallTerminalOutcome::Cancelled(_)));
+
+    let receipts: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT receipt.command_id, receipt.outcome_kind, receipt.delivered_turn_id
+           FROM injection_settled_outbox_event AS receipt
+          WHERE receipt.command_id = ANY($1)
+          ORDER BY receipt.event_sequence",
+    )
+    .bind(vec![
+        Uuid::from_u128(interrupt_command),
+        Uuid::from_u128(steering_command),
+    ])
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        receipts,
+        vec![
+            (
+                Uuid::from_u128(interrupt_command),
+                String::from("delivered"),
+                Some(successor_turn.into_uuid()),
+            ),
+            (
+                Uuid::from_u128(steering_command),
+                String::from("delivered"),
+                Some(reclassified_turn.into_uuid()),
+            ),
+        ]
+    );
+    let queued: (String, String) = sqlx::query_as(
+        "SELECT accepted.disposition_kind, successor.state_kind
+           FROM accepted_input AS accepted
+           JOIN turn_lifecycle AS successor ON successor.turn_id = accepted.origin_turn_id
+          WHERE accepted.accepted_input_id = $1",
+    )
+    .bind(Uuid::from_u128(seed + 31))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        queued,
+        (
+            String::from("reclassified_as_turn_origin"),
+            String::from("queued")
+        )
+    );
 
     pool.close().await;
     drop(container);

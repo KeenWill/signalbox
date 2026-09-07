@@ -1,0 +1,236 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_integration_test", "rust_postgres_test", "rust_unit_test")
+
+CRATE_FEATURES = [
+    "postgres-integration",
+    "test-support",
+]
+
+CRATE_PROC_MACRO_DEPS = ["//crates/derive:signalbox_derive"]
+
+TEST_DEPS = [
+    ":signalbox_persistence",
+    "//crates/application:signalbox_application",
+    "//crates/blob-store:signalbox_blob_store",
+    "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
+    "//crates/conversation-import-codex:signalbox_conversation_import_codex",
+    "//crates/domain:signalbox_domain",
+    "//crates/newtype:signalbox_newtype",
+    "//crates/tools-plan:signalbox_tools_plan",
+]
+
+rust_package()
+
+rust_library(
+    name = "signalbox_persistence",
+    compile_data = glob(["migrations/*.sql"]) + ["//:config/signalboxd.example.toml"],
+    crate_features = CRATE_FEATURES,
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/blob-store:signalbox_blob_store",
+        "//crates/domain:signalbox_domain",
+        "//crates/newtype:signalbox_newtype",
+        "//crates/tools-plan:signalbox_tools_plan",
+    ],
+)
+
+rust_postgres_test(
+    name = "approval_judge_eval_postgres",
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/approval_judge_eval_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "blob_postgres",
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/blob_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "conversation_import_postgres",
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/conversation_import_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "conversation_listing_postgres",
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/conversation_listing_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "git_remote_authority_postgres",
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/git_remote_authority_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "goal_postgres",
+    srcs = ["tests/goal_postgres.rs"] + glob(["tests/support/**/*.rs"]),
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/goal_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "imported_session_postgres",
+    srcs = ["tests/imported_session_postgres.rs"] + glob(["tests/support/**/*.rs"]),
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/imported_session_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "imported_conversation_e2e_postgres",
+    srcs = ["tests/imported_conversation_e2e_postgres.rs"] + glob(["tests/support/**/*.rs"]),
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/imported_conversation_e2e_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "search_path_postgres",
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/search_path_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "outbox_decode_postgres",
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/outbox_decode_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "program_journal_postgres",
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/program_journal_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "postgres_integration",
+    srcs = glob([
+        "tests/postgres_integration/**/*.rs",
+        "tests/support/**/*.rs",
+    ]),
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/postgres_integration/main.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "runner_protocol_postgres",
+    srcs = glob([
+        "tests/runner_protocol_postgres/**/*.rs",
+        "tests/support/**/*.rs",
+    ]),
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/runner_protocol_postgres/main.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "review_workflow_postgres",
+    srcs = glob([
+        "tests/review_workflow_postgres/**/*.rs",
+        "tests/support/**/*.rs",
+    ]),
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/review_workflow_postgres/main.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "session_metadata_postgres",
+    srcs = ["tests/session_metadata_postgres.rs"] + glob(["tests/support/**/*.rs"]),
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/session_metadata_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+rust_postgres_test(
+    name = "session_placement_postgres",
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/session_placement_postgres.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = TEST_DEPS,
+)
+
+test_suite(
+    name = "postgres_tests",
+    tests = [
+        ":approval_judge_eval_postgres",
+        ":blob_postgres",
+        ":conversation_import_postgres",
+        ":conversation_listing_postgres",
+        ":git_remote_authority_postgres",
+        ":goal_postgres",
+        ":imported_conversation_e2e_postgres",
+        ":imported_session_postgres",
+        ":outbox_decode_postgres",
+        ":postgres_integration",
+        ":program_journal_postgres",
+        ":review_workflow_postgres",
+        ":runner_protocol_postgres",
+        ":search_path_postgres",
+        ":session_metadata_postgres",
+        ":session_placement_postgres",
+    ],
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_persistence",
+    crate_features = [
+        "default",
+        "postgres-integration",
+        "test-support",
+    ],
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
+        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
+    ],
+)
+
+rust_integration_test(
+    name = "importer_conformance_corpus",
+    size = "small",
+    compile_data = glob(["tests/fixtures/importer-conformance/*.jsonl"]),
+    crate_features = CRATE_FEATURES,
+    crate_root = "tests/importer_conformance_corpus.rs",
+    data = glob(["tests/fixtures/importer-conformance/golden/**"]) + ["//:.cargo/config.toml"],
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/persistence"},
+    deps = TEST_DEPS,
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_persistence",
+    crate_features = CRATE_FEATURES,
+)

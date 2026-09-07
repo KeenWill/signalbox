@@ -1,3 +1,6 @@
+//! Deterministic file-media registration, candidate selection, and output admission governed by
+//! `docs/spec/file-and-media.md`.
+
 use std::{collections::BTreeMap, error::Error, fmt, str::FromStr};
 
 use crate::{
@@ -10,45 +13,32 @@ use crate::{
     StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
 };
 
-// numeric-bound: ceiling - bounds process-lifetime provider inventory memory
 const MAX_REGISTRY_PROVIDERS: usize = 256;
-// numeric-bound: ceiling - bounds per-provider reader inventory memory and startup work
 pub const MAX_READERS_PER_PROVIDER: usize = 256;
-// numeric-bound: ceiling - bounds aggregate process-lifetime reader inventory memory
 pub const MAX_REGISTRY_READERS: usize = 256;
-// numeric-bound: ceiling - bounds per-reader media-claim memory and conflict checks
 const MAX_MEDIA_TYPES_PER_READER: usize = 256;
-// numeric-bound: ceiling - bounds aggregate process-lifetime media-claim memory
 const MAX_REGISTRY_MEDIA_TYPES: usize = 4_096;
-// numeric-bound: ceiling - bounds per-reader model-visible view inventory memory
 const MAX_VIEWS_PER_READER: usize = 256;
-// numeric-bound: ceiling - reserves tool-result space for fixed inspection facts and metadata
 const MAX_INSPECTION_VIEW_INVENTORY_BYTES: usize = 512 * 1_024;
-// numeric-bound: ceiling - reserves effective result space for fixed inspection facts and metadata
 const INSPECTION_NON_VIEW_RESERVE_BYTES: usize = 64 * 1_024;
-// numeric-bound: ceiling - bounds aggregate process-lifetime view inventory memory
 const MAX_REGISTRY_VIEWS: usize = 4_096;
-// numeric-bound: ceiling - bounds aggregate retained view-schema bytes
 const MAX_REGISTRY_SCHEMA_BYTES: usize = 16 * 1_024 * 1_024;
-// numeric-bound: ceiling - bounds per-reader sanitized reason inventory memory
 const MAX_REASON_CODES_PER_READER: usize = 256;
-// numeric-bound: ceiling - bounds aggregate process-lifetime reason inventory memory
 const MAX_REGISTRY_REASON_CODES: usize = 4_096;
-// numeric-bound: ceiling - bounds one inspection's aggregate probe source I/O
 const MAX_INSPECTION_PROBE_BYTES: u64 = 16 * 1_024 * 1_024;
-// numeric-bound: ceiling - bounds one inspection's aggregate probe request fan-out
 const MAX_INSPECTION_PROBE_READS: u32 = 1_024;
-// numeric-bound: ceiling - bounds collision-validation worker fan-out and source I/O
 const MAX_COLLISION_VALIDATION_CANDIDATES: usize = 2;
-// numeric-bound: ceiling - the tool contract permits this many input containers
 const MAX_READ_INPUT_CONTAINERS: u32 = 256;
-// numeric-bound: ceiling - every JSON node emits at least one serialized byte
+// Every JSON node emits at least one serialized byte.
 const MAX_READ_OPTIONS_NODES: usize = MAX_READ_OPTIONS_BYTES;
-// numeric-bound: ceiling - reserves processor-frame space for structured-body JSON escaping
+// Structured-body JSON escaping shares the processor frame with its envelope.
 const MAX_STRUCTURED_BODY_BYTES: usize = 500 * 1_024;
+#[derive(signalbox_derive::Accessors)]
 /// Immutable process-lifetime registry snapshot.
 #[derive(Clone, Debug)]
 pub struct FileMediaRegistry {
+    /// Borrows canonically ordered provider declarations.
+    #[get(slice)]
     providers: Vec<FileMediaProviderDeclaration>,
     readers: BTreeMap<ReaderIdentity, ReaderDeclaration>,
     media_readers: BTreeMap<CanonicalMediaType, ReaderIdentity>,
@@ -104,6 +94,14 @@ impl FileMediaRegistry {
         let mut media_readers = BTreeMap::new();
         let mut streaming_text_reader = None;
         for provider in &providers {
+            if provider
+                .observed_container_entries()
+                .is_some_and(|entries| {
+                    entries == 0 || entries > ceilings.observed_container_entries
+                })
+            {
+                return Err(FileMediaRegistryConstructionError::ContainerBounds);
+            }
             for reader in provider.readers() {
                 validate_reader(reader, ceilings)?;
                 let identity = reader.identity().clone();
@@ -149,11 +147,6 @@ impl FileMediaRegistry {
         }
     }
 
-    /// Borrows canonically ordered provider declarations.
-    pub fn providers(&self) -> &[FileMediaProviderDeclaration] {
-        &self.providers
-    }
-
     /// Returns the effective lowerable-only ceiling set.
     pub const fn ceilings(&self) -> FileMediaCeilings {
         self.ceilings
@@ -190,7 +183,22 @@ impl FileMediaRegistry {
                     .await?;
                 match sanitize_probe(reader, raw)? {
                     SanitizedProbe::NoMatch => {}
-                    SanitizedProbe::Candidate(candidate) => candidates.push(candidate),
+                    SanitizedProbe::Candidate(candidate) => {
+                        // A retained candidate must be re-examinable inside the
+                        // envelope `validate_candidate` will grant, and that envelope
+                        // is the clamped pair rather than the deployment ceiling
+                        // alone. For a reader whose declared validation envelope is
+                        // the smaller of the two, the ceiling by itself would keep
+                        // evidence validation can never cover.
+                        if candidate.evidence_bytes
+                            <= self
+                                .ceilings
+                                .validation_source_bytes
+                                .min(reader.validation().source_bytes())
+                        {
+                            candidates.push(candidate);
+                        }
+                    }
                     SanitizedProbe::Malformed {
                         media_type,
                         reason_code,
@@ -297,6 +305,7 @@ impl FileMediaRegistry {
                         reader: reader.clone(),
                         media_type: declared,
                         strength: ProbeStrength::DeclaredCandidate,
+                        evidence_bytes: 0,
                     },
                     ValidationEvidence::DeclaredCandidateStructurallyValidated,
                 )
@@ -328,6 +337,7 @@ impl FileMediaRegistry {
                         reader: declaration.identity().clone(),
                         media_type: text_plain,
                         strength: ProbeStrength::DeclaredCandidate,
+                        evidence_bytes: 0,
                     },
                     ValidationEvidence::StreamingTextValidation,
                 )
@@ -589,6 +599,12 @@ impl FileMediaRegistry {
             .readers
             .get(validated.reader())
             .ok_or(FileMediaFailure::ProcessorFailed)?;
+        let provider_container_entries = self
+            .providers
+            .iter()
+            .find(|provider| provider.provider() == validated.reader().provider())
+            .ok_or(FileMediaFailure::ProcessorFailed)?
+            .observed_container_entries();
         let raw = processor
             .read(
                 validated.reader(),
@@ -597,6 +613,15 @@ impl FileMediaRegistry {
                     detected_media_type: validated.detected_media_type().clone(),
                     validation: validated.validation(),
                     metadata: validated.metadata().clone(),
+                    // The field names the prefix validation actually covered, so it
+                    // carries the same clamp `validate_candidate` applied. The
+                    // deployment ceiling alone would overstate that prefix for a
+                    // reader whose declared validation envelope is smaller, and an
+                    // adapter honoring it could interpret bytes validation never saw.
+                    maximum_source_bytes: self
+                        .ceilings
+                        .validation_source_bytes
+                        .min(reader.validation().source_bytes()),
                     view: request.view,
                     input: request.input,
                     maximum_image_axis: self.ceilings.image_axis,
@@ -607,7 +632,14 @@ impl FileMediaRegistry {
                 cancellation,
             )
             .await?;
-        sanitize_read(reader, view, self.ceilings, initial_request, raw)
+        sanitize_read(
+            reader,
+            view,
+            self.ceilings,
+            provider_container_entries,
+            initial_request,
+            raw,
+        )
     }
 }
 
@@ -702,6 +734,7 @@ struct Candidate {
     reader: ReaderIdentity,
     media_type: CanonicalMediaType,
     strength: ProbeStrength,
+    evidence_bytes: u64,
 }
 
 fn recognized_probe_strength(strength: ProbeStrength) -> bool {
@@ -740,11 +773,14 @@ fn sanitize_probe(
         ProcessorProbeOutput::Candidate {
             media_type,
             strength,
+            evidence_bytes,
         } => {
             let media_type = CanonicalMediaType::from_str(&media_type)
                 .map_err(|_| FileMediaFailure::ProcessorFailed)?;
             if !reader.media_types().contains(&media_type)
                 || strength == ProbeStrength::DeclaredCandidate
+                || evidence_bytes == 0
+                || evidence_bytes > reader.probe().cumulative_bytes()
             {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
@@ -752,6 +788,7 @@ fn sanitize_probe(
                 reader: reader.identity().clone(),
                 media_type,
                 strength,
+                evidence_bytes,
             }))
         }
         ProcessorProbeOutput::RecognizedMalformed {
@@ -829,6 +866,7 @@ fn sanitize_read(
     reader: &ReaderDeclaration,
     view: &crate::ReadViewDeclaration,
     ceilings: FileMediaCeilings,
+    provider_container_entries: Option<u64>,
     initial_request: bool,
     raw: ProcessorReadOutput,
 ) -> Result<FileReadResult, FileMediaFailure> {
@@ -874,11 +912,14 @@ fn sanitize_read(
             }
             let continuation = sanitize_continuation(truncated, cursor)?;
             let maximum_nodes = nodes.min(ceilings.structured_nodes);
+            let maximum_container_entries = provider_container_entries
+                .unwrap_or(ceilings.observed_container_entries)
+                .min(ceilings.observed_container_entries);
             let body = crate::value::parse_json_without_duplicate_members_bounded(
                 &body_json,
                 crate::value::JsonParseLimits {
                     maximum_nodes,
-                    maximum_container_entries: ceilings.observed_container_entries,
+                    maximum_container_entries,
                 },
             )
             .map_err(|_| FileMediaFailure::ProcessorFailed)?;
@@ -894,7 +935,7 @@ fn sanitize_read(
                 || observed.depth > ceilings.structured_depth
                 || observed.nodes > nodes
                 || observed.nodes > ceilings.structured_nodes
-                || observed.max_container_entries > ceilings.observed_container_entries
+                || observed.max_container_entries > maximum_container_entries
                 || observed.string_bytes > string_bytes
             {
                 return Err(FileMediaFailure::ProcessorFailed);
@@ -1280,6 +1321,8 @@ pub enum FileMediaRegistryConstructionError {
     ProbeBounds,
     /// View bounds were absent, contradictory, or excessive.
     ViewBounds,
+    /// A provider container-entry bound was zero or excessive.
+    ContainerBounds,
     /// Text fallback registration was absent or ambiguous.
     TextFallback,
 }
@@ -1296,6 +1339,7 @@ impl fmt::Display for FileMediaRegistryConstructionError {
             Self::DuplicateReaderMember => "file media reader member is duplicated",
             Self::ProbeBounds => "file media probe bounds are invalid",
             Self::ViewBounds => "file media view bounds are invalid",
+            Self::ContainerBounds => "file media container bounds are invalid",
             Self::TextFallback => "file media text fallback is invalid",
         })
     }

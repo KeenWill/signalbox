@@ -1,17 +1,16 @@
-//! Reads the exact pinned `@openai/codex` version from
-//! `../../tooling/codex-cli/package.json` and exports it as the
-//! `SIGNALBOX_CODEX_CLI_VERSION` build environment variable the adapter and
-//! its pin test compare against.
+//! Exports the pinned upstream version and fork executable SHA-256 from
+//! `../../tooling/codex-cli/release.json` for startup verification.
+
+mod version_pin;
 
 use std::path::PathBuf;
 
-const PIN_MANIFEST: &str = "../../tooling/codex-cli/package.json";
-const PIN_PACKAGE: &str = "@openai/codex";
+const PIN_MANIFEST: &str = "../../tooling/codex-cli/release.json";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={PIN_MANIFEST}");
 
-    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(PIN_MANIFEST);
+    let manifest_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join(PIN_MANIFEST);
     let manifest = std::fs::read_to_string(&manifest_path).map_err(|error| {
         std::io::Error::other(format!("{} is readable: {error}", manifest_path.display()))
     })?;
@@ -22,31 +21,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     })?;
     let pinned = manifest
-        .get("dependencies")
-        .and_then(|dependencies| dependencies.get(PIN_PACKAGE))
+        .get("release")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
             std::io::Error::other(format!(
-                "{} declares a {PIN_PACKAGE} dependency",
+                "{} declares a fork release tag",
                 manifest_path.display()
             ))
         })?;
-    if !is_exact_pin(pinned) {
-        return Err(std::io::Error::other(format!(
-            "{} must pin {PIN_PACKAGE} at an exact major.minor.patch version",
+    let pinned = version_pin::upstream_version(pinned).ok_or_else(|| {
+        std::io::Error::other(format!(
+            "{} must pin an exact rust-vX.Y.Z-signalbox.N release",
             manifest_path.display()
         ))
-        .into());
-    }
+    })?;
 
+    let executable_sha256 = manifest
+        .get("executableSha256")
+        .and_then(serde_json::Value::as_str)
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| std::io::Error::other("pin manifest must declare the executable SHA-256"))?;
+
+    println!("cargo:rustc-env=SIGNALBOX_CODEX_CLI_SHA256={executable_sha256}");
     println!("cargo:rustc-env=SIGNALBOX_CODEX_CLI_VERSION={pinned}");
     Ok(())
-}
-
-fn is_exact_pin(version: &str) -> bool {
-    let components: Vec<&str> = version.split('.').collect();
-    components.len() == 3
-        && components
-            .iter()
-            .all(|component| !component.is_empty() && component.bytes().all(|b| b.is_ascii_digit()))
 }

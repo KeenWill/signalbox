@@ -303,9 +303,6 @@ bound by foreign key and command transaction behavior.
   `model_call.credential_reference` NOT NULL and non-empty, and the store no
   longer carries the NULL-read branch. This matches the authorizing change in
   [PR #217](https://github.com/KeenWill/signalbox/pull/217).
-- The former stale migration inventory is fixed:
-  [persistence-protocol](../spec/persistence-protocol.md#migrations) says 27
-  files through `202607280001`.
 - The new nullable fields are domain optionality, not compatibility: imported
   source-session lineage is unknown or conflicting evidence; context-frontier
   prefix identity is optional; tool, metadata, and lifecycle payload columns are
@@ -489,11 +486,10 @@ the only ones.
 
 That branch must land or be abandoned before the checkpoint. Its current
 `260400` version is lower than `main`'s `280001` maximum, so it cannot merge
-unchanged under the
-[prefix-order rule](../spec/persistence-protocol.md#migrations). The stacked
-`origin/agent/signalboxd-rename` branch carries the same migration through
-ancestry and adds no second migration. No other unmerged remote branch based on
-current work adds a migration beyond files already on `main`.
+unchanged under the [prefix-order rule](../spec/persistence-protocol.md). The
+stacked `origin/agent/signalboxd-rename` branch carries the same migration
+through ancestry and adds no second migration. No other unmerged remote branch
+based on current work adds a migration beyond files already on `main`.
 
 After the review migration, the expected catalog rises to 58 tables, one view,
 178 indexes, 161 triggers, and 100 functions; its schema-only dump is 13,035

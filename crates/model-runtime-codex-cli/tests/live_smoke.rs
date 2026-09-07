@@ -1,14 +1,14 @@
 //! Compatibility smoke against the real, pinned Codex CLI.
 //!
-//! Ignored by default: it spawns the installed executable, spends one real
-//! model exchange, and therefore needs credentials the ordinary Rust workflow
-//! never has. `.github/workflows/codex-smoke.yml` is the only automated caller:
-//! its unprivileged gate rejects changed fork pull requests before the
-//! environment-backed smoke job can start.
+//! Ignored by default: the adapter smoke and temporary app-server probe each
+//! spend one real model exchange. They need credentials the ordinary Rust
+//! workflow never has. Their only automated caller is
+//! `.github/workflows/codex-smoke.yml`: its unprivileged gate rejects changed
+//! fork pull requests before the environment-backed smoke job can start.
 //!
 //! What it proves is protocol compatibility, which is what a CLI version bump
-//! actually breaks: the `codex exec --json` event stream still starts a thread,
-//! still reports usage on `turn.completed`, still accepts every flag the
+//! actually breaks: the `codex app-server` conversation still starts an ephemeral thread,
+//! still reports usage on `thread/tokenUsage/updated`, still accepts every flag the
 //! adapter passes, and its final response envelope still decodes as a completed
 //! or refused terminal outcome. It deliberately asserts nothing about answer
 //! quality.
@@ -45,7 +45,7 @@ use signalbox_model_runtime_codex_cli::{
 };
 
 /// Overrides the executable under test. The default resolves through `PATH`;
-/// CI points it at the binary `npm ci` unpacked from the pin manifest.
+/// CI points it at the binary installed from the pinned release manifest.
 const EXECUTABLE_VARIABLE: &str = "SIGNALBOX_CODEX_SMOKE_EXECUTABLE";
 
 /// Overrides the model. The default is the cheapest model this CLI advertises
@@ -77,123 +77,169 @@ wait
 /// Exact built-in feature inventory reported by the pinned CLI. Stage and
 /// default are part of the snapshot: a newly enabled feature is classification
 /// drift even when its name already existed.
-const PINNED_CODEX_FEATURE_INVENTORY: &str = r#"apply_patch_freeform                 removed            false
-apply_patch_streaming_events         under development  false
-apps                                 stable             true
-apps_mcp_path_override               removed            false
-artifact                             under development  false
-auth_elicitation                     stable             true
-browser_use                          stable             true
-browser_use_external                 stable             true
-browser_use_full_cdp_access          stable             true
-chronicle                            under development  false
-code_mode                            under development  false
-code_mode_buffered_exec              under development  false
-code_mode_host                       stable             true
-code_mode_only                       under development  false
-codex_git_commit                     removed            false
-collaboration_modes                  removed            true
-computer_use                         stable             true
-concurrent_reasoning_summaries       under development  false
-current_time_reminder                under development  false
-default_mode_request_user_input      under development  false
-deferred_executor                    under development  false
-deferred_tool_world_state            under development  false
-elevated_windows_sandbox             removed            false
-enable_fanout                        removed            false
-enable_mcp_apps                      under development  false
-enable_request_compression           stable             true
-exec_permission_approvals            under development  false
-executed_tool_call_metadata          under development  false
-executor_capability_discovery        under development  false
-experimental_windows_sandbox         removed            false
-external_agent_memory_import         under development  false
-external_migration                   removed            false
-fast_mode                            stable             true
-goals                                stable             true
-guardian_approval                    stable             true
-guardianv2                           under development  false
-hooks                                stable             true
-image_detail_original                removed            false
-image_generation                     stable             true
-image_resize_notice                  under development  false
-in_app_browser                       stable             true
-in_app_updates                       stable             true
-item_ids                             removed            true
-js_repl                              removed            false
-js_repl_tools_only                   removed            false
-local_thread_store_compression       under development  false
-mcp_2026_07_28                       under development  false
-memories                             stable             false
-mentions_v2                          stable             true
-multi_agent                          stable             true
-multi_agent_mode                     removed            false
-multi_agent_v2                       stable             false
-network_proxy                        experimental       false
-non_prefixed_mcp_tool_names          under development  false
-personality                          stable             true
-plugin_hooks                         removed            false
-plugin_sharing                       stable             true
-plugins                              stable             true
-prevent_idle_sleep                   experimental       false
-realtime_conversation                under development  false
-recommended_plugins                  stable             false
-remote_compaction_v2                 stable             true
-remote_control                       removed            false
-remote_models                        removed            false
-remote_plugin                        stable             true
-request_permissions_tool             under development  false
-request_rule                         removed            false
-resize_all_images                    removed            true
-respect_system_proxy                 under development  false
-responses_websockets                 removed            false
-responses_websockets_v2              removed            false
-rollout_budget                       under development  false
-runtime_metrics                      under development  false
-search_tool                          removed            false
-secret_auth_storage                  stable             false
-shell_snapshot                       stable             true
-shell_tool                           stable             true
-shell_zsh_fork                       under development  false
-skill_env_var_dependency_prompt      removed            false
-skill_mcp_dependency_install         stable             true
-skill_search                         stable             true
-sqlite                               removed            true
-standalone_web_search                under development  false
-steer                                removed            true
-terminal_resize_reflow               removed            true
-terminal_visualization_instructions  under development  false
-token_budget                         under development  false
-tool_call_mcp_elicitation            stable             true
-tool_search                          removed            false
-tool_search_always_defer_mcp_tools   removed            true
-tool_suggest                         stable             true
-tui_app_server                       removed            true
-unavailable_dummy_tools              removed            false
-undo                                 removed            false
-unified_exec                         stable             true
-unified_exec_zsh_fork                under development  false
-use_agent_identity                   under development  false
-use_legacy_landlock                  deprecated         false
-use_linux_sandbox_bwrap              removed            false
-view_image                           stable             true
-web_search_cached                    deprecated         false
-web_search_request                   deprecated         false
-workspace_dependencies               stable             true
-workspace_owner_usage_nudge          removed            false
+const PINNED_CODEX_FEATURE_INVENTORY: &str = r#"apply_patch_freeform                     removed            false
+apply_patch_preserve_line_endings        under development  false
+apply_patch_streaming_events             under development  false
+apps                                     stable             true
+apps_mcp_path_override                   removed            false
+artifact                                 under development  false
+auth_elicitation                         stable             true
+background_paginated_rollout_migration   under development  false
+bedrock_setup_wizard                     under development  false
+browser_use                              stable             true
+browser_use_external                     stable             true
+browser_use_full_cdp_access              stable             true
+chronicle                                under development  false
+code_mode                                under development  false
+code_mode_buffered_exec                  removed            false
+code_mode_host                           stable             true
+code_mode_interrupt                      under development  false
+code_mode_only                           under development  false
+code_mode_prewarm                        under development  false
+codex_git_commit                         removed            false
+collaboration_modes                      removed            true
+compaction_image_budget                  stable             true
+computer_use                             stable             true
+concurrent_reasoning_summaries           under development  false
+content_item_kinds                       stable             true
+context_management                       under development  false
+current_time_reminder                    under development  false
+cwd_relative_turn_diffs                  under development  false
+default_mode_request_user_input          under development  false
+deferred_executor                        under development  false
+deferred_tool_world_state                under development  false
+elevated_windows_sandbox                 removed            false
+enable_fanout                            removed            false
+enable_mcp_apps                          under development  false
+enable_request_compression               stable             true
+exec_permission_approvals                under development  false
+executed_tool_call_metadata              under development  false
+executor_capability_discovery            under development  false
+experimental_windows_sandbox             removed            false
+external_agent_memory_import             under development  false
+external_migration                       removed            false
+fast_mode                                stable             true
+goals                                    stable             true
+guardian_approval                        stable             true
+guardian_enhanced_node_repl_transcripts  under development  false
+guardian_ext                             under development  false
+guardian_node_repl_transcript_images     under development  false
+guardian_reuse_parent_compaction         under development  false
+guardianv2                               under development  false
+hooks                                    stable             true
+image_detail_original                    removed            false
+image_generation                         stable             true
+image_resize_notice                      under development  false
+in_app_browser                           stable             true
+in_app_chat                              stable             true
+in_app_dictation                         stable             true
+in_app_local_automation                  stable             true
+in_app_updates                           stable             true
+item_ids                                 removed            true
+js_repl                                  removed            false
+js_repl_tools_only                       removed            false
+local_thread_store_compression           under development  false
+local_thread_store_shared_compression    removed            false
+mcp_2026_07_28                           under development  false
+mcp_oauth_refresh_coordination           under development  false
+memories                                 stable             false
+mentions_v2                              stable             true
+multi_agent                              stable             true
+multi_agent_mode                         removed            false
+multi_agent_v2                           stable             false
+network_proxy                            experimental       false
+non_prefixed_mcp_tool_names              under development  false
+omit_app_server_notification_media       under development  false
+personality                              stable             true
+plugin_hooks                             removed            false
+plugin_sharing                           stable             true
+plugins                                  stable             true
+powershell_shell_version                 under development  false
+prevent_idle_sleep                       experimental       false
+psp                                      under development  false
+realtime_conversation                    under development  false
+recommended_plugins                      stable             false
+remote_compaction_v2                     stable             true
+remote_control                           removed            false
+remote_models                            removed            false
+remote_plugin                            stable             true
+request_permissions_tool                 under development  false
+request_rule                             removed            false
+resize_all_images                        removed            true
+respect_system_proxy                     under development  false
+responses_websockets                     removed            false
+responses_websockets_v2                  removed            false
+retain_client_developer_messages         under development  false
+rollout_budget                           under development  false
+runtime_metrics                          under development  false
+search_tool                              removed            false
+secret_auth_storage                      stable             false
+send_async_message                       removed            false
+shell_snapshot                           stable             true
+shell_snapshot_v2                        under development  false
+shell_tool                               stable             true
+shell_zsh_fork                           under development  false
+skill_env_var_dependency_prompt          removed            false
+skill_mcp_dependency_install             stable             true
+skill_search                             stable             true
+skip_host_skill_discovery                under development  false
+sleep_tool                               stable             true
+sqlite                                   removed            true
+standalone_web_search                    under development  false
+steer                                    removed            true
+step_model_switching                     under development  false
+terminal_resize_reflow                   removed            true
+terminal_visualization_instructions      under development  false
+token_budget                             under development  false
+tool_call_mcp_elicitation                stable             true
+tool_search                              removed            false
+tool_search_always_defer_mcp_tools       removed            true
+tool_suggest                             stable             true
+transcript_v2                            under development  false
+tui_app_server                           removed            true
+unavailable_dummy_tools                  removed            false
+unbounded_connection_retries             stable             true
+undo                                     removed            false
+unified_exec                             stable             true
+unified_exec_zsh_fork                    removed            true
+unified_image_budget                     under development  false
+use_agent_identity                       under development  false
+use_legacy_landlock                      deprecated         false
+use_linux_sandbox_bwrap                  removed            false
+view_image                               stable             true
+web_search_cached                        deprecated         false
+web_search_request                       deprecated         false
+workspace_dependencies                   stable             true
+workspace_owner_usage_nudge              removed            false
+write_stdin_approval                     under development  false
 "#;
 
 /// Inventory entries that do not add a model-visible tool, external
 /// interaction, instruction source, or delegated execution surface. Every
 /// other entry is in the runtime's exported hard-disable list above.
+///
+/// Entries that only select *how* a surface classified above behaves — which
+/// shell an already-disabled executor forks, what a disabled reviewer is shown,
+/// how the CLI encodes, budgets, stores, or cancels work it would do anyway —
+/// belong here even when a same-prefix sibling is hard-disabled: enabling one
+/// alone opens nothing. Only the entry that decides whether the surface exists
+/// is the capability.
 const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "apply_patch_freeform",
+    "apply_patch_preserve_line_endings",
     "apply_patch_streaming_events",
     "apps_mcp_path_override",
+    "background_paginated_rollout_migration",
+    "bedrock_setup_wizard",
     "chronicle",
+    "code_mode_interrupt",
+    "code_mode_prewarm",
     "codex_git_commit",
     "collaboration_modes",
+    "compaction_image_budget",
     "concurrent_reasoning_summaries",
+    "content_item_kinds",
+    "cwd_relative_turn_diffs",
     "elevated_windows_sandbox",
     "enable_fanout",
     "enable_request_compression",
@@ -201,19 +247,25 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "experimental_windows_sandbox",
     "external_migration",
     "fast_mode",
+    "guardian_enhanced_node_repl_transcripts",
+    "guardian_node_repl_transcript_images",
+    "guardian_reuse_parent_compaction",
     "image_detail_original",
     "image_resize_notice",
     "item_ids",
     "js_repl",
     "js_repl_tools_only",
     "local_thread_store_compression",
+    "local_thread_store_shared_compression",
     "mentions_v2",
     "multi_agent_mode",
     "network_proxy",
     "non_prefixed_mcp_tool_names",
+    "omit_app_server_notification_media",
     "personality",
     "plugin_hooks",
     "prevent_idle_sleep",
+    "psp",
     "remote_compaction_v2",
     "remote_control",
     "remote_models",
@@ -222,28 +274,35 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "respect_system_proxy",
     "responses_websockets",
     "responses_websockets_v2",
+    "retain_client_developer_messages",
     "rollout_budget",
     "runtime_metrics",
     "search_tool",
     "secret_auth_storage",
+    "send_async_message",
     "shell_zsh_fork",
     "skill_env_var_dependency_prompt",
+    "skip_host_skill_discovery",
     "sqlite",
     "steer",
     "terminal_resize_reflow",
     "terminal_visualization_instructions",
     "tool_search",
     "tool_search_always_defer_mcp_tools",
+    "transcript_v2",
     "tui_app_server",
     "unavailable_dummy_tools",
+    "unbounded_connection_retries",
     "undo",
     "unified_exec_zsh_fork",
+    "unified_image_budget",
     "use_agent_identity",
     "use_legacy_landlock",
     "use_linux_sandbox_bwrap",
     "web_search_cached",
     "web_search_request",
     "workspace_owner_usage_nudge",
+    "write_stdin_approval",
 ];
 
 /// A trivial prompt keeps the exchange to the smallest billable turn that
@@ -320,13 +379,13 @@ async fn the_pinned_codex_cli_completes_one_exchange() {
     let decoded = require_decoded_response(report.evidence);
     assert!(
         decoded.exchange.provider_request_id.is_some(),
-        "no thread id reached the exchange facts, so `thread.started` no longer \
+        "no thread id reached the exchange facts, so `thread/start` no longer \
          parses for model {model}"
     );
     assert!(
         decoded.usage.input_tokens.is_some_and(|tokens| tokens > 0)
             && decoded.usage.output_tokens.is_some(),
-        "`turn.completed` no longer reports the usage counters the adapter reads"
+        "`thread/tokenUsage/updated` no longer reports the usage counters the adapter reads"
     );
 }
 
@@ -342,6 +401,12 @@ async fn the_pinned_codex_cli_pre_spend_contract_holds() {
 }
 
 async fn assert_pre_spend_contract(executable: &std::path::Path) {
+    signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version(
+        executable,
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    .expect("the executable matches the manifest's upstream version and fork binary digest");
     assert_pinned_version(executable).await;
     assert_pinned_feature_inventory(executable).await;
     assert_ambient_skill_instructions_disabled(executable).await;
@@ -602,7 +667,10 @@ async fn assert_pinned_version(executable: &std::path::Path) {
     let version = reported
         .lines()
         .next()
-        .and_then(|line| line.split_whitespace().next_back())
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|token| semver::Version::parse(token).ok())
+        })
         .unwrap_or_else(|| {
             panic!(
                 "`{} --version` printed no version token",
@@ -612,11 +680,12 @@ async fn assert_pinned_version(executable: &std::path::Path) {
 
     assert_eq!(
         version,
-        SUPPORTED_CODEX_CLI_VERSION,
+        semver::Version::parse(SUPPORTED_CODEX_CLI_VERSION)
+            .expect("the build-validated pin is SemVer"),
         "the executable at `{}` reports {version}, but this smoke can \
          only produce compatibility evidence for the pinned \
          {SUPPORTED_CODEX_CLI_VERSION}; install the version pinned in \
-         tooling/codex-cli/package.json",
+         tooling/codex-cli/release.json",
         executable.display()
     );
 }
@@ -1484,11 +1553,14 @@ fn decoded_response_accepts_refusal_without_completion_material() {
         ..TokenUsage::default()
     };
     let evidence = TerminalEvidence::Refused(RefusalEvidence {
+        reason: signalbox_model_runtime::RefusalReason::Unspecified,
         exchange: exchange.clone(),
         message_id: None,
         reported_model: None,
         content: Vec::new(),
         usage,
+        retained_input_tokens: None,
+        retained_output_tokens: None,
     });
 
     let decoded = require_decoded_response(evidence);
@@ -1907,4 +1979,289 @@ fn executable_resolution_panics_for_a_missing_bare_command() {
         empty.path(),
         Some(&search),
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "observes the pinned app-server with CI-only credentials"]
+async fn the_pinned_codex_app_server_answers_protocol_questions() {
+    let executable = absolute_executable(&executable_override_or_default());
+    assert_pinned_version(&executable).await;
+    app_server_probe::run(&executable).await;
+}
+
+#[cfg(unix)]
+mod app_server_probe {
+    use super::*;
+    use serde_json::{Value, json};
+    use std::path::Path;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    // Probe-only bounds keep a protocol stall and an oversized frame observable.
+    const TURN_BOUND: Duration = Duration::from_secs(180);
+    const FRAME_BOUND: u64 = 1024 * 1024;
+
+    #[derive(Default)]
+    struct Observed {
+        stage: &'static str,
+        rpc_code: Option<i64>,
+        status: &'static str,
+        unauthorized: bool,
+        error_info: &'static str,
+        path_present: bool,
+        refresh_requests: usize,
+        windows: Vec<Value>,
+    }
+
+    pub(super) async fn run(executable: &Path) {
+        let empty_home = tempfile::tempdir().expect("empty home");
+        let working = tempfile::tempdir().expect("non-Git working directory");
+        std::fs::write(empty_home.path().join("config.toml"), "").expect("empty config");
+        let empty = exchange(executable, empty_home.path(), working.path()).await;
+        println!(
+            "PROBE a observed empty_home stage={} rpc_code={:?} status={} unauthorized={} codex_error_info={}",
+            empty.stage, empty.rpc_code, empty.status, empty.unauthorized, empty.error_info
+        );
+
+        let invalid_home = tempfile::tempdir().expect("synthetic invalid login home");
+        std::fs::write(invalid_home.path().join("config.toml"), "").expect("empty config");
+        std::fs::write(
+            invalid_home.path().join("auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-signalbox-invalid-probe-credential"}"#,
+        )
+        .expect("write a deliberately invalid synthetic credential");
+        let invalid = exchange(executable, invalid_home.path(), working.path()).await;
+        println!(
+            "PROBE a observed synthetic_invalid_login stage={} rpc_code={:?} status={} unauthorized={} codex_error_info={}",
+            invalid.stage,
+            invalid.rpc_code,
+            invalid.status,
+            invalid.unauthorized,
+            invalid.error_info
+        );
+
+        let home = tempfile::tempdir().expect("authenticated probe home");
+        std::fs::write(home.path().join("config.toml"), "").expect("empty config");
+        let credential_home = std::env::var_os("CODEX_HOME").expect("CI credential home");
+        // The CLI opens its own login; the test never reads credential bytes.
+        std::os::unix::fs::symlink(
+            Path::new(&credential_home).join("auth.json"),
+            home.path().join("auth.json"),
+        )
+        .expect("reference the CI login");
+        let live = exchange(executable, home.path(), working.path()).await;
+        let config = std::fs::read_to_string(home.path().join("config.toml"))
+            .expect("read only the probe-owned configuration");
+        println!(
+            "PROBE b observed sandbox=read-only config_empty={} trust_entry={}",
+            config.is_empty(),
+            config.contains("trust_level")
+        );
+        println!(
+            "PROBE c observed ephemeral=true thread_path_present={} sessions_directory={} files={}",
+            live.path_present,
+            home.path().join("sessions").exists(),
+            file_count(home.path())
+        );
+        println!(
+            "PROBE d observed refresh_requests={} decline_code=-32601 stage={} status={}",
+            live.refresh_requests, live.stage, live.status
+        );
+        println!(
+            "PROBE e observed windows_used_percent_and_resets_at={:?}",
+            live.windows
+        );
+        let mut command = command(executable, empty_home.path(), working.path());
+        command.args(["--disable", "signalbox_probe_unknown_feature", "app-server"]);
+        let mut child = spawn_probe(&mut command, executable).await;
+        drop(child.stdin.take());
+        let output = command_output_bounded(
+            child,
+            executable,
+            "unknown feature app-server",
+            Duration::from_secs(30),
+            FRAME_BOUND as usize,
+            "probe output",
+        )
+        .await;
+        println!(
+            "PROBE f observed unknown_feature_exit_success={}",
+            output.status.success()
+        );
+        println!(
+            "PROBE g observed non_git_cwd=true stage={} rpc_code={:?} status={}",
+            live.stage, live.rpc_code, live.status
+        );
+    }
+
+    fn file_count(root: &Path) -> usize {
+        std::fs::read_dir(root)
+            .expect("list probe home")
+            .map(|entry| {
+                let entry = entry.expect("probe entry");
+                if entry.file_type().expect("entry type").is_dir() {
+                    file_count(&entry.path())
+                } else {
+                    1
+                }
+            })
+            .sum()
+    }
+
+    fn command(executable: &Path, home: &Path, working: &Path) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(executable);
+        command
+            .env_clear()
+            .env("CODEX_HOME", home)
+            .env("HOME", working);
+        for name in ["PATH", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        command
+            .current_dir(working)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .process_group(0);
+        command
+    }
+
+    async fn send(stdin: &mut tokio::process::ChildStdin, frame: Value) {
+        let mut bytes = serde_json::to_vec(&frame).expect("probe request encodes");
+        bytes.push(b'\n');
+        stdin.write_all(&bytes).await.expect("probe request writes");
+    }
+
+    async fn exchange(executable: &Path, home: &Path, working: &Path) -> Observed {
+        let mut command = command(executable, home, working);
+        for feature in DISABLED_CODEX_CLI_CAPABILITY_FEATURES {
+            command.args(["--disable", feature]);
+        }
+        for config in [
+            "agents.enabled=false",
+            "skills.include_instructions=false",
+            "mcp_servers={}",
+            "web_search=\"disabled\"",
+            "project_doc_max_bytes=0",
+        ] {
+            command.args(["-c", config]);
+        }
+        command.args(["app-server", "--stdio", "--strict-config"]);
+        let mut child = spawn_probe(&mut command, executable).await;
+        let group = child.id();
+        let mut stdin = child.stdin.take().expect("probe stdin");
+        let mut stdout = BufReader::new(child.stdout.take().expect("probe stdout"));
+        let mut observed = Observed {
+            stage: "initialize",
+            status: "no_terminal",
+            ..Observed::default()
+        };
+        let completed = tokio::time::timeout(TURN_BOUND, async {
+            send(&mut stdin, json!({"id":1,"method":"initialize","params":{
+                "clientInfo":{"name":"signalbox_protocol_probe","version":"1"},
+                "capabilities":{"experimentalApi":false}
+            }})).await;
+            loop {
+                use tokio::io::AsyncReadExt;
+                let mut bytes = Vec::new();
+                let size = (&mut stdout).take(FRAME_BOUND + 1).read_until(b'\n', &mut bytes)
+                    .await.expect("probe frame read");
+                if size == 0 { break; }
+                assert!(size as u64 <= FRAME_BOUND, "probe frame exceeded bound");
+                let frame: Value = serde_json::from_slice(&bytes).expect("probe frame is JSON");
+                if let Some(method) = frame.get("method").and_then(Value::as_str) {
+                    if let Some(id) = frame.get("id") {
+                        if method == "account/chatgptAuthTokens/refresh" {
+                            observed.refresh_requests += 1;
+                        }
+                        send(&mut stdin, json!({"id":id,"error":{"code":-32601,"message":"Unsupported method"}})).await;
+                    } else if method == "account/rateLimits/updated" {
+                        for name in ["primary", "secondary"] {
+                            let window = &frame["params"]["rateLimits"][name];
+                            if !window.is_null() {
+                                observed.windows.push(json!({
+                                    "usedPercent": window["usedPercent"].as_i64(),
+                                    "resetsAt": window["resetsAt"].as_i64()
+                                }));
+                            }
+                        }
+                    } else if method == "turn/completed" {
+                        observed.unauthorized = frame["params"]["turn"]["error"]["codexErrorInfo"] == "unauthorized";
+                        observed.error_info = error_tag(&frame["params"]["turn"]["error"]["codexErrorInfo"]);
+                        observed.status = match frame["params"]["turn"]["status"].as_str() {
+                            Some("completed") => "completed",
+                            Some("failed") => "failed",
+                            Some("interrupted") => "interrupted",
+                            _ => continue,
+                        };
+                        observed.stage = "turn/completed";
+                        break;
+                    }
+                } else if frame.get("error").is_some() {
+                    observed.rpc_code = frame["error"]["code"].as_i64();
+                    break;
+                } else {
+                    match frame["id"].as_u64() {
+                        Some(1) => {
+                            send(&mut stdin, json!({"method":"initialized"})).await;
+                            observed.stage = "thread/start";
+                            send(&mut stdin, json!({"id":2,"method":"thread/start","params":{
+                                "model":variable_or(MODEL_VARIABLE, DEFAULT_MODEL),
+                                "cwd":working,"sandbox":"read-only","approvalPolicy":"never","ephemeral":true
+                            }})).await;
+                        }
+                        Some(2) => {
+                            observed.path_present = !frame["result"]["thread"]["path"].is_null();
+                            let id = frame["result"]["thread"]["id"].as_str().expect("thread id");
+                            observed.stage = "turn/start";
+                            send(&mut stdin, json!({"id":3,"method":"turn/start","params":{
+                                "threadId":id,"input":[{"type":"text","text":"Reply OK. Do not use tools.","text_elements":[]}]
+                            }})).await;
+                        }
+                        Some(3) => observed.stage = "turn_started",
+                        _ => {}
+                    }
+                }
+            }
+        }).await;
+        if completed.is_err() {
+            observed.status = "timeout";
+        }
+        kill_probe_group(group);
+        let _ = child.wait().await;
+        observed
+    }
+
+    fn error_tag(value: &Value) -> &'static str {
+        const TAGS: &[&str] = &[
+            "contextWindowExceeded",
+            "sessionBudgetExceeded",
+            "usageLimitExceeded",
+            "rateLimitExceeded",
+            "serverOverloaded",
+            "cyberPolicy",
+            "misalignmentPolicyViolation",
+            "httpConnectionFailed",
+            "responseStreamConnectionFailed",
+            "internalServerError",
+            "unauthorized",
+            "badRequest",
+            "threadRollbackFailed",
+            "sandboxError",
+            "responseStreamDisconnected",
+            "responseTooManyFailedAttempts",
+            "activeTurnNotSteerable",
+            "other",
+        ];
+        if value.is_null() {
+            return "absent";
+        }
+        TAGS.iter()
+            .copied()
+            .find(|tag| value.as_str() == Some(tag) || value.get(tag).is_some())
+            .unwrap_or("unknown")
+    }
 }

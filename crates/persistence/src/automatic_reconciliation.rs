@@ -1,6 +1,6 @@
 //! Durable daemon-owned reconciliation of ambiguous physical operations.
 
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{future::Future, time::Duration};
 
 use signalbox_application::{
     AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
@@ -40,7 +40,6 @@ use crate::{
 /// attempt deadline while earlier session-locked transactions run. The daemon
 /// still drains a bounded multi-operation scan by returning here after each
 /// completed attempt and claiming the next one just in time.
-// numeric-bound: guard - prevents a durable claim deadline from expiring before work starts
 const CLAIM_WINDOW: i64 = 1;
 
 /// Admitted attempts the claim statement schedules, one `CASE` arm each.
@@ -54,7 +53,6 @@ const CLAIM_WINDOW: i64 = 1;
 /// sweep would settle attempts that are still running. Configuration admission
 /// refuses such a budget rather than letting the arity be discovered in
 /// production.
-// numeric-bound: not-a-bound - the claim statement's fixed CASE arity, which the ladder and the configured budget must match
 pub const RETRY_LADDER_ARITY: usize = 5;
 
 /// How long any one reconciliation statement waits for a contended row.
@@ -75,7 +73,6 @@ pub const RETRY_LADDER_ARITY: usize = 5;
 /// It is published because what makes it correct is its relationship to the
 /// caller's deadline: the caller must let this budget expire first, which
 /// [`reconciliation_deadline`] enforces.
-// numeric-bound: guard - prevents a contended statement from holding a pooled connection for the whole real wait
 pub const RECONCILIATION_LOCK_WAIT: Duration = Duration::from_secs(1);
 
 /// How long one reconciliation transaction waits to reach a pooled connection.
@@ -83,7 +80,6 @@ pub const RECONCILIATION_LOCK_WAIT: Duration = Duration::from_secs(1);
 /// Cancelling an acquisition is safe in a way cancelling a statement is not: no
 /// transaction has begun, nothing has been sent, and so there is no work whose
 /// fate could be unknown.
-// numeric-bound: guard - prevents a saturated pool from consuming the attempt's deadline before it begins
 pub const RECONCILIATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
 
 /// Headroom the caller's deadline keeps above the summed database-side budgets.
@@ -96,7 +92,6 @@ pub const RECONCILIATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
 /// stretch outside the deadline, so the deadline could expire in the same
 /// instant PostgreSQL was about to report `55P03`, which is the strand these
 /// bounds exist to prevent rather than a smaller version of it.
-// numeric-bound: guard - keeps the caller deadline above the database-side budgets by more than the uncovered BEGIN stretch
 pub const RECONCILIATION_DEADLINE_MARGIN: Duration = Duration::from_millis(500);
 
 /// The smallest caller deadline that lets the database-side budgets expire first.
@@ -105,7 +100,6 @@ pub const RECONCILIATION_DEADLINE_MARGIN: Duration = Duration::from_millis(500);
 /// [`RECONCILIATION_DEADLINE_MARGIN`], never written as their sum: a budget
 /// raised without raising this floor would otherwise close the margin silently.
 /// A deployment-configured bound is raised to this floor.
-// numeric-bound: derived guard from RECONCILIATION_DEADLINE_MARGIN
 pub const RECONCILIATION_DEADLINE_FLOOR: Duration = RECONCILIATION_ACQUIRE_WAIT
     .saturating_add(RECONCILIATION_LOCK_WAIT)
     .saturating_add(RECONCILIATION_DEADLINE_MARGIN);
@@ -131,7 +125,6 @@ const _: () = assert!(
 /// An unconfigured deployment keeps the shipped default rather than running
 /// unbounded, and a configured bound below [`RECONCILIATION_DEADLINE_FLOOR`] is
 /// raised to it.
-// numeric-bound: guard - prevents an unconfigured deployment from waiting forever on a backend that stopped answering
 pub const RECONCILIATION_DEADLINE_DEFAULT: Duration = Duration::from_secs(5);
 
 /// The margin must hold as an arithmetic fact, not as a comment: a
@@ -263,24 +256,32 @@ fn decode_operation(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Failure while discovering, claiming, or applying automatic reconciliation.
 #[derive(Debug)]
 pub enum AutomaticReconciliationRepositoryError {
+    #[error("automatic operation reconciliation failed: {source}")]
     /// PostgreSQL failed before or during a commit.
     Database {
         /// Whether a commit acknowledgement was lost.
         commit_ambiguous: bool,
+        #[source]
         /// Driver failure.
         source: sqlx::Error,
     },
+    #[error(transparent)]
     /// Session rows could not be reconstructed.
-    Session(SessionRepositoryError),
+    Session(#[source] SessionRepositoryError),
+    #[error(transparent)]
     /// Scheduling rows could not be reconstructed.
-    Scheduling(SubmitInputRepositoryError),
+    Scheduling(#[source] SubmitInputRepositoryError),
+    #[error(transparent)]
     /// The shared model-call terminal transition failed.
-    Model(ModelCallRepositoryError),
+    Model(#[source] ModelCallRepositoryError),
+    #[error(transparent)]
     /// Tool-round evidence could not reconstruct the exact recovery wait.
-    Tool(ToolLoopRepositoryError),
+    Tool(#[source] ToolLoopRepositoryError),
+    #[error("invalid automatic operation reconciliation {field_0}")]
     /// A durable recovery row was outside the closed application vocabulary.
     Corruption(&'static str),
 }
@@ -309,42 +310,6 @@ impl AutomaticReconciliationRepositoryError {
             | Self::Model(_)
             | Self::Tool(_)
             | Self::Corruption(_) => AutomaticReconciliationFailureKind::Integrity,
-        }
-    }
-}
-
-impl fmt::Display for AutomaticReconciliationRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(
-                    formatter,
-                    "automatic operation reconciliation failed: {source}"
-                )
-            }
-            Self::Session(source) => source.fmt(formatter),
-            Self::Scheduling(source) => source.fmt(formatter),
-            Self::Model(source) => source.fmt(formatter),
-            Self::Tool(source) => source.fmt(formatter),
-            Self::Corruption(detail) => {
-                write!(
-                    formatter,
-                    "invalid automatic operation reconciliation {detail}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for AutomaticReconciliationRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Session(source) => Some(source),
-            Self::Scheduling(source) => Some(source),
-            Self::Model(source) => Some(source),
-            Self::Tool(source) => Some(source),
-            Self::Corruption(_) => None,
         }
     }
 }

@@ -90,14 +90,25 @@ pub enum ValidationEvidence {
     StreamingTextValidation,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Registry-produced evidence that a reader validated exact bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedFile {
+    /// Borrows the exact semantic use.
+    #[get]
     source: FileUse,
+    /// Borrows the byte-validated canonical type.
+    #[get]
     detected_media_type: CanonicalMediaType,
+    /// Borrows the exact reader identity and revision.
+    #[get]
     reader: ReaderIdentity,
     validation: ValidationEvidence,
+    /// Borrows bounded provider metadata.
+    #[get]
     metadata: BoundedMetadata,
+    /// Borrows ordered provider-owned views.
+    #[get(slice)]
     views: Vec<ReadViewDeclaration>,
 }
 
@@ -120,34 +131,9 @@ impl ValidatedFile {
         }
     }
 
-    /// Borrows the exact semantic use.
-    pub const fn source(&self) -> &FileUse {
-        &self.source
-    }
-
-    /// Borrows the byte-validated canonical type.
-    pub const fn detected_media_type(&self) -> &CanonicalMediaType {
-        &self.detected_media_type
-    }
-
-    /// Borrows the exact reader identity and revision.
-    pub const fn reader(&self) -> &ReaderIdentity {
-        &self.reader
-    }
-
     /// Returns the evidence class.
     pub const fn validation(&self) -> ValidationEvidence {
         self.validation
-    }
-
-    /// Borrows bounded provider metadata.
-    pub const fn metadata(&self) -> &BoundedMetadata {
-        &self.metadata
-    }
-
-    /// Borrows ordered provider-owned views.
-    pub fn views(&self) -> &[ReadViewDeclaration] {
-        &self.views
     }
 }
 
@@ -307,6 +293,8 @@ pub enum ProcessorProbeOutput {
         media_type: String,
         /// Claimed evidence strength.
         strength: ProbeStrength,
+        /// Actual cumulative source bytes examined to produce this evidence.
+        evidence_bytes: u64,
     },
     /// Reader recognized a malformed format.
     RecognizedMalformed {

@@ -28,11 +28,12 @@ enum SessionCreationDefaults {
 
 /// Why one session exists.
 ///
-/// User-initiated and delegated causes are implemented. Application-initiated,
-/// scheduled, and any other causes remain reserved extension examples rather
-/// than valid baseline values: the specification revision that enables one
-/// must add a typed variant carrying the exact durable initiating domain
-/// identity, so this type contains no uninhabitable placeholders.
+/// Interactive, module-dispatched, and delegated causes are implemented.
+/// Application-initiated, scheduled, and any other causes remain reserved
+/// extension examples rather than valid baseline values: the specification
+/// revision that enables one must add a typed variant carrying the exact
+/// durable initiating domain identity, so this type contains no uninhabitable
+/// placeholders.
 ///
 /// and an unstructured string is not a substitute for a typed variant:
 ///
@@ -42,24 +43,54 @@ enum SessionCreationDefaults {
 /// let _: SessionCreationCause = "delegated".into();
 /// ```
 ///
-/// S01 / S17 / INV-003: no cause variant implies or carries ancestry:
+/// no cause variant implies or carries ancestry:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{SessionCreationCause, TranscriptAncestry};
 ///
 /// fn a_cause_cannot_carry_ancestry(ancestry: TranscriptAncestry) {
-///     let _ = SessionCreationCause::UserInitiated { ancestry };
+///     let _ = SessionCreationCause::Interactive { ancestry };
 /// }
 /// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionCreationCause {
-    /// The user started this conversation.
-    UserInitiated,
+    /// A person started this conversation.
+    ///
+    /// The imported-frontier creation family records this cause with its
+    /// import reference in its own ancestry columns: importing a conversation
+    /// is a user-initiated act, so the vocabulary stays closed.
+    Interactive,
+    /// One exact module dispatch created this session.
+    ModuleDispatched {
+        /// The dispatching module and its own durable dispatch identity.
+        dispatch: crate::ModuleDispatch,
+    },
     /// One exact logical tool request spawned this delegated child.
     Delegated {
         /// The parent work to which the child must return its result.
         spawning_request: crate::ToolRequestId,
     },
+}
+
+impl SessionCreationCause {
+    /// Returns the ownership a creation takes when the command names none.
+    pub const fn default_ownership(&self) -> crate::SessionOwnership {
+        match self {
+            Self::Interactive => crate::SessionOwnership::Unmonitored,
+            Self::ModuleDispatched { .. } | Self::Delegated { .. } => {
+                crate::SessionOwnership::Owned
+            }
+        }
+    }
+
+    /// Returns the finish condition a creation carries when the command
+    /// names none: dispatched work is gated on the dispatch's external gate.
+    pub const fn default_finish_condition(&self) -> Option<crate::FinishCondition> {
+        match self {
+            Self::ModuleDispatched { .. } => Some(crate::FinishCondition::ExternalGate),
+            Self::Interactive | Self::Delegated { .. } => None,
+        }
+    }
 }
 
 /// Identifies one exact immutable source boundary in semantic history.
@@ -107,8 +138,7 @@ pub enum ImportedSessionRelationship {
 /// input, configuration, or a creation cause. Signalbox never infers ancestry
 /// from related-session links, task briefs, copied text, or delegation.
 ///
-/// S17 / INV-003: ancestry never implies a creation cause and no variant
-/// carries one:
+/// ancestry never implies a creation cause and no variant carries one:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{SessionCreationCause, TranscriptAncestry};
@@ -118,7 +148,7 @@ pub enum ImportedSessionRelationship {
 /// }
 /// ```
 ///
-/// INV-030: the value is immutable and has no update operations; later
+/// the value is immutable and has no update operations; later
 /// source-session changes cannot rewrite it. Multiple-source ancestry and
 /// merge remain reserved future decision scope.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -147,8 +177,8 @@ pub enum TranscriptAncestry {
 
 /// The two required, independent, immutable creation facts for one session.
 ///
-/// Cause and ancestry vary independently and neither can be omitted. S01 /
-/// S17 / INV-003: one fact alone is not creation provenance:
+/// Cause and ancestry vary independently and neither can be omitted. one fact alone is not creation
+/// provenance:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{SessionCreationCause, SessionCreationProvenance};
@@ -185,6 +215,18 @@ impl SessionCreationProvenance {
     pub const fn delegated(spawning_request: crate::ToolRequestId) -> Self {
         Self {
             cause: SessionCreationCause::Delegated { spawning_request },
+            ancestry: TranscriptAncestry::None,
+        }
+    }
+
+    /// Creates module-dispatched provenance naming the exact dispatch.
+    ///
+    /// A dispatched session starts from no prior transcript, so the ancestry
+    /// is fixed rather than accepted: a module supplying one would be
+    /// inferring semantic history from a dispatch record.
+    pub const fn module_dispatched(dispatch: crate::ModuleDispatch) -> Self {
+        Self {
+            cause: SessionCreationCause::ModuleDispatched { dispatch },
             ancestry: TranscriptAncestry::None,
         }
     }
@@ -248,6 +290,9 @@ pub struct CreateSession {
     provenance: SessionCreationProvenance,
     creation_defaults: SessionCreationDefaults,
     placement: SessionPlacement,
+    start_gate: crate::StartGate,
+    ownership: crate::SessionOwnership,
+    finish_condition: Option<crate::FinishCondition>,
 }
 
 impl CreateSession {
@@ -263,6 +308,9 @@ impl CreateSession {
             provenance,
             creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
             placement: SessionPlacement::pathless(),
+            start_gate: crate::StartGate::Open,
+            ownership: provenance.cause().default_ownership(),
+            finish_condition: provenance.cause().default_finish_condition(),
         }
     }
 
@@ -278,6 +326,9 @@ impl CreateSession {
             provenance,
             creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
             placement,
+            start_gate: crate::StartGate::Open,
+            ownership: provenance.cause().default_ownership(),
+            finish_condition: provenance.cause().default_finish_condition(),
         }
     }
 
@@ -297,6 +348,9 @@ impl CreateSession {
                 resolved: resolved_configuration_defaults,
             },
             placement: SessionPlacement::pathless(),
+            start_gate: crate::StartGate::Open,
+            ownership: provenance.cause().default_ownership(),
+            finish_condition: provenance.cause().default_finish_condition(),
         }
     }
 
@@ -316,6 +370,9 @@ impl CreateSession {
                 resolved: resolved_configuration_defaults,
             },
             placement,
+            start_gate: crate::StartGate::Open,
+            ownership: provenance.cause().default_ownership(),
+            finish_condition: provenance.cause().default_finish_condition(),
         }
     }
 
@@ -353,14 +410,41 @@ impl CreateSession {
         &self.placement
     }
 
+    /// Installs the lifecycle members: the start gate, the ownership, and
+    /// the finish condition an owned session owes.
+    pub fn with_lifecycle(
+        mut self,
+        start_gate: crate::StartGate,
+        ownership: crate::SessionOwnership,
+        finish_condition: Option<crate::FinishCondition>,
+    ) -> Self {
+        self.start_gate = start_gate;
+        self.ownership = ownership;
+        self.finish_condition = finish_condition;
+        self
+    }
+
+    /// Returns whether the creation holds its start gate.
+    pub const fn start_gate(&self) -> crate::StartGate {
+        self.start_gate
+    }
+
+    /// Returns the ownership the creation establishes.
+    pub const fn ownership(&self) -> crate::SessionOwnership {
+        self.ownership
+    }
+
+    /// Borrows the finish condition the creation declares.
+    pub const fn finish_condition(&self) -> Option<&crate::FinishCondition> {
+        self.finish_condition.as_ref()
+    }
+
     /// Establishes the first immutable defaults version this creation
     /// installs.
     ///
-    /// The result is always [`VersionedSessionConfigurationDefaults::establish`]
-    /// applied to the carried payload, so session creation establishes
-    /// version one. S01 / INV-003: the established defaults are operationally
-    /// associated with the session but are not a third creation-provenance
-    /// fact:
+    /// The result is always [`VersionedSessionConfigurationDefaults::establish`] applied to the
+    /// carried payload, so session creation establishes version one. The established defaults are
+    /// operationally associated with the session but are not a third creation-provenance fact:
     ///
     /// ```compile_fail
     /// use signalbox_domain::{
@@ -395,6 +479,9 @@ impl PartialEq for CreateSession {
     fn eq(&self, other: &Self) -> bool {
         self.provenance == other.provenance
             && self.placement == other.placement
+            && self.start_gate == other.start_gate
+            && self.ownership == other.ownership
+            && self.finish_condition == other.finish_condition
             && match (&self.creation_defaults, &other.creation_defaults) {
                 (
                     SessionCreationDefaults::Explicit(left),
@@ -419,6 +506,9 @@ impl std::hash::Hash for CreateSession {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.provenance.hash(state);
         self.placement.hash(state);
+        self.start_gate.hash(state);
+        self.ownership.hash(state);
+        self.finish_condition.hash(state);
         match &self.creation_defaults {
             SessionCreationDefaults::Explicit(defaults) => {
                 0_u8.hash(state);
@@ -950,11 +1040,12 @@ const fn session_provenance_failure(
 ) -> Option<SessionReconstitutionFailure> {
     match (provenance.cause(), provenance.ancestry()) {
         (
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None | TranscriptAncestry::SingleSource { .. },
         )
-        | (SessionCreationCause::Delegated { .. }, TranscriptAncestry::None) => None,
-        (SessionCreationCause::UserInitiated, TranscriptAncestry::ImportedConversation { .. }) => {
+        | (SessionCreationCause::Delegated { .. }, TranscriptAncestry::None)
+        | (SessionCreationCause::ModuleDispatched { .. }, TranscriptAncestry::None) => None,
+        (SessionCreationCause::Interactive, TranscriptAncestry::ImportedConversation { .. }) => {
             Some(SessionReconstitutionFailure::ImportedSessionSeedUnavailable)
         }
         (
@@ -962,6 +1053,11 @@ const fn session_provenance_failure(
             TranscriptAncestry::SingleSource { .. }
             | TranscriptAncestry::ImportedConversation { .. },
         ) => Some(SessionReconstitutionFailure::DelegatedAncestryMismatch),
+        (
+            SessionCreationCause::ModuleDispatched { .. },
+            TranscriptAncestry::SingleSource { .. }
+            | TranscriptAncestry::ImportedConversation { .. },
+        ) => Some(SessionReconstitutionFailure::ModuleDispatchedAncestryMismatch),
     }
 }
 
@@ -989,6 +1085,8 @@ pub enum SessionReconstitutionFailure {
     DelegatedAncestryMismatch,
     /// Delegated creation cannot carry user-selected template provenance.
     DelegatedTemplateProvenance,
+    /// Module-dispatched creation is independently constrained to no ancestry.
+    ModuleDispatchedAncestryMismatch,
 }
 
 /// A failed current-session reconstitution retaining every typed input
@@ -1132,9 +1230,12 @@ impl CreateSession {
         session: SessionId,
     ) -> Result<PreparedCreateSession, CreateSessionPreparationError> {
         match (self.provenance.cause(), self.provenance.ancestry()) {
-            (SessionCreationCause::UserInitiated, TranscriptAncestry::None) => {}
             (
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
+                TranscriptAncestry::None,
+            ) => {}
+            (
+                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
                 TranscriptAncestry::SingleSource { .. }
                 | TranscriptAncestry::ImportedConversation { .. },
             ) => {
@@ -1355,9 +1456,12 @@ impl CreateSessionReconstitutionInput {
             ));
         }
         match (self.provenance.cause(), self.provenance.ancestry()) {
-            (SessionCreationCause::UserInitiated, TranscriptAncestry::None) => {}
             (
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
+                TranscriptAncestry::None,
+            ) => {}
+            (
+                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
                 TranscriptAncestry::SingleSource { .. }
                 | TranscriptAncestry::ImportedConversation { .. },
             ) => {
@@ -1494,7 +1598,7 @@ pub(crate) const fn test_frontier(value: u128) -> TranscriptFrontier {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use super::{
         CreateSession, CreateSessionFromImportedFrontier, CreateSessionPreparationFailure,
@@ -1520,10 +1624,7 @@ mod tests {
     }
 
     fn user_initiated_empty() -> SessionCreationProvenance {
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        )
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None)
     }
 
     /// Canonical spawning-request identity for delegated-session fixtures.
@@ -1538,11 +1639,7 @@ mod tests {
         )
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct ReconstitutionFailureRow {
         perturbed_stored_fact: &'static str,
         failure: String,
@@ -1572,34 +1669,34 @@ mod tests {
         )
     }
 
-    /// S01 / INV-003: a user-initiated session with explicitly empty
-    /// ancestry is complete creation provenance for an empty conversation.
+    /// a user-initiated session with explicitly empty ancestry is complete creation provenance for
+    /// an empty conversation.
     #[test]
-    fn s01_inv003_user_initiated_with_no_ancestry_is_complete_provenance() {
+    fn user_initiated_with_no_ancestry_is_complete_provenance() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None,
         );
 
-        assert_eq!(provenance.cause(), SessionCreationCause::UserInitiated);
+        assert_eq!(provenance.cause(), SessionCreationCause::Interactive);
         assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
     }
 
-    /// S17 / INV-003 / INV-030: a user-created fork records the exact
-    /// immutable source session and source frontier it was seeded from.
+    /// a user-created fork records the exact immutable source session and source frontier it was
+    /// seeded from.
     #[test]
-    fn s17_inv003_inv030_fork_provenance_records_exact_source_and_frontier() {
+    fn fork_provenance_records_exact_source_and_frontier() {
         let source_session = session_id(1);
         let source_frontier = test_frontier(2);
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session,
                 source_frontier,
             },
         );
 
-        assert_eq!(provenance.cause(), SessionCreationCause::UserInitiated);
+        assert_eq!(provenance.cause(), SessionCreationCause::Interactive);
         let TranscriptAncestry::SingleSource {
             source_session: carried_session,
             source_frontier: carried_frontier,
@@ -1611,18 +1708,17 @@ mod tests {
         assert_eq!(carried_frontier, source_frontier);
     }
 
-    /// S28 / INV-003 / INV-039: imported ancestry retains the exact imported
-    /// boundary and resume/fork relationship without duplicating the
-    /// conversation identity outside the frontier.
+    /// imported ancestry retains the exact imported boundary and resume/fork relationship without
+    /// duplicating the conversation identity outside the frontier.
     #[test]
-    fn s28_inv003_inv039_imported_ancestry_records_exact_frontier_and_relationship() {
+    fn imported_ancestry_records_exact_frontier_and_relationship() {
         let source_frontier = test_imported_frontier(
             imported_conversation_id(1),
             imported_transcript_entry_id(2),
             ImportedTranscriptPosition::try_from_u64(3).expect("positive position"),
         );
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier,
                 relationship: ImportedSessionRelationship::Resume,
@@ -1648,11 +1744,11 @@ mod tests {
         );
     }
 
-    /// S28 / INV-015 / INV-039: the separate seed record retains the exact
-    /// session and generated context-frontier identities; equal semantic
-    /// content cannot substitute another frontier identity at this boundary.
+    /// the separate seed record retains the exact session and generated context-frontier
+    /// identities; equal semantic content cannot substitute another frontier identity at this
+    /// boundary.
     #[test]
-    fn s28_inv015_inv039_imported_seed_keeps_exact_local_frontier_identity() {
+    fn imported_seed_keeps_exact_local_frontier_identity() {
         let seed = ImportedSessionSeed {
             session: session_id(1),
             seed_frontier: context_frontier_id(2),
@@ -1669,12 +1765,12 @@ mod tests {
         );
     }
 
-    /// S28 / INV-039: the baseline current-session reconstitution seam cannot
-    /// accept imported ancestry without the separate exact-prefix seed facts.
+    /// the baseline current-session reconstitution seam cannot accept imported ancestry without the
+    /// separate exact-prefix seed facts.
     #[test]
-    fn s28_inv039_current_session_requires_imported_seed_reconstitution() {
+    fn current_session_requires_imported_seed_reconstitution() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: test_imported_frontier(
                     imported_conversation_id(1),
@@ -1703,16 +1799,16 @@ mod tests {
         assert_eq!(error.input(), &input);
     }
 
-    /// S01 / S17 / INV-003: the same user-initiated cause pairs with empty
-    /// and single-source ancestry, so neither fact is a proxy for the other.
+    /// the same user-initiated cause pairs with empty and single-source ancestry, so neither fact
+    /// is a proxy for the other.
     #[test]
-    fn s01_s17_inv003_cause_and_ancestry_vary_independently() {
+    fn cause_and_ancestry_vary_independently() {
         let empty = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None,
         );
         let fork = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
@@ -1724,11 +1820,10 @@ mod tests {
         assert_ne!(empty, fork);
     }
 
-    /// S17 / INV-030: ancestry equality is exact over both the source session
-    /// and the source frontier, and an explicit empty ancestry never equals a
-    /// single-source one.
+    /// ancestry equality is exact over both the source session and the source frontier, and an
+    /// explicit empty ancestry never equals a single-source one.
     #[test]
-    fn s17_inv030_ancestry_equality_is_exact_over_source_and_frontier() {
+    fn ancestry_equality_is_exact_over_source_and_frontier() {
         let ancestry = TranscriptAncestry::SingleSource {
             source_session: session_id(1),
             source_frontier: test_frontier(2),
@@ -1752,11 +1847,10 @@ mod tests {
         assert_ne!(ancestry, TranscriptAncestry::None);
     }
 
-    /// S01 / INV-002 / INV-003 / INV-008: a complete matching projection
-    /// reconstructs one owned current session with exact immutable provenance
-    /// and the complete later defaults version selected by the pointer.
+    /// a complete matching projection reconstructs one owned current session with exact immutable
+    /// provenance and the complete later defaults version selected by the pointer.
     #[test]
-    fn s01_inv002_inv003_inv008_matching_current_session_reconstitutes_whole() {
+    fn matching_current_session_reconstitutes_whole() {
         let version = SessionConfigurationDefaultsVersion::first()
             .checked_next()
             .expect("version two exists");
@@ -1783,13 +1877,13 @@ mod tests {
         assert_ne!(session, changed_defaults);
     }
 
-    /// INV-003: the general current-session seam retains a complete typed
+    /// the general current-session seam retains a complete typed
     /// single-source provenance value. It does not repeat the narrower live
     /// CreateSession preparation slice's frontier-availability check.
     #[test]
-    fn inv003_current_session_reconstitution_retains_typed_provenance() {
+    fn current_session_reconstitution_retains_typed_provenance() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
@@ -1891,9 +1985,9 @@ mod tests {
         failure
     }
 
-    /// S18 / INV-003: delegated construction fixes exact cause and no ancestry.
+    /// delegated construction fixes exact cause and no ancestry.
     #[test]
-    fn s18_inv003_delegated_helper_constructs_no_ancestry() {
+    fn delegated_helper_constructs_no_ancestry() {
         let spawning_request = delegated_spawning_request();
         let provenance = SessionCreationProvenance::delegated(spawning_request);
 
@@ -1904,10 +1998,10 @@ mod tests {
         assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
     }
 
-    /// S18 / INV-003: matching delegated current-session facts retain the
-    /// exact spawning request and no transcript ancestry.
+    /// matching delegated current-session facts retain the exact spawning request and no transcript
+    /// ancestry.
     #[test]
-    fn s18_inv003_current_session_reconstitutes_delegated_no_ancestry() {
+    fn current_session_reconstitutes_delegated_no_ancestry() {
         let spawning_request = delegated_spawning_request();
         let provenance = SessionCreationProvenance::delegated(spawning_request);
         let session = CurrentSessionFacts {
@@ -1929,10 +2023,10 @@ mod tests {
         );
     }
 
-    /// S18 / INV-003: delegated creation cannot retain user-selected template
-    /// provenance through the public current-session seam.
+    /// delegated creation cannot retain user-selected template provenance through the public
+    /// current-session seam.
     #[test]
-    fn s18_inv003_current_session_rejects_delegated_template_provenance() {
+    fn current_session_rejects_delegated_template_provenance() {
         let failure = current_session_reconstitution_failure(CurrentSessionFacts {
             provenance: SessionCreationProvenance::delegated(delegated_spawning_request()),
             template_provenance: Some(template_provenance("reviewer", 2)),
@@ -1945,9 +2039,9 @@ mod tests {
         );
     }
 
-    /// S18 / INV-003: delegated current sessions reject native ancestry.
+    /// delegated current sessions reject native ancestry.
     #[test]
-    fn s18_inv003_current_session_rejects_delegated_native_ancestry() {
+    fn current_session_rejects_delegated_native_ancestry() {
         let spawning_request = delegated_spawning_request();
         let provenance = SessionCreationProvenance::new(
             SessionCreationCause::Delegated { spawning_request },
@@ -1967,9 +2061,9 @@ mod tests {
         );
     }
 
-    /// S18 / INV-003: delegated current sessions reject imported ancestry.
+    /// delegated current sessions reject imported ancestry.
     #[test]
-    fn s18_inv003_current_session_rejects_delegated_imported_ancestry() {
+    fn current_session_rejects_delegated_imported_ancestry() {
         let spawning_request = delegated_spawning_request();
         let provenance = SessionCreationProvenance::new(
             SessionCreationCause::Delegated { spawning_request },
@@ -1993,12 +2087,11 @@ mod tests {
         );
     }
 
-    /// S01 / INV-002 / INV-008: every requested/stored identity, defaults
-    /// pointer/record identity, placement pointer/event identity, or
-    /// selected-version mismatch fails closed and
-    /// returns the complete unchanged typed projection.
+    /// every requested/stored identity, defaults pointer/record identity, placement pointer/event
+    /// identity, or selected-version mismatch fails closed and returns the complete unchanged typed
+    /// projection.
     #[test]
-    fn s01_inv002_inv008_current_session_rejects_cross_wired_facts() {
+    fn current_session_rejects_cross_wired_facts() {
         let matching = CurrentSessionFacts::matching(session_id(1));
         let second_version = SessionConfigurationDefaultsVersion::first()
             .checked_next()
@@ -2085,7 +2178,7 @@ mod tests {
             │ pointer and record versions torn │ CurrentDefaultsVersionMismatch │
             └──────────────────────────────────┴────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "requested session differs",
                 failure: format!("{requested_other_session:?}"),
@@ -2105,11 +2198,10 @@ mod tests {
         ]));
     }
 
-    /// S01 / INV-003: the creation payload couples the durable command
-    /// identity, both independent provenance facts, and one complete
-    /// unversioned defaults payload.
+    /// the creation payload couples the durable command identity, both independent provenance
+    /// facts, and one complete unversioned defaults payload.
     #[test]
-    fn s01_inv003_create_session_couples_command_provenance_and_defaults() {
+    fn create_session_couples_command_provenance_and_defaults() {
         let provenance = user_initiated_empty();
         let create = CreateSession::new(command_id(1), provenance, defaults(2));
 
@@ -2118,10 +2210,10 @@ mod tests {
         assert_eq!(create.initial_configuration_defaults(), &defaults(2));
     }
 
-    /// S01: session creation establishes exactly version one of the carried
-    /// model-selection defaults payload.
+    /// session creation establishes exactly version one of the carried model-selection defaults
+    /// payload.
     #[test]
-    fn s01_creation_establishes_version_one_of_the_carried_defaults() {
+    fn creation_establishes_version_one_of_the_carried_defaults() {
         let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));
 
         let established = create.establish_initial_defaults();
@@ -2137,11 +2229,10 @@ mod tests {
         assert_eq!(*established.defaults(), defaults(2));
     }
 
-    /// S01 / S17 / INV-003: initial defaults never join the provenance facts,
-    /// and replacing established defaults installs a later version while both
-    /// provenance facts compare unchanged.
+    /// initial defaults never join the provenance facts, and replacing established defaults
+    /// installs a later version while both provenance facts compare unchanged.
     #[test]
-    fn s01_s17_inv003_defaults_are_not_a_third_provenance_fact() {
+    fn defaults_are_not_a_third_provenance_fact() {
         let provenance = user_initiated_empty();
         let first = CreateSession::new(command_id(1), provenance, defaults(2));
         let second = CreateSession::new(command_id(1), provenance, defaults(3));
@@ -2160,15 +2251,14 @@ mod tests {
         assert_eq!(first.provenance(), provenance);
     }
 
-    /// S01 / S17 / INV-012: the canonical comparison payload is every
-    /// caller-supplied semantic field except the command identifier itself, so
-    /// payloads that differ only in `command_id` compare equal (equal replay),
-    /// while any provenance or defaults difference is a distinct payload
-    /// (conflicting reuse of one identifier is then detectable).
+    /// the canonical comparison payload is every caller-supplied semantic field except the command
+    /// identifier itself, so payloads that differ only in `command_id` compare equal (equal
+    /// replay), while any provenance or defaults difference is a distinct payload (conflicting
+    /// reuse of one identifier is then detectable).
     #[test]
-    fn s01_s17_inv012_create_session_comparison_payload_excludes_command_id() {
+    fn create_session_comparison_payload_excludes_command_id() {
         let fork = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
@@ -2191,11 +2281,11 @@ mod tests {
         );
     }
 
-    /// INV-047: replay of template creation is keyed by requested name, so a
+    /// replay of template creation is keyed by requested name, so a
     /// catalog edit under that name remains equal while another name or the
     /// explicit creation mode is conflicting reuse.
     #[test]
-    fn inv047_template_creation_comparison_uses_name_and_creation_mode() {
+    fn template_creation_comparison_uses_name_and_creation_mode() {
         let original = CreateSession::new_from_template(
             command_id(1),
             user_initiated_empty(),
@@ -2221,10 +2311,10 @@ mod tests {
         assert_ne!(original, explicit);
     }
 
-    /// INV-047: preparation copies the resolved bundle and immutable
+    /// preparation copies the resolved bundle and immutable
     /// name/digest provenance into initial session state.
     #[test]
-    fn inv047_template_preparation_copies_defaults_and_provenance() {
+    fn template_preparation_copies_defaults_and_provenance() {
         let provenance = template_provenance("reviewer", 2);
         let create = CreateSession::new_from_template(
             command_id(1),
@@ -2245,10 +2335,10 @@ mod tests {
         );
     }
 
-    /// INV-047: replay reconstitution requires command and session storage to
+    /// replay reconstitution requires command and session storage to
     /// repeat the same name and digest exactly.
     #[test]
-    fn inv047_template_reconstitution_rejects_missing_provenance() {
+    fn template_reconstitution_rejects_missing_provenance() {
         let provenance = template_provenance("reviewer", 2);
         let create = CreateSession::new_from_template(
             command_id(1),
@@ -2275,11 +2365,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-012 / INV-039: imported-session command comparison excludes
-    /// only command identity; its conversation, boundary, relationship, and
-    /// defaults all remain replay-significant.
+    /// imported-session command comparison excludes only command identity; its conversation,
+    /// boundary, relationship, and defaults all remain replay-significant.
     #[test]
-    fn s28_inv012_inv039_imported_creation_comparison_payload_is_complete() {
+    fn imported_creation_comparison_payload_is_complete() {
         let conversation = imported_conversation_id(1);
         let frontier = test_imported_frontier(
             conversation,
@@ -2344,11 +2433,10 @@ mod tests {
         );
     }
 
-    /// S01 / INV-003 / INV-008 / INV-012: preparation seals the exact
-    /// command, hub-supplied session, independent provenance, defaults version
-    /// one, and matching replay result without claiming a commit.
+    /// preparation seals the exact command, hub-supplied session, independent provenance, defaults
+    /// version one, and matching replay result without claiming a commit.
     #[test]
-    fn s01_inv003_inv008_inv012_preparation_couples_complete_creation() {
+    fn preparation_couples_complete_creation() {
         let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));
 
         let prepared = create
@@ -2375,13 +2463,12 @@ mod tests {
         assert_eq!(carried_session.id(), carried_result.session());
     }
 
-    /// S17: until trusted transcript-frontier production exists, a
-    /// single-source command yields no candidate or terminal command result
-    /// and returns the command and minted identity unchanged.
+    /// until trusted transcript-frontier production exists, a single-source command yields no
+    /// candidate or terminal command result and returns the command and minted identity unchanged.
     #[test]
-    fn s17_unavailable_ancestry_is_a_nonclaiming_preparation_failure() {
+    fn unavailable_ancestry_is_a_nonclaiming_preparation_failure() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
@@ -2410,10 +2497,10 @@ mod tests {
         );
     }
 
-    /// S18 / INV-003: ordinary CreateSession cannot forge the delegated
-    /// creation family owned by the spawning-request transaction.
+    /// ordinary CreateSession cannot forge the delegated creation family owned by the
+    /// spawning-request transaction.
     #[test]
-    fn s18_inv003_create_session_rejects_delegated_creation() {
+    fn create_session_rejects_delegated_creation() {
         let command = command_id(3);
         let session = session_id(5);
         let provenance = SessionCreationProvenance::delegated(delegated_spawning_request());
@@ -2432,11 +2519,10 @@ mod tests {
         assert_eq!(error.command().provenance(), provenance);
     }
 
-    /// S01 / INV-003 / INV-008 / INV-012: complete matching durable facts
-    /// reconstruct the same canonical initial session and typed replay result
-    /// without producing a pre-commit candidate.
+    /// complete matching durable facts reconstruct the same canonical initial session and typed
+    /// replay result without producing a pre-commit candidate.
     #[test]
-    fn s01_inv003_inv008_inv012_matching_creation_reconstitutes_whole() {
+    fn matching_creation_reconstitutes_whole() {
         let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));
         let input = CreateSessionReconstitutionInput::new(
             create.clone(),
@@ -2528,10 +2614,10 @@ mod tests {
         failure
     }
 
-    /// S18 / INV-003: ordinary creation reconstitution cannot claim the
-    /// delegated provenance family owned by the spawning-request transaction.
+    /// ordinary creation reconstitution cannot claim the delegated provenance family owned by the
+    /// spawning-request transaction.
     #[test]
-    fn s18_inv003_creation_reconstitution_rejects_delegated_provenance() {
+    fn creation_reconstitution_rejects_delegated_provenance() {
         let command = CreateSession::new(
             command_id(1),
             SessionCreationProvenance::delegated(delegated_spawning_request()),
@@ -2561,18 +2647,17 @@ mod tests {
         assert_eq!(input.defaults(), &facts.defaults);
     }
 
-    /// S01 / INV-003 / INV-008 / INV-012: every cross-wired session, result,
-    /// provenance, or defaults shape fails closed and retains the complete
-    /// unchanged typed projection.
+    /// every cross-wired session, result, provenance, or defaults shape fails closed and retains
+    /// the complete unchanged typed projection.
     #[test]
-    fn s01_inv003_inv008_inv012_reconstitution_rejects_cross_wired_facts() {
+    fn reconstitution_rejects_cross_wired_facts() {
         let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));
         let matching = CreationFacts::matching(create, session_id(3));
         let second_version = SessionConfigurationDefaultsVersion::first()
             .checked_next()
             .expect("version two exists");
         let fork = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(10),
                 source_frontier: test_frontier(11),
@@ -2644,7 +2729,7 @@ mod tests {
             │ stored defaults differ             │ DefaultsMismatch              │
             └────────────────────────────────────┴───────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "result session cross-wired",
                 failure: format!("{cross_wired_result:?}"),

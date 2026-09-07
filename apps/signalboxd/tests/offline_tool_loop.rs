@@ -20,10 +20,10 @@ use signalbox_application::{
     InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
     ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
-    ToolExecutorEvidence, ToolInputSchema, UuidV7SessionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator,
-    UuidV7ToolLoopIdGenerator,
+    SubmitInputService, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
+    ToolExecutionInvocation, ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
+    ToolPreauthorization, UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
     ActivatedTurn, DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult,
@@ -80,20 +80,18 @@ use signalboxd::{
     CHANGE_REQUEST_THREAD_RESOLVE_NAME, ChangeRequestCommentResult, ChangeRequestSummaryFields,
     ChangeRequestSummaryResult, ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult,
     CiJobLogResult, CodeHostNumericBounds, CodeHostOperation, CodeHostResult,
-    CodeHostResultCompleteness, CodeHostTransport, CodeHostTransportFailure,
-    ConvergenceStateFields, ConvergenceStateResult, ConversationIntrospectionPort,
-    ConversationListPage, ConversationListRequest, ConversationTranscriptRead,
-    ConversationTranscriptRequest, DaemonTools, DaemonToolsConstructionError, FilePatchResult,
-    GitHubEgressPolicy, GitHubOperation, GitHubResult, GitHubTransport, GitHubTransportFailure,
-    HubModelConfiguration, ImportedTranscriptRequest, LocalProcessListener,
-    LocalWorkspaceFileSystem, MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME,
-    PULL_REQUEST_PUBLISH_REVIEW_NAME, PostgresConversationIntrospection,
-    PostgresProviderModelExecution, PostgresProviderToolLoopExecution, PostgresSessionStatusWriter,
-    ProcessRuntime, READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult,
-    ReviewAuthorClass, ReviewDispositionClass, ReviewGateCheckResult, ReviewGatePurpose,
+    CodeHostResultCompleteness, CodeHostTransport, CodeHostTransportFailure, ConvergenceReadResult,
+    ConversationIntrospectionPort, ConversationListPage, ConversationListRequest,
+    ConversationTranscriptRead, ConversationTranscriptRequest, DaemonTools,
+    DaemonToolsConstructionError, FilePatchResult, GitHubEgressPolicy, GitHubOperation,
+    GitHubResult, GitHubTransport, GitHubTransportFailure, HubModelConfiguration,
+    ImportedTranscriptRequest, LocalProcessListener, LocalWorkspaceFileSystem,
+    MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
+    PostgresConversationIntrospection, PostgresProviderModelExecution,
+    PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, ProcessRuntime, READ_FILE_NAME,
+    REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass, ReviewDispositionClass,
     ReviewThread, ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
-    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult,
-    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
+    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult, SessionStatusWrite,
     SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
     ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME,
     WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse,
@@ -878,11 +876,14 @@ fn provider_error_script() -> Script {
 
 fn refusal_script() -> Script {
     Script::delivering(TerminalEvidence::Refused(RefusalEvidence {
+        reason: signalbox_model_runtime::RefusalReason::Unspecified,
         exchange: ExchangeFacts::default(),
         message_id: None,
         reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
         content: Vec::new(),
         usage: TokenUsage::unreported(),
+        retained_input_tokens: None,
+        retained_output_tokens: None,
     }))
 }
 
@@ -1096,6 +1097,54 @@ impl RecordingExecutor {
             .lock()
             .expect("fixture correlation lock is available")
             .clone()
+    }
+}
+
+/// Requests daemon shutdown whenever the tool loop resolves one exact tool
+/// name, and otherwise answers exactly as the wrapped catalog does.
+///
+/// Only the loop's own attempt preparation and its preflight resolve a single
+/// name; everything earlier reads the advertised snapshot. So the first such
+/// lookup of a batch is the one preceding that batch's attempt checkpoint, and
+/// the request lands between two committed boundaries rather than inside an
+/// issued operation — the interleaving an asynchronous `SIGTERM` produces, and
+/// the one the drive loop's shutdown checks exist to catch.
+#[derive(Clone, Debug)]
+struct ShutdownOnToolResolutionCatalog {
+    inner: CompiledToolCatalog,
+    shutdown: watch::Sender<bool>,
+}
+
+impl ShutdownOnToolResolutionCatalog {
+    const fn new(inner: CompiledToolCatalog, shutdown: watch::Sender<bool>) -> Self {
+        Self { inner, shutdown }
+    }
+}
+
+impl ToolCatalog for ShutdownOnToolResolutionCatalog {
+    fn definitions(&self) -> Box<[ToolDefinition]> {
+        self.inner.definitions()
+    }
+
+    fn definition(&self, name: &ToolName) -> Option<ToolDefinition> {
+        self.shutdown.send_replace(true);
+        self.inner.definition(name)
+    }
+
+    fn validate_arguments(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolCatalogValidationFailure> {
+        self.inner.validate_arguments(name, arguments)
+    }
+
+    fn preauthorization(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolCatalogValidationFailure> {
+        self.inner.preauthorization(name, arguments)
     }
 }
 
@@ -1610,7 +1659,6 @@ enum ExpectedCodeHostOperation {
     ReviewGateCheck {
         repository: &'static str,
         number: u32,
-        purpose: ReviewGatePurpose,
     },
     ThreadReply {
         repository: &'static str,
@@ -1724,15 +1772,10 @@ fn assert_code_host_operation(actual: &CodeHostOperation, expected: ExpectedCode
         }
         (
             CodeHostOperation::ReviewGateCheck(arguments),
-            ExpectedCodeHostOperation::ReviewGateCheck {
-                repository,
-                number,
-                purpose,
-            },
+            ExpectedCodeHostOperation::ReviewGateCheck { repository, number },
         ) => {
             assert_eq!(arguments.repository().as_str(), repository);
             assert_eq!(arguments.number().get(), number);
-            assert_eq!(arguments.purpose(), purpose);
         }
         (
             CodeHostOperation::ThreadReply(arguments),
@@ -2010,51 +2053,28 @@ fn rerun_failed_jobs_result() -> CodeHostResult {
 
 const REVIEW_SLOG_HEAD_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const REVIEW_SLOG_BASE_REVISION: &str = "1111111111111111111111111111111111111111";
-const REVIEW_SLOG_REVIEWED_AT: &str = "2026-07-27T10:00:00Z";
 const REVIEW_SLOG_REPOSITORY: &str = "owner/repository";
 const REVIEW_SLOG_NUMBER: u32 = 17;
 const REVIEW_SLOG_BASE_REF: &str = "main";
 const REVIEW_SLOG_HEAD_REF: &str = "feature";
 
-fn reviewer_verdict_result() -> ReviewerVerdictEvidence {
-    ReviewerVerdictEvidence::try_new(
-        code_host_bounds(),
-        ReviewerVerdictFields {
-            status: ReviewerVerdictStatus::CurrentHead,
-            reviewed_revision: Some(String::from(REVIEW_SLOG_HEAD_REVISION)),
-            reviewed_at: Some(String::from(REVIEW_SLOG_REVIEWED_AT)),
-            starvation_after_verdict: false,
-            latest_starvation_at: None,
-            latest_review_request_at: None,
-            review_request_in_flight: false,
-            source_truncated: false,
-            comments_previous_cursor: None,
-            reviews_previous_cursor: None,
-        },
+fn convergence_state_evidence() -> ConvergenceReadResult {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/convergence");
+    let policy =
+        signalbox_convergence::ConvergencePolicy::read(&root.join("examples/repository.toml"))
+            .expect("recorded policy parses");
+    let recording =
+        signalbox_convergence::Recording::read(&root.join("fixtures/mutations/settled.json"))
+            .expect("recorded fixture loads");
+    let evaluation = signalbox_convergence::evaluate(
+        &recording
+            .snapshot(&policy)
+            .expect("recorded snapshot is complete"),
+        &policy,
     )
-    .expect("fixture reviewer verdict is bounded")
-}
-
-fn convergence_state_evidence() -> ConvergenceStateResult {
-    ConvergenceStateResult::try_new(
-        code_host_bounds(),
-        ConvergenceStateFields {
-            head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
-            mergeable_state: String::from("MERGEABLE"),
-            ci_rollup_state: Some(String::from("SUCCESS")),
-            checks: Vec::new(),
-            checks_truncated: false,
-            checks_next_cursor: None,
-            unresolved_threads: Vec::new(),
-            open_escalations: Vec::new(),
-            buried_escalations: Vec::new(),
-            undispositioned_threads: Vec::new(),
-            threads_truncated: false,
-            threads_next_cursor: None,
-            reviewer: reviewer_verdict_result(),
-        },
-    )
-    .expect("fixture convergence state is bounded")
+    .expect("recorded evidence evaluates");
+    ConvergenceReadResult::try_new(code_host_bounds(), evaluation)
+        .expect("recorded verdict fits the tool bounds")
 }
 
 fn convergence_state_result() -> CodeHostResult {
@@ -2117,15 +2137,7 @@ fn thread_inventory_result() -> CodeHostResult {
 }
 
 fn review_gate_result() -> CodeHostResult {
-    let convergence = convergence_state_evidence();
-    let stack = stack_state_evidence();
-    let inventory = thread_inventory_evidence();
-    CodeHostResult::ReviewGateCheck(ReviewGateCheckResult::compose(
-        ReviewGatePurpose::DeclareConvergence,
-        &convergence,
-        &stack,
-        &inventory,
-    ))
+    CodeHostResult::ReviewGateCheck(convergence_state_evidence())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2236,11 +2248,10 @@ async fn delegated_park_resumes_into_fresh_judge_composition() -> Result<(), Box
     first_execution
         .execute(Box::new(fixture.activated.clone()))
         .await?;
-    let (scheduled, _dispatch_starts, continuation) =
-        PostgresEligibilitySweep::new(fixture.pool.clone())
-            .find_sessions()
-            .await?
-            .into_parts();
+    let (scheduled, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
     let resumable = PostgresToolLoopRepository::new(fixture.pool.clone())
         .find_resumable_turn(fixture.session)
         .await?;
@@ -2582,6 +2593,82 @@ async fn shutdown_checkpoints_after_the_issued_model_before_the_next_tool()
     Ok(())
 }
 
+/// A shutdown requested between two operations checkpoints at the committed
+/// attempt boundary the loop has just reached, issuing neither the tool
+/// operation that boundary prepared nor the continuation provider round beyond
+/// it, and lets a successor finish both.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn shutdown_checkpoints_at_a_committed_boundary_before_the_next_operation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let tool_catalog = ShutdownOnToolResolutionCatalog::new(
+        catalog([tool(
+            "checkpointed",
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        )]),
+        shutdown_sender,
+    );
+    let executor = RecordingExecutor::completing();
+    let (execution, first_runtime) = fixture.execution(
+        [
+            tool_use_script(&[("checkpointed", "{}")]),
+            completion_script("must remain unused before restart"),
+        ],
+        tool_catalog.clone(),
+        executor.clone(),
+    );
+
+    execution
+        .with_shutdown_checkpoint(shutdown_receiver)
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let active: (String, String) = sqlx::query_as(
+        "SELECT state_kind, active_phase_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(executor.events().is_empty());
+    assert_eq!(first_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        1
+    );
+    assert_eq!(active, (String::from("active"), String::from("running")));
+
+    let (resumed, second_runtime) = fixture.execution(
+        [completion_script("resumed after the shutdown checkpoint")],
+        tool_catalog,
+        executor.clone(),
+    );
+    resumed.resume_active(fixture.session).await?;
+
+    assert_eq!(executor.events(), vec![String::from("checkpointed")]);
+    assert_eq!(second_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        2
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "assistant_text",
+            "turn_completed",
+        ]
+    );
+    Ok(())
+}
+
 /// The daemon's required automatic tool-round policy reaches the production
 /// PostgreSQL tool loop and terminalizes before a disallowed provider call.
 #[tokio::test(flavor = "multi_thread")]
@@ -2624,15 +2711,13 @@ async fn configured_automatic_tool_round_limit_stops_before_the_next_provider_ca
     Ok(())
 }
 
-/// S10 / INV-004 / INV-005 / INV-019 / INV-021 / INV-024:
 /// one offline scripted turn parks for a user decision, executes exactly
 /// once after approval with normalized arguments, commits a reference-only
 /// result at the continuation boundary, and completes only after the second
 /// model round.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<(), Box<dyn Error>>
-{
+async fn tool_loop_completes() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -3004,11 +3089,11 @@ async fn tier_zero_session_status_updates_metadata_offline() -> Result<(), Box<d
     Ok(())
 }
 
-/// S10: the composed GitHub metadata read is catalog-visible and crosses only
-/// the injected credential, egress policy, and hermetic transport.
+/// the composed GitHub metadata read is catalog-visible and crosses only the injected credential,
+/// egress policy, and hermetic transport.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_composed_github_read_executes_offline() -> Result<(), Box<dyn Error>> {
+async fn composed_github_read_executes_offline() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let expected = serde_json::json!({"number": 17, "title": "offline pull request"});
@@ -3050,11 +3135,11 @@ async fn s10_composed_github_read_executes_offline() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// S10: the composed workspace read is rooted in the injected temporary
-/// directory and returns its exact fixture content without network access.
+/// the composed workspace read is rooted in the injected temporary directory and returns its exact
+/// fixture content without network access.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Error>> {
+async fn composed_workspace_read_executes_offline() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let relative_path = "note.txt";
@@ -3087,7 +3172,9 @@ async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Er
         serde_json::json!({
             "path": relative_path,
             "content": fixture_content,
+            "offset": 0,
             "bytes_read": fixture_content.len(),
+            "next_offset": fixture_content.len(),
             "total_bytes": fixture_content.len(),
             "truncated": false
         })
@@ -3096,11 +3183,11 @@ async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// S10: the composed local Git executor observes the injected repository
-/// worktree and returns its fixture path through the daemon tool loop.
+/// the composed local Git executor observes the injected repository worktree and returns its
+/// fixture path through the daemon tool loop.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_composed_local_git_status_executes_offline() -> Result<(), Box<dyn Error>> {
+async fn composed_local_git_status_executes_offline() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let relative_path = "untracked.txt";
@@ -3134,14 +3221,13 @@ async fn s10_composed_local_git_status_executes_offline() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// S10: the composed sandboxed executor reaches the injected process boundary
-/// and returns its typed host-refusal evidence through the daemon tool loop.
-/// The session blanket is enabled because `sandboxed_exec` declares `Confirm`,
-/// so an unapproved proposal parks instead of dispatching and this test would
-/// observe the approval gate rather than the process boundary it is about.
+/// the composed sandboxed executor reaches the injected process boundary and returns its typed
+/// host-refusal evidence through the daemon tool loop. The session blanket is enabled because
+/// `sandboxed_exec` declares `Confirm`, so an unapproved proposal parks instead of dispatching and
+/// this test would observe the approval gate rather than the process boundary it is about.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Error>> {
+async fn composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::ApproveAll).await?;
     let workspace = tempdir()?;
     let (tool_catalog, tool_executor) = commissioned_daemon_tools(
@@ -3179,11 +3265,11 @@ async fn s10_composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// S10: the composed conversation port reads the invoking session's real
-/// persisted semantic transcript rather than a synthetic transcript value.
+/// the composed conversation port reads the invoking session's real persisted semantic transcript
+/// rather than a synthetic transcript value.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), Box<dyn Error>> {
+async fn composed_introspection_returns_real_own_transcript() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let (tool_catalog, tool_executor) = commissioned_daemon_tools(
@@ -3200,6 +3286,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
         "max_bytes": 131072
     })
     .to_string();
+    let expected_user_content = format!(r#"[{{"type":"text","text":"{FIXTURE_USER_CONTENT}"}}]"#);
     let expected_tool_use_content = format!(
         "{}\n{arguments}",
         signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME
@@ -3226,7 +3313,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
             "entries": [{
                 "position": 1,
                 "kind": "user",
-                "content": r#"[{"type":"text","text":"offline tool-loop request"}]"#,
+                "content": expected_user_content,
                 "content_truncated": false
             }, {
                 "position": 2,
@@ -3242,11 +3329,11 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
     Ok(())
 }
 
-/// S10: workspace mutation remains parked with no filesystem effect until a
-/// user approval is recorded through the process protocol.
+/// workspace mutation remains parked with no filesystem effect until a user approval is recorded
+/// through the process protocol.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s10_workspace_write_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
+async fn workspace_write_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let relative_path = "approved.txt";
@@ -3295,11 +3382,11 @@ async fn s10_workspace_write_gates_through_process_protocol() -> Result<(), Box<
     Ok(())
 }
 
-/// S10: review publication remains parked with no transport effect until a
-/// user approval is recorded through the process protocol.
+/// review publication remains parked with no transport effect until a user approval is recorded
+/// through the process protocol.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s10_github_publish_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
+async fn github_publish_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let expected = serde_json::json!({"review_id": 91, "state": "APPROVED"});
@@ -3349,7 +3436,7 @@ async fn s10_github_publish_gates_through_process_protocol() -> Result<(), Box<d
     Ok(())
 }
 
-/// Tier 1 / INV-035: summary lookup crosses the typed mock, scrubs reflected
+/// Tier 1: summary lookup crosses the typed mock, scrubs reflected
 /// credential text, and persists only the bounded result in the continuation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -3639,34 +3726,8 @@ async fn tier_one_change_request_convergence_state_completes_offline_tool_loop()
             .to_string(),
         convergence_state_result(),
         serde_json::json!({
-            "buried_escalations": [],
-            "checks": [],
-            "checks_next_cursor": null,
-            "checks_truncated": false,
-            "ci_green": true,
-            "ci_rollup_state": "SUCCESS",
-            "head_revision": REVIEW_SLOG_HEAD_REVISION,
-            "mergeable_state": "MERGEABLE",
-            "open_escalations": [],
-            "reviewer_verdict": {
-                "comments_previous_cursor": null,
-                "latest_starvation_at": null,
-                "latest_review_request_at": null,
-                "review_request_in_flight": false,
-                "reviewed_at": REVIEW_SLOG_REVIEWED_AT,
-                "reviewed_revision": REVIEW_SLOG_HEAD_REVISION,
-                "reviews_previous_cursor": null,
-                "source_truncated": false,
-                "starvation_after_verdict": false,
-                "status": "current_head",
-            },
-            "threads_next_cursor": null,
-            "threads_truncated": false,
-            "unresolved_thread_count": 0,
-            "undispositioned_thread_count": 0,
-            "undispositioned_threads": [],
-            "unresolved_threads": [],
-            "verdict": "converged",
+            "head_revision":"417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+            "convergence":{"verdict":"Converged"},
         }),
         ExpectedCodeHostOperation::ConvergenceState {
             repository: REVIEW_SLOG_REPOSITORY,
@@ -3758,8 +3819,7 @@ async fn tier_one_change_request_thread_inventory_completes_offline_tool_loop()
     .await
 }
 
-/// Tier 1 review gating persists the pure composition result while its fresh
-/// evidence reads cross only the typed mocked transport boundary.
+/// Tier 1 review gating persists the recorded convergence verdict through the tool loop.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn tier_one_review_gate_check_completes_offline_tool_loop() -> Result<(), Box<dyn Error>> {
@@ -3767,33 +3827,28 @@ async fn tier_one_review_gate_check_completes_offline_tool_loop() -> Result<(), 
         REVIEW_GATE_CHECK_NAME,
         serde_json::json!({
             "number": REVIEW_SLOG_NUMBER,
-            "purpose": "declare_convergence",
             "repository": REVIEW_SLOG_REPOSITORY,
         })
         .to_string(),
         review_gate_result(),
         serde_json::json!({
-            "blockers": [],
-            "head_revision": REVIEW_SLOG_HEAD_REVISION,
-            "purpose": "declare_convergence",
-            "ready": true,
+            "head_revision":"417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+            "convergence":{"verdict":"Converged"},
         }),
         ExpectedCodeHostOperation::ReviewGateCheck {
             repository: REVIEW_SLOG_REPOSITORY,
             number: REVIEW_SLOG_NUMBER,
-            purpose: ReviewGatePurpose::DeclareConvergence,
         },
         ExpectedCodeHostApproval::Auto,
     )
     .await
 }
 
-/// S10 / S11 / INV-019 / INV-020 / INV-027: user denial creates no physical
-/// attempt, projects one error result to the continuation call, and allows the
-/// same turn to complete from the model's response.
+/// user denial creates no physical attempt, projects one error result to the continuation call, and
+/// allows the same turn to complete from the model's response.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<(), Box<dyn Error>> {
+async fn denial_continues_without_execution() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -3862,15 +3917,12 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
     Ok(())
 }
 
-/// S10 / S11 / INV-019 / INV-020 / INV-027 / INV-029 / INV-037: deny-and-end first
-/// records the exact denial, then the ordinary proof-bearing interrupt closes
-/// the active turn; no tool attempt is created, the stop remains independently
-/// auditable, and a later submit survives reconstitution before its new turn
-/// activates and runs.
+/// deny-and-end first records the exact denial, then the ordinary proof-bearing interrupt closes
+/// the active turn; no tool attempt is created, the stop remains independently auditable, and a
+/// later submit survives reconstitution before its new turn activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_s11_inv020_inv027_inv029_inv037_cancelled_tool_round_admits_and_runs_later_turn()
--> Result<(), Box<dyn Error>> {
+async fn cancelled_tool_round_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -3976,14 +4028,12 @@ async fn s10_s11_inv020_inv027_inv029_inv037_cancelled_tool_round_admits_and_run
     Ok(())
 }
 
-/// S07 / S10 / INV-012 / INV-028: an interrupt alone against a parked approval
-/// wait records the authoritative typed rejection — it is not a denial and
-/// does not bypass the decision command — and the wait remains parked with no
+/// an interrupt alone against a parked approval wait records the authoritative typed rejection — it
+/// is not a denial and does not bypass the decision command — and the wait remains parked with no
 /// tool attempt until its canonical decision command resolves the obligation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s07_s10_inv012_inv028_interrupt_against_parked_approval_wait_is_rejected()
--> Result<(), Box<dyn Error>> {
+async fn interrupt_against_parked_approval_wait_is_rejected() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -4058,12 +4108,11 @@ async fn s07_s10_inv012_inv028_interrupt_against_parked_approval_wait_is_rejecte
     Ok(())
 }
 
-/// S02 / S10 / INV-005 / INV-006 / INV-019: a restart scan preserves an
-/// approval wait exactly; after the user decision, the durable sweep and a
-/// fresh composition resume the same logical turn without replaying activation.
+/// a restart scan preserves an approval wait exactly; after the user decision, the durable sweep
+/// and a fresh composition resume the same logical turn without replaying activation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(), Box<dyn Error>> {
+async fn restart_leaves_approval_turn_parked() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -4113,11 +4162,10 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
     fixture
         .decide(request, ToolApprovalDecision::Approve)
         .await?;
-    let (resumable, _dispatch_starts, continuation) =
-        PostgresEligibilitySweep::new(fixture.pool.clone())
-            .find_sessions()
-            .await?
-            .into_parts();
+    let (resumable, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
     assert!(!continuation);
     assert_eq!(resumable, vec![fixture.session]);
     let (restarted_execution, restarted_runtime) = fixture.execution(
@@ -4161,13 +4209,11 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
     Ok(())
 }
 
-/// S10 / INV-019 / INV-020 / INV-021: an auto/confirm batch parks on
-/// its earliest undecided request and, after approval, executes both requests
-/// serially in proposal order with their distinct provenance.
+/// an auto/confirm batch parks on its earliest undecided request and, after approval, executes both
+/// requests serially in proposal order with their distinct provenance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
--> Result<(), Box<dyn Error>> {
+async fn mixed_batch_executes_in_proposal_order() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([
         tool(
@@ -4289,13 +4335,11 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
     Ok(())
 }
 
-/// S10 / INV-020 / INV-021: the explicitly dangerous frozen blanket posture
-/// approves a confirm-default tool under `session_blanket` provenance and the
-/// turn runs unattended without fabricating user agency.
+/// the explicitly dangerous frozen blanket posture approves a confirm-default tool under
+/// `session_blanket` provenance and the turn runs unattended without fabricating user agency.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
--> Result<(), Box<dyn Error>> {
+async fn blanket_posture_runs_confirm_tool_unattended() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::ApproveAll).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -4343,15 +4387,13 @@ async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
     Ok(())
 }
 
-/// S05 / INV-005 / INV-006 / INV-024: losing a dispatched effect-free attempt
-/// never retries it; the dispatch path contains the executor failure by
-/// classifying it `known_failed` with `crash_lost` evidence before releasing
-/// its gate, startup preserves that terminal state idempotently, and a later
-/// submit activates and runs.
+/// losing a dispatched effect-free attempt never retries it; the dispatch path contains the
+/// executor failure by classifying it `known_failed` with `crash_lost` evidence before releasing
+/// its gate, startup preserves that terminal state idempotently, and a later submit activates and
+/// runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
--> Result<(), Box<dyn Error>> {
+async fn failed_tool_round_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "effect_free",
@@ -4429,15 +4471,13 @@ async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
     Ok(())
 }
 
-/// S02 / S10 / INV-006: an ordinary provider failure on the continuation model
-/// call of a completed tool round terminalizes the turn naming that call, and
-/// the committed terminal shape reloads through the scheduling projection —
-/// the startup scan completes and the next submit activates and runs instead
-/// of the session becoming permanently unloadable.
+/// an ordinary provider failure on the continuation model call of a completed tool round
+/// terminalizes the turn naming that call, and the committed terminal shape reloads through the
+/// scheduling projection — the startup scan completes and the next submit activates and runs
+/// instead of the session becoming permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s10_inv006_failed_continuation_call_admits_and_runs_later_turn()
--> Result<(), Box<dyn Error>> {
+async fn failed_continuation_call_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "effect_free",
@@ -4596,15 +4636,13 @@ fn assert_approved_receipt(message: ServerMessage, request: ToolRequestId) {
     );
 }
 
-/// S02 / S10 / INV-006: a provider refusal on the continuation model call of
-/// a completed tool round terminalizes the turn as refused naming that call,
-/// and the committed refused shape reloads through the scheduling
-/// projection — the startup scan completes and the next submit activates and
-/// runs instead of the session becoming permanently unloadable.
+/// a provider refusal on the continuation model call of a completed tool round terminalizes the
+/// turn as refused naming that call, and the committed refused shape reloads through the scheduling
+/// projection — the startup scan completes and the next submit activates and runs instead of the
+/// session becoming permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s10_inv006_refused_continuation_call_admits_and_runs_later_turn()
--> Result<(), Box<dyn Error>> {
+async fn refused_continuation_call_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "effect_free",
@@ -4690,16 +4728,13 @@ async fn s02_s10_inv006_refused_continuation_call_admits_and_runs_later_turn()
     Ok(())
 }
 
-/// S02 / S08 / S10 / INV-016 / INV-036: a NextSafePoint input accepted through
-/// while a tool round is parked is consumed by the
-/// continuation call, the
-/// steering-bearing continuation completes the turn, and the committed shape
-/// reloads through the scheduling projection — the startup scan completes and
-/// the next submit activates and runs.
+/// a NextSafePoint input accepted through while a tool round is parked is consumed by the
+/// continuation call, the steering-bearing continuation completes the turn, and the committed shape
+/// reloads through the scheduling projection — the startup scan completes and the next submit
+/// activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
--> Result<(), Box<dyn Error>> {
+async fn steering_consumed_at_continuation_completes() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -4825,15 +4860,13 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
     Ok(())
 }
 
-/// S02 / S08 / S10 / INV-016 / INV-036: steering consumed by the first model
-/// call stays reconstitutable through the tool round it proposes — the parked
-/// approval wait still admits submits — and a second input steers the
-/// continuation, so one turn consumes steering at both safe points and the
-/// completed history reloads.
+/// steering consumed by the first model call stays reconstitutable through the tool round it
+/// proposes — the parked approval wait still admits submits — and a second input steers the
+/// continuation, so one turn consumes steering at both safe points and the completed history
+/// reloads.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s08_s10_inv016_inv036_steering_consumed_at_both_safe_points_reloads()
--> Result<(), Box<dyn Error>> {
+async fn steering_consumed_at_both_safe_points_reloads() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -4958,14 +4991,11 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_both_safe_points_reloads
     Ok(())
 }
 
-/// S06 / INV-005 / INV-024 / INV-025 / INV-026 / INV-034: losing a dispatched
-/// external-effect attempt never retries it; startup idempotently classifies
-/// exact ambiguity without projecting a result or close, and parks the turn for
-/// user recovery.
+/// losing a dispatched external-effect attempt never retries it; startup idempotently classifies
+/// exact ambiguity without projecting a result or close, and parks the turn for user recovery.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s06_inv005_inv024_inv025_inv026_inv034_external_crash_parks_without_retry()
--> Result<(), Box<dyn Error>> {
+async fn external_crash_parks_without_retry() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "external_effect",

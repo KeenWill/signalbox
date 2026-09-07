@@ -4,12 +4,12 @@ pub const THREAD_ID: &str = "thread-offline-1";
 pub const STREAM_ERROR_MESSAGE: &str = "quota exhausted for the active plan";
 pub const BUFFERED_ANSWER: &str = "buffered answer";
 pub const STREAMED_ANSWER: &str = "streamed answer";
-pub const REASONING_TEXT: &str = "considering";
-pub const PENDING_PROGRESS_TEXT: &str = "harmless";
 pub const REFUSAL_TEXT: &str = "request refused";
 pub const TOOL_NAME: &str = "lookup";
 pub const OTHER_TOOL_NAME: &str = "timezone";
 pub const TOOL_ARGUMENTS: &str = r#"{ "city" : "Oslo", "limit": 3 }"#;
+pub const MALFORMED_TOOL_ARGUMENTS: &str = "not an argument object";
+pub const NON_OBJECT_TOOL_ARGUMENTS: &str = "7";
 pub const STRUCTURED_ACCEPTED: bool = true;
 pub const INPUT_TOKENS: u64 = 11;
 pub const CACHE_READ_INPUT_TOKENS: u64 = 2;
@@ -35,7 +35,7 @@ pub const CREDENTIAL_PREFIX_THREAD_ID: &str = "api_";
 pub const SENSITIVE_THREAD_CONTINUATION: &str = "key=opaque-thread-continuation done";
 pub const EARLY_STDIN_EXIT_MARKER: &str = "fake-codex-exit-before-stdin";
 /// Makes the fake CLI hand its stdin to a surviving descendant (which never
-/// reads it, keeping the upload blocked), write a classifiable stderr
+/// reads it, keeping the upload blocked), write a synthetic stderr
 /// failure, and exit nonzero before reading the prompt.
 pub const EARLY_STDIN_HELD_EXIT_MARKER: &str = "fake-codex-exit-with-held-stdin";
 pub const EARLY_STDIN_COMPLETION_MARKER: &str = "fake-codex-complete-before-stdin";

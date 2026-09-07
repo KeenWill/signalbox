@@ -30,16 +30,16 @@ use signalbox_model_runtime::ModelCapabilityCatalog;
 use signalbox_model_runtime::{CredentialAccess, CredentialValue, redact_evidence};
 
 use crate::config::OpenAiConfig;
-use crate::response::{StopSequences, decode_buffered_response};
+use crate::response::decode_buffered_response;
 use crate::status::{classify_error, classify_error_envelope_with_proof};
 use crate::stream::{LaterRecords, StreamDecoder, StreamStep};
 use crate::translate::build_request_with_fast_mode;
 use crate::wire::ErrorEnvelope;
 
-/// The OpenAI Chat Completions adapter.
+/// The OpenAI Responses adapter.
 ///
 /// Implements [`ModelRuntime`]: executes exactly one authorized operation as
-/// at most one `POST /v1/chat/completions` request and reports typed
+/// at most one `POST /v1/responses` request and reports typed
 /// evidence. It holds no state between operations, retries nothing, and
 /// never issues a second request for one operation.
 pub struct OpenAiRuntime<A> {
@@ -74,7 +74,6 @@ struct PreparedTransport {
 struct ExecutionSettings {
     delivery: DeliveryMode,
     sse_record_limit: usize,
-    stop_sequences: StopSequences,
 }
 
 impl<A> std::fmt::Debug for OpenAiRuntime<A> {
@@ -228,7 +227,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 detail: "base URL cannot carry path segments".to_string(),
             })?
             .pop_if_empty()
-            .extend(["v1", "chat", "completions"]);
+            .extend(["v1", "responses"]);
         // The workspace graph selects only ring; installation may already
         // have occurred through SQLx in the composed process.
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -346,11 +345,6 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             };
         };
         let delivery = operation.delivery;
-        let stop_sequences = if operation.settings.stop_sequences.is_empty() {
-            StopSequences::NotDeclared
-        } else {
-            StopSequences::Declared
-        };
         let request = match build_http_request(
             self.client
                 .post(self.completions_url.clone())
@@ -373,7 +367,6 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 settings: ExecutionSettings {
                     delivery,
                     sse_record_limit: self.sse_record_limit,
-                    stop_sequences,
                 },
             },
             correlation,
@@ -411,20 +404,13 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             sink,
             ObservationFact::ExchangeEstablished(exchange.clone()),
         );
-        // The Chat Completions success contract is specifically HTTP 200;
+        // The Responses success contract is specifically HTTP 200;
         // another 2xx is not recognized terminal-success evidence.
         if status.as_u16() == 200 {
             match settings.delivery {
                 DeliveryMode::Buffered => {
-                    self.finish_buffered(
-                        response,
-                        exchange,
-                        correlation,
-                        sink,
-                        cancellation,
-                        settings.stop_sequences,
-                    )
-                    .await
+                    self.finish_buffered(response, exchange, correlation, sink, cancellation)
+                        .await
                 }
                 DeliveryMode::Streamed => {
                     self.finish_streamed(
@@ -465,14 +451,13 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
-        stop_sequences: StopSequences,
     ) -> TerminalEvidence {
         let body = match collect_response_body(response, cancellation).await {
             None => return exchange_loss(LossCause::CancellationRequested, exchange),
             Some(Err(cause)) => return exchange_loss(cause, exchange),
             Some(Ok(bytes)) => bytes,
         };
-        decode_buffered_response(&body, exchange, correlation, sink, stop_sequences)
+        decode_buffered_response(&body, exchange, correlation, sink)
     }
 
     async fn finish_streamed<C: Clone + Send + Sync>(
@@ -485,7 +470,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         settings: &ExecutionSettings,
     ) -> TerminalEvidence {
         let mut framing = SseFraming::new(settings.sse_record_limit);
-        let mut decoder = StreamDecoder::new(exchange, settings.stop_sequences);
+        let mut decoder = StreamDecoder::new(exchange);
         let mut body = response.bytes_stream();
         let mut streamed_bytes = 0usize;
         loop {
@@ -499,7 +484,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 Some(chunk) => chunk,
             };
             match chunk {
-                // End of transport without `[DONE]`: the explicit
+                // End of transport without a terminal response event: the explicit
                 // incomplete-stream fact, never silent success.
                 None => {
                     return match framing.finish() {
@@ -655,10 +640,6 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for OpenAiRunt
             )
             .await;
         redacting_sink.flush();
-        // A buffered reqwest request provides no independent proof that an
-        // early response followed the complete upload.
-        // `docs/spec/model-call-execution.md` therefore forbids classifying
-        // its refusal token as definitive `Refused`.
         let evidence = without_unproven_refusal(evidence);
         // Per the runtime-substrate spec, sanitize with the exact
         // preparation-time value, after no second credential lookup or
@@ -673,6 +654,9 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for OpenAiRunt
 
 fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
     match evidence {
+        TerminalEvidence::Refused(refusal) if refusal.usage != TokenUsage::unreported() => {
+            TerminalEvidence::Refused(refusal)
+        }
         TerminalEvidence::Refused(refusal) => {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: refusal.exchange,
@@ -680,7 +664,7 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
                 kind: ProviderErrorKind::Unrecognized,
                 non_acceptance_proven: false,
                 native: NativeErrorFacts {
-                    // Refusal came from `finish_reason` or `message.refusal`,
+                    // Refusal came from incomplete reason or refusal content,
                     // not from a native error-envelope token.
                     error_token: None,
                     error_code: None,
@@ -715,7 +699,7 @@ async fn finish_error(
         );
         return TerminalEvidence::ProviderError(ProviderErrorEvidence {
             exchange,
-            // The Chat Completions error envelope reports no model identity.
+            // The Responses error envelope reports no model identity.
             reported_model: None,
             kind,
             non_acceptance_proven,
@@ -832,20 +816,63 @@ fn sensitive_bearer(api_key: &CredentialValue) -> Option<HeaderValue> {
 mod tests {
     use signalbox_model_runtime::{
         CancellationSignal, CredentialRedactingSink, CredentialValue, ExchangeFacts, LossCause,
-        NativeErrorFacts, Observation, ObservationFact, ObservationSink, PreparationDefect,
-        RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
+        Observation, ObservationFact, ObservationSink, PreparationDefect, RefusalEvidence,
+        SseFraming, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
     };
 
     use super::{
         MAX_STREAMED_RESPONSE_BYTES, build_http_request, process_streamed_chunk,
         without_unproven_refusal,
     };
-    use crate::response::StopSequences;
     use crate::stream::StreamDecoder;
 
     #[test]
-    fn refusal_without_full_upload_proof_is_known_failure_evidence() {
+    fn refusal_without_reported_usage_remains_an_unproven_provider_error() {
+        let evidence = TerminalEvidence::Refused(RefusalEvidence {
+            reason: signalbox_model_runtime::RefusalReason::Unspecified,
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            content: Vec::new(),
+            usage: TokenUsage::unreported(),
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
+        let TerminalEvidence::ProviderError(error) = without_unproven_refusal(evidence) else {
+            panic!("a refusal with no usage or completed compaction has no processing evidence");
+        };
+        assert_eq!(
+            error.kind,
+            signalbox_model_runtime::ProviderErrorKind::Unrecognized
+        );
+        assert!(!error.non_acceptance_proven);
+    }
+
+    #[test]
+    fn refusal_with_reported_zero_output_is_preserved() {
+        let evidence = TerminalEvidence::Refused(RefusalEvidence {
+            reason: signalbox_model_runtime::RefusalReason::Unspecified,
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            content: Vec::new(),
+            usage: TokenUsage {
+                output_tokens: Some(0),
+                ..TokenUsage::unreported()
+            },
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
+        let TerminalEvidence::Refused(refusal) = without_unproven_refusal(evidence) else {
+            panic!("zero output is reported usage");
+        };
+        assert_eq!(refusal.usage.output_tokens, Some(0));
+    }
+
+    #[test]
+    fn refusal_with_reported_usage_is_preserved() {
         let refusal = TerminalEvidence::Refused(RefusalEvidence {
+            reason: signalbox_model_runtime::RefusalReason::Unspecified,
             exchange: ExchangeFacts::default(),
             message_id: None,
             reported_model: None,
@@ -856,19 +883,24 @@ mod tests {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: Some(3),
             },
+            retained_input_tokens: None,
+            retained_output_tokens: None,
         });
 
-        let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {
-            panic!("unproven refusal must use the non-refusal known-failure mapping");
+        let TerminalEvidence::Refused(refusal) = without_unproven_refusal(refusal) else {
+            panic!("reported usage preserves refusal evidence");
         };
-        assert_eq!(error.native, NativeErrorFacts::default());
-        assert_eq!(error.usage.input_tokens, Some(11));
-        assert_eq!(error.usage.output_tokens, Some(2));
-        assert_eq!(error.usage.cache_read_input_tokens, Some(3));
+        assert_eq!(
+            refusal.reason,
+            signalbox_model_runtime::RefusalReason::Unspecified
+        );
+        assert_eq!(refusal.usage.input_tokens, Some(11));
+        assert_eq!(refusal.usage.output_tokens, Some(2));
+        assert_eq!(refusal.usage.cache_read_input_tokens, Some(3));
     }
 
     #[test]
-    fn inv_035_split_json_escaped_credentials_are_redacted_before_tool_deltas_leave() {
+    fn split_json_escaped_credentials_are_redacted_before_tool_deltas_leave() {
         let credential = CredentialValue::new(b"key_loop".to_vec());
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &credential);
@@ -922,7 +954,7 @@ mod tests {
     fn streamed_response_overflow_is_typed_protocol_loss() {
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -947,18 +979,17 @@ mod tests {
 
     #[test]
     fn terminal_record_in_budget_wins_over_coalesced_trailing_bytes() {
-        let mut bytes = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-            \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\
-            \"finish_reason\":\"stop\"}]}\n\n\
-            data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[],\
-            \"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n\
-            data: [DONE]\n\n"
+        let mut bytes = br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl_1","model":"model-exact-1","status":"in_progress","output":[]}}
+
+data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl_1","model":"model-exact-1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
             .to_vec();
         let terminal_len = bytes.len();
         bytes.extend_from_slice(b"coalesced trailing bytes");
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - terminal_len;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -984,16 +1015,19 @@ mod tests {
     /// could have carried the tool call.
     #[test]
     fn a_violation_before_an_over_budget_suffix_withholds_the_tool_fact() {
-        let mut bytes = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-            \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n\
-            data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_2\",\
-            \"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n"
+        let mut bytes = br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl_1","model":"model-exact-1","status":"in_progress","output":[]}}
+
+data: {"type":"response.created","response":{"object":"response","id":"chatcmpl_2","model":"model-exact-1","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"x"}
+
+"#
             .to_vec();
         let in_budget_len = bytes.len();
         bytes.extend_from_slice(b"data: coalesced suffix past the adapter limit\n\n");
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - in_budget_len;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -1035,18 +1069,18 @@ mod tests {
 
     #[test]
     fn cancellation_is_rechecked_between_coalesced_sse_records() {
-        let bytes = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-            \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\
-            \"delta\":{\"role\":\"assistant\"}}]}\n\n\
-            data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-            \"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"}}]}\n\n";
+        let bytes = br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl_1","model":"model-exact-1","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"late"}
+
+"#;
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let mut cancellation = CancellationSignal::when(async move {
             let _ = receiver.await;
         });
         let mut streamed_bytes = 0;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
         let mut sink = CancelOnModel {
             observations: Vec::new(),
             sender: Some(sender),

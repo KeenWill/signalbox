@@ -1,5 +1,7 @@
 import { configureStore, createSlice, type Middleware } from '@reduxjs/toolkit'
 import { useDispatch, useSelector } from 'react-redux'
+import type { AttentionSyncPhase } from './attention'
+import type { WebSessionLiveSnapshot, WebSubmitInputRequest } from './generated/web-contract.mjs'
 import {
   type BrowserPreferences,
   createDefaultBrowserPreferences,
@@ -15,10 +17,27 @@ export type DensityMode = 'compact' | 'comfortable'
 export type DetailMode = 'full' | 'condensed' | 'results'
 export type ThemeMode = 'light' | 'dark'
 export type Overlay = 'palette' | 'help' | 'navigation' | null
+export type ArtifactOriginalState = 'loading' | 'loaded' | 'failed'
 
 export interface VisibleRange {
   start: number
   end: number
+}
+
+export interface SessionSyncState {
+  sessionId: string | null
+  attempt: number
+  phase: 'idle' | 'connecting' | 'live' | 'resyncing' | 'failed'
+  snapshot: WebSessionLiveSnapshot | null
+  cursor: string | null
+}
+
+// Hard safety ceiling: unresolved identities cannot be evicted to admit new messages.
+export const MAX_PENDING_SESSION_INPUTS = 4
+
+export interface PendingSessionInput {
+  input: WebSubmitInputRequest
+  phase: 'sending' | 'unconfirmed'
 }
 
 interface AppState extends BrowserPreferences {
@@ -27,7 +46,13 @@ interface AppState extends BrowserPreferences {
   detail: DetailMode
   theme: ThemeMode
   overlay: Overlay
+  sessionSync: SessionSyncState
+  pendingSessionInputs: Record<string, PendingSessionInput>
+  attentionSync: AttentionSyncPhase
   selectedTimeline: string | null
+  selectedArtifact: string | null
+  expandedArtifacts: Record<string, boolean>
+  originalArtifacts: Record<string, ArtifactOriginalState>
   transcriptRange: VisibleRange
   tableRange: VisibleRange
   activitySequence: number
@@ -36,7 +61,13 @@ interface AppState extends BrowserPreferences {
 const initialState: AppState = {
   ...loadBrowserPreferences(),
   overlay: null,
+  sessionSync: { sessionId: null, attempt: 0, phase: 'idle', snapshot: null, cursor: null },
+  pendingSessionInputs: {},
+  attentionSync: 'idle',
   selectedTimeline: null,
+  selectedArtifact: null,
+  expandedArtifacts: {},
+  originalArtifacts: {},
   transcriptRange: { start: 0, end: 0 },
   tableRange: { start: 0, end: 0 },
   activitySequence: 0,
@@ -51,6 +82,61 @@ const appSlice = createSlice({
   name: 'app',
   initialState,
   reducers: {
+    sessionFollowRequested(state, action: { payload: string | null }) {
+      if (state.sessionSync.sessionId === action.payload) return
+      state.sessionSync = {
+        sessionId: action.payload,
+        attempt: state.sessionSync.attempt + 1,
+        phase: action.payload === null ? 'idle' : 'connecting',
+        snapshot: null,
+        cursor: null,
+      }
+    },
+    sessionFollowReconnectRequested(state) {
+      if (state.sessionSync.sessionId === null) return
+      state.sessionSync.attempt += 1
+      state.sessionSync.phase = 'connecting'
+      state.sessionSync.snapshot = null
+    },
+    sessionFollowUpdated(state, action: { payload: SessionSyncState }) {
+      if (
+        state.sessionSync.sessionId === action.payload.sessionId &&
+        state.sessionSync.attempt === action.payload.attempt
+      )
+        state.sessionSync = {
+          ...action.payload,
+          snapshot:
+            action.payload.snapshot === null
+              ? null
+              : {
+                  ...action.payload.snapshot,
+                  queued_turn_ids: [...action.payload.snapshot.queued_turn_ids],
+                },
+        }
+    },
+    sessionInputStarted(
+      state,
+      action: { payload: { sessionId: string; input: WebSubmitInputRequest } },
+    ) {
+      if (
+        state.pendingSessionInputs[action.payload.sessionId] === undefined &&
+        Object.keys(state.pendingSessionInputs).length >= MAX_PENDING_SESSION_INPUTS
+      )
+        return
+      state.pendingSessionInputs[action.payload.sessionId] = {
+        input: action.payload.input,
+        phase: 'sending',
+      }
+    },
+    sessionInputSettled(
+      state,
+      action: { payload: { sessionId: string; commandId: string; confirmed: boolean } },
+    ) {
+      const pending = state.pendingSessionInputs[action.payload.sessionId]
+      if (pending?.input.command_id !== action.payload.commandId) return
+      if (action.payload.confirmed) delete state.pendingSessionInputs[action.payload.sessionId]
+      else pending.phase = 'unconfirmed'
+    },
     layoutSet(state, action: { payload: LayoutMode }) {
       state.layout = action.payload
       state.activitySequence += 1
@@ -70,6 +156,9 @@ const appSlice = createSlice({
     paneSizesSet(state, action: { payload: BrowserPreferences['paneSizes'] }) {
       state.paneSizes = action.payload
       state.activitySequence += 1
+    },
+    paneSizesPreviewed(state, action: { payload: BrowserPreferences['paneSizes'] }) {
+      state.paneSizes = action.payload
     },
     preferencesReset(state) {
       Object.assign(state, createDefaultBrowserPreferences())
@@ -101,8 +190,32 @@ const appSlice = createSlice({
       state.overlay = action.payload
       state.activitySequence += 1
     },
+    attentionSyncSet(state, action: { payload: AttentionSyncPhase }) {
+      if (state.attentionSync === action.payload) return
+      state.attentionSync = action.payload
+      state.activitySequence += 1
+    },
     timelineSelected(state, action: { payload: string | null }) {
       state.selectedTimeline = action.payload
+      state.activitySequence += 1
+    },
+    artifactSelected(state, action: { payload: string | null }) {
+      state.selectedArtifact = action.payload
+      state.activitySequence += 1
+    },
+    artifactExpansionSet(state, action: { payload: { id: string; expanded: boolean } }) {
+      state.expandedArtifacts[action.payload.id] = action.payload.expanded
+      state.activitySequence += 1
+    },
+    artifactOriginalRequested(state, action: { payload: string }) {
+      state.originalArtifacts[action.payload] = 'loading'
+      state.activitySequence += 1
+    },
+    artifactOriginalSettled(
+      state,
+      action: { payload: { id: string; result: 'loaded' | 'failed' } },
+    ) {
+      state.originalArtifacts[action.payload.id] = action.payload.result
       state.activitySequence += 1
     },
     transcriptRangeSet(state, action: { payload: VisibleRange }) {
@@ -176,3 +289,10 @@ export const selectApp = (state: RootState) => state.app
 export const getRecentActions = (): readonly string[] => actionTrace
 export const useAppDispatch = useDispatch.withTypes<AppDispatch>()
 export const useAppSelector = useSelector.withTypes<RootState>()
+
+export const selectSessionSync = (state: RootState) => state.app.sessionSync
+export const selectPendingSessionInput = (state: RootState, sessionId: string) =>
+  state.app.pendingSessionInputs[sessionId]
+
+export const selectSessionInputCapacityReached = (state: RootState) =>
+  Object.keys(state.app.pendingSessionInputs).length >= MAX_PENDING_SESSION_INPUTS

@@ -1,253 +1,171 @@
 # Credential availability
 
-This page was introduced and verified through PR #453
-(`agent/credential-pools-grammar`).
+Credential availability decides how a model call that draws its credential from
+a configured pool ends when the pool admits a member, admits none, or a member's
+call fails with a cause the pool can route around.
 
-It owns one thing: what a credential-pool selection attempt can end as, and what
-every other page must say about each ending. The pool grammar, membership
-ranking, trigger vocabulary, and admission rules are owned by
-[credential pools and selection](configuration-and-credentials.md#credential-pools-and-selection);
-the successor call's own mechanics by
-[availability successor calls](model-call-execution.md#availability-successor-calls);
-the phase algebra by
-[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot);
-the storage protocol by
-[persistence protocol](persistence-protocol.md#lock-protocol); the entry
-vocabulary by
-[sessions and the transcript](sessions-and-transcript.md#when-entries-come-to-exist);
-the wire shapes by
-[process protocol](process-protocol.md#credential-pool-preparation-failure); and
-the evidence algebra by
-[terminal evidence](runtime-substrate.md#terminal-evidence).
+## Overview
 
-## The credential-availability machine
+A credential pool is a ranked set of credential profiles a session's model calls
+may use. Its grammar, ranking, trigger vocabulary and admission rules are owned
+by [configuration and credentials](configuration-and-credentials.md). This page
+owns the endings of a credential-pool selection attempt.
 
-This build resolves configured pools at each model-call preparation and applies
-the `quota_exhausted`, `rate_limited`, and `overloaded` trigger actions. It
-implements the `selected`, `pre-call fail`, `post-failure fail`, `successor`,
-and `terminal` rows below, including durable chain exclusions and durable
-successor backoff. Capacity reservation, parking, and the three wait-transition
-rows remain committed unimplemented functionality, as their tier cells state.
+The machine runs in `crates/persistence/src/model_execution.rs` at two points.
+Preparation resolves the session's pool, admits a member, and pins the policy
+snapshot to the call. A fresh admission reselects the member the session's most
+recent call on that pool used while that member remains admissible; otherwise
+selection applies the pool's priority and tie-break rule to admissible members.
+The commit that closes a failed call applies the action the pinned policy fixes
+for the failure's cause, and either terminalizes the turn or prepares a
+successor attempt, whose member is admitted and call created at that attempt's
+preparation.
 
-### The complete credential-availability machine
+An availability chain begins at a fresh admission inside one turn and holds the
+call that admission prepares, if any, and every successor that follows a
+qualifying failure. [Model-call execution](model-call-execution.md) owns what
+bounds a chain and when a turn starts a fresh one.
 
-The table is the whole normative statement, including both its implemented and
-explicitly committed-unimplemented rows.
+The durable records are the policy snapshot pinned to each call, one exclusion
+row for each member a qualifying failure in the turn removed, one successor row
+linking a prepared successor attempt to the predecessor call and its cause, and
+one exhaustion header when a turn fails because the pool admitted no member.
+Members are also removed by the exclusions the pool's trigger policy writes,
+which [configuration and credentials](configuration-and-credentials.md) owns;
+the operator surface that clears them is on
+[process protocol](process-protocol.md).
 
-Rather than let each page describe this machine from its own side, this contract
-states the complete set of endings once and gives every projection a column.
-**Every credential-pool selection attempt ends in exactly one of the nine rows
-below, and each row fixes every projection of that ending that any specification
-page states.** A page may name the column it projects and link here; it may not
-author a competing account of a row.
+A selection attempt reaches one of five endings: selected, pre-call fail,
+post-failure fail, successor and terminal. They split on whether selection
+admitted a member, whether the attempt that met exhaustion was call-free, and
+whether a failed call's cause, pinned action and proof authorize a successor.
+Every exhaustion fails, whatever exhaustion value the pool configures.
 
-The rows partition on two questions asked in order — did the traversal select a
-member, and if not, was anything skipped only for its concurrency bound — and
-then on whether the exhaustion selects a wait, on whether the admission was the
-release of a parked wait rather than a fresh one, and on whether **this
-availability chain** had already issued a call. Nothing else divides them, which
-is why there are nine and not more.
+## Design decisions
 
-The release question divides only the endings that select no wait. A release
-that selects a member reaches `selected`, and one that re-parks reaches the wait
-row it re-enters, because neither ending's projections change with the path that
-reached it; the two failure endings do change, since a release has a parked wait
-to consume and an immutable ended attempt it cannot reuse.
+A rejected daemon-owned OAuth refresh or a credential-home identity that failed
+its walk never enters this machine: each precedes any provider request, is typed
+as its own failure and quarantines the profile under
+[configuration and credentials](configuration-and-credentials.md). Why: a
+deployment misconfiguration is not a provider condition the pool's trigger
+policy routes around. A `file` delivery that cannot produce a usable credential
+quarantines nothing; its prepared call fails with that typed cause and reaches
+terminal.
 
-That last question is scoped to the availability chain and not to the turn. What
-bounds a chain, when a turn starts a fresh one, and which facts outlive the
-chain that produced them are owned by
-[availability successor calls](model-call-execution.md#availability-successor-calls)
-and are not restated here. This page applies that scoping; it does not define
-it. A row's condition therefore names the chain wherever the fact is the
-chain's, and names the turn only where that contract says the fact outlives the
-chain.
+## Boundary contracts
 
-| Outcome                                                                                                                                                     | Turn phase and attempt disposition                                                                                                                                                                                                                                                                                                                    | Wake condition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Continuation origin, durable records, committing transaction                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Transcript producer and entry                                                                                                                                                                                                                                | Wire projection                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Terminal evidence and cause                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Tier and implementing child                                                                                                                    |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`selected`** — a member was admitted and its reservation acquired                                                                                         | `Running`, unchanged. The selecting transaction inserts the call's `Prepared` record and the attempt proceeds to its send. No phase is added.                                                                                                                                                                                                         | Not applicable: nothing parks, so nothing wakes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | No continuation origin — this is the attempt's own `Prepared` insert, not a continuation. Records: `Prepared` pinning both `model_call.credential_reference` and the selecting `pool_policy_id`; and, when the selected member is `codex_home`, one `pending_spawn` invocation reservation for **that member only**, whether or not it declares a bound — no reservation is taken against a member no invocation will start. Committing transaction: one selecting preparation, which also consumes the pending `switch_next_turn` displacement of the member it **excluded** for that displacement, not of the member it selected: the displacement is the excluded member's record, and consuming it anywhere else leaves it pending forever while clearing an unrelated one.                                                                                                                                                                                                                                                                                                                                                                                                                                                           | No producer and no entry. Selection is not a transcript event; the call it prepares produces the entries.                                                                                                                                                    | `active_running`, unchanged. No live event of its own and no `rejected.detail`. No present or committed wire shape exposes which member served an ordinary selection: the snapshot carries model-call identity, usage, and cost, and no committed projection exposes a member at all — whether the predecessor, cause, and successor relation is ever client-visible is itself undecided. Whether a client is shown the serving profile for a normal call is routed through [model fallback and provenance](../open-questions.md#model-fallback-and-provenance) and is deliberately not promised here.                     | None. The call has not terminalized, so no `TerminalEvidence` exists yet.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Implemented — pool-based preparation selects the first admissible member and persists the call-pinned policy snapshot.                         |
-| **`contended-wait`** — nothing admissible, and at least one otherwise-admissible member was skipped only for its bound                                      | The credential-availability wait phase with closed cause `contended`. The attempt ends call-free `WithoutStop(YieldedToDurableWait)`; the turn keeps its slot and is not terminal.                                                                                                                                                                    | Any of three: an invocation-reservation release by one of the bounded members the wait names; the wait's deadline, computed over the durable exclusions it also carries by the same per-member rule stated for `exhausted-wait`; or startup's re-evaluation of retained contended waits against current registrations. A restart alone is not a wake.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Continuation origin on release: the wait-release origin, naming the consumed wait and its call-free ended attempt, and additionally carrying the predecessor call, its qualifying cause and its non-acceptance proof exactly where **this chain** had already observed a qualifying failure before entering the wait. Scoped to the turn instead, a fresh chain in a later tool round would inherit the earlier round's failure as its predecessor and link a new call to a failure it did not follow. Records: one wait row of form `contended` carrying the frozen policy identity, every durable exclusion that removed a member, the complete nonempty set of otherwise-admissible bounded members with their exact reservation identities, and the optional deadline. Committing transactions: four, and they must not be conflated — the *admission* that finds every candidate at its bound and inserts the wait, the *reservation completion* that publishes its wake, the *evidence rewrite* by which a woken transaction that still finds every candidate at its bound replaces this wait's reservation identities with the ones now holding it and stays parked, and the *release* that consumes the wait and prepares a call. | No producer and no entry. A parked turn has not failed, and appending `TurnFailed` here would make a recoverable wait indistinguishable from a terminal outcome.                                                                                             | No present `transcript_turn.state` variant. The committed projection is an **active** state retaining the same turn and session slot, never a terminal one. No `rejected.detail` applies: no client request produced the wait.                                                                                                                                                                                                                                                                                                                                                                                             | None — this is not a terminal outcome. The bounded members that caused the wait reported no failure and carry no cause.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Committed unimplemented — capacity reservations and contention.                                                                                |
-| **`exhausted-wait`** — nothing admissible, nothing skipped merely for a bound, and a wait is selected                                                       | The same wait phase with closed cause `exhausted`. The attempt ends call-free `WithoutStop(YieldedToDurableWait)`; the turn keeps its slot, appends no failure entry, and is not terminal.                                                                                                                                                            | The deadline, computed per member and not per exclusion: a member can become admissible by time passage alone exactly when **all** of its active exclusions are of a kind that *expires* at the reset it reports, and it does so at the latest of them. Reporting a reset is not enough: a predecessor chain exclusion, a `switch_next_turn` displacement, and a profile quarantine can each carry a provider-reported reset while clearing only by turn end, by another member being prepared, or by operator command respectively, so none of them ever contributes a deadline. Counting one would wake the wait at a time nothing had changed and re-park it with a now-past deadline, which is the same livelock the release rule below avoids; the wait's deadline is the earliest such time across the members that qualify. One member holding an indefinite exclusion therefore does not deny a deadline to a wait whose other member is merely rate-limited until a stated time. The wait is deadline-free only when **no** member can become admissible by time passage, and is then woken only by a durable member-availability update or by an operator [`clear_credential_exclusion`](process-protocol.md#credential-exclusion-administration). A restart alone is not a wake, and no timer ends a deadline-free wait. | Continuation origin on release: the wait-release origin naming the consumed wait, carrying the same optional predecessor evidence as `contended-wait` and on the same condition — present exactly where this chain had already observed a qualifying failure before entering the wait, since the release may then select a remaining member only as that failure's authorized successor. Records: one wait row of form `exhausted` carrying the frozen policy identity, the complete policy-member exclusion snapshot, and the optional deadline. Committing transactions: three — the *admission* whose read established exhaustion and inserted the wait, the *rewrite* by which a woken contended wait whose bounded candidates have all become durably excluded is converted to this form — taken exactly when that exhaustion still selects a wait, instead of being inserted afresh, and the *release* that consumes the wait and prepares a call.                                                                                                                                                                                                                                                                                  | No producer and no entry, for the reason given in `contended-wait`.                                                                                                                                                                                          | As for `contended-wait`: no present variant; the committed projection is an active state retaining turn and slot; no `rejected.detail`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | None — not a terminal outcome. The excluded members' causes are carried as the wait's evidence rather than as the turn's.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Committed unimplemented — capacity reservations and contention; the wait phase itself is owed by the availability-wait child.                  |
-| **`pre-call fail`** — a fresh admission finds the pool exhausted, no wait is selected, and this availability chain has issued no call                       | The turn terminalizes `Failed`. The call-free attempt ends `KnownFailure`. No wait is stored.                                                                                                                                                                                                                                                         | Not applicable: the outcome is terminal, so nothing parks and nothing wakes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | No continuation origin — the chain ends here. Records: one turn-correlated exhaustion failure header whose cause is exactly `credential_pool_exhausted`, with contiguous member rows in policy order carrying each member's exclusion, widest scope first. Committing transaction: one admission that proves exhaustion and prepares no call. Partial, foreign, or stale evidence fails reconstitution closed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | The pre-call pool-exhaustion producer — the third producer of `TurnFailed`. Entry `TurnFailed { turn }`, appended after the ended attempt's starting frontier in the transaction that terminalizes the turn.                                                 | `transcript_turn.state` `failed_credential_pool_exhausted`; live events `turn_failed` and typed `turn_credential_pool_exhausted`; the member evidence is read through `read_credential_pool_policy`, whose `rejected.detail` for a policy it cannot resolve is `unknown_pool_policy { session_id, turn_id, pool_policy_id }`.                                                                                                                                                                                                                                                                                              | No `TerminalEvidence`: this chain issued no provider request, so no adapter observed anything for it — and an earlier round's successful call is not this chain's evidence. The cause is the preparation cause `credential_pool_exhausted`, which exists so this ending is not reported as a provider failure that never happened.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Implemented for fail-closed exhaustion; capacity-derived parking remains committed unimplemented.                                              |
-| **`post-failure fail`** — a fresh admission finds the pool exhausted, no wait is selected, and the chain has already observed a qualifying provider failure | The turn terminalizes `Failed`. The predecessor attempt has already ended `KnownFailure`; exhaustion adds no further attempt.                                                                                                                                                                                                                         | Not applicable: terminal.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | No continuation origin — the chain ends here. Records: the terminal observation, committed atomically with whatever exclusion its frozen action derives. Committing transaction: one that commits the observation and proves the pool exhausted.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | The model-call known-failure closure — the first producer, unchanged. Entry `TurnFailed { turn }`.                                                                                                                                                           | `failed`, with `cause` the provider cause the chain last observed: `rate_limited`, `quota_exhausted`, or `overloaded`. Live event `turn_failed`. No `rejected.detail`.                                                                                                                                                                                                                                                                                                                                                                                                                                                     | The last observed provider cause and its `TerminalEvidence::ProviderError` — never `credential_pool_exhausted`. Why: this chain did issue a call and the provider did fail it, and reporting the pool's emptiness instead would discard the only evidence naming what actually went wrong.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Implemented — the final failed member remains an ordinary terminal call while the outcome is typed as pool exhaustion.                         |
-| **`wait-transition fail (no call)`** — a released wait finds the pool exhausted, no wait is selected again, and this availability chain has issued no call  | The turn terminalizes `Failed`. The wait's own attempt already ended `WithoutStop(YieldedToDurableWait)` and is immutable, so this transaction opens a fresh call-free attempt and ends **that** attempt `KnownFailure`. No wait remains stored.                                                                                                      | Not applicable: the outcome is terminal. A wake did reach this row — the release that ran admission again — but nothing parks a second time and nothing wakes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Continuation origin: the wait-release origin, naming the consumed wait — the same origin a releasing *selection* carries, because this transaction **is** that release. The fresh call-free attempt it opens is a continuation like any other and must name one: the unique continuation chain is total over attempts, not over the ones that reach a call, so an attempt created without an origin could not be reconstituted. Records: the same turn-correlated exhaustion failure header `pre-call fail` stores, whose cause is exactly `credential_pool_exhausted`, with contiguous member rows in policy order carrying each member's exclusion, widest scope first; plus the consumed wait. Committing transaction: one, which consumes the wait, opens and ends the fresh attempt, and terminalizes the turn. It is never the `pre-call fail` admission, which has no wait to consume. Partial, foreign, or stale evidence fails reconstitution closed.                                                                                                                                                                                                                                                                            | The pre-call pool-exhaustion producer, unchanged and serving a second ending, because its commit shape is exactly this one. Entry `TurnFailed { turn }`, appended after the ended attempt's starting frontier in the transaction that terminalizes the turn. | Exactly `pre-call fail`'s: `transcript_turn.state` `failed_credential_pool_exhausted`; live events `turn_failed` and typed `turn_credential_pool_exhausted`; the member evidence is read through `read_credential_pool_policy`.                                                                                                                                                                                                                                                                                                                                                                                            | No `TerminalEvidence`: this chain issued no provider request, so no adapter observed anything for it. The cause is the preparation cause `credential_pool_exhausted`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Committed unimplemented — the availability-wait child, which owes this transition alongside the wait itself.                                   |
-| **`wait-transition fail (after call)`** — the same release and the same exhaustion, where this chain had already issued a call                              | The turn terminalizes `Failed`. The predecessor call's attempt ended `KnownFailure` earlier without terminalizing, and the wait's own attempt ended `WithoutStop(YieldedToDurableWait)`; both are immutable, so this transaction opens a fresh call-free attempt and ends **that** attempt `KnownFailure`.                                            | Not applicable: terminal.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Continuation origin: the wait-release origin, naming the consumed wait and additionally carrying this chain's predecessor call, its qualifying cause, and its non-acceptance proof — the same origin the release would have carried had it selected a member, for the same reason and by the same condition. Records: the exhaustion outcome naming this chain's predecessor model call as the source of its cause, plus the consumed wait. Committing transaction: one, which consumes the wait, opens and ends the fresh attempt, and terminalizes the turn. It is never the model-call known-failure closure that `post-failure fail` names: that closure committed earlier in this turn without terminalizing and is not available to a transition happening now.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | The **wait-transition failure producer** — the fourth producer of `TurnFailed`, differing from the pre-call producer only in naming the predecessor model call that supplied the cause. Entry `TurnFailed { turn }`.                                         | `failed` with live event `turn_failed` and no `rejected.detail`, but **not** `post-failure fail`'s exact shape: the terminal attempt here is the fresh call-free one, so `terminal_model_call` is null by [the shape's own rule](process-protocol.md#transcript-snapshots), while the provider cause this chain last observed lives only inside a nonnull `terminal_model_call`. The two cannot both hold, so this ending owes a wire shape that correlates the predecessor call with a terminal attempt that owns none — owed by the same child that owes the wait, and not satisfiable by reusing `failed` as it stands. | The predecessor call's observed provider cause and its `TerminalEvidence::ProviderError` — never `credential_pool_exhausted`, for the reason `post-failure fail` gives.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Committed unimplemented — the availability-wait child, jointly with availability successor calls where the predecessor was itself a successor. |
-| **`successor`** — `switch_now` is the frozen action for a qualifying cause, a member remains, and the adapter supplied pre-stream non-acceptance proof      | The turn stays active and keeps its slot. The predecessor attempt ends `KnownFailure` without terminalizing, and a successor attempt is created against the next admitted member.                                                                                                                                                                     | Not applicable: nothing parks. The successor is prepared in the same commit that closes the predecessor.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Continuation origin: the availability-successor origin, carrying the predecessor call, the authorizing qualifying cause, and the non-acceptance proof. Records: the successor's `Prepared` pinning both; and a chain-exclusion row removing the failed member for the remainder of the turn, not merely for the chain. Committing transaction: one that applies the trigger and prepares the successor.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | No producer and no entry. The commit appends no `TurnFailed`: one commit can never both terminalize the turn and authorize a successor.                                                                                                                      | No present variant, and no committed one: whether a completed chain is ever exposed to a client, and in what shape, is the open question at [model fallback and provenance](../open-questions.md#model-fallback-and-provenance), which this row does not close. What is committed is the durable evidence, not its projection. No `rejected.detail` applies.                                                                                                                                                                                                                                                               | The predecessor's `TerminalEvidence::ProviderError` for exactly one of `provider_quota_exhausted`, `provider_rate_limited`, or `provider_overloaded`, together with the sealed non-acceptance proof the adapter decoded from its own documented error envelope before any stream began.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Implemented for admitted provider error envelopes and Codex JSONL `turn.failed` closures; each successor and its backoff deadline are durable. |
-| **`terminal`** — a known failure that no successor is authorized to follow                                                                                  | The turn terminalizes `Failed` exactly as it would with no pool at all. The attempt ends `KnownFailure`, or `AfterCancellation(KnownFailure)` where a call was already in flight when a stop was requested and then failed on its own. A stop applied to a *parked wait* is not this row: it terminalizes `Cancelled`, as the exception below states. | Not applicable: terminal.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | No continuation origin. Records: the terminal observation, and any exclusion its frozen action derives. Committing transaction: one observation commit, which prepares nothing.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | The model-call known-failure closure. Entry `TurnFailed { turn }`.                                                                                                                                                                                           | `failed` with its observed `cause`; live event `turn_failed`; no `rejected.detail`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | The observed `TerminalEvidence`, whatever it was. Four **ordered gates** decide this row rather than `successor`, and the first that fails decides it — they are gates in sequence, not a partition, because ordinary inputs satisfy several at once and a discriminator built on disjointness could not represent them. In order: a stop was requested while the call was in flight and it then failed on its own, since an attempt already cancelled admits no successor; the cause is not one of the three that can carry non-acceptance proof; the frozen action for that cause is not `switch_now`; the adapter supplied no pre-stream proof, which a mid-stream error record never carries however its native token reads. A credential rejection, for instance, fails the second gate and would also fail the third, and reporting it by the second is what names the reason an implementer can act on. | Implemented — failures whose frozen trigger action is not `switch_now`, or that lack non-acceptance proof, retain the ordinary terminal path.  |
+Every credential-pool selection attempt ends in exactly one ending of this
+machine, and that ending fixes every projection any specification page states of
+it.
 
-**This table states no lock protocol at all, and has no locks column.** Locking
-is owned entirely by
-[persistence protocol](persistence-protocol.md#lock-protocol), whose inventory
-is organised per transaction. Each row above names the transaction that commits
-that ending, which is how a reader finds the right entry there; it says nothing
-about which objects that transaction takes, in what order, or in which mode.
+Turn phase and attempt disposition belong to
+[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md); continuation
+origins and durable records to [persistence protocol](persistence-protocol.md);
+transcript producers and entries to
+[sessions and the transcript](sessions-and-transcript.md); snapshot state, live
+events and rejection details to [process protocol](process-protocol.md);
+terminal evidence and the outcome it derives to
+[runtime substrate](runtime-substrate.md) and
+[model-call execution](model-call-execution.md).
 
-There is no locks column because locking is a fact about transactions while
-these rows are endings: several endings share a transaction and one spans three,
-so any per-ending lock column would restate a per-transaction protocol in a
-shape that does not fit it.
+A condition that asks whether a call has already been issued is scoped to the
+availability chain, not to the turn;
+[model-call execution](model-call-execution.md) owns what bounds a chain.
 
-`park` and `fail` have their semantics here and nowhere else, and both act
-through exactly one question: **does this exhaustion select a wait?** `fail`
-never selects one. `park` selects one only when at least one exclusion in the
-snapshot is one a wake can clear — the second consequence below gives the
-reason, and this is the only statement of the rule. Where a wait is selected the
-ending is `contended-wait` or `exhausted-wait`; where none is, the ending is one
-of the four failure rows, chosen by whether the admission is a fresh one or the
-release of a parked wait, and by whether **this availability chain** had already
-issued a call. Neither value has any other effect, and neither appears in a row
-it does not name.
+Selected: a member was admitted. The selecting preparation inserts the call's
+prepared record, adds no turn phase, and consumes the pending `switch_next_turn`
+displacement of the member it excluded, never of the member it selected, because
+the displacement is the excluded member's record and consuming any other leaves
+it pending forever.
 
-Stating it as wait selection rather than as the configured value is what keeps
-the rows total. A `park` pool whose exclusions no wake can clear must still end
-somewhere, and a row conditioned on the literal value `fail` could not hold it.
+Pre-call fail: the attempt that finds every member excluded is call-free, either
+a fresh chain's admission or the later preparation of a deferred successor. The
+turn terminalizes Failed and that attempt ends KnownFailure. The pre-call
+exhaustion producer appends the `TurnFailed` transcript entry after the ended
+attempt's starting frontier in the transaction that terminalizes the turn. The
+ending carries no terminal evidence, because the attempt that ends issued no
+provider request and no other attempt's call is its evidence; its terminal cause
+is pool exhaustion, never a provider failure.
 
-Three consequences of that are stated here, because each is a place a reader
-would otherwise have to derive an answer that two pages once derived
-differently.
+Post-failure fail: the observation that closes a qualifying provider failure
+finds every member excluded. The turn terminalizes Failed and adds no further
+attempt; the predecessor attempt has already ended KnownFailure. The terminal
+evidence is the last observed provider cause as a provider error, never pool
+exhaustion, because reporting the pool's emptiness would discard the only
+evidence naming what failed. The rotation test in
+`crates/persistence/tests/postgres_integration/model_call_execution_and_recovery.rs`
+pins this ending.
 
-First, **a contended wait that becomes exhausted re-runs `on_pool_exhausted`
-rather than staying parked.** When a woken contended waiter finds that every
-formerly bounded candidate is now durably excluded, contention is over and the
-pool is exhausted, so the pool's configured value decides afresh. A `fail` pool
-that happened to contend first therefore terminalizes rather than parking
-indefinitely under a policy it never selected.
+Successor: a stop was not requested, and either a transient cause has
+same-credential attempts remaining with adapter proof that the provider never
+accepted the request, or the pinned action is `switch_now` and a member remains.
+`switch_now` also admits credential rejection without separate non-acceptance
+proof; rejection never admits same-credential retry. Every other availability
+successor requires the adapter's [non-acceptance proof](runtime-substrate.md);
+for Codex this requires the typed failed-turn gate, without assistant activity
+or an earlier retryable error. The turn stays active and keeps its slot; the
+predecessor attempt ends KnownFailure without terminalizing, and the same commit
+prepares a successor attempt. That commit appends no `TurnFailed`: one commit
+never both terminalizes the turn and authorizes a successor. The rotation and
+transient retry tests pin this ending.
 
-That transition is not a variant of either admission-time failure row, which is
-why it has rows of its own: the wait's call-free attempt has already ended
-`WithoutStop(YieldedToDurableWait)` and is immutable, so it cannot now end
-`KnownFailure` as `pre-call fail` requires, and the model-call closure that
-`post-failure fail` names committed earlier without terminalizing. Its two rows
-— `wait-transition fail (no call)` and `wait-transition fail (after call)` —
-split on the same question that separates those two, and every projection of
-each is stated in its row above rather than here.
+A same-credential retry additionally requires the failed member itself to remain
+admitted when the observation commits. If a durable action already excludes it,
+the pinned `switch_now` action may rotate to another admitted member; every
+other pinned action terminalizes the known failure.
 
-Second, **that is why `park` selects no wait it could never release.** Where
-every member is excluded solely by predecessor chain exclusions earned in this
-turn, no reset, operator clear, or availability update can readmit any of them
-before the turn ends, so a wait would hold the turn and its session slot until
-an explicit stop and no release could ever prepare a call. Such an exhaustion
-selects no wait and therefore ends in a failure row exactly as a `fail` pool
-would: `post-failure fail` at a fresh admission, and
-`wait-transition fail (after call)` at a release. Both name a chain that had
-issued a call, which this case always has — a predecessor chain exclusion is
-earned by a qualifying failure, so a snapshot made only of them proves the call
-that earned them. Third, **releasing a parked wait resumes the chain that parked
-and re-evaluates admission from current state**, and the two kinds of exclusion
-the wait carried are treated differently, because collapsing them deadlocks the
-wait it is meant to release.
+A transient successor commit writes a credential-scoped durable exclusion whose
+reset equals the successor's durable retry deadline. Every session's call
+preparation skips that credential until the reset passes; after it passes, the
+member is admitted again. A chain exclusion is written when a failure rotates
+the pool and removes that member for the remainder of the turn. If another
+durable action excludes a retry successor's credential before preparation, that
+successor exhausts instead of selecting another member.
 
-A *predecessor chain exclusion* — one a qualifying failure in this turn earned —
-is insert-only and turn-local: nothing readmits that member for the remainder of
-the turn, not a reset passing, not an operator clear of its exact predecessor
-correlation, and not any other durable availability update. Without that, waking
-a one-member `switch_now` pool on its own reported reset would call the same
-profile again without bound. Every *other* exclusion the wait recorded — an
-ordinary reset-aware membership exclusion, an `avoid_new_sessions` exclusion, a
-profile quarantine — is re-read from its **current** active state at release, so
-a reset that has since passed or an authorized clear readmits that member
-normally.
+A successor prepared after a rate-limit, overload or provider-internal failure
+waits the greater of the provider's reported delay and a local exponentially
+increasing jittered delay, each capped at five minutes
+(`MAX_AVAILABILITY_BACKOFF` in `crates/persistence/src/model_execution.rs`). A
+successor after a quota failure is immediate. Quota and authentication failures
+bypass same-credential retry and apply their pinned actions immediately. A
+same-credential retry derives local backoff from that credential's recorded
+attempt count; rotation starts the successor's backoff count at one.
 
-Stating it the other way round would be self-defeating, and visibly so: an
-exhausted wait's deadline is derived from the very exclusions that caused it —
-the latest reset among each member's reset-expiring exclusions, then the
-earliest of those across members, exactly as the row above states — so a release
-that re-applied those same exclusions unconditionally would exclude every member
-again and re-enter the exhausted wait immediately, forever, on exactly the wake
-the deadline exists to produce. It would also contradict the two contracts that
-own these records —
-[credential pools and selection](configuration-and-credentials.md#credential-pools-and-selection),
-where a reported reset time clears an `avoid_new_sessions` exclusion when it
-passes, and [persistence protocol](persistence-protocol.md#lock-protocol), which
-gives the insert-only turn-local fact to a chain exclusion alone.
+The required finite positive
+`numeric_bounds.max_same_credential_attempts_per_turn` bounds recorded calls on
+one credential in one turn. At the bound a transient failure applies its pinned
+action instead of readmitting that credential.
 
-Two exceptions to the row partition, and only these two. **Cancellation leaves
-this machine rather than ending inside it.** An accepted `stop_turn` against a
-parked wait is not a selection outcome at all: the owning lifecycle contract
-consumes the wait, creates a fresh immediate-successor attempt, records the
-applied-interrupt proof, ends that attempt `AfterCancellation(Cancelled)`,
-appends `TurnCancelled` after the wait's latest frontier, and terminalizes the
-turn `Cancelled`
-([turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot)).
-None of that is the `terminal` row, whose projections are `Failed`,
-`TurnFailed`, and a provider `TerminalEvidence` — routing a cancellation through
-it would persist the wrong disposition and the wrong transcript entry, and would
-report an operator's own stop as a provider failure. What cancellation does
-share with `terminal` is only that it authorizes no successor. And a
-delivery-layer credential failure — a rejected daemon-owned OAuth refresh, or a
-credential-home identity that failed its walk — never enters this machine at
-all: it occurs before any provider request, is typed as its own refresh or
-credential-home failure, and quarantines the profile directly under
-[credential deliveries](configuration-and-credentials.md#credential-deliveries).
-The pool's trigger policy does not see it, and no row above describes it.
+Terminal: a known failure no successor is authorized to follow terminalizes the
+turn Failed exactly as it would with no pool. A stop request, missing pre-stream
+proof except for credential-rejection rotation, non-transient cause without
+`switch_now`, or transient cause at its bound without `switch_now` authorizes no
+successor.
 
-Why the machine is stated as one table rather than as each page's own paragraph:
-described separately, seven pages each own a closed inventory over the same nine
-endings, so a new ending on one page leaves six inventories silently wrong and
-each page stays internally consistent while the corpus does not. A disagreement
-of that shape is visible only to a reader holding two pages open at once. The
-table makes that class unwritable rather than merely discouraged: a missing
-projection is a visibly empty cell rather than a cross-page discovery, the grid
-is bounded at nine rows by seven columns, and **the row is the unit of edit**,
-so changing an ending's terminal evidence edits its transcript producer and its
-wire projection in the same place and the same commit.
+## Planned
 
-No cell may be left blank. Where a projection does not apply to a row, the cell
-says so and says why, because a blank cell cannot be told apart from one nobody
-has filled in yet — which is the exact failure the table replaces.
-
-## Derived views
-
-Every other page's treatment of this machine is a derived view: a sentence
-naming the column that page projects, plus a link here. A derived view may
-restate a cell's content for local readability, and must not extend it. Where a
-derived view and a row disagree, the row governs and the derived view is the
-defect.
-
-Each projection below is a column above, and names the page that owns it:
-
-- Turn phase, attempt disposition, and wake conditions —
-  [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
-- Continuation origins, durable record shapes, and lock order —
-  [persistence protocol](persistence-protocol.md#lock-protocol).
-- Transcript producers and semantic entries —
-  [sessions and the transcript](sessions-and-transcript.md#when-entries-come-to-exist).
-- Snapshot turn state, live events, and `rejected.detail` —
-  [process protocol](process-protocol.md#credential-pool-preparation-failure),
-  with the operator clear surface at
-  [credential-exclusion administration](process-protocol.md#credential-exclusion-administration).
-- Terminal evidence and cause —
-  [terminal evidence](runtime-substrate.md#terminal-evidence) for the evidence
-  algebra, and [terminal outcomes](model-call-execution.md#terminal-outcomes)
-  for the outcome each one derives.
-- Pool grammar, ranking, and admission —
-  [credential pools and selection](configuration-and-credentials.md#credential-pools-and-selection).
-
-What is mechanically enforced, and what is not, is worth stating exactly,
-because a promise a reader takes as enforced is worse than no promise. One
-assertion in `scripts/check_docs_consistency.py` requires every page listed
-above to carry a resolving link to this page. It is page-level: it does not
-inspect cells, does not know which paragraph projects what, and cannot tell a
-derived view from a competing account. It exists to catch the failure that
-produced this page — a carve that moved a paragraph while the anchor citing it
-still resolved, so only the meaning left.
-
-Everything else here is upheld by review rather than by a gate: that no cell is
-blank, that a page states no projection without linking, that tier labels stay
-headings in ascending order. Checkers enforcing those two latter properties
-existed and were removed, because across four review waves they produced more
-findings about themselves than about the pages they guarded while catching one
-defect between them. That is an accepted cost recorded here rather than hidden,
-and the durable answer if the cells ever do drift is to generate this table from
-a data file as `docs/invariants.md` is generated, which makes totality a
-property of the data rather than of a Markdown reader.
-
-## Open edges
-
-- The per-turn client visibility surface for a successor chain is routed through
-  [model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
-  This table fixes what a client is shown for each row; which of those a
-  rendering surface exposes, and how, is not yet decided.
-- Whether any adapter can offer a zero-cost liveness probe — the only wake for
-  an indefinite `exhausted-wait` other than an operator clear — is recorded in
-  [model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
+- Contended-wait: an exhaustion in which at least one member was skipped only
+  for its concurrency bound parks the turn with closed cause contended
+  ([design](../design/credential-availability.md)).
+- Exhausted-wait: an exhaustion in which nothing was skipped for a bound, and a
+  wait is selected, parks the turn with closed cause exhausted
+  ([design](../design/credential-availability.md)).
+- Wait-transition fail (no call): a released wait that finds the pool exhausted
+  before this chain issued a call terminalizes the turn Failed through a fresh
+  call-free attempt ([design](../design/credential-availability.md)).
+- Wait-transition fail (after call): the same release and exhaustion after this
+  chain issued a call; a fresh call-free attempt is opened and ended
+  KnownFailure ([design](../design/credential-availability.md)).
+- Park selects a wait only when some member's every active exclusion is one a
+  wake can clear ([design](../design/credential-availability.md)).
+- Releasing a parked wait resumes the chain that parked and re-evaluates
+  admission from current state ([design](../design/credential-availability.md)).
+- Every exclusion a wait recorded other than a chain exclusion is re-read from
+  its current active state at release, so a passed reset or an authorized clear
+  readmits that member ([design](../design/credential-availability.md)).
+- The typed `turn_credential_pool_exhausted` live event for the pre-call
+  exhaustion ending ([design](../design/credential-availability.md)).
+- Per-member exclusion evidence rows on the pre-call exhaustion record
+  ([design](../design/credential-availability.md)).
+- Honoring `on_pool_exhausted = "park"` on the pre-call path
+  ([design](../design/credential-availability.md)).

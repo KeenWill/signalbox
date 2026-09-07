@@ -11,13 +11,24 @@ import {
   useState,
 } from 'react'
 import { invokeCommand } from './commands'
+import { MissingAttachmentState } from './features/artifacts/ArtifactAttachments'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
+import type { SessionTranscriptLimits } from './product'
+import { SessionComposer } from './SessionComposer'
+import { SessionTranscriptText } from './SessionTranscriptText'
 import {
   BoundedSessionHistory,
   HttpSessionTimelineSource,
   type SessionWindowAnchor,
 } from './session-timeline/model'
-import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
+import {
+  actions,
+  selectApp,
+  selectSessionSync,
+  store,
+  useAppDispatch,
+  useAppSelector,
+} from './state'
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const NATIVE_SESSION_ID_PATTERN = String.raw`\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*`
@@ -108,29 +119,37 @@ export const pruneExpandedSessionItems = (
 }
 
 export function SessionWorkspaceSurface({
+  initialSessionId,
   onSelectionEvidence,
   onTimelineIds,
   onTimelineWindowAvailable,
   onWindowRequestConsumed,
   timelineCapability,
+  transcriptAvailable,
+  transcriptLimits,
   timelineRef,
   windowRequest,
 }: {
+  initialSessionId?: string
   onSelectionEvidence: (evidence: SessionSelectionEvidence | null) => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
   onWindowRequestConsumed: () => void
   timelineCapability: TimelineCapability
+  transcriptAvailable: boolean
+  transcriptLimits: SessionTranscriptLimits
   timelineRef: RefObject<HTMLDivElement | null>
   windowRequest: { anchor: 'first' | 'latest'; attempt: number } | null
 }) {
   const dispatch = useAppDispatch()
   const queryClient = useQueryClient()
   const app = useAppSelector(selectApp)
-  const [draftId, setDraftId] = useState('')
-  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [draftId, setDraftId] = useState(initialSessionId ?? '')
+  const [sessionId, setSessionId] = useState<string | null>(initialSessionId ?? null)
   const [awaitingSessionId, setAwaitingSessionId] = useState<string | null>(null)
-  const [openingPosition, setOpeningPosition] = useState<string | undefined>()
+  const [openingPosition, setOpeningPosition] = useState<string | undefined>(
+    initialSessionId === undefined ? undefined : app.lastLogicalPositions[initialSessionId],
+  )
   const [refetchRequest, setRefetchRequest] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
@@ -201,6 +220,15 @@ export function SessionWorkspaceSurface({
     enabled: sessionId !== null && timelineCapability === 'available',
   })
   const refetchSession = session.refetch
+  const synchronization = useAppSelector(selectSessionSync)
+  const live = synchronization.sessionId === sessionId ? synchronization.snapshot : null
+  const followFailed = synchronization.sessionId === sessionId && synchronization.phase === 'failed'
+  useEffect(() => {
+    dispatch(actions.sessionFollowRequested(timelineCapability === 'available' ? sessionId : null))
+    return () => {
+      dispatch(actions.sessionFollowRequested(null))
+    }
+  }, [dispatch, sessionId, timelineCapability])
   const displayedSession =
     session.isSuccess && awaitingSessionId !== sessionId ? session.data : undefined
   const items = useMemo(
@@ -351,6 +379,8 @@ export function SessionWorkspaceSurface({
       dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => timelineRef.current?.focus(),
       sessionId:
         isCanonicalSessionId(candidate) && timelineCapability === 'available'
@@ -375,6 +405,8 @@ export function SessionWorkspaceSurface({
       dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       timelineWindowAvailable: displayedSession !== undefined,
       focusTimeline: () => timelineRef.current?.focus(),
       loadTimelineWindow: loadWindow,
@@ -445,7 +477,7 @@ export function SessionWorkspaceSurface({
             <h2 id="session-entry-heading">Open a known session by immutable identity</h2>
             <p>
               {timelineCapability === 'available'
-                ? 'This branch provides bounded descriptor and timeline reads, but no session catalog, creation operation, or live follow channel. Enter an exact server-issued ID.'
+                ? 'Enter an exact server-issued ID to read bounded history, follow live updates, and send a message.'
                 : 'The validated daemon bootstrap has not authorized bounded session timeline reads. Signalbox will not call or advertise that surface until the capability is available.'}
             </p>
           </div>
@@ -502,11 +534,70 @@ export function SessionWorkspaceSurface({
             <button type="button" onClick={() => invokeBoundaryCommand('selection.last')}>
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
+            <button
+              type="button"
+              disabled={!displayedSession.window.continuation_before}
+              onClick={() => {
+                const address = displayedSession.window.continuation_before?.event_sequence
+                if (address) {
+                  manualAnchorRef.current = { kind: 'before', eventSequence: address }
+                  void refetchSession()
+                }
+              }}
+            >
+              Previous window
+            </button>
+            <button
+              type="button"
+              disabled={!displayedSession.window.continuation_after}
+              onClick={() => {
+                const address = displayedSession.window.continuation_after?.event_sequence
+                if (address) {
+                  manualAnchorRef.current = { kind: 'after', eventSequence: address }
+                  void refetchSession()
+                }
+              }}
+            >
+              Next window
+            </button>
             <span>
               {displayedSession.window.items.length} bounded items ·{' '}
               {displayedSession.window.projected_structured_bytes} B
             </span>
           </div>
+          <p className="session-live-status" role="status">
+            {followFailed ? (
+              <>
+                Live updates unavailable.{' '}
+                <button
+                  type="button"
+                  onClick={() => dispatch(actions.sessionFollowReconnectRequested())}
+                >
+                  Reconnect live updates
+                </button>
+              </>
+            ) : live ? (
+              'Following live session'
+            ) : (
+              'Connecting live session…'
+            )}
+          </p>
+          {transcriptAvailable &&
+            displayedSession.descriptor.sizes.projected_text_bytes !== '0' && (
+              <SessionTranscriptText
+                sessionId={sessionId ?? ''}
+                first={
+                  displayedSession.window.items[0]?.address.event_sequence ??
+                  displayedSession.descriptor.first_address.event_sequence
+                }
+                through={
+                  displayedSession.window.items.at(-1)?.address.event_sequence ??
+                  displayedSession.descriptor.latest_address.event_sequence
+                }
+                observed={displayedSession.descriptor.observed_through}
+                limits={transcriptLimits}
+              />
+            )}
           <div
             className={`session-timeline presentation-${app.detail}`}
             aria-label="Session timeline"
@@ -565,24 +656,42 @@ export function SessionWorkspaceSurface({
                     <small>{item.projected_structured_bytes} B</small>
                   </div>
                   {isExpanded && (
-                    <dl id={`session-timeline-detail-${id}`} className="session-item-detail">
-                      <div>
-                        <dt>Address</dt>
-                        <dd>
-                          {sessionId}:{id}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Projection</dt>
-                        <dd>Header only; rich event detail is not exposed</dd>
-                      </div>
-                    </dl>
+                    <>
+                      <dl id={`session-timeline-detail-${id}`} className="session-item-detail">
+                        <div>
+                          <dt>Address</dt>
+                          <dd>
+                            {sessionId}:{id}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Projection</dt>
+                          <dd>
+                            {transcriptAvailable
+                              ? 'Durable event metadata; message text appears in the transcript above'
+                              : 'Durable event metadata; transcript text is unavailable'}
+                          </dd>
+                        </div>
+                      </dl>
+                      {item.kind === 'input_accepted' && (
+                        <MissingAttachmentState placement="transcript" />
+                      )}
+                    </>
                   )}
                 </div>
               )
             })}
           </div>
         </section>
+      )}
+      {sessionId !== null && timelineCapability === 'available' && (
+        <SessionComposer
+          key={sessionId}
+          sessionId={sessionId ?? ''}
+          activeState={live ? (live.active?.state.kind ?? null) : undefined}
+          stateUnavailable={followFailed && live === null}
+          onAccepted={refetchSession}
+        />
       )}
     </div>
   )

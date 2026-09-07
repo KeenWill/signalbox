@@ -1,0 +1,49 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+
+CRATE_PROC_MACRO_DEPS = ["//crates/derive:signalbox_derive"]
+
+TEST_DEPS = ["//crates/test-bin:signalbox_test_bin"]
+
+rust_package()
+
+rust_library(
+    name = "signalbox_tools_exec",
+    crate_root = "src/lib.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/domain:signalbox_domain",
+        "//crates/tool-contract:signalbox_tool_contract",
+    ],
+)
+
+rust_binary(
+    name = "signalbox-exec-supervisor",
+    crate_root = "src/bin/signalbox-exec-supervisor.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    deps = [
+        ":signalbox_tools_exec",
+        "//crates/application:signalbox_application",
+        "//crates/domain:signalbox_domain",
+        "//crates/tool-contract:signalbox_tool_contract",
+    ],
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_tools_exec",
+    deps = TEST_DEPS,
+)
+
+rust_unit_test(
+    name = "signalbox_exec_supervisor_unit_tests",
+    crate = ":signalbox-exec-supervisor",
+    deps = TEST_DEPS,
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_tools_exec",
+)

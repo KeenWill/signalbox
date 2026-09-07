@@ -4,7 +4,7 @@
 //! construction. These tools own only exact argument shapes, checked neutral
 //! requests, and bounded result projection.
 
-use std::{collections::BTreeMap, error::Error, fmt, future::Future, pin::Pin, str::FromStr};
+use std::{collections::BTreeMap, future::Future, pin::Pin, str::FromStr};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -32,9 +32,8 @@ const INVALID_INSPECT_ARGUMENTS: &str =
     "expected exactly a canonical digest and optional visible-part selector";
 const INVALID_READ_ARGUMENTS: &str = "expected a canonical digest, view, optional selector, and exactly one of object options or continuation";
 const RESULT_TOO_LARGE_DETAIL: &str = r#"{"status":"result_too_large"}"#;
-// numeric-bound: ceiling - reserves processor-frame space for validated evidence and framing
+// The remaining processor-frame space carries validation evidence and framing.
 const MAX_INITIAL_OPTIONS_BYTES: usize = MAX_PROCESSOR_FRAME_BYTES / 4;
-// numeric-bound: hard safety ceiling - bounds recursive JSON serialization and destruction work
 const MAX_FILE_READ_ARGUMENT_DEPTH: usize = 256;
 
 /// Checked service request for `file_inspect`.
@@ -243,31 +242,23 @@ fn map_contract_error(error: ToolContractCompileError) -> FileMediaToolConstruct
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Static construction failure for the two-entry file/media family.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileMediaToolConstructionError {
+    #[error("file media static tool name is invalid")]
     /// A stable name was rejected.
     Name,
+    #[error("file media static tool schema is invalid")]
     /// A stable schema was rejected.
     Schema,
+    #[error("file media static error detail is invalid")]
     /// Static sanitized failure detail was rejected.
     ErrorDetail,
+    #[error("file media tool catalog is duplicated")]
     /// The two-entry catalog unexpectedly found a duplicate.
     Duplicate,
 }
-
-impl fmt::Display for FileMediaToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Name => "file media static tool name is invalid",
-            Self::Schema => "file media static tool schema is invalid",
-            Self::ErrorDetail => "file media static error detail is invalid",
-            Self::Duplicate => "file media tool catalog is duplicated",
-        })
-    }
-}
-
-impl Error for FileMediaToolConstructionError {}
 
 #[derive(Clone, Debug)]
 struct InspectArgumentValidator {
@@ -409,17 +400,11 @@ pub struct FileMediaExecutor<Service> {
     service: Service,
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("file media argument validation drifted")]
 /// A checked catalog/executor assumption drifted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileMediaExecutorError;
-
-impl fmt::Display for FileMediaExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("file media argument validation drifted")
-    }
-}
-
-impl Error for FileMediaExecutorError {}
 
 impl ClassifyOperatorFailure for FileMediaExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {

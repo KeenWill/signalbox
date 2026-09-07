@@ -734,7 +734,7 @@ impl CurrentTurnAttemptTransitionError {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use super::*;
     use crate::applied_interrupt::test_applied_interrupt_proof;
@@ -743,11 +743,7 @@ mod tests {
         turn_attempt_id as attempt_id, turn_id,
     };
 
-    #[derive(Clone, Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Clone, Debug, serde::Serialize)]
     struct AttemptEndRow {
         attempted_end: String,
         outcome: String,
@@ -791,7 +787,7 @@ mod tests {
         causes.clone()
     }
 
-    /// INV-004 / INV-006: Prepared is the sole entry and authorization
+    /// Prepared is the sole entry and authorization
     /// preserves the physical-attempt identity.
     #[test]
     fn prepared_begins_running_with_the_same_identity() {
@@ -801,7 +797,7 @@ mod tests {
         assert_eq!(current.state(), &CurrentTurnAttemptState::Running);
     }
 
-    /// INV-006: authorization rejects every non-Prepared current state and
+    /// authorization rejects every non-Prepared current state and
     /// returns that state unchanged.
     #[test]
     fn begin_running_rejects_every_other_current_state_unchanged() {
@@ -819,8 +815,8 @@ mod tests {
         );
     }
 
-    /// S07 / INV-006 / INV-029: Running accepts either singleton stop; stopped
-    /// values replay/union compatible causes; Prepared accepts neither.
+    /// Running accepts either singleton stop; stopped values replay/union compatible causes;
+    /// Prepared accepts neither.
     #[test]
     fn stop_request_transition_matrix_preserves_complete_causes() {
         let cancellation = cancellation_stopped();
@@ -877,7 +873,7 @@ mod tests {
         );
     }
 
-    /// INV-006 / INV-029: a distinct second interrupt is rejected for either
+    /// a distinct second interrupt is rejected for either
     /// stopped family without changing the exact current attempt.
     #[test]
     fn conflicting_interrupt_returns_the_unchanged_stopped_attempt() {
@@ -896,8 +892,7 @@ mod tests {
         );
     }
 
-    /// S03 / S04 / S07 / INV-006 / INV-029 / INV-034: Prepared accepts exactly
-    /// the restricted unsent and startup terminal branches from
+    /// Prepared accepts exactly the restricted unsent and startup terminal branches from
     /// docs/spec/turn-lifecycle-and-scheduling.md.
     #[test]
     fn prepared_terminal_matrix_is_complete() {
@@ -1012,11 +1007,10 @@ mod tests {
             │ after fatal mismatch (with interrupt): Ambiguous    │ rejected │
             └─────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
-    /// S02 / S04 / S06 / S07 / S10 / S23 / INV-004 / INV-006: Running may
-    /// enter every type-valid terminal branch once slice 5 establishes guards.
+    /// Running may enter every type-valid terminal branch once slice 5 establishes guards.
     #[test]
     fn running_accepts_every_type_valid_terminal_value() {
         let causes_without_interrupt =
@@ -1103,7 +1097,7 @@ mod tests {
             │ after fatal mismatch (with interrupt): Ambiguous    │ ends    │
             └─────────────────────────────────────────────────────┴─────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
     #[track_caller]
@@ -1211,8 +1205,7 @@ mod tests {
         );
     }
 
-    /// S04 / S07 / S23 / INV-006 / INV-029 / INV-034: CancellationOnly ends
-    /// only as AfterCancellation with its exact proof and any honest result.
+    /// CancellationOnly ends only as AfterCancellation with its exact proof and any honest result.
     #[test]
     fn cancellation_stopped_terminal_matrix_is_complete() {
         let matching_fatal = FatalMismatchStopCauses::new(
@@ -1362,11 +1355,10 @@ mod tests {
             │ after fatal mismatch: Ambiguous                     │ rejected │
             └─────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
-    /// S04 / S06 / S21 / S23 / INV-006 / INV-034: FatalMismatch ends only as
-    /// AfterFatalMismatch with the exact complete cause value.
+    /// FatalMismatch ends only as AfterFatalMismatch with the exact complete cause value.
     #[test]
     fn fatal_stopped_terminal_matrix_is_complete() {
         let exact_without_interrupt = fatal_causes(&fatal_stopped());
@@ -1546,7 +1538,7 @@ mod tests {
             │ after cancellation (retained proof): Ambiguous     │ rejected │
             └────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
     /// Renders `without stop` rows for ending fresh copies of one source
@@ -1616,7 +1608,7 @@ mod tests {
         }
     }
 
-    /// INV-006: fatal stop is nonempty and repeated additions are canonical set
+    /// fatal stop is nonempty and repeated additions are canonical set
     /// union rather than duplicate causes.
     #[test]
     fn fatal_failures_are_nonempty_canonical_set_union() {
@@ -1635,8 +1627,8 @@ mod tests {
         assert!(!causes.contains(failure(3)));
     }
 
-    /// S07 / INV-006 / INV-029: fatal failure and applied interrupt addition is
-    /// idempotent and event-order independent without losing either fact.
+    /// fatal failure and applied interrupt addition is idempotent and event-order independent
+    /// without losing either fact.
     #[test]
     fn stop_union_is_idempotent_and_event_order_independent() {
         let interrupt_then_failure = TurnAttemptStopCauses::cancellation_only(proof(1))
@@ -1660,7 +1652,7 @@ mod tests {
         );
     }
 
-    /// INV-006 / INV-029: a distinct second proof cannot replace the retained
+    /// a distinct second proof cannot replace the retained
     /// cancellation authority.
     #[test]
     fn distinct_second_interrupt_is_rejected_unchanged() {
@@ -1719,7 +1711,7 @@ mod tests {
         );
     }
 
-    /// INV-006: the three accepted fatal-reference kinds remain typed and
+    /// the three accepted fatal-reference kinds remain typed and
     /// distinct.
     #[test]
     fn fatal_failure_reference_kinds_are_distinct() {
@@ -1753,7 +1745,6 @@ mod tests {
         );
     }
 
-    /// S04 / S06 / S07 / S10 / S23 / INV-006 / INV-018 / INV-029 / INV-034:
     /// each terminal family retains its exact typed cause and disposition.
     #[test]
     fn every_allowed_terminal_disposition_stays_in_its_typed_family() {
@@ -1847,11 +1838,7 @@ mod tests {
     /// cause, read back from the observed values
     /// (`docs/agents/testing-style.md`, rule 12).
     fn attempt_end_family_table(ends: &[AttemptEnd]) -> String {
-        #[derive(Debug)]
-        #[allow(
-            dead_code,
-            reason = "the table renderer reads every field through the Debug derive"
-        )]
+        #[derive(Debug, serde::Serialize)]
         struct Row {
             family: &'static str,
             disposition: String,
@@ -1896,10 +1883,10 @@ mod tests {
             })
             .collect();
 
-        table(rows)
+        print(&rows)
     }
 
-    /// INV-018: refusal remains representable without fatal stop and after a
+    /// refusal remains representable without fatal stop and after a
     /// cancellation race; the fatal family has no refusal variant.
     #[test]
     fn refusal_is_typed_for_unstopped_and_cancellation_race_history() {
@@ -1923,8 +1910,7 @@ mod tests {
         ));
     }
 
-    /// S04 / INV-034: startup loss retains the terminal family matching the
-    /// complete recovered stop causes.
+    /// startup loss retains the terminal family matching the complete recovered stop causes.
     #[test]
     fn lost_is_representable_in_all_three_matching_terminal_families() {
         let fatal = FatalMismatchStopCauses::new(
@@ -1962,7 +1948,7 @@ mod tests {
         ));
     }
 
-    /// INV-004 / INV-006: a successful terminal transition preserves identity
+    /// a successful terminal transition preserves identity
     /// and exact history; rejection returns the unchanged state and input.
     #[test]
     fn terminal_transition_preserves_success_and_rejection_inputs_exactly() {

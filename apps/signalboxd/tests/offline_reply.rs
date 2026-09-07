@@ -11,20 +11,23 @@ use std::{error::Error, process::Command, time::Duration};
 use signalbox_application::{
     ClassifyOperatorFailure, CorrelatedToolExecutorEvidence, CreateSessionOutcome,
     CreateSessionRequest, CreateSessionService, EligibilityNudge, GoalAwareEligibilityPass,
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, NoToolCatalog, OperatorFailureClass, SchedulerLoop,
-    SchedulerLoopExit, StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+    GoalPassDisposition, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
+    InProcessToolDispatchGate, ModelCallCredentialReference, NoToolCatalog, OperatorFailureClass,
+    SchedulerLoop, SchedulerLoopExit, StartEligibleTurnOutcome, StartEligibleTurnService,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, ToolExecutionInvocation,
+    ToolExecutor, UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
-    AcceptedInputId, DeliveryRequest, DirectModelSelection, DurableCommandId, Goal,
+    AcceptedInputId, AcceptedInputTurnActivationIdentities, ContextFrontierId, DeliveryRequest,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, Goal,
     GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandResult, GoalEvent, GoalEventKind,
     GoalState, GoalStatement, GoalUserAction, GoalUserCommand, ModelSelectionOverride,
     ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
-    ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
-    TurnId, UserContent,
+    ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SubmitInputAppliedResult, SubmitInputResult, TurnAttemptId, TurnId, TurnTerminalCause,
+    UserContent,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -37,18 +40,20 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository,
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
-    goal::{GoalCommandHandlingOutcome, GoalRepository},
+    goal::{GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
+    process_read::{ProcessReadRepository, ProcessTranscriptEntry},
     scheduler::PostgresEligibilitySweep,
-    start_eligible_turn::StartEligibleTurnRepository,
+    start_eligible_turn::{CommitCompactionFailurePreviewOutcome, StartEligibleTurnRepository},
     submit_input::SubmitInputRepository,
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
-    ActivatedTurnPass, FatalExecutionSupervisor, GoalModeNumericBounds,
-    PostgresGoalPassDisposition, PostgresProviderModelExecution,
+    ActivatedTurnExecution, ActivatedTurnPass, CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED,
+    FatalExecutionSupervisor, GoalModeNumericBounds, PostgresGoalPassDisposition,
+    PostgresProviderModelExecution,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -65,6 +70,7 @@ const SERVED_PROVIDER_MODEL: &str = "claude-haiku-4-5-20251001";
 const DATABASE_NAME: &str = "signalboxd_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const SCHEDULED_EXECUTION_FAILURE_NEED: &str = "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal.";
 // numeric-bound: test - identifies the first durable recovery event
 const FIRST_RECOVERY_EVENT_COUNT: i64 = 1;
 // numeric-bound: test - identifies the second durable execution-failure block
@@ -254,11 +260,14 @@ fn goal_completion_script() -> Script {
 
 fn goal_refusal_script() -> Script {
     Script::delivering(TerminalEvidence::Refused(RefusalEvidence {
+        reason: signalbox_model_runtime::RefusalReason::Unspecified,
         exchange: ExchangeFacts::default(),
         message_id: None,
         reported_model: Some(ProviderReportedModel::new(SERVED_PROVIDER_MODEL)),
         content: Vec::new(),
         usage: TokenUsage::unreported(),
+        retained_input_tokens: None,
+        retained_output_tokens: None,
     }))
 }
 
@@ -289,10 +298,7 @@ fn assert_execution_failure_blocked(goal: &Goal) {
     // The first failure of a run is under the automatic-resumption budget, so
     // the need text states the scheduled attempt before the operator repair
     // every execution-failure need carries.
-    assert_eq!(
-        need.as_str(),
-        "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal."
-    );
+    assert_eq!(need.as_str(), SCHEDULED_EXECUTION_FAILURE_NEED);
 }
 
 #[track_caller]
@@ -307,22 +313,18 @@ fn execution_failure_turn(goal: &Goal) -> TurnId {
     provenance.turn()
 }
 
-/// S01 / S02 / INV-014 / INV-015: the complete offline
-/// chain creates a session, submits input, lets the scheduler activate it,
-/// invokes the application provider port, and atomically persists the exact
-/// selection, resolved target, consumed frontier, Prepared-to-InFlight
-/// checkpoint sequence, assistant reply, and terminal lifecycle facts.
-/// INV-026: the bridge receives a one-action runtime script, so any repeated
-/// physical interaction exhausts the script and fails the test.
-/// S20: the fixture configures an undated provider-model spelling while the
-/// scripted response echoes that family's canonical dated form, so the chain
-/// also proves the provider-target normalization law of
-/// docs/spec/model-call-execution.md end to end: the call completes and the
-/// supervisor never raises a fatal signal.
+/// the complete offline chain creates a session, submits input, lets the scheduler activate it,
+/// invokes the application provider port, and atomically persists the exact selection, resolved
+/// target, consumed frontier, Prepared-to-InFlight checkpoint sequence, assistant reply, and
+/// terminal lifecycle facts. the bridge receives a one-action runtime script, so any repeated
+/// physical interaction exhausts the script and fails the test. the fixture configures an undated
+/// provider-model spelling while the scripted response echoes that family's canonical dated form,
+/// so the chain also proves the provider-target normalization law of
+/// docs/spec/model-call-execution.md end to end: the call completes and the supervisor never raises
+/// a fatal signal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply()
--> Result<(), Box<dyn Error>> {
+async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
     let mut create = CreateSessionService::new(
@@ -349,14 +351,15 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         nudge,
         tool_dispatch_gate.clone(),
     );
+    let submitted_content = UserContent::try_text(String::from("offline user request"))
+        .expect("fixture user content is admitted");
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
     )) = submit
         .execute(SubmitInputRequest::try_new(
             DurableCommandId::from_uuid(Uuid::from_u128(0x2003)),
             session,
-            UserContent::try_text(String::from("offline user request"))
-                .expect("fixture user content is admitted"),
+            submitted_content.clone(),
             DeliveryRequest::StartWhenNoActiveTurn {
                 configuration: PerInputConfigurationChoices::new(
                     SessionConfigurationDefaultsVersion::first(),
@@ -384,13 +387,14 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         )
         .expect("fixture runtime definition is valid")])
         .expect("one fixture runtime target is unique");
+    let assistant_reply = String::from("offline assistant reply");
     let runtime = ScriptedModel::single(Script::delivering(TerminalEvidence::Completed(
         CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
             reported_model: Some(ProviderReportedModel::new(SERVED_PROVIDER_MODEL)),
             finish: CompletionFinish::EndTurn,
-            content: vec![AssistantPart::Text(String::from("offline assistant reply"))],
+            content: vec![AssistantPart::Text(assistant_reply.clone())],
             usage: TokenUsage::unreported(),
         },
     )));
@@ -439,48 +443,37 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         "post-activation execution failure must stop this isolated scheduler"
     );
 
-    let transcript = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-        "SELECT entry.payload_kind,
-                accepted_part.text_value,
-                entry.assistant_text_value
-           FROM turn_lifecycle AS lifecycle
-           JOIN context_frontier_member AS member
-             ON member.owning_session_id = lifecycle.session_id
-            AND member.context_frontier_id = lifecycle.terminal_frontier_id
-           JOIN semantic_transcript_entry AS entry
-             ON entry.source_session_id = member.source_session_id
-            AND entry.semantic_entry_id = member.semantic_entry_id
-           LEFT JOIN accepted_input AS accepted
-             ON accepted.session_id = entry.source_session_id
-            AND accepted.accepted_input_id = entry.origin_accepted_input_id
-           LEFT JOIN accepted_input_content_part AS accepted_part
-             ON accepted_part.accepted_input_id = accepted.accepted_input_id
-            AND accepted_part.position = 0
-            AND accepted_part.part_kind = 'text'
-          WHERE lifecycle.session_id = $1
-            AND lifecycle.turn_id = $2
-          ORDER BY member.member_position",
-    )
-    .bind(session.into_uuid())
-    .bind(turn.into_uuid())
-    .fetch_all(&pool)
-    .await?;
-    assert_eq!(
-        transcript,
-        vec![
-            (
-                String::from("origin_accepted_input"),
-                Some(String::from("offline user request")),
-                None,
-            ),
-            (
-                String::from("assistant_text"),
-                None,
-                Some(String::from("offline assistant reply")),
-            ),
-            (String::from("turn_completed"), None, None),
-        ]
-    );
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the fixture session has a transcript");
+    let [user_entry, assistant_entry, completed_entry] = transcript.entries() else {
+        panic!("the completed fixture transcript has exactly three entries");
+    };
+    let ProcessTranscriptEntry::User {
+        content: persisted_content,
+        ..
+    } = user_entry
+    else {
+        panic!("the first transcript entry must be user content: {user_entry:?}");
+    };
+    assert_eq!(persisted_content, &submitted_content);
+    let ProcessTranscriptEntry::Assistant {
+        content: persisted_reply,
+        ..
+    } = assistant_entry
+    else {
+        panic!("the second transcript entry must be assistant content: {assistant_entry:?}");
+    };
+    assert_eq!(persisted_reply, &assistant_reply);
+    let ProcessTranscriptEntry::TurnCompleted {
+        turn: completed_turn,
+        ..
+    } = completed_entry
+    else {
+        panic!("the third transcript entry must complete the turn: {completed_entry:?}");
+    };
+    assert_eq!(*completed_turn, turn);
 
     let terminal_shape: (i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -557,15 +550,28 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
     Ok(())
 }
 
-/// INV-048: a completed goal turn is followed without user input, and an
-/// unsuccessful successor blocks with scheduler provenance. This reproduces
-/// the fleet's blocked-after-restart cycle: a fresh daemon re-arms the pending
-/// resumption exactly once, and another failed resume returns to a durable
-/// execution-failure block instead of losing or double-applying the attempt.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_restart_rearms_blocked_resumed_blocked_cycle_once()
--> Result<(), Box<dyn Error>> {
+struct GoalFailureFixture<Pass, Probe> {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    goal: Goal,
+    scheduler: SchedulerLoop<InProcessEligibilityWorkSource<PostgresEligibilitySweep>, Pass>,
+    operation_count: Probe,
+    nudge: signalbox_application::InProcessEligibilityNudge,
+    fatal: signalboxd::FatalExecutionSignal,
+}
+
+/// Runs an owned goal through a completed turn and unsuccessful successor, or
+/// releases its activated first turn before that turn finishes unsuccessfully.
+async fn goal_failure_block_after_success(
+    ownership: signalbox_domain::SessionOwnership,
+) -> Result<
+    GoalFailureFixture<
+        impl signalbox_application::EligibilityPass<Error: ClassifyOperatorFailure + Send + 'static>
+        + Send,
+        impl Fn() -> usize,
+    >,
+    Box<dyn Error>,
+> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
@@ -597,18 +603,21 @@ async fn s_goal_inv048_restart_rearms_blocked_resumed_blocked_cycle_once()
         )
         .await?;
     assert_goal_command_applied(attached);
-
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
     let restart_nudge = nudge.clone();
-    let restart_configuration = configuration.clone();
     let _ = nudge.nudge(session);
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
-    let runtime = ScriptedModel::following([
-        goal_completion_script(),
-        goal_refusal_script(),
-        goal_refusal_script(),
-    ]);
+    let runtime = match ownership {
+        signalbox_domain::SessionOwnership::Owned => ScriptedModel::following([
+            goal_completion_script(),
+            goal_refusal_script(),
+            goal_refusal_script(),
+        ]),
+        signalbox_domain::SessionOwnership::Unmonitored => {
+            ScriptedModel::following([goal_refusal_script()])
+        }
+    };
     let provider =
         RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog(), None);
     let credential_reference = ModelCallCredentialReference::new("scripted-goal-test");
@@ -630,36 +639,66 @@ async fn s_goal_inv048_restart_rearms_blocked_resumed_blocked_cycle_once()
             Vec::new(),
         )),
     );
+    let disposition = PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration,
+        nudge,
+        GoalModeNumericBounds::new(None, None, None, None, None),
+    );
     let activated_pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
             UuidV7StartEligibleTurnIdGenerator,
             StartEligibleTurnRepository::new(pool.clone()),
         ),
-        execution,
+        execution.clone(),
     );
-    let pass = GoalAwareEligibilityPass::new(
-        activated_pass,
-        PostgresGoalPassDisposition::new(
-            pool.clone(),
-            configuration,
-            nudge,
-            GoalModeNumericBounds::new(None, None, None, None),
-        ),
-    );
+    let pass = GoalAwareEligibilityPass::new(activated_pass, disposition.clone());
     let mut scheduler = SchedulerLoop::new(work_source, pass);
-    let observation_pool = pool.clone();
-    let fatal_shutdown = fatal_execution.clone();
-    let shutdown = async move {
-        tokio::select! {
-            () = wait_for_execution_failure_block(&observation_pool, session) => {}
-            () = fatal_shutdown.wait() => {}
+    match ownership {
+        signalbox_domain::SessionOwnership::Owned => {
+            let observation_pool = pool.clone();
+            let fatal_shutdown = fatal_execution.clone();
+            let shutdown = async move {
+                tokio::select! {
+                    () = wait_for_execution_failure_block(&observation_pool, session) => {}
+                    () = fatal_shutdown.wait() => {}
+                }
+            };
+            assert_eq!(
+                timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
+                SchedulerLoopExit::Shutdown
+            );
         }
-    };
-
-    assert_eq!(
-        timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
-        SchedulerLoopExit::Shutdown
-    );
+        signalbox_domain::SessionOwnership::Unmonitored => {
+            let mut activation = StartEligibleTurnService::new(
+                UuidV7StartEligibleTurnIdGenerator,
+                StartEligibleTurnRepository::new(pool.clone()),
+            );
+            let StartEligibleTurnOutcome::Activated(activated) =
+                activation.execute(session).await?
+            else {
+                panic!("the owned goal turn must activate before release")
+            };
+            let released = signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository::new(pool.clone())
+                .handle(
+                    signalbox_domain::SessionLifecycleCommand::new(
+                        DurableCommandId::from_uuid(Uuid::from_u128(0x2103)),
+                        session,
+                        signalbox_domain::SessionLifecycleOperation::Release,
+                    ),
+                    signalbox_domain::CommandPrincipal::Operator,
+                )
+                .await?;
+            assert!(matches!(
+                released,
+                signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandHandlingOutcome::Recorded(
+                    signalbox_domain::SessionLifecycleCommandResult::Applied(_)
+                )
+            ));
+            execution.execute(activated).await?;
+            disposition.reconcile_success(session).await?;
+        }
+    }
     assert!(
         !fatal_execution.is_triggered(),
         "a provider refusal is a durable unsuccessful turn, not a fatal execution defect"
@@ -669,11 +708,75 @@ async fn s_goal_inv048_restart_rearms_blocked_resumed_blocked_cycle_once()
         .load_goal(session)
         .await?
         .expect("the attached goal remains readable");
-    assert_execution_failure_blocked(&goal);
-    assert_ne!(first_turn.turn(), execution_failure_turn(&goal));
+    let goal_turn_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM goal_turn WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
 
-    let restarted =
-        PostgresGoalPassDisposition::new(pool.clone(), restart_configuration, restart_nudge);
+    match ownership {
+        signalbox_domain::SessionOwnership::Owned => {
+            assert_eq!(goal_turn_count, 2);
+            assert_eq!(runtime.received_operations().len(), 2);
+            assert_ne!(first_turn.turn(), execution_failure_turn(&goal));
+        }
+        signalbox_domain::SessionOwnership::Unmonitored => {
+            assert_eq!(goal_turn_count, 1);
+            assert_eq!(runtime.received_operations().len(), 1);
+            assert_eq!(first_turn.turn(), execution_failure_turn(&goal));
+        }
+    }
+
+    Ok(GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        scheduler,
+        operation_count: move || runtime.received_operations().len(),
+        nudge: restart_nudge,
+        fatal: fatal_execution,
+    })
+}
+
+/// a completed goal turn is followed without user input, and an
+/// unsuccessful successor blocks with scheduler provenance without a retry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s_goal_success_continues_and_unsuccessful_turn_blocks_without_retry()
+-> Result<(), Box<dyn Error>> {
+    let GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        ..
+    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Owned).await?;
+    assert_execution_failure_blocked(&goal);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Startup inventory re-arms a pending goal resumption once; another refusal blocks durably.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn restart_rearms_blocked_resumed_blocked_cycle_once() -> Result<(), Box<dyn Error>> {
+    let GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        mut scheduler,
+        operation_count,
+        nudge,
+        fatal,
+    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Owned).await?;
+    let session = goal.session();
+    assert_execution_failure_blocked(&goal);
+    let restarted = PostgresGoalPassDisposition::new(
+        pool.clone(),
+        support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?,
+        nudge,
+        GoalModeNumericBounds::new(None, None, None, None, None),
+    );
     assert_eq!(
         restarted
             .reconcile_automatic_resumptions_after_restart()
@@ -693,7 +796,7 @@ async fn s_goal_inv048_restart_rearms_blocked_resumed_blocked_cycle_once()
     );
 
     let observation_pool = pool.clone();
-    let fatal_shutdown = fatal_execution.clone();
+    let fatal_shutdown = fatal.clone();
     let shutdown = async move {
         tokio::select! {
             () = wait_for_goal_event_count(
@@ -710,7 +813,7 @@ async fn s_goal_inv048_restart_rearms_blocked_resumed_blocked_cycle_once()
         SchedulerLoopExit::Shutdown
     );
 
-    let recovered_goal = goal_repository
+    let recovered_goal = GoalRepository::new(pool.clone())
         .load_goal(session)
         .await?
         .expect("the recovered goal remains readable");
@@ -722,10 +825,153 @@ async fn s_goal_inv048_restart_rearms_blocked_resumed_blocked_cycle_once()
 
     assert_execution_failure_blocked(&recovered_goal);
     assert_eq!(recovered_goal_turn_count, RECOVERY_CYCLE_TURN_COUNT);
+    assert_eq!(i64::try_from(operation_count())?, RECOVERY_CYCLE_TURN_COUNT);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// An unmonitored session is owed no automatic resumption, and its failure
+/// block's need says so instead of promising one.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_unmonitored_sessions_failure_block_schedules_no_resumption()
+-> Result<(), Box<dyn Error>> {
+    let GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        ..
+    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    let GoalState::Blocked { need, .. } = goal.current().state() else {
+        panic!("the unmonitored goal must be blocked");
+    };
     assert_eq!(
-        i64::try_from(runtime.received_operations().len())?,
-        RECOVERY_CYCLE_TURN_COUNT
+        need.as_str(),
+        "The goal turn failed to execute and the session is unmonitored, so no automatic resumption is scheduled. Resolve the failed goal turn's execution condition, then resume the goal."
     );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// a goal turn whose durable recovery cause requires an operator is
+/// parked by the shared resume planner, not only by the direct disposition
+/// callback that reads the cause.
+///
+/// This drives the sequence that reaches `reconcile_success` with the cause
+/// already recorded: the turn terminalizes as a call-free compaction failure
+/// writing its `goal_execution_failure_recovery` row, the direct
+/// `block_execution_failure` callback never runs — which is what a daemon
+/// restart between the failing commit and the disposition future does — and the
+/// next pass reconciles the still-undisposed terminal turn. The appended block
+/// must carry the operator-required need, because planning it from block
+/// provenance alone armed a resume into the same impossible compaction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s_goal_reconciled_success_parks_a_durably_non_resumable_failure()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
+    let mut create = CreateSessionService::new(
+        UuidV7SessionIdGenerator,
+        CreateSessionRepository::new(pool.clone(), configuration.session_credential_pin()),
+    );
+    let CreateSessionOutcome::Applied(created) = create
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x2301)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )?)
+        .await?
+    else {
+        panic!("the unique fixture command must create its session")
+    };
+    let session = created.session();
+    let attached_turn = goal_turn_candidates(0x2401);
+    let goal_repository = GoalRepository::new(pool.clone());
+    let attached = goal_repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x2302)),
+                session,
+                GoalUserAction::Attach(goal_statement("finish the commissioned task")),
+            ),
+            Some(attached_turn),
+            |_| None,
+        )
+        .await?;
+    assert_goal_command_applied(attached);
+
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x2501)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x2502)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x2503)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(0x2504)),
+            ),
+        )
+        .await?
+        .expect("the queued goal turn has an activation preview");
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(0x2601)),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0x2602))),
+    )])
+    .expect("one fixture target forms a catalog");
+    let closure = activation
+        .commit_compaction_failure_preview(
+            preview,
+            &PostgresModelCallRepository::new(
+                pool.clone(),
+                targets,
+                ModelCallCredentialReference::new("compaction-failure-test-provider"),
+            ),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x2701)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x2702)),
+            ),
+            TurnTerminalCause::ContextCompactionWall,
+            Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit),
+        )
+        .await?;
+
+    assert_eq!(
+        closure,
+        CommitCompactionFailurePreviewOutcome::Failed(attached_turn.turn())
+    );
+    assert_eq!(
+        goal_repository
+            .execution_failure_recovery_cause(session, attached_turn.turn())
+            .await?,
+        Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit)
+    );
+
+    let (nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration,
+        nudge,
+        GoalModeNumericBounds::new(None, None, None, None, None),
+    )
+    .reconcile_success(session)
+    .await?;
+
+    let goal = goal_repository
+        .load_goal(session)
+        .await?
+        .expect("the attached goal remains readable");
+    let GoalState::Blocked { reason, need } = goal.current().state() else {
+        panic!("the reconciled terminal failure must block the goal")
+    };
+
+    assert_eq!(*reason, GoalBlockedReasonKind::ExecutionFailure);
+    assert_eq!(need.as_str(), CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED);
+    assert_eq!(execution_failure_turn(&goal), attached_turn.turn());
 
     pool.close().await;
     drop(container);
@@ -774,6 +1020,138 @@ async fn debug_driver_rejects_invalid_reply_before_durable_writes() -> Result<()
             .await?,
         0
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Waits for the armed resumption to append its `resumed` event.
+async fn resumed_goal(pool: &PgPool, session: SessionId) -> Result<Goal, Box<dyn Error>> {
+    let repository = GoalRepository::new(pool.clone());
+    let goal = timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(goal) = repository.load_goal(session).await.ok().flatten()
+                && matches!(
+                    goal.events().last().map(GoalEvent::kind),
+                    Some(GoalEventKind::Resumed { .. })
+                )
+            {
+                return goal;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    Ok(goal)
+}
+
+/// Waits for adoption to persist the scheduled need before its delayed resume.
+async fn armed_goal(pool: &PgPool, session: SessionId) -> Result<Goal, Box<dyn Error>> {
+    let repository = GoalRepository::new(pool.clone());
+    let goal = timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(goal) = repository.load_goal(session).await.ok().flatten()
+                && matches!(
+                    goal.current().state(),
+                    GoalState::Blocked { need, .. }
+                        if need.as_str() == SCHEDULED_EXECUTION_FAILURE_NEED
+                )
+            {
+                return goal;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    Ok(goal)
+}
+
+async fn adopt_session(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn Error>> {
+    let adopted =
+        signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository::new(
+            pool.clone(),
+        )
+        .handle(
+            signalbox_domain::SessionLifecycleCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x2104)),
+                session,
+                signalbox_domain::SessionLifecycleOperation::Adopt {
+                    finish_condition: None,
+                },
+            ),
+            signalbox_domain::CommandPrincipal::Operator,
+        )
+        .await?;
+    assert!(matches!(
+        adopted,
+        signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandHandlingOutcome::Recorded(
+            signalbox_domain::SessionLifecycleCommandResult::Applied(_)
+        )
+    ));
+    Ok(())
+}
+
+/// Adopting a session whose goal is blocked arms the resumption the
+/// unmonitored block was not owed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Error>> {
+    let GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        ..
+    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    let session = goal.session();
+    adopt_session(&pool, session).await?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
+    let (nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration,
+        nudge,
+        GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
+    )
+    .arm_blocked_goal_resumption(session);
+
+    let resumed = resumed_goal(&pool, session).await?;
+
+    assert_eq!(*resumed.current().state(), GoalState::Pursuing);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Adoption durably changes the unmonitored block's effective need before
+/// the configured backoff elapses.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn adopting_a_blocked_goal_persists_its_scheduled_need() -> Result<(), Box<dyn Error>> {
+    let GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        ..
+    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    let session = goal.session();
+    adopt_session(&pool, session).await?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
+    let (nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration,
+        nudge,
+        GoalModeNumericBounds::new(Some(Duration::from_secs(60)), None, None, None, None),
+    )
+    .arm_blocked_goal_resumption(session);
+
+    let armed = armed_goal(&pool, session).await?;
+
+    assert_execution_failure_blocked(&armed);
 
     pool.close().await;
     drop(container);

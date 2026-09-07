@@ -86,9 +86,8 @@ pub enum IssuedOperationRef {
 
 /// A canonical nonempty set of exact issued-operation references.
 ///
-/// Empty or duplicate input is rejected by [`Self::try_from_operations`].
-/// S04 / S06 / INV-006 / INV-025 / INV-026: the private field also prevents
-/// bypassing that boundary:
+/// Empty or duplicate input is rejected by [`Self::try_from_operations`]. the private field also
+/// prevents bypassing that boundary:
 ///
 /// ```compile_fail
 /// use std::collections::BTreeSet;
@@ -159,8 +158,7 @@ pub enum NonEmptyIssuedOperationRefsError {
 /// Authority from one applied exact-set user decision to stop for
 /// reconciliation.
 ///
-/// S06 / INV-006 / INV-026: raw command and turn identities cannot construct
-/// this proof:
+/// raw command and turn identities cannot construct this proof:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{AppliedStopForReconciliationProof, DurableCommandId, TurnId};
@@ -230,9 +228,8 @@ pub enum ReconciliationReason {
 
 /// Complete immutable evidence named by a reconciliation-required turn.
 ///
-/// S04 / S06 / S07 / INV-006 / INV-025 / INV-026 / INV-029: fields remain
-/// private because only the later aggregate can validate that the set is exact
-/// and unacknowledged and that the reason matches its durable evidence:
+/// fields remain private because only the later aggregate can validate that the set is exact and
+/// unacknowledged and that the reason matches its durable evidence:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{NonEmptyIssuedOperationRefs, ReconciliationMarker, ReconciliationReason};
@@ -313,17 +310,15 @@ pub(crate) fn test_reconciliation_marker(
 
 /// One active phase; every value retains the session's progressing-turn slot.
 ///
-/// Variant fields make a running phase own exactly one current attempt and
-/// each wait own its exact subject with no optional attempt. S04 / S06 /
-/// INV-006 / INV-009: a current attempt cannot be omitted from `Running`:
+/// Variant fields make a running phase own exactly one current attempt and each wait own its exact
+/// subject with no optional attempt. a current attempt cannot be omitted from `Running`:
 ///
 /// ```compile_fail
 /// use signalbox_domain::ActiveTurnPhase;
 /// let _ = ActiveTurnPhase::Running;
 /// ```
 ///
-/// S10 / INV-006 / INV-009 / INV-010: nor can an approval wait carry an
-/// independent attempt:
+/// nor can an approval wait carry an independent attempt:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{ActiveTurnPhase, CurrentTurnAttempt, ToolRequestId};
@@ -379,16 +374,14 @@ impl ActiveTurnPhase {
 
 /// The immutable terminal classification carried by a turn.
 ///
-/// S07 / INV-006 / INV-029: cancellation cannot omit its purpose-specific
-/// proof:
+/// cancellation cannot omit its purpose-specific proof:
 ///
 /// ```compile_fail
 /// use signalbox_domain::TurnDisposition;
 /// let _ = TurnDisposition::Cancelled;
 /// ```
 ///
-/// S04 / S06 / S07 / INV-006 / INV-025 / INV-026 / INV-029: reconciliation
-/// likewise cannot omit its complete marker:
+/// reconciliation likewise cannot omit its complete marker:
 ///
 /// ```compile_fail
 /// use signalbox_domain::TurnDisposition;
@@ -412,6 +405,65 @@ pub enum TurnDisposition {
         /// The exact nonempty ambiguity set and typed reason.
         marker: ReconciliationMarker,
     },
+    /// A queued turn that never activated was retired from the queue.
+    ///
+    /// It contributes no terminal frontier and is excluded from queue
+    /// predecessor selection.
+    Retired,
+}
+
+/// The mandatory typed reason one turn reached `terminal`.
+///
+/// The set is closed and every terminalization names exactly one member.
+/// `UnclassifiedFailure` is the only catch-all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnTerminalCause {
+    /// The turn produced its conversational outcome.
+    Completed,
+    /// The provider produced an explicit refusal.
+    ModelRefusal,
+    /// An applied interrupt ended the turn.
+    InterruptApplied,
+    /// Unacknowledged physical model-call ambiguity requires reconciliation.
+    ModelCallAmbiguous,
+    /// Unacknowledged physical tool-attempt ambiguity requires reconciliation.
+    ToolAttemptAmbiguous,
+    /// A model call the turn owned ended failed.
+    ModelCallFailed,
+    /// No resolved provider target admitted the call the turn needed.
+    ModelTargetUnavailable,
+    /// Attachment preparation could not produce the call's input.
+    AttachmentPreparationFailed,
+    /// Provider capability preparation reported a trustworthy local failure.
+    CapabilityPreparationFailed,
+    /// The turn already held the maximum admitted automatic tool rounds.
+    ToolRoundLimitReached,
+    /// A tool attempt the turn owned was lost with its executing process.
+    ToolAttemptLost,
+    /// Every member of the turn's credential pool was exhausted.
+    CredentialPoolExhausted,
+    /// A tool request needed an approval decision no attended surface could give.
+    HeadlessApprovalEscalation,
+    /// A restart found the turn's work with no live process owning it.
+    AbandonedAtRestart,
+    /// The liveness watchdog closed the turn on repeated staleness evidence.
+    WatchdogStaleTurn,
+    /// Reserved context headroom could not admit the turn's continuation.
+    ContextHeadroomExhausted,
+    /// Context compaction could not fit the input it was asked to compact.
+    ContextCompactionWall,
+    /// Context compaction failed for a reason other than an unfittable input.
+    ContextCompactionFailed,
+    /// The turn's bounded automatic compaction attempt was already spent.
+    ReportedUsageContextCompactionExhausted,
+    /// Automatic compaction did not restore reserved context headroom.
+    ReportedUsageContextStillExceeded,
+    /// Durable evidence supports failure and classifies no reason.
+    UnclassifiedFailure,
+    /// A queued goal turn became ineligible under its goal's lineage.
+    GoalTurnIneligible,
+    /// A queued turn retired by its session's closure.
+    SessionClosed,
 }
 
 #[cfg(test)]
@@ -469,7 +521,7 @@ mod tests {
         }
     }
 
-    /// INV-025 / INV-026: baseline operation kinds remain tagged and distinct.
+    /// baseline operation kinds remain tagged and distinct.
     #[test]
     fn issued_operation_reference_kinds_do_not_collapse() {
         let model = IssuedOperationRef::ModelCall(model_call_id(1));
@@ -478,8 +530,7 @@ mod tests {
         assert_ne!(model, tool);
     }
 
-    /// S04 / S06 / INV-006 / INV-025 / INV-026: empty and duplicate caller
-    /// collections cannot construct the canonical ambiguity set.
+    /// empty and duplicate caller collections cannot construct the canonical ambiguity set.
     #[test]
     fn ambiguity_set_rejects_empty_and_duplicate_input() {
         assert_eq!(
@@ -494,8 +545,7 @@ mod tests {
         );
     }
 
-    /// S04 / S06 / INV-006 / INV-025 / INV-026: valid reorderings construct
-    /// equal canonical sets and preserve every exact reference.
+    /// valid reorderings construct equal canonical sets and preserve every exact reference.
     #[test]
     fn ambiguity_set_is_canonical_and_exact() {
         let forward = operations(&[1, 2, 3]);
@@ -523,8 +573,8 @@ mod tests {
         );
     }
 
-    /// S01 / S07 / S09 / INV-009: starting lineage remains a closed typed
-    /// algebra independently of frontier construction authority.
+    /// starting lineage remains a closed typed algebra independently of frontier construction
+    /// authority.
     #[test]
     fn starting_lineage_distinguishes_first_and_exact_predecessor() {
         let predecessor = turn_id(1);
@@ -547,11 +597,10 @@ mod tests {
         ));
     }
 
-    /// S01 / S09: the opaque start value retains the exact lineage/frontier
-    /// pair, but its module-private construction does not claim the later
-    /// eligibility transition is implemented.
+    /// the opaque start value retains the exact lineage/frontier pair, but its module-private
+    /// construction does not claim the later eligibility transition is implemented.
     #[test]
-    fn s01_s09_turn_start_shape_couples_lineage_and_exact_frontier() {
+    fn turn_start_shape_couples_lineage_and_exact_frontier() {
         let snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
             session_id(1),
             context_frontier_id(1),
@@ -578,8 +627,7 @@ mod tests {
         assert_eq!(start.frontier(), snapshot.frontier());
     }
 
-    /// S04 / S06 / S10 / INV-006 / INV-009 / INV-010: every active phase
-    /// retains the slot and structurally carries exactly its required subject.
+    /// every active phase retains the slot and structurally carries exactly its required subject.
     #[test]
     fn active_phases_retain_slot_with_exact_subjects() {
         let attempt_id = turn_attempt_id(1);
@@ -626,8 +674,7 @@ mod tests {
         ));
     }
 
-    /// S04 / S06 / S07 / INV-006 / INV-025 / INV-026 / INV-029: every marker
-    /// reason retains the exact canonical ambiguity set and typed authority.
+    /// every marker reason retains the exact canonical ambiguity set and typed authority.
     #[test]
     fn reconciliation_markers_preserve_exact_sets_and_reasons() {
         let ambiguous_operations = operations(&[1, 2]);
@@ -668,8 +715,7 @@ mod tests {
         assert_eq!(marker.reason(), &reason);
     }
 
-    /// S07 / INV-006 / INV-029: cancellation and reconciliation terminal
-    /// values retain their exact proof-bearing payloads.
+    /// cancellation and reconciliation terminal values retain their exact proof-bearing payloads.
     #[test]
     fn terminal_dispositions_preserve_exact_payloads() {
         let expected_cause = interrupt(1);
@@ -730,7 +776,7 @@ mod tests {
         .assert_debug_eq(&(cancelled, reconciliation));
     }
 
-    /// INV-006 / INV-026: the user-stop proof exposes only its exact applied
+    /// the user-stop proof exposes only its exact applied
     /// command and turn while raw identities cannot construct it publicly.
     #[test]
     fn user_stop_proof_preserves_exact_identity() {

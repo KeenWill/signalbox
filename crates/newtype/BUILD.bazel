@@ -1,0 +1,27 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tooling/bazel:package.bzl", "rust_package")
+
+rust_package(exports = [])
+
+rust_library(
+    name = "signalbox_newtype",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    lint_config = ":cargo_lints",
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    visibility = ["//:__subpackages__"],
+)
+
+rust_test(
+    name = "unit_tests",
+    size = "small",
+    crate = ":signalbox_newtype",
+    lint_config = ":cargo_lints",
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+)

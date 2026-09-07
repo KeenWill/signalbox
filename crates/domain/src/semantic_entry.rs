@@ -6,6 +6,8 @@
 
 use std::num::NonZeroU64;
 
+use serde::Deserialize;
+
 use crate::{
     AcceptedInputId, ContextCompactionRange, DelegationContent, DelegationMessageId,
     DelegationOutcome, DelegationWaitMode, DirectModelSelection, ImportedSourceAttestation,
@@ -39,6 +41,100 @@ impl AssistantText {
         self.0.into_string()
     }
 }
+
+/// One complete provider-produced compaction content block.
+///
+/// The JSON bytes remain opaque after the `compaction` discriminator is
+/// checked so provider metadata can be replayed unchanged.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ProviderCompactionBlock(String);
+
+impl ProviderCompactionBlock {
+    /// Checks the provider block discriminator while retaining the exact JSON.
+    pub fn try_new(value: String) -> Result<Self, ProviderCompactionBlockError> {
+        let mut deserializer = serde_json::Deserializer::from_str(&value);
+        deserializer.disable_recursion_limit();
+        let parsed =
+            serde_json::Value::deserialize(serde_stacker::Deserializer::new(&mut deserializer))
+                .map_err(|_| ProviderCompactionBlockError)?;
+        deserializer
+            .end()
+            .map_err(|_| ProviderCompactionBlockError)?;
+        if parsed.get("type").and_then(serde_json::Value::as_str) != Some("compaction") {
+            return Err(ProviderCompactionBlockError);
+        }
+        match parsed.get("content") {
+            Some(serde_json::Value::String(content)) if !content.is_empty() => {}
+            Some(serde_json::Value::Null) => {}
+            _ => return Err(ProviderCompactionBlockError),
+        }
+        if !matches!(
+            parsed.get("encrypted_content"),
+            None | Some(serde_json::Value::String(_)) | Some(serde_json::Value::Null)
+        ) {
+            return Err(ProviderCompactionBlockError);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the exact provider JSON.
+    pub fn as_json(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the exact provider JSON.
+    pub fn into_json(self) -> String {
+        self.0
+    }
+}
+
+/// A stored provider compaction block is not a complete `compaction` object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderCompactionBlockError;
+
+/// One complete provider reasoning item retained as exact JSON text.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ProviderReasoningItem(String);
+
+impl ProviderReasoningItem {
+    /// Checks the reasoning discriminator, non-empty identity, and encrypted content.
+    pub fn try_new(value: String) -> Result<Self, ProviderReasoningItemError> {
+        let mut deserializer = serde_json::Deserializer::from_str(&value);
+        deserializer.disable_recursion_limit();
+        let parsed =
+            serde_json::Value::deserialize(serde_stacker::Deserializer::new(&mut deserializer))
+                .map_err(|_| ProviderReasoningItemError)?;
+        deserializer.end().map_err(|_| ProviderReasoningItemError)?;
+        if !parsed.is_object()
+            || parsed.get("type").and_then(serde_json::Value::as_str) != Some("reasoning")
+            || !parsed
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+            || !matches!(
+                parsed.get("encrypted_content"),
+                Some(serde_json::Value::String(_))
+            )
+        {
+            return Err(ProviderReasoningItemError);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the exact provider JSON without re-serialization.
+    pub fn as_json(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the exact provider JSON without re-serialization.
+    pub fn into_json(self) -> String {
+        self.0
+    }
+}
+
+/// A stored reasoning item lacks its discriminator, identity, or encrypted content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderReasoningItemError;
 
 /// The complete semantic transcript-entry payload set.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -118,6 +214,20 @@ pub enum SemanticTranscriptEntryPayload {
         producing_call: ModelCallId,
         /// The exact assistant-owned text.
         value: AssistantText,
+    },
+    /// One opaque provider-produced compaction block with call provenance.
+    ProviderCompaction {
+        /// The outcome-authoritative call that supplied this block.
+        producing_call: ModelCallId,
+        /// The complete block retained for exact replay.
+        block: ProviderCompactionBlock,
+    },
+    /// One complete provider reasoning item with producing-call provenance.
+    ProviderReasoning {
+        /// The outcome-authoritative call that supplied this item.
+        producing_call: ModelCallId,
+        /// The complete item retained for exact replay.
+        item: ProviderReasoningItem,
     },
     /// One logical tool request named by a definitive assistant response.
     AssistantToolUse {
@@ -269,6 +379,31 @@ impl SemanticTranscriptEntryReconstitutionInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_compaction_distinguishes_summary_from_failed_noop() {
+        let summary = ProviderCompactionBlock::try_new(String::from(
+            r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+        ))
+        .expect("complete summary block is valid");
+        let failed = ProviderCompactionBlock::try_new(String::from(
+            r#"{"type":"compaction","content":null,"encrypted_content":null}"#,
+        ))
+        .expect("failed compaction block is replayable");
+
+        assert_eq!(
+            summary.as_json(),
+            r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#
+        );
+        assert_eq!(
+            failed.as_json(),
+            r#"{"type":"compaction","content":null,"encrypted_content":null}"#
+        );
+        assert!(
+            ProviderCompactionBlock::try_new(String::from(r#"{"type":"compaction","content":""}"#))
+                .is_err()
+        );
+    }
     use crate::test_support::{
         accepted_input_id, model_call_id, semantic_transcript_entry_id, session_id,
         tool_request_id, turn_id,
@@ -284,7 +419,7 @@ mod tests {
         )
     }
 
-    /// INV-001 / INV-005 / INV-036: the semantic projection remains a closed
+    /// the semantic projection remains a closed
     /// typed reference to its distinct accepted-input, source-turn, terminal
     /// turn, or tool subject.
     #[test]
@@ -334,10 +469,10 @@ mod tests {
         ));
     }
 
-    /// INV-005: assistant text stays exact, remains distinct from user
+    /// assistant text stays exact, remains distinct from user
     /// content, and retains producing-call provenance.
     #[test]
-    fn adr0042_inv005_assistant_text_is_exact_and_call_correlated() {
+    fn adr0042_assistant_text_is_exact_and_call_correlated() {
         let producing_call = crate::test_support::model_call_id(7);
         let exact = String::from(" \tline one\r\ncafe\u{301}\n ");
         let entry = semantic_entry(SemanticTranscriptEntryPayload::AssistantText {
@@ -362,10 +497,10 @@ mod tests {
         );
     }
 
-    /// INV-006: completion is an explicit turn marker distinct from every
+    /// completion is an explicit turn marker distinct from every
     /// physical model-call outcome.
     #[test]
-    fn adr0042_inv006_completion_marker_names_the_exact_turn() {
+    fn adr0042_completion_marker_names_the_exact_turn() {
         let turn = turn_id(9);
         let entry = semantic_entry(SemanticTranscriptEntryPayload::TurnCompleted { turn });
 
@@ -373,5 +508,66 @@ mod tests {
             entry.payload(),
             SemanticTranscriptEntryPayload::TurnCompleted { turn: actual } if *actual == turn
         ));
+    }
+    #[test]
+    fn reasoning_item_preserves_the_exact_original_json() {
+        let raw = " { \"type\": \"reasoning\", \"id\": \"rs_fixture\", \"summary\": [], \"encrypted_content\": \"opaque\" } ";
+        let item = ProviderReasoningItem::try_new(raw.to_string()).unwrap();
+        assert_eq!(item.as_json(), raw);
+        assert_eq!(item.into_json(), raw);
+    }
+
+    #[test]
+    fn reasoning_item_rejects_trailing_json() {
+        assert!(
+            ProviderReasoningItem::try_new(
+                r#"{"type":"reasoning","id":"rs_fixture","encrypted_content":"opaque"} {}"#
+                    .to_string()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reasoning_item_rejects_non_objects() {
+        assert!(ProviderReasoningItem::try_new("[]".to_string()).is_err());
+    }
+
+    #[test]
+    fn reasoning_item_rejects_a_different_type() {
+        assert!(
+            ProviderReasoningItem::try_new(
+                r#"{"type":"compaction","id":"rs_fixture","encrypted_content":"opaque"}"#
+                    .to_string()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reasoning_item_requires_a_nonempty_id() {
+        for raw in [
+            r#"{"type":"reasoning","encrypted_content":"opaque"}"#,
+            r#"{"type":"reasoning","id":"","encrypted_content":"opaque"}"#,
+        ] {
+            assert!(
+                ProviderReasoningItem::try_new(raw.to_string()).is_err(),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn reasoning_item_requires_nonnull_encrypted_content() {
+        for raw in [
+            r#"{"type":"reasoning","id":"rs_fixture"}"#,
+            r#"{"type":"reasoning","id":"rs_fixture","encrypted_content":null}"#,
+            r#"{"type":"reasoning","id":"rs_fixture","encrypted_content":3}"#,
+        ] {
+            assert!(
+                ProviderReasoningItem::try_new(raw.to_string()).is_err(),
+                "{raw}"
+            );
+        }
     }
 }

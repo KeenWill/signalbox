@@ -12,6 +12,26 @@ use crate::message::AssistantPart;
 use crate::target::ProviderReportedModel;
 use crate::usage::TokenUsage;
 
+/// One provider-reported capacity window, independent of transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimitWindow {
+    /// Remaining percentage as reported, without clamping provider evidence.
+    pub remaining_percent: i64,
+    /// Length of the accounting window, when reported.
+    pub window_duration: Option<Duration>,
+    /// Reset instant, when reported.
+    pub resets_at: Option<SystemTime>,
+}
+
+/// The latest complete collection of capacity windows observed on a call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimitSnapshot {
+    /// Adapter observation time, used to order concurrent reports.
+    pub observed_at: SystemTime,
+    /// Provider windows in adapter-defined stable order.
+    pub windows: Vec<RateLimitWindow>,
+}
+
 /// The terminal report for one executed operation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TerminalReport<C> {
@@ -30,19 +50,16 @@ pub struct TerminalReport<C> {
 ///
 /// - [`Completed`](Self::Completed): `Completed`.
 /// - [`Refused`](Self::Refused): `Refused`.
-/// - [`ProviderError`](Self::ProviderError): `KnownFailed`, for a complete,
-///   correlated definitive provider error response; credential rejection
-///   stays distinguishable via [`ProviderErrorKind::CredentialRejected`].
-/// - [`CancellationConfirmed`](Self::CancellationConfirmed): `Cancelled`, for
-///   a complete, correlated response definitively confirming provider
-///   cancellation.
-/// - [`ProvenUnsent`](Self::ProvenUnsent): `KnownFailed`, or `Cancelled` when
-///   the cause is [`UnsentCause::CancelledBeforeSend`] and the caller holds
-///   the applied-interrupt proof required by
-///   docs/spec/model-call-execution.md.
-/// - [`BoundaryLoss`](Self::BoundaryLoss): `Ambiguous` — the request crossed
-///   or may have crossed the acceptance-capable boundary and no definitive
-///   response classifies it.
+/// - [`ProviderError`](Self::ProviderError): `KnownFailed`, for a complete, correlated definitive
+///   provider error response; credential rejection stays distinguishable via
+///   [`ProviderErrorKind::CredentialRejected`].
+/// - [`CancellationConfirmed`](Self::CancellationConfirmed): `Cancelled`, for a complete,
+///   correlated response definitively confirming provider cancellation.
+/// - [`ProvenUnsent`](Self::ProvenUnsent): `KnownFailed`, or `Cancelled` when the cause is
+///   [`UnsentCause::CancelledBeforeSend`] and the caller holds the applied-interrupt proof required
+///   by docs/spec/model-call-execution.md.
+/// - [`BoundaryLoss`](Self::BoundaryLoss): `Ambiguous` — the request crossed or may have crossed
+///   the acceptance-capable boundary and no definitive response classifies it.
 ///
 /// A provider-reported model identity is carried as a separate fact where
 /// observed; comparing it with the resolved target (the mismatch rule in
@@ -52,6 +69,15 @@ pub enum TerminalEvidence {
     /// A complete, correlated provider response with a terminal success
     /// status and valid completion material.
     Completed(CompletionEvidence),
+    /// A completed response containing provider compaction, with the
+    /// provider-reported retained input that remains relevant to the next
+    /// request. This measure is distinct from the iteration-aggregated usage
+    /// retained on `completion` for billing.
+    CompletedWithProviderCompaction {
+        completion: CompletionEvidence,
+        retained_input_tokens: u64,
+        retained_output_tokens: u64,
+    },
     /// A complete exchange whose response reports the provider's refusal
     /// outcome rather than completion material.
     Refused(RefusalEvidence),
@@ -235,15 +261,29 @@ pub struct CompletionEvidence {
     pub usage: TokenUsage,
 }
 
+/// The provider's typed reason for refusing a response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalReason {
+    ContentPolicy,
+    CyberPolicy,
+    Misalignment,
+    Unspecified,
+}
+
 /// Evidence for a complete exchange the provider reported as refused.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RefusalEvidence {
+    pub reason: RefusalReason,
     pub exchange: ExchangeFacts,
     pub message_id: Option<ProviderMessageId>,
     pub reported_model: Option<ProviderReportedModel>,
     /// Any response parts produced before the refusal, in provider order.
     pub content: Vec<AssistantPart>,
     pub usage: TokenUsage,
+    /// Provider-reported input retained after an in-response compaction.
+    pub retained_input_tokens: Option<u64>,
+    /// Provider-reported output from the final physical compaction iteration.
+    pub retained_output_tokens: Option<u64>,
 }
 
 /// Evidence for a complete, correlated definitive provider error response.

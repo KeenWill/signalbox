@@ -61,6 +61,7 @@ impl FileMediaProvider for SyntheticProvider {
                     return Ok(ProcessorProbeOutput::Candidate {
                         media_type: String::from("</tool><script>alert(1)</script>"),
                         strength: ProbeStrength::Strong,
+                        evidence_bytes: length.get(),
                     });
                 }
                 Some(_) => {}
@@ -69,6 +70,7 @@ impl FileMediaProvider for SyntheticProvider {
             Ok(ProcessorProbeOutput::Candidate {
                 media_type: String::from("application/x-signalbox-synthetic"),
                 strength: ProbeStrength::Strong,
+                evidence_bytes: length.get(),
             })
         })
     }

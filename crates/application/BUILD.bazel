@@ -1,0 +1,26 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+
+CRATE_FEATURES = ["test-support"]
+
+rust_package()
+
+rust_library(
+    name = "signalbox_application",
+    crate_features = CRATE_FEATURES,
+    proc_macro_deps = ["//crates/derive:signalbox_derive"],
+    deps = ["//crates/domain:signalbox_domain"],
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_application",
+    crate_features = CRATE_FEATURES,
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_application",
+    crate_features = CRATE_FEATURES,
+)

@@ -8,6 +8,7 @@
 use std::error::Error;
 
 use expect_test::expect;
+use expectable::print;
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     RootPlacementGlobalReadIntent, SessionConfigurationDefaults, SessionCreationCause,
@@ -15,7 +16,6 @@ use signalbox_domain::{
     SessionPlacementVersion, SessionReadScopeDecision, SessionReadScopeRefusal, TranscriptAncestry,
     UpdateSessionPlacement, UpdateSessionPlacementResult,
 };
-use signalbox_expect_table::table;
 use signalbox_persistence::{
     create_session::{
         CreateSessionCorruption, CreateSessionRepository, CreateSessionRepositoryError,
@@ -37,7 +37,9 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+#[path = "../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+use postgres_test_image::POSTGRES_IMAGE_TAG;
 const DATABASE_NAME: &str = "signalbox_placement";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
@@ -120,7 +122,7 @@ const PAGED_HISTORY_UPDATE_COUNT: u64 = 65;
 const PAGED_HISTORY_EXPECTED_VERSION: u64 = 66;
 const PAGED_HISTORY_PATH_PREFIX: &str = "projects.history.revision";
 
-#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow, serde::Serialize)]
 struct PlacementHistoryRow {
     version: i64,
     event_kind: String,
@@ -236,7 +238,7 @@ async fn scoped_read_fixture() -> Result<ScopedReadFixture, Box<dyn Error>> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_scoped_transcript_open_reads_a_sibling() -> Result<(), Box<dyn Error>> {
+async fn scoped_transcript_open_reads_a_sibling() -> Result<(), Box<dyn Error>> {
     let fixture = scoped_read_fixture().await?;
     let ProcessScopedTranscriptRead::Opened(reader) =
         ProcessReadRepository::new(fixture.pool.clone())
@@ -255,7 +257,7 @@ async fn s36_scoped_transcript_open_reads_a_sibling() -> Result<(), Box<dyn Erro
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_scoped_transcript_open_reads_a_descendant() -> Result<(), Box<dyn Error>> {
+async fn scoped_transcript_open_reads_a_descendant() -> Result<(), Box<dyn Error>> {
     let fixture = scoped_read_fixture().await?;
     let ProcessScopedTranscriptRead::Opened(reader) =
         ProcessReadRepository::new(fixture.pool.clone())
@@ -274,7 +276,7 @@ async fn s36_scoped_transcript_open_reads_a_descendant() -> Result<(), Box<dyn E
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_scoped_transcript_open_refuses_an_ancestor_with_typed_evidence()
+async fn scoped_transcript_open_refuses_an_ancestor_with_typed_evidence()
 -> Result<(), Box<dyn Error>> {
     let fixture = scoped_read_fixture().await?;
     let ProcessScopedTranscriptRead::Refused(refusal) =
@@ -293,7 +295,7 @@ async fn s36_scoped_transcript_open_refuses_an_ancestor_with_typed_evidence()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_scoped_transcript_open_refuses_a_disjoint_subtree_with_typed_evidence()
+async fn scoped_transcript_open_refuses_a_disjoint_subtree_with_typed_evidence()
 -> Result<(), Box<dyn Error>> {
     let fixture = scoped_read_fixture().await?;
     let ProcessScopedTranscriptRead::Refused(refusal) =
@@ -312,7 +314,7 @@ async fn s36_scoped_transcript_open_refuses_a_disjoint_subtree_with_typed_eviden
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_pathless_requester_keeps_legacy_transcript_reads() -> Result<(), Box<dyn Error>> {
+async fn pathless_requester_keeps_legacy_transcript_reads() -> Result<(), Box<dyn Error>> {
     let fixture = scoped_read_fixture().await?;
     let ProcessScopedTranscriptRead::Opened(reader) =
         ProcessReadRepository::new(fixture.pool.clone())
@@ -331,7 +333,7 @@ async fn s36_pathless_requester_keeps_legacy_transcript_reads() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_root_placement_reads_every_transcript_globally() -> Result<(), Box<dyn Error>> {
+async fn root_placement_reads_every_transcript_globally() -> Result<(), Box<dyn Error>> {
     let fixture = scoped_read_fixture().await?;
     let ProcessScopedTranscriptRead::Opened(reader) =
         ProcessReadRepository::new(fixture.pool.clone())
@@ -382,10 +384,7 @@ fn creation(
 ) -> signalbox_domain::PreparedCreateSession {
     CreateSession::new_with_placement(
         command_id,
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(Uuid::from_u128(
                 ARBITRARY_DEFAULT_MODEL_SELECTION_ID_SEED,
@@ -503,7 +502,7 @@ async fn install_reserved_command_claim_guard(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_placement_update_rejects_reserved_command_identities_before_claim()
+async fn placement_update_rejects_reserved_command_identities_before_claim()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(ARBITRARY_RESERVED_IDENTITY_SESSION_ID_SEED);
@@ -550,8 +549,7 @@ async fn s36_inv012_placement_update_rejects_reserved_command_identities_before_
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_root_creation_record_states_global_read_intent_explicitly()
--> Result<(), Box<dyn Error>> {
+async fn root_creation_record_states_global_read_intent_explicitly() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let command_id = command(ARBITRARY_ROOT_CREATION_COMMAND_ID_SEED);
     let session_id = session(ARBITRARY_ROOT_CREATION_SESSION_ID_SEED);
@@ -587,7 +585,7 @@ async fn s01_root_creation_record_states_global_read_intent_explicitly()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_pathless_creation_keeps_the_legacy_unscoped_value() -> Result<(), Box<dyn Error>> {
+async fn pathless_creation_keeps_the_legacy_unscoped_value() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let command_id = command(ARBITRARY_PATHLESS_CREATION_COMMAND_ID_SEED);
     let session_id = session(ARBITRARY_PATHLESS_CREATION_SESSION_ID_SEED);
@@ -647,7 +645,7 @@ async fn placement_update_fixture() -> Result<PlacementUpdateFixture, Box<dyn Er
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_placement_update_appends_created_and_updated_history() -> Result<(), Box<dyn Error>> {
+async fn placement_update_appends_created_and_updated_history() -> Result<(), Box<dyn Error>> {
     let fixture = placement_update_fixture().await?;
     fixture.repository.handle(fixture.update).await?;
     let history: Vec<PlacementHistoryRow> = sqlx::query_as(
@@ -667,7 +665,7 @@ async fn s36_placement_update_appends_created_and_updated_history() -> Result<()
         │       2 │ updated    │
         └─────────┴────────────┘
     "#]]
-    .assert_eq(&table(history));
+    .assert_eq(&print(&history));
 
     fixture.pool.close().await;
     drop(fixture.container);
@@ -709,7 +707,7 @@ async fn missing_placement_head_fixture() -> Result<MissingPlacementHeadFixture,
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_public_placement_read_rejects_a_missing_current_head() -> Result<(), Box<dyn Error>> {
+async fn public_placement_read_rejects_a_missing_current_head() -> Result<(), Box<dyn Error>> {
     let fixture = missing_placement_head_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
         .load_current(fixture.session)
@@ -727,7 +725,7 @@ async fn s36_public_placement_read_rejects_a_missing_current_head() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_placement_update_rejects_a_missing_current_head() -> Result<(), Box<dyn Error>> {
+async fn placement_update_rejects_a_missing_current_head() -> Result<(), Box<dyn Error>> {
     let fixture = missing_placement_head_fixture().await?;
     let update = UpdateSessionPlacement::new(
         command(ARBITRARY_MISSING_HEAD_UPDATE_COMMAND_ID_SEED),
@@ -751,8 +749,7 @@ async fn s36_placement_update_rejects_a_missing_current_head() -> Result<(), Box
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_inv012_creation_replay_rejects_a_missing_current_placement_head()
--> Result<(), Box<dyn Error>> {
+async fn creation_replay_rejects_a_missing_current_placement_head() -> Result<(), Box<dyn Error>> {
     let fixture = missing_placement_head_fixture().await?;
     let error = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
         .handle(fixture.creation)
@@ -817,8 +814,8 @@ async fn initial_placement_event_shape_fixture()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_inv012_native_creation_replay_rejects_initial_placement_predecessor()
--> Result<(), Box<dyn Error>> {
+async fn native_creation_replay_rejects_initial_placement_predecessor() -> Result<(), Box<dyn Error>>
+{
     let fixture = initial_placement_event_shape_fixture().await?;
     sqlx::query(
         "UPDATE session_placement_event
@@ -847,8 +844,8 @@ async fn s36_inv002_inv012_native_creation_replay_rejects_initial_placement_pred
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_inv012_native_creation_replay_rejects_initial_placement_event_kind()
--> Result<(), Box<dyn Error>> {
+async fn native_creation_replay_rejects_initial_placement_event_kind() -> Result<(), Box<dyn Error>>
+{
     let fixture = initial_placement_event_shape_fixture().await?;
     sqlx::query(
         "UPDATE session_placement_event
@@ -917,7 +914,7 @@ async fn stateful_rejection_receipt_fixture()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_mismatch_receipt_schema_rejects_the_expected_version_as_current()
+async fn mismatch_receipt_schema_rejects_the_expected_version_as_current()
 -> Result<(), Box<dyn Error>> {
     let fixture = stateful_rejection_receipt_fixture().await?;
     let error = sqlx::query(
@@ -943,7 +940,7 @@ async fn s36_mismatch_receipt_schema_rejects_the_expected_version_as_current()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_mismatch_receipt_replay_rejects_the_expected_version_as_current()
+async fn mismatch_receipt_replay_rejects_the_expected_version_as_current()
 -> Result<(), Box<dyn Error>> {
     let fixture = stateful_rejection_receipt_fixture().await?;
     sqlx::query(
@@ -978,8 +975,7 @@ async fn s36_inv012_mismatch_receipt_replay_rejects_the_expected_version_as_curr
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_exhaustion_receipt_schema_requires_the_maximum_version() -> Result<(), Box<dyn Error>>
-{
+async fn exhaustion_receipt_schema_requires_the_maximum_version() -> Result<(), Box<dyn Error>> {
     let fixture = stateful_rejection_receipt_fixture().await?;
     let error = sqlx::query(
         "UPDATE update_session_placement_command
@@ -1005,8 +1001,7 @@ async fn s36_exhaustion_receipt_schema_requires_the_maximum_version() -> Result<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_exhaustion_receipt_replay_requires_the_maximum_version()
--> Result<(), Box<dyn Error>> {
+async fn exhaustion_receipt_replay_requires_the_maximum_version() -> Result<(), Box<dyn Error>> {
     let fixture = stateful_rejection_receipt_fixture().await?;
     sqlx::query(
         "ALTER TABLE update_session_placement_command
@@ -1041,7 +1036,7 @@ async fn s36_inv012_exhaustion_receipt_replay_requires_the_maximum_version()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_public_placement_read_rejects_cross_wired_creation_provenance()
+async fn public_placement_read_rejects_cross_wired_creation_provenance()
 -> Result<(), Box<dyn Error>> {
     let fixture = corrupt_creation_placement_provenance_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
@@ -1060,8 +1055,7 @@ async fn s36_public_placement_read_rejects_cross_wired_creation_provenance()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_creation_replay_rejects_cross_wired_placement_provenance()
--> Result<(), Box<dyn Error>> {
+async fn creation_replay_rejects_cross_wired_placement_provenance() -> Result<(), Box<dyn Error>> {
     let fixture = corrupt_creation_placement_provenance_fixture().await?;
     let error = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
         .handle(fixture.creation)
@@ -1126,7 +1120,7 @@ async fn corrupt_creation_placement_provenance_fixture()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Error>> {
+async fn cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(ARBITRARY_CROSS_WIRED_APPLIED_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -1243,8 +1237,7 @@ async fn corrupt_placement_predecessor_fixture()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_current_read_authenticates_every_placement_predecessor() -> Result<(), Box<dyn Error>>
-{
+async fn current_read_authenticates_every_placement_predecessor() -> Result<(), Box<dyn Error>> {
     let fixture = corrupt_placement_predecessor_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
         .load_current(fixture.session)
@@ -1262,8 +1255,8 @@ async fn s36_current_read_authenticates_every_placement_predecessor() -> Result<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_placement_update_authenticates_every_placement_predecessor()
--> Result<(), Box<dyn Error>> {
+async fn placement_update_authenticates_every_placement_predecessor() -> Result<(), Box<dyn Error>>
+{
     let fixture = corrupt_placement_predecessor_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
         .handle(UpdateSessionPlacement::new(
@@ -1286,7 +1279,7 @@ async fn s36_placement_update_authenticates_every_placement_predecessor()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_scoped_transcript_open_rejects_a_corrupt_placement_predecessor()
+async fn scoped_transcript_open_rejects_a_corrupt_placement_predecessor()
 -> Result<(), Box<dyn Error>> {
     let fixture = corrupt_placement_predecessor_fixture().await?;
     let error = ProcessReadRepository::new(fixture.pool.clone())
@@ -1305,8 +1298,7 @@ async fn s36_scoped_transcript_open_rejects_a_corrupt_placement_predecessor()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_session_summary_rejects_a_corrupt_placement_predecessor() -> Result<(), Box<dyn Error>>
-{
+async fn session_summary_rejects_a_corrupt_placement_predecessor() -> Result<(), Box<dyn Error>> {
     let fixture = corrupt_placement_predecessor_fixture().await?;
     let mut reader = ProcessReadRepository::new(fixture.pool.clone())
         .open_session_summaries()
@@ -1374,8 +1366,7 @@ async fn corrupt_placement_update_receipt_fixture()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_current_read_authenticates_the_placement_update_receipt() -> Result<(), Box<dyn Error>>
-{
+async fn current_read_authenticates_the_placement_update_receipt() -> Result<(), Box<dyn Error>> {
     let fixture = corrupt_placement_update_receipt_fixture().await?;
     let error = SessionRepository::new(fixture.pool.clone())
         .load_session(fixture.session)
@@ -1393,8 +1384,8 @@ async fn s36_current_read_authenticates_the_placement_update_receipt() -> Result
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_placement_update_authenticates_the_current_placement_receipt()
--> Result<(), Box<dyn Error>> {
+async fn placement_update_authenticates_the_current_placement_receipt() -> Result<(), Box<dyn Error>>
+{
     let fixture = corrupt_placement_update_receipt_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
         .handle(UpdateSessionPlacement::new(
@@ -1417,7 +1408,7 @@ async fn s36_placement_update_authenticates_the_current_placement_receipt()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_rejected_update_replay_authenticates_the_reported_current_version()
+async fn rejected_update_replay_authenticates_the_reported_current_version()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session = session(ARBITRARY_REJECTED_CURRENT_AUTH_SESSION_ID_SEED);
@@ -1468,7 +1459,7 @@ async fn s36_inv012_rejected_update_replay_authenticates_the_reported_current_ve
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_applied_update_replay_requires_the_event_to_reach_the_current_head()
+async fn applied_update_replay_requires_the_event_to_reach_the_current_head()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(ARBITRARY_APPLIED_REPLAY_SESSION_ID_SEED);
@@ -1591,8 +1582,7 @@ async fn dangling_placement_head_fixture() -> Result<LaggingPlacementHeadFixture
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_inv012_applied_update_replay_rejects_a_head_without_an_event()
--> Result<(), Box<dyn Error>> {
+async fn applied_update_replay_rejects_a_head_without_an_event() -> Result<(), Box<dyn Error>> {
     let fixture = dangling_placement_head_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
         .handle(fixture.applied_update)
@@ -1610,8 +1600,7 @@ async fn s36_inv002_inv012_applied_update_replay_rejects_a_head_without_an_event
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_inv012_rejected_update_replay_rejects_a_head_without_an_event()
--> Result<(), Box<dyn Error>> {
+async fn rejected_update_replay_rejects_a_head_without_an_event() -> Result<(), Box<dyn Error>> {
     let fixture = dangling_placement_head_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
         .handle(fixture.rejected_update)
@@ -1629,8 +1618,7 @@ async fn s36_inv002_inv012_rejected_update_replay_rejects_a_head_without_an_even
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_public_placement_read_rejects_a_head_behind_event_history()
--> Result<(), Box<dyn Error>> {
+async fn public_placement_read_rejects_a_head_behind_event_history() -> Result<(), Box<dyn Error>> {
     let fixture = lagging_placement_head_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
         .load_current(fixture.session)
@@ -1648,8 +1636,8 @@ async fn s36_inv002_public_placement_read_rejects_a_head_behind_event_history()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_session_load_rejects_a_placement_head_behind_event_history()
--> Result<(), Box<dyn Error>> {
+async fn session_load_rejects_a_placement_head_behind_event_history() -> Result<(), Box<dyn Error>>
+{
     let fixture = lagging_placement_head_fixture().await?;
     let error = SessionRepository::new(fixture.pool.clone())
         .load_session(fixture.session)
@@ -1667,7 +1655,7 @@ async fn s36_inv002_session_load_rejects_a_placement_head_behind_event_history()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_inv012_creation_replay_rejects_a_placement_head_behind_event_history()
+async fn creation_replay_rejects_a_placement_head_behind_event_history()
 -> Result<(), Box<dyn Error>> {
     let fixture = lagging_placement_head_fixture().await?;
     let error = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
@@ -1692,8 +1680,7 @@ async fn s36_inv002_inv012_creation_replay_rejects_a_placement_head_behind_event
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_inv012_applied_update_replay_rejects_a_head_behind_event_history()
--> Result<(), Box<dyn Error>> {
+async fn applied_update_replay_rejects_a_head_behind_event_history() -> Result<(), Box<dyn Error>> {
     let fixture = lagging_placement_head_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
         .handle(fixture.applied_update)
@@ -1711,8 +1698,8 @@ async fn s36_inv002_inv012_applied_update_replay_rejects_a_head_behind_event_his
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_inv012_rejected_update_replay_rejects_a_head_behind_event_history()
--> Result<(), Box<dyn Error>> {
+async fn rejected_update_replay_rejects_a_head_behind_event_history() -> Result<(), Box<dyn Error>>
+{
     let fixture = lagging_placement_head_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
         .handle(fixture.rejected_update)
@@ -1730,7 +1717,7 @@ async fn s36_inv002_inv012_rejected_update_replay_rejects_a_head_behind_event_hi
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_rejected_update_replay_requires_the_reported_version_to_reach_the_current_head()
+async fn rejected_update_replay_requires_the_reported_version_to_reach_the_current_head()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(ARBITRARY_REJECTED_REPLAY_SESSION_ID_SEED);
@@ -1784,8 +1771,8 @@ async fn s36_inv012_rejected_update_replay_requires_the_reported_version_to_reac
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_current_read_rejects_a_corrupt_placement_update_typed_header()
--> Result<(), Box<dyn Error>> {
+async fn current_read_rejects_a_corrupt_placement_update_typed_header() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(ARBITRARY_CORRUPT_HEADER_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -1837,8 +1824,7 @@ async fn s36_current_read_rejects_a_corrupt_placement_update_typed_header()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_creation_receipt_must_match_the_session_ancestry_family() -> Result<(), Box<dyn Error>>
-{
+async fn creation_receipt_must_match_the_session_ancestry_family() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(ARBITRARY_ANCESTRY_MISMATCH_SESSION_ID_SEED);
     let imported_conversation_id =
@@ -1886,7 +1872,7 @@ async fn s36_creation_receipt_must_match_the_session_ancestry_family() -> Result
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_current_placement_read_rejects_a_pre_v6_scoped_creation_receipt()
+async fn current_placement_read_rejects_a_pre_v6_scoped_creation_receipt()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let command = command(ARBITRARY_PRE_V6_CREATION_COMMAND_ID_SEED);
@@ -1937,7 +1923,7 @@ async fn s36_current_placement_read_rejects_a_pre_v6_scoped_creation_receipt()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_post_migration_legacy_creation_materializes_pathless_placement()
+async fn post_migration_legacy_creation_materializes_pathless_placement()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let command_id = command(ARBITRARY_LEGACY_CREATION_COMMAND_ID_SEED);
@@ -1990,12 +1976,14 @@ async fn s36_post_migration_legacy_creation_materializes_pathless_placement()
              ancestry_kind, initial_defaults_version, model_selection_kind,
              direct_model_selection_id, model_alias_id, dangerous_tool_auto_approval,
              system_prompt, template_name, template_content_digest, placement_path,
-             root_global_read_intent, result_kind, created_session_id)
+             root_global_read_intent, result_kind, created_session_id,
+             start_gate, ownership)
          SELECT command_id, command_kind, storage_version, creation_cause,
                 ancestry_kind, initial_defaults_version, model_selection_kind,
                 direct_model_selection_id, model_alias_id, dangerous_tool_auto_approval,
                 system_prompt, template_name, template_content_digest, placement_path,
-                root_global_read_intent, result_kind, created_session_id
+                root_global_read_intent, result_kind, created_session_id,
+                'open', 'unmonitored'
            FROM legacy_creation",
     )
     .execute(&mut *transaction)
@@ -2018,15 +2006,14 @@ async fn s36_post_migration_legacy_creation_materializes_pathless_placement()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Result<(), Box<dyn Error>>
-{
+async fn applied_update_receipt_requires_the_expected_predecessor() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let command_id = command(ARBITRARY_MALFORMED_PREDECESSOR_COMMAND_ID_SEED);
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, $2, $3, transaction_timestamp(), 'operator')",
     )
     .bind(*command_id.as_uuid())
     .bind("update_session_placement")
@@ -2060,14 +2047,14 @@ async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Resul
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_applied_update_receipt_requires_a_result_version() -> Result<(), Box<dyn Error>> {
+async fn applied_update_receipt_requires_a_result_version() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let command_id = command(ARBITRARY_MISSING_RESULT_VERSION_COMMAND_ID_SEED);
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, $2, $3, transaction_timestamp(), 'operator')",
     )
     .bind(*command_id.as_uuid())
     .bind("update_session_placement")
@@ -2101,7 +2088,7 @@ async fn s36_applied_update_receipt_requires_a_result_version() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_update_handle_applies_first_command() -> Result<(), Box<dyn Error>> {
+async fn update_handle_applies_first_command() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, update) = placement_authentication_fixture().await?;
     let first = repository.handle(update).await?;
     let applied = recorded_applied_update(&first);
@@ -2121,7 +2108,7 @@ async fn s36_inv012_update_handle_applies_first_command() -> Result<(), Box<dyn 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_update_handle_replays_equal_command() -> Result<(), Box<dyn Error>> {
+async fn update_handle_replays_equal_command() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, update) = placement_authentication_fixture().await?;
     let first = repository.handle(update.clone()).await?;
 
@@ -2134,8 +2121,7 @@ async fn s36_inv012_update_handle_replays_equal_command() -> Result<(), Box<dyn 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_update_replay_authenticates_the_applied_predecessor_chain()
--> Result<(), Box<dyn Error>> {
+async fn update_replay_authenticates_the_applied_predecessor_chain() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, update) = placement_authentication_fixture().await?;
     repository.handle(update.clone()).await?;
     cross_wire_initial_placement_provenance(&pool, update.session(), update.command_id()).await?;
@@ -2149,8 +2135,7 @@ async fn s36_inv012_update_replay_authenticates_the_applied_predecessor_chain()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_current_placement_rejects_an_incomplete_applied_receipt()
--> Result<(), Box<dyn Error>> {
+async fn current_placement_rejects_an_incomplete_applied_receipt() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, update) = placement_authentication_fixture().await?;
     repository.handle(update.clone()).await?;
     sqlx::query(
@@ -2183,7 +2168,7 @@ async fn s36_inv012_current_placement_rejects_an_incomplete_applied_receipt()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_update_handle_rejects_conflicting_reuse() -> Result<(), Box<dyn Error>> {
+async fn update_handle_rejects_conflicting_reuse() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, update) = placement_authentication_fixture().await?;
     repository.handle(update).await?;
     let command_id = command(UPDATE_FIXTURE_COMMAND_ID_SEED);
@@ -2237,7 +2222,7 @@ async fn placement_authentication_fixture() -> Result<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_complete_history_authentication_crosses_bounded_pages() -> Result<(), Box<dyn Error>> {
+async fn complete_history_authentication_crosses_bounded_pages() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(PAGED_HISTORY_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -2288,7 +2273,7 @@ async fn append_paged_history_fixture(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_inv012_ordinary_session_load_authenticates_complete_placement_history()
+async fn ordinary_session_load_authenticates_complete_placement_history()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(UPDATE_FIXTURE_SESSION_ID_SEED);

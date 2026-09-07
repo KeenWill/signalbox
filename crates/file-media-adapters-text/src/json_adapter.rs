@@ -38,6 +38,7 @@ pub(crate) async fn probe(
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(JSON_MEDIA_TYPE),
             strength,
+            evidence_bytes: u64::try_from(prefix.len()).map_err(|_| ProcessorFailure::Failed)?,
         })
     } else {
         Ok(ProcessorProbeOutput::NoMatch)

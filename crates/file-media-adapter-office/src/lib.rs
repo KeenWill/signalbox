@@ -42,51 +42,32 @@ const HOSTILE_ENTRY_NAME: &str = "hostile_entry_name";
 const RECURSIVE_CONTAINER: &str = "recursive_container";
 const SYMLINK_ENTRY: &str = "symlink_entry";
 const XML_MALFORMED: &str = "xml_malformed";
-// numeric-bound: not-a-bound - fixed ZIP signature width required by the format
 const ZIP_PREFIX_BYTES: u64 = 4;
-// numeric-bound: not-a-bound - fixed maximum ZIP comment plus trailing record coverage
+// The ZIP suffix covers the 65,535-byte maximum comment plus one EOCD byte.
 const ZIP_SUFFIX_BYTES: u64 = 65_536;
-// numeric-bound: ceiling - bounds ZIP64 extensible end-record data inspected during probing
 const MAX_ZIP64_EOCD_BYTES: u64 = 64 * 1024;
-// numeric-bound: not-a-bound - maximum EOCD reach, locator width, and bounded ZIP64 record
+// The 22-byte ZIP EOCD and 65,535-byte comment leave 21 bytes before the suffix, followed
+// backward by the 20-byte ZIP64 locator and bounded ZIP64 record (PKWARE APPNOTE).
 const EOCD_PRECEDING_BYTES: u64 = 21 + 20 + MAX_ZIP64_EOCD_BYTES;
-// numeric-bound: not-a-bound - maximum selected main-part name width across supported families
 const SELECTED_PART_NAME_BYTES: u64 = 20;
-// numeric-bound: not-a-bound - fixed number of supported Office families selected by one probe
 const MAX_SELECTED_PARTS: u64 = 3;
-// numeric-bound: ceiling - protects probe broker memory and cumulative source reads
 const VALIDATION_SOURCE_BYTES: u64 = 262_144;
-// numeric-bound: ceiling - protects probe decompression from oversized type metadata
 const CONTENT_TYPES_COMPRESSED_BYTES: u64 = 64 * 1024;
-// numeric-bound: ceiling - protects probe decompression from oversized relationship metadata
 const PACKAGE_RELS_COMPRESSED_BYTES: u64 = 8 * 1024;
-// numeric-bound: not-a-bound - fixed ZIP local-file-header width required by the format
+// The PKWARE APPNOTE defines a 30-byte local-file header.
 const LOCAL_HEADER_BYTES: u64 = 30;
-// numeric-bound: not-a-bound - fixed byte length of the canonical content-types part name
 const CONTENT_TYPES_NAME_BYTES: u64 = 19;
-// numeric-bound: not-a-bound - fixed byte length of the canonical package-relationships name
 const PACKAGE_RELS_NAME_BYTES: u64 = 11;
-// numeric-bound: ceiling - protects probe reads from adversarial local extra fields
 const LOCAL_EXTRA_BYTES: u64 = 256;
-// numeric-bound: ceiling - protects worker memory while reading a complete Office source
 const READ_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
-// numeric-bound: tunable - controls bounded source-read granularity
 const SOURCE_CHUNK_BYTES: u64 = 256 * 1024;
-// numeric-bound: ceiling - protects decoder memory from one expanded Office part
 const MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024;
-// numeric-bound: ceiling - protects worker memory and CPU across all expanded Office parts
 const MAX_TOTAL_EXPANDED_BYTES: u64 = 16 * 1024 * 1024;
-// numeric-bound: ceiling - protects XML parsing from adversarial nesting and scope cloning
 const MAX_XML_DEPTH: usize = 256;
-// numeric-bound: ceiling - bounds one namespace prefix so cloned scopes stay small
 const MAX_NAMESPACE_PREFIX_BYTES: usize = 64;
-// numeric-bound: ceiling - bounds one namespace name so cloned scopes stay small
 const MAX_NAMESPACE_URI_BYTES: usize = 1024;
-// numeric-bound: ceiling - bounds live declarations per scope so per-element clones cannot amplify
 const MAX_NAMESPACE_DECLARATIONS: usize = 128;
-// numeric-bound: ceiling - bounds cumulative markup-compatibility state per scope so per-element clones cannot amplify
 const MAX_MARKUP_COMPATIBILITY_ENTRIES: usize = 128;
-// numeric-bound: ceiling - protects worker framing from oversized metadata output
 const METADATA_OUTPUT_BYTES: usize = 16 * 1024;
 const CONTENT_TYPES: &str = "[Content_Types].xml";
 const PACKAGE_RELS: &str = "_rels/.rels";
@@ -165,6 +146,7 @@ impl FileMediaProvider for OfficeProvider {
                 Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(kind.media_type()),
                     strength: ProbeStrength::StructuralCandidate,
+                    evidence_bytes: inventory.examined_bytes,
                 })
             } else {
                 Ok(ProcessorProbeOutput::NoMatch)
@@ -386,6 +368,8 @@ struct CentralInventory {
     entries_by_name: Vec<CentralEntry>,
     kinds: Vec<OfficeKind>,
     encrypted: bool,
+    /// Actual cumulative source bytes read while building this inventory.
+    examined_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -469,9 +453,11 @@ async fn read_central_inventory(
     cancellation: &dyn CancellationSignal,
 ) -> Result<CentralInventory, CentralReadError> {
     require_active(cancellation)?;
+    let mut examined: u64 = 0;
     let source_length = source.byte_length().get();
     let prefix_length = source_length.min(ZIP_PREFIX_BYTES);
     let prefix = read_range(source, 0, prefix_length).await?;
+    examined = examined.saturating_add(prefix_length);
     if !prefix.starts_with(b"PK\x03\x04") {
         return Err(ValidationIssue::Unrecognized.into());
     }
@@ -484,7 +470,9 @@ async fn read_central_inventory(
     } else {
         read_range(source, suffix_start, preceding_length).await?
     };
+    examined = examined.saturating_add(preceding_length);
     suffix.extend(read_range(source, suffix_offset, suffix_length).await?);
+    examined = examined.saturating_add(suffix_length);
     let eocd_relative = find_consistent_eocd(&suffix, suffix_start)
         .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
     let eocd = &suffix[eocd_relative..];
@@ -531,6 +519,7 @@ async fn read_central_inventory(
         return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
     }
     let central = read_range(source, central_offset, central_size).await?;
+    examined = examined.saturating_add(central_size);
     require_active(cancellation)?;
     let mut inventory = parse_central_directory(&central, entries).map_err(|error| {
         CentralReadError::Validation {
@@ -564,7 +553,9 @@ async fn read_central_inventory(
         }
         if content_types.flags & 1 != 0 || package_relationships.flags & 1 != 0 {
             inventory.kinds = recognized;
-            validate_selected_probe_entries(source, cancellation, &inventory).await?;
+            validate_selected_probe_entries(source, cancellation, &inventory, &mut examined)
+                .await?;
+            inventory.examined_bytes = examined;
             return Ok(inventory);
         }
     }
@@ -574,6 +565,7 @@ async fn read_central_inventory(
         &inventory,
         CONTENT_TYPES,
         CONTENT_TYPES_COMPRESSED_BYTES,
+        &mut examined,
     )
     .await
     {
@@ -599,6 +591,7 @@ async fn read_central_inventory(
         &inventory,
         PACKAGE_RELS,
         PACKAGE_RELS_COMPRESSED_BYTES,
+        &mut examined,
     )
     .await
     {
@@ -618,7 +611,8 @@ async fn read_central_inventory(
         issue,
         kinds: recognized,
     })?;
-    validate_selected_probe_entries(source, cancellation, &inventory).await?;
+    validate_selected_probe_entries(source, cancellation, &inventory, &mut examined).await?;
+    inventory.examined_bytes = examined;
     Ok(inventory)
 }
 
@@ -626,6 +620,7 @@ async fn validate_selected_probe_entries(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
     inventory: &CentralInventory,
+    examined: &mut u64,
 ) -> Result<(), CentralReadError> {
     for kind in &inventory.kinds {
         let entry = inventory
@@ -634,7 +629,7 @@ async fn validate_selected_probe_entries(
             .find(|entry| entry.name == kind.marker())
             .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
         validate_selected_probe_entry(entry)?;
-        let data_offset = read_probe_local_header(source, cancellation, entry).await?;
+        let data_offset = read_probe_local_header(source, cancellation, entry, examined).await?;
         require_range(
             source.byte_length().get(),
             data_offset,
@@ -775,6 +770,7 @@ fn parse_central_directory(
         entries_by_name,
         kinds: Vec::new(),
         encrypted,
+        examined_bytes: 0,
     })
 }
 
@@ -948,6 +944,7 @@ async fn read_probe_entry(
     inventory: &CentralInventory,
     name: &str,
     maximum_compressed_bytes: u64,
+    examined: &mut u64,
 ) -> Result<Vec<u8>, CentralReadError> {
     let entry = inventory
         .entries_by_name
@@ -960,13 +957,14 @@ async fn read_probe_entry(
     {
         return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT).into());
     }
-    let data_offset = read_probe_local_header(source, cancellation, entry).await?;
+    let data_offset = read_probe_local_header(source, cancellation, entry, examined).await?;
     require_range(
         source.byte_length().get(),
         data_offset,
         entry.compressed_bytes,
     )?;
     let compressed = read_range(source, data_offset, entry.compressed_bytes).await?;
+    *examined = examined.saturating_add(entry.compressed_bytes);
     let bytes = match entry.compression {
         0 => compressed,
         8 => {
@@ -994,6 +992,7 @@ async fn read_probe_local_header(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
     entry: &CentralEntry,
+    examined: &mut u64,
 ) -> Result<u64, CentralReadError> {
     require_active(cancellation)?;
     require_range(
@@ -1002,6 +1001,7 @@ async fn read_probe_local_header(
         LOCAL_HEADER_BYTES,
     )?;
     let local = read_range(source, entry.local_offset, LOCAL_HEADER_BYTES).await?;
+    *examined = examined.saturating_add(LOCAL_HEADER_BYTES);
     if local.get(0..4) != Some(b"PK\x03\x04")
         || le_u16(&local, 6)? != entry.flags
         || le_u16(&local, 8)? != entry.compression
@@ -1028,6 +1028,7 @@ async fn read_probe_local_header(
         local_variable_length,
     )?;
     let local_variable = read_range(source, local_name_offset, local_variable_length).await?;
+    *examined = examined.saturating_add(local_variable_length);
     let local_name_length =
         usize::try_from(name_length).map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
     let local_name = local_variable
@@ -1090,30 +1091,33 @@ fn validate_package_relationships(
         {
             Event::Start(element) => {
                 if depth == 0 {
-                    if saw_root || local_name(element.name().as_ref()) != b"Relationships" {
+                    if saw_root
+                        || local_name(element.name().as_ref().as_bytes()) != b"Relationships"
+                    {
                         return Err(ValidationIssue::Malformed(MALFORMED_REASON));
                     }
-                    apply_namespace_declarations(&reader, &element, &mut relationships_scope)
+                    apply_namespace_declarations(&element, &mut relationships_scope)
                         .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
                     if !element_uses_scoped_namespace(
-                        element.name().as_ref(),
+                        element.name().as_ref().as_bytes(),
                         &relationships_scope,
                         PACKAGE_RELATIONSHIPS_NAMESPACE,
                     ) {
                         return Err(ValidationIssue::Malformed(MALFORMED_REASON));
                     }
                     saw_root = true;
-                } else if depth == 1 && local_name(element.name().as_ref()) == b"Relationship" {
+                } else if depth == 1
+                    && local_name(element.name().as_ref().as_bytes()) == b"Relationship"
+                {
                     let mut scope = relationships_scope.clone();
-                    apply_namespace_declarations(&reader, &element, &mut scope)
+                    apply_namespace_declarations(&element, &mut scope)
                         .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
                     if element_uses_scoped_namespace(
-                        element.name().as_ref(),
+                        element.name().as_ref().as_bytes(),
                         &scope,
                         PACKAGE_RELATIONSHIPS_NAMESPACE,
                     ) {
                         collect_package_relationship(
-                            &reader,
                             &element,
                             &mut relationship_ids,
                             &mut targets,
@@ -1126,32 +1130,28 @@ fn validate_package_relationships(
                     .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
             }
             Event::Empty(element)
-                if depth == 1 && local_name(element.name().as_ref()) == b"Relationship" =>
+                if depth == 1
+                    && local_name(element.name().as_ref().as_bytes()) == b"Relationship" =>
             {
                 let mut scope = relationships_scope.clone();
-                apply_namespace_declarations(&reader, &element, &mut scope)
+                apply_namespace_declarations(&element, &mut scope)
                     .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
                 if element_uses_scoped_namespace(
-                    element.name().as_ref(),
+                    element.name().as_ref().as_bytes(),
                     &scope,
                     PACKAGE_RELATIONSHIPS_NAMESPACE,
                 ) {
-                    collect_package_relationship(
-                        &reader,
-                        &element,
-                        &mut relationship_ids,
-                        &mut targets,
-                    )?;
+                    collect_package_relationship(&element, &mut relationship_ids, &mut targets)?;
                 }
             }
             Event::Empty(element) if depth == 0 => {
-                if saw_root || local_name(element.name().as_ref()) != b"Relationships" {
+                if saw_root || local_name(element.name().as_ref().as_bytes()) != b"Relationships" {
                     return Err(ValidationIssue::Malformed(MALFORMED_REASON));
                 }
-                apply_namespace_declarations(&reader, &element, &mut relationships_scope)
+                apply_namespace_declarations(&element, &mut relationships_scope)
                     .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
                 if !element_uses_scoped_namespace(
-                    element.name().as_ref(),
+                    element.name().as_ref().as_bytes(),
                     &relationships_scope,
                     PACKAGE_RELATIONSHIPS_NAMESPACE,
                 ) {
@@ -1165,9 +1165,7 @@ fn validate_package_relationships(
                     .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
             }
             Event::Text(text) => {
-                let decoded = text
-                    .xml10_content()
-                    .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+                let decoded = text.xml10_content();
                 if !decoded.trim().is_empty() {
                     return Err(ValidationIssue::Malformed(MALFORMED_REASON));
                 }
@@ -1232,7 +1230,6 @@ fn normalized_package_target(target: &str) -> Result<String, ValidationIssue> {
 }
 
 fn collect_package_relationship(
-    reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
     relationship_ids: &mut HashSet<String>,
     targets: &mut Vec<String>,
@@ -1244,9 +1241,9 @@ fn collect_package_relationship(
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
         let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
-        match attribute.key.as_ref() {
+        match attribute.key.as_ref().as_bytes() {
             b"Id" => id = Some(value.into_owned()),
             b"Type" => relationship_type = Some(value.into_owned()),
             b"Target" => target = Some(value.into_owned()),
@@ -1292,13 +1289,13 @@ fn validate_content_types(
         {
             Event::Start(start) => {
                 if depth == 0 {
-                    if saw_root || local_name(start.name().as_ref()) != b"Types" {
+                    if saw_root || local_name(start.name().as_ref().as_bytes()) != b"Types" {
                         return Err(ValidationIssue::Malformed(MALFORMED_REASON));
                     }
-                    apply_namespace_declarations(&reader, &start, &mut content_types_scope)
+                    apply_namespace_declarations(&start, &mut content_types_scope)
                         .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
                     if !element_uses_scoped_namespace(
-                        start.name().as_ref(),
+                        start.name().as_ref().as_bytes(),
                         &content_types_scope,
                         CONTENT_TYPES_NAMESPACE,
                     ) {
@@ -1307,24 +1304,21 @@ fn validate_content_types(
                     saw_root = true;
                 } else if depth == 1 {
                     let mut scope = content_types_scope.clone();
-                    apply_namespace_declarations(&reader, &start, &mut scope)
+                    apply_namespace_declarations(&start, &mut scope)
                         .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
                     if element_uses_scoped_namespace(
-                        start.name().as_ref(),
+                        start.name().as_ref().as_bytes(),
                         &scope,
                         CONTENT_TYPES_NAMESPACE,
                     ) {
-                        match local_name(start.name().as_ref()) {
+                        match local_name(start.name().as_ref().as_bytes()) {
                             b"Override" => collect_content_type_kind(
-                                &reader,
                                 &start,
                                 entries,
                                 &mut kinds,
                                 &mut part_names,
                             )?,
-                            b"Default" => {
-                                collect_default_content_type(&reader, &start, &mut default_types)?
-                            }
+                            b"Default" => collect_default_content_type(&start, &mut default_types)?,
                             _ => {}
                         }
                     }
@@ -1336,36 +1330,30 @@ fn validate_content_types(
             }
             Event::Empty(empty) if depth == 1 => {
                 let mut scope = content_types_scope.clone();
-                apply_namespace_declarations(&reader, &empty, &mut scope)
+                apply_namespace_declarations(&empty, &mut scope)
                     .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
                 if element_uses_scoped_namespace(
-                    empty.name().as_ref(),
+                    empty.name().as_ref().as_bytes(),
                     &scope,
                     CONTENT_TYPES_NAMESPACE,
                 ) {
-                    match local_name(empty.name().as_ref()) {
-                        b"Override" => collect_content_type_kind(
-                            &reader,
-                            &empty,
-                            entries,
-                            &mut kinds,
-                            &mut part_names,
-                        )?,
-                        b"Default" => {
-                            collect_default_content_type(&reader, &empty, &mut default_types)?
+                    match local_name(empty.name().as_ref().as_bytes()) {
+                        b"Override" => {
+                            collect_content_type_kind(&empty, entries, &mut kinds, &mut part_names)?
                         }
+                        b"Default" => collect_default_content_type(&empty, &mut default_types)?,
                         _ => {}
                     }
                 }
             }
             Event::Empty(empty) if depth == 0 => {
-                if saw_root || local_name(empty.name().as_ref()) != b"Types" {
+                if saw_root || local_name(empty.name().as_ref().as_bytes()) != b"Types" {
                     return Err(ValidationIssue::Malformed(MALFORMED_REASON));
                 }
-                apply_namespace_declarations(&reader, &empty, &mut content_types_scope)
+                apply_namespace_declarations(&empty, &mut content_types_scope)
                     .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
                 if !element_uses_scoped_namespace(
-                    empty.name().as_ref(),
+                    empty.name().as_ref().as_bytes(),
                     &content_types_scope,
                     CONTENT_TYPES_NAMESPACE,
                 ) {
@@ -1379,9 +1367,7 @@ fn validate_content_types(
                     .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
             }
             Event::Text(text) => {
-                let decoded = text
-                    .xml10_content()
-                    .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+                let decoded = text.xml10_content();
                 if !decoded.trim().is_empty() {
                     return Err(ValidationIssue::Malformed(MALFORMED_REASON));
                 }
@@ -1420,7 +1406,6 @@ fn validate_content_types(
 }
 
 fn namespace_declaration(
-    reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
     prefix: &[u8],
 ) -> Option<Vec<u8>> {
@@ -1428,7 +1413,7 @@ fn namespace_declaration(
         .attributes()
         .filter_map(Result::ok)
         .find_map(|attribute| {
-            let key = attribute.key.as_ref();
+            let key = attribute.key.as_ref().as_bytes();
             let declared_prefix = if key == b"xmlns" {
                 b"".as_slice()
             } else {
@@ -1438,14 +1423,13 @@ fn namespace_declaration(
                 return None;
             }
             attribute
-                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                .normalized_value(XmlVersion::Implicit1_0)
                 .ok()
                 .map(|value| value.as_bytes().to_vec())
         })
 }
 
 fn collect_content_type_kind(
-    reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
     entries: &[CentralEntry],
     kinds: &mut Vec<OfficeKind>,
@@ -1456,9 +1440,9 @@ fn collect_content_type_kind(
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
         let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
-        match attribute.key.as_ref() {
+        match attribute.key.as_ref().as_bytes() {
             b"PartName" => part_name = Some(value.into_owned()),
             b"ContentType" => content_type = Some(value.into_owned()),
             _ => {}
@@ -1489,7 +1473,6 @@ fn collect_content_type_kind(
 }
 
 fn collect_default_content_type(
-    reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
     default_types: &mut std::collections::HashMap<String, String>,
 ) -> Result<(), ValidationIssue> {
@@ -1498,9 +1481,9 @@ fn collect_default_content_type(
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
         let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
-        match attribute.key.as_ref() {
+        match attribute.key.as_ref().as_bytes() {
             b"Extension" => extension = Some(value.into_owned().to_ascii_lowercase()),
             b"ContentType" => content_type = Some(value.into_owned()),
             _ => {}
@@ -1778,10 +1761,10 @@ fn ordered_relationship_ids(
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_namespace_declarations(&reader, &element, &mut scope)?;
-                if local_name(element.name().as_ref()) == list_name
+                apply_namespace_declarations(&element, &mut scope)?;
+                if local_name(element.name().as_ref().as_bytes()) == list_name
                     && element_uses_scoped_namespace(
-                        element.name().as_ref(),
+                        element.name().as_ref().as_bytes(),
                         &scope,
                         root_namespace,
                     )
@@ -1791,9 +1774,9 @@ fn ordered_relationship_ids(
                         return Err(XmlIssue::Malformed);
                     }
                     list_depth = Some(depth);
-                } else if local_name(element.name().as_ref()) == item_name
+                } else if local_name(element.name().as_ref().as_bytes()) == item_name
                     && element_uses_scoped_namespace(
-                        element.name().as_ref(),
+                        element.name().as_ref().as_bytes(),
                         &scope,
                         root_namespace,
                     )
@@ -1801,34 +1784,38 @@ fn ordered_relationship_ids(
                 {
                     record_ordered_relationship_id(
                         &mut ids,
-                        required_relationship_id(&reader, &element, &scope)?,
+                        required_relationship_id(&element, &scope)?,
                     )?;
                 }
                 namespace_scopes.push(scope);
                 depth = next_xml_depth(depth)?;
             }
             Event::Empty(element)
-                if local_name(element.name().as_ref()) == item_name
+                if local_name(element.name().as_ref().as_bytes()) == item_name
                     && list_depth == depth.checked_sub(1) =>
             {
                 let mut scope = namespace_scopes
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_namespace_declarations(&reader, &element, &mut scope)?;
-                if element_uses_scoped_namespace(element.name().as_ref(), &scope, root_namespace) {
+                apply_namespace_declarations(&element, &mut scope)?;
+                if element_uses_scoped_namespace(
+                    element.name().as_ref().as_bytes(),
+                    &scope,
+                    root_namespace,
+                ) {
                     record_ordered_relationship_id(
                         &mut ids,
-                        required_relationship_id(&reader, &element, &scope)?,
+                        required_relationship_id(&element, &scope)?,
                     )?;
                 }
             }
             Event::End(element) => {
                 let scope = namespace_scopes.last().ok_or(XmlIssue::Malformed)?;
                 let qualified_name = element.name();
-                let closes_list = local_name(qualified_name.as_ref()) == list_name
+                let closes_list = local_name(qualified_name.as_ref().as_bytes()) == list_name
                     && element_uses_scoped_namespace(
-                        qualified_name.as_ref(),
+                        qualified_name.as_ref().as_bytes(),
                         scope,
                         root_namespace,
                     )
@@ -1859,13 +1846,12 @@ fn record_ordered_relationship_id(ids: &mut Vec<String>, id: String) -> Result<(
 }
 
 fn apply_namespace_declarations(
-    reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
     scope: &mut std::collections::HashMap<Vec<u8>, Vec<u8>>,
 ) -> Result<(), XmlIssue> {
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
-        let key = attribute.key.as_ref();
+        let key = attribute.key.as_ref().as_bytes();
         let prefix = if key == b"xmlns" {
             b"".as_slice()
         } else if let Some(prefix) = key.strip_prefix(b"xmlns:") {
@@ -1874,7 +1860,7 @@ fn apply_namespace_declarations(
             continue;
         };
         let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|_| XmlIssue::Malformed)?;
         if prefix.len() > MAX_NAMESPACE_PREFIX_BYTES || value.len() > MAX_NAMESPACE_URI_BYTES {
             return Err(XmlIssue::Malformed);
@@ -1916,14 +1902,13 @@ struct MarkupCompatibilityScope {
 }
 
 fn apply_markup_compatibility_attributes(
-    reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
     namespace_scope: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
     compatibility: &mut MarkupCompatibilityScope,
 ) -> Result<(), XmlIssue> {
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
-        let name = attribute.key.as_ref();
+        let name = attribute.key.as_ref().as_bytes();
         let Some(separator) = name.iter().position(|byte| *byte == b':') else {
             continue;
         };
@@ -1935,7 +1920,7 @@ fn apply_markup_compatibility_attributes(
             continue;
         }
         let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|_| XmlIssue::Malformed)?;
         match &name[separator + 1..] {
             b"MustUnderstand" => {
@@ -2005,17 +1990,16 @@ fn supported_markup_namespace(namespace: &[u8]) -> bool {
 }
 
 fn markup_choice_is_supported(
-    reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
     namespace_scope: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
 ) -> Result<bool, XmlIssue> {
     let mut requires = None;
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
-        if attribute.key.as_ref() == b"Requires" {
+        if attribute.key.as_ref().as_bytes() == b"Requires" {
             requires = Some(
                 attribute
-                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                    .normalized_value(XmlVersion::Implicit1_0)
                     .map_err(|_| XmlIssue::Malformed)?
                     .into_owned(),
             );
@@ -2052,13 +2036,12 @@ fn ignores_markup_compatibility_element(
 }
 
 fn required_relationship_id(
-    reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
     namespace_scope: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
 ) -> Result<String, XmlIssue> {
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
-        let name = attribute.key.as_ref();
+        let name = attribute.key.as_ref().as_bytes();
         let Some(separator) = name.iter().position(|byte| *byte == b':') else {
             continue;
         };
@@ -2070,7 +2053,7 @@ fn required_relationship_id(
                 .is_some_and(|actual| namespace_matches(actual, OFFICE_RELATIONSHIPS_NAMESPACE))
         {
             return Ok(attribute
-                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                .normalized_value(XmlVersion::Implicit1_0)
                 .map_err(|_| XmlIssue::Malformed)?
                 .into_owned());
         }
@@ -2098,21 +2081,16 @@ fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, Option<Str
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_namespace_declarations(&reader, &element, &mut scope)?;
+                apply_namespace_declarations(&element, &mut scope)?;
                 if depth == 1
-                    && local_name(element.name().as_ref()) == b"Relationship"
+                    && local_name(element.name().as_ref().as_bytes()) == b"Relationship"
                     && element_uses_scoped_namespace(
-                        element.name().as_ref(),
+                        element.name().as_ref().as_bytes(),
                         &scope,
                         PACKAGE_RELATIONSHIPS_NAMESPACE,
                     )
                 {
-                    collect_workbook_relationship(
-                        &reader,
-                        &element,
-                        &mut relationship_ids,
-                        &mut targets,
-                    )?;
+                    collect_workbook_relationship(&element, &mut relationship_ids, &mut targets)?;
                 }
                 namespace_scopes.push(scope);
                 depth = next_xml_depth(depth)?;
@@ -2122,21 +2100,16 @@ fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, Option<Str
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_namespace_declarations(&reader, &element, &mut scope)?;
+                apply_namespace_declarations(&element, &mut scope)?;
                 if depth == 1
-                    && local_name(element.name().as_ref()) == b"Relationship"
+                    && local_name(element.name().as_ref().as_bytes()) == b"Relationship"
                     && element_uses_scoped_namespace(
-                        element.name().as_ref(),
+                        element.name().as_ref().as_bytes(),
                         &scope,
                         PACKAGE_RELATIONSHIPS_NAMESPACE,
                     )
                 {
-                    collect_workbook_relationship(
-                        &reader,
-                        &element,
-                        &mut relationship_ids,
-                        &mut targets,
-                    )?;
+                    collect_workbook_relationship(&element, &mut relationship_ids, &mut targets)?;
                 }
             }
             Event::End(_) => {
@@ -2144,7 +2117,7 @@ fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, Option<Str
                 namespace_scopes.pop().ok_or(XmlIssue::Malformed)?;
             }
             Event::Text(text) => {
-                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                let decoded = text.xml10_content();
                 if !decoded.trim().is_empty() {
                     return Err(XmlIssue::Malformed);
                 }
@@ -2162,7 +2135,6 @@ fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, Option<Str
 }
 
 fn collect_workbook_relationship(
-    reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
     relationship_ids: &mut HashSet<String>,
     targets: &mut Vec<(String, Option<String>)>,
@@ -2174,9 +2146,9 @@ fn collect_workbook_relationship(
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
         let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|_| XmlIssue::Malformed)?;
-        match attribute.key.as_ref() {
+        match attribute.key.as_ref().as_bytes() {
             b"Id" => id = Some(value.into_owned()),
             b"Target" => target = Some(value.into_owned()),
             b"Type" => relationship_type = Some(value.into_owned()),
@@ -2237,17 +2209,16 @@ fn relationship_targets(
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_namespace_declarations(&reader, &element, &mut scope)?;
+                apply_namespace_declarations(&element, &mut scope)?;
                 if depth == 1
-                    && local_name(element.name().as_ref()) == b"Relationship"
+                    && local_name(element.name().as_ref().as_bytes()) == b"Relationship"
                     && element_uses_scoped_namespace(
-                        element.name().as_ref(),
+                        element.name().as_ref().as_bytes(),
                         &scope,
                         PACKAGE_RELATIONSHIPS_NAMESPACE,
                     )
                 {
                     collect_relationship_target(
-                        &reader,
                         &element,
                         relationship_suffix,
                         normalize,
@@ -2263,17 +2234,16 @@ fn relationship_targets(
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_namespace_declarations(&reader, &element, &mut scope)?;
+                apply_namespace_declarations(&element, &mut scope)?;
                 if depth == 1
-                    && local_name(element.name().as_ref()) == b"Relationship"
+                    && local_name(element.name().as_ref().as_bytes()) == b"Relationship"
                     && element_uses_scoped_namespace(
-                        element.name().as_ref(),
+                        element.name().as_ref().as_bytes(),
                         &scope,
                         PACKAGE_RELATIONSHIPS_NAMESPACE,
                     )
                 {
                     collect_relationship_target(
-                        &reader,
                         &element,
                         relationship_suffix,
                         normalize,
@@ -2287,7 +2257,7 @@ fn relationship_targets(
                 namespace_scopes.pop().ok_or(XmlIssue::Malformed)?;
             }
             Event::Text(text) => {
-                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                let decoded = text.xml10_content();
                 if !decoded.trim().is_empty() {
                     return Err(XmlIssue::Malformed);
                 }
@@ -2305,7 +2275,6 @@ fn relationship_targets(
 }
 
 fn collect_relationship_target(
-    reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
     relationship_suffix: &str,
     normalize: fn(&str) -> Result<String, XmlIssue>,
@@ -2319,9 +2288,9 @@ fn collect_relationship_target(
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
         let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|_| XmlIssue::Malformed)?;
-        match attribute.key.as_ref() {
+        match attribute.key.as_ref().as_bytes() {
             b"Id" => id = Some(value.into_owned()),
             b"Target" => target = Some(value.into_owned()),
             b"Type" => relationship_type = Some(value.into_owned()),
@@ -2398,25 +2367,25 @@ fn spreadsheet_shared_strings(bytes: &[u8]) -> Result<Vec<String>, XmlIssue> {
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_namespace_declarations(&reader, &element, &mut scope)?;
+                apply_namespace_declarations(&element, &mut scope)?;
                 let spreadsheet_element = element_uses_scoped_namespace(
-                    element.name().as_ref(),
+                    element.name().as_ref().as_bytes(),
                     &scope,
                     SPREADSHEETML_NAMESPACE,
                 );
-                if spreadsheet_element && local_name(element.name().as_ref()) == b"si" {
+                if spreadsheet_element && local_name(element.name().as_ref().as_bytes()) == b"si" {
                     if current.replace(String::new()).is_some() {
                         return Err(XmlIssue::Malformed);
                     }
                 } else if current.is_some()
                     && spreadsheet_element
-                    && local_name(element.name().as_ref()) == b"rPh"
+                    && local_name(element.name().as_ref().as_bytes()) == b"rPh"
                 {
                     phonetic_depth = next_xml_depth(phonetic_depth)?;
                 } else if current.is_some()
                     && phonetic_depth == 0
                     && spreadsheet_element
-                    && local_name(element.name().as_ref()) == b"t"
+                    && local_name(element.name().as_ref().as_bytes()) == b"t"
                 {
                     text_depth = next_xml_depth(text_depth)?;
                 }
@@ -2427,12 +2396,12 @@ fn spreadsheet_shared_strings(bytes: &[u8]) -> Result<Vec<String>, XmlIssue> {
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_namespace_declarations(&reader, &element, &mut scope)?;
+                apply_namespace_declarations(&element, &mut scope)?;
                 if element_uses_scoped_namespace(
-                    element.name().as_ref(),
+                    element.name().as_ref().as_bytes(),
                     &scope,
                     SPREADSHEETML_NAMESPACE,
-                ) && local_name(element.name().as_ref()) == b"si"
+                ) && local_name(element.name().as_ref().as_bytes()) == b"si"
                 {
                     if current.is_some() {
                         return Err(XmlIssue::Malformed);
@@ -2445,11 +2414,11 @@ fn spreadsheet_shared_strings(bytes: &[u8]) -> Result<Vec<String>, XmlIssue> {
                 let scope = namespace_scopes.last().ok_or(XmlIssue::Malformed)?;
                 let qualified_name = element.name();
                 let spreadsheet_element = element_uses_scoped_namespace(
-                    qualified_name.as_ref(),
+                    qualified_name.as_ref().as_bytes(),
                     scope,
                     SPREADSHEETML_NAMESPACE,
                 );
-                let name = local_name(qualified_name.as_ref());
+                let name = local_name(qualified_name.as_ref().as_bytes());
                 if spreadsheet_element && name == b"t" && text_depth > 0 {
                     text_depth -= 1;
                 } else if spreadsheet_element && name == b"rPh" && phonetic_depth > 0 {
@@ -2460,16 +2429,16 @@ fn spreadsheet_shared_strings(bytes: &[u8]) -> Result<Vec<String>, XmlIssue> {
                 namespace_scopes.pop().ok_or(XmlIssue::Malformed)?;
             }
             Event::Text(text) if text_depth > 0 => {
-                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                let decoded = text.xml10_content();
                 append_xml_text(current.as_mut().ok_or(XmlIssue::Malformed)?, &decoded)?;
             }
             Event::CData(text) if text_depth > 0 => {
-                let decoded = text.decode().map_err(|_| XmlIssue::Malformed)?;
-                append_xml_text(current.as_mut().ok_or(XmlIssue::Malformed)?, &decoded)?;
+                let decoded = text.as_ref();
+                append_xml_text(current.as_mut().ok_or(XmlIssue::Malformed)?, decoded)?;
             }
             Event::GeneralRef(reference) if text_depth > 0 => {
-                let decoded = reference.decode().map_err(|_| XmlIssue::Malformed)?;
-                let value = decode_xml_reference(&decoded)?;
+                let decoded = reference.as_ref();
+                let value = decode_xml_reference(decoded)?;
                 append_xml_text(current.as_mut().ok_or(XmlIssue::Malformed)?, &value)?;
             }
             Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
@@ -2516,14 +2485,14 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_namespace_declarations(&reader, &element, &mut scope)?;
+                apply_namespace_declarations(&element, &mut scope)?;
                 let qualified_name = element.name();
-                let name = local_name(qualified_name.as_ref());
+                let name = local_name(qualified_name.as_ref().as_bytes());
                 // Extension elements (e.g. `<ext:c>`) share local names with
                 // real spreadsheet cells; require the SpreadsheetML namespace
                 // so foreign markup cannot be read back as cell text.
                 let spreadsheet_element = element_uses_scoped_namespace(
-                    qualified_name.as_ref(),
+                    qualified_name.as_ref().as_bytes(),
                     &scope,
                     SPREADSHEETML_NAMESPACE,
                 );
@@ -2534,12 +2503,9 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                     inline_value.clear();
                     for attribute in element.attributes() {
                         let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
-                        if attribute.key.as_ref() == b"t" {
+                        if attribute.key.as_ref().as_bytes() == b"t" {
                             let cell_type = attribute
-                                .decoded_and_normalized_value(
-                                    XmlVersion::Implicit1_0,
-                                    reader.decoder(),
-                                )
+                                .normalized_value(XmlVersion::Implicit1_0)
                                 .map_err(|_| XmlIssue::Malformed)?;
                             shared_cell = cell_type == "s";
                             inline_cell = cell_type == "inlineStr";
@@ -2564,26 +2530,26 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                 namespace_scopes.push(scope);
             }
             Event::Text(text) if value_depth > 0 => {
-                value.push_str(&text.xml10_content().map_err(|_| XmlIssue::Malformed)?);
+                value.push_str(&text.xml10_content());
             }
             Event::CData(text) if value_depth > 0 => {
-                value.push_str(&text.decode().map_err(|_| XmlIssue::Malformed)?);
+                value.push_str(text.as_ref());
             }
             Event::GeneralRef(reference) if value_depth > 0 => {
-                let decoded = reference.decode().map_err(|_| XmlIssue::Malformed)?;
-                value.push_str(&decode_xml_reference(&decoded)?);
+                let decoded = reference.as_ref();
+                value.push_str(&decode_xml_reference(decoded)?);
             }
             Event::Text(text) if inline_text_depth > 0 => {
-                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                let decoded = text.xml10_content();
                 append_xml_text(&mut inline_value, &decoded)?;
             }
             Event::CData(text) if inline_text_depth > 0 => {
-                let decoded = text.decode().map_err(|_| XmlIssue::Malformed)?;
-                append_xml_text(&mut inline_value, &decoded)?;
+                let decoded = text.as_ref();
+                append_xml_text(&mut inline_value, decoded)?;
             }
             Event::GeneralRef(reference) if inline_text_depth > 0 => {
-                let decoded = reference.decode().map_err(|_| XmlIssue::Malformed)?;
-                let value = decode_xml_reference(&decoded)?;
+                let decoded = reference.as_ref();
+                let value = decode_xml_reference(decoded)?;
                 append_xml_text(&mut inline_value, &value)?;
             }
             Event::End(element) => {
@@ -2593,7 +2559,7 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                 // incremented these depths or set these flags, so the
                 // Start-side check above is sufficient.
                 let qualified_name = element.name();
-                let name = local_name(qualified_name.as_ref());
+                let name = local_name(qualified_name.as_ref().as_bytes());
                 if name == b"v" && value_depth > 0 {
                     value_depth -= 1;
                 } else if name == b"t" && inline_text_depth > 0 {
@@ -2720,12 +2686,12 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_namespace_declarations(&reader, &start, &mut scope)?;
+                apply_namespace_declarations(&start, &mut scope)?;
                 let mut compatibility = compatibility_scopes
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_markup_compatibility_attributes(&reader, &start, &scope, &mut compatibility)?;
+                apply_markup_compatibility_attributes(&start, &scope, &mut compatibility)?;
                 if element_depth == 0 {
                     if saw_root {
                         return Err(XmlIssue::Malformed);
@@ -2734,10 +2700,10 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 }
                 element_depth = next_xml_depth(element_depth)?;
                 let qualified_name = start.name();
-                let name = local_name(qualified_name.as_ref());
+                let name = local_name(qualified_name.as_ref().as_bytes());
                 if ignored_depth.is_none()
                     && ignores_markup_compatibility_element(
-                        qualified_name.as_ref(),
+                        qualified_name.as_ref().as_bytes(),
                         &scope,
                         &compatibility,
                     )
@@ -2754,26 +2720,26 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 };
                 let supported_text = name == b"t"
                     && element_uses_scoped_namespace(
-                        qualified_name.as_ref(),
+                        qualified_name.as_ref().as_bytes(),
                         &scope,
                         text_namespace,
                     );
                 let supported_word_control = kind == OfficeKind::Docx
                     && (name == b"tab" || name == b"br" || name == b"cr")
                     && element_uses_scoped_namespace(
-                        qualified_name.as_ref(),
+                        qualified_name.as_ref().as_bytes(),
                         &scope,
                         WORDPROCESSINGML_NAMESPACE,
                     );
                 let supported_drawing_break = kind == OfficeKind::Pptx
                     && name == b"br"
                     && element_uses_scoped_namespace(
-                        qualified_name.as_ref(),
+                        qualified_name.as_ref().as_bytes(),
                         &scope,
                         DRAWINGML_NAMESPACE,
                     );
                 let markup_compatibility_element = element_uses_scoped_namespace(
-                    qualified_name.as_ref(),
+                    qualified_name.as_ref().as_bytes(),
                     &scope,
                     MARKUP_COMPATIBILITY_NAMESPACE,
                 );
@@ -2790,7 +2756,7 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     && markup_compatibility_element
                     && alternate_depth.is_some_and(|depth| element_depth == depth + 1)
                     && !supported_choice_found
-                    && markup_choice_is_supported(&reader, &start, &scope)?
+                    && markup_choice_is_supported(&start, &scope)?
                 {
                     supported_choice_found = true;
                     selected_branch_depth = Some(element_depth);
@@ -2814,10 +2780,10 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 element_depth = element_depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
                 let was_text = text_elements.pop().ok_or(XmlIssue::Malformed)?;
                 let qualified_name = end.name();
-                let name = local_name(qualified_name.as_ref());
+                let name = local_name(qualified_name.as_ref().as_bytes());
                 let scope = namespace_scopes.last().ok_or(XmlIssue::Malformed)?;
                 let markup_compatibility_element = element_uses_scoped_namespace(
-                    qualified_name.as_ref(),
+                    qualified_name.as_ref().as_bytes(),
                     scope,
                     MARKUP_COMPATIBILITY_NAMESPACE,
                 );
@@ -2828,14 +2794,14 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 };
                 let supported_paragraph = name == b"p"
                     && element_uses_scoped_namespace(
-                        qualified_name.as_ref(),
+                        qualified_name.as_ref().as_bytes(),
                         scope,
                         paragraph_namespace,
                     );
                 let supported_spreadsheet_boundary = kind == OfficeKind::Xlsx
                     && (name == b"si" || name == b"c")
                     && element_uses_scoped_namespace(
-                        qualified_name.as_ref(),
+                        qualified_name.as_ref().as_bytes(),
                         scope,
                         SPREADSHEETML_NAMESPACE,
                     );
@@ -2874,12 +2840,12 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_namespace_declarations(&reader, &empty, &mut scope)?;
+                apply_namespace_declarations(&empty, &mut scope)?;
                 let mut compatibility = compatibility_scopes
                     .last()
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
-                apply_markup_compatibility_attributes(&reader, &empty, &scope, &mut compatibility)?;
+                apply_markup_compatibility_attributes(&empty, &scope, &mut compatibility)?;
                 if element_depth == 0 {
                     if saw_root {
                         return Err(XmlIssue::Malformed);
@@ -2887,24 +2853,24 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     saw_root = true;
                 }
                 let qualified_name = empty.name();
-                let name = local_name(qualified_name.as_ref());
+                let name = local_name(qualified_name.as_ref().as_bytes());
                 let selected = ignored_depth.is_none()
                     && !ignores_markup_compatibility_element(
-                        qualified_name.as_ref(),
+                        qualified_name.as_ref().as_bytes(),
                         &scope,
                         &compatibility,
                     )
                     && (alternate_depth.is_none() || selected_branch_depth.is_some());
                 let supported_word_control = kind == OfficeKind::Docx
                     && element_uses_scoped_namespace(
-                        qualified_name.as_ref(),
+                        qualified_name.as_ref().as_bytes(),
                         &scope,
                         WORDPROCESSINGML_NAMESPACE,
                     );
                 let supported_drawing_break = kind == OfficeKind::Pptx
                     && name == b"br"
                     && element_uses_scoped_namespace(
-                        qualified_name.as_ref(),
+                        qualified_name.as_ref().as_bytes(),
                         &scope,
                         DRAWINGML_NAMESPACE,
                     );
@@ -2918,20 +2884,20 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 }
             }
             Event::Text(text) if text_depth > 0 => {
-                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                let decoded = text.xml10_content();
                 append_xml_text(&mut output, &decoded)?;
             }
             Event::CData(text) if text_depth > 0 => {
-                let decoded = text.decode().map_err(|_| XmlIssue::Malformed)?;
-                append_xml_text(&mut output, &decoded)?;
+                let decoded = text.as_ref();
+                append_xml_text(&mut output, decoded)?;
             }
             Event::GeneralRef(reference) if text_depth > 0 => {
-                let decoded = reference.decode().map_err(|_| XmlIssue::Malformed)?;
-                let value = decode_xml_reference(&decoded)?;
+                let decoded = reference.as_ref();
+                let value = decode_xml_reference(decoded)?;
                 append_xml_text(&mut output, &value)?;
             }
             Event::Text(text) if element_depth == 0 => {
-                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                let decoded = text.xml10_content();
                 if !decoded.trim().is_empty() {
                     return Err(XmlIssue::Malformed);
                 }
@@ -2983,12 +2949,7 @@ fn validate_xml_root(
             Event::Start(element) => {
                 if depth == 0 {
                     if saw_root
-                        || !element_is_expected_root(
-                            &reader,
-                            &element,
-                            expected_name,
-                            expected_namespace,
-                        )
+                        || !element_is_expected_root(&element, expected_name, expected_namespace)
                     {
                         return Err(XmlIssue::Malformed);
                     }
@@ -2998,12 +2959,7 @@ fn validate_xml_root(
             }
             Event::Empty(element) if depth == 0 => {
                 if saw_root
-                    || !element_is_expected_root(
-                        &reader,
-                        &element,
-                        expected_name,
-                        expected_namespace,
-                    )
+                    || !element_is_expected_root(&element, expected_name, expected_namespace)
                 {
                     return Err(XmlIssue::Malformed);
                 }
@@ -3013,7 +2969,7 @@ fn validate_xml_root(
                 depth = depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
             }
             Event::Text(text) if depth == 0 => {
-                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                let decoded = text.xml10_content();
                 if !decoded.trim().is_empty() {
                     return Err(XmlIssue::Malformed);
                 }
@@ -3031,21 +2987,20 @@ fn validate_xml_root(
 }
 
 fn element_is_expected_root(
-    reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
     expected_name: &[u8],
     expected_namespace: &[u8],
 ) -> bool {
-    if local_name(element.name().as_ref()) != expected_name {
+    if local_name(element.name().as_ref().as_bytes()) != expected_name {
         return false;
     }
     let qualified_name = element.name();
-    let name = qualified_name.as_ref();
+    let name = qualified_name.as_ref().as_bytes();
     let prefix = name
         .iter()
         .position(|byte| *byte == b':')
         .map_or(b"".as_slice(), |separator| &name[..separator]);
-    namespace_declaration(reader, element, prefix)
+    namespace_declaration(element, prefix)
         .is_some_and(|actual| namespace_matches(&actual, expected_namespace))
 }
 
@@ -3083,7 +3038,7 @@ fn transcode_xml(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, XmlIssue> {
     if body.len() % 2 != 0 {
         return Err(XmlIssue::Malformed);
     }
-    let units = body.chunks_exact(2).map(|pair| {
+    let units = body.as_chunks::<2>().0.iter().map(|pair| {
         if little_endian {
             u16::from_le_bytes([pair[0], pair[1]])
         } else {
@@ -3931,7 +3886,7 @@ mod tests {
             local_offset: 0,
         };
 
-        let result = read_probe_local_header(&source, &NeverCancelled, &entry).await;
+        let result = read_probe_local_header(&source, &NeverCancelled, &entry, &mut 0).await;
 
         assert!(matches!(
             result,
@@ -4009,6 +3964,7 @@ mod tests {
             }],
             kinds: vec![OfficeKind::Docx],
             encrypted: false,
+            examined_bytes: 0,
         };
 
         let result = read_probe_entry(
@@ -4017,6 +3973,7 @@ mod tests {
             &inventory,
             CONTENT_TYPES,
             CONTENT_TYPES_COMPRESSED_BYTES,
+            &mut 0,
         )
         .await;
 
@@ -4042,6 +3999,7 @@ mod tests {
             }],
             kinds: vec![OfficeKind::Docx],
             encrypted: true,
+            examined_bytes: 0,
         };
 
         let entry = inventory
@@ -4199,11 +4157,12 @@ mod tests {
             entries_by_name: vec![entry],
             kinds: vec![OfficeKind::Docx],
             encrypted: false,
+            examined_bytes: 0,
         };
 
         let truncated = BytesSource(header.clone());
         assert!(
-            validate_selected_probe_entries(&truncated, &NeverCancelled, &inventory)
+            validate_selected_probe_entries(&truncated, &NeverCancelled, &inventory, &mut 0)
                 .await
                 .is_err()
         );
@@ -4212,7 +4171,7 @@ mod tests {
         complete_bytes.extend_from_slice(&[0_u8; 64]);
         let complete = BytesSource(complete_bytes);
         assert!(
-            validate_selected_probe_entries(&complete, &NeverCancelled, &inventory)
+            validate_selected_probe_entries(&complete, &NeverCancelled, &inventory, &mut 0)
                 .await
                 .is_ok()
         );

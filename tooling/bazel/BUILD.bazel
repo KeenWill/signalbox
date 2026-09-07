@@ -1,0 +1,15 @@
+load(":native_runtime.bzl", "native_runtime")
+
+native_runtime(
+    name = "native_runtime",
+    libraries = "@linux_test_runtime//:libraries",
+    patchelf = "@patchelf//:bin/patchelf",
+    visibility = ["//visibility:public"],
+)
+
+exports_files([
+    "check_generated.py",
+    "check_markdown.py",
+    "patches/deno-embedded-javascript.patch",
+    "patches/v8-build-output.patch",
+])

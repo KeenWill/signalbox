@@ -44,7 +44,9 @@ use testcontainers_modules::{
     testcontainers::{ImageExt, runners::AsyncRunner},
 };
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+#[path = "../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+use postgres_test_image::POSTGRES_IMAGE_TAG;
 const DATABASE_NAME: &str = "signalbox_search_path";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
@@ -386,7 +388,7 @@ fn unpinned_names(covered: &[(String, bool)]) -> Vec<&str> {
         .collect()
 }
 
-/// INV-070: every function reachable from a check constraint or index during
+/// every function reachable from a check constraint or index during
 /// `pg_restore` carries the canonical pinned search path — the
 /// migration-selected schema, then `pg_catalog`, then `pg_temp`.
 #[tokio::test(flavor = "multi_thread")]
@@ -426,7 +428,7 @@ async fn every_restore_reachable_function_pins_its_search_path() -> Result<(), B
     Ok(())
 }
 
-/// INV-070: body-reference discovery closes transitively — a check constraint
+/// body-reference discovery closes transitively — a check constraint
 /// whose function calls through an intermediate body still surfaces the
 /// unpinned function at the end of the chain.
 #[tokio::test(flavor = "multi_thread")]

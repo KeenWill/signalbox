@@ -1,0 +1,57 @@
+load("@crates//:defs.bzl", "all_crate_deps", "crate_edition")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+
+rust_package()
+
+cargo_build_script(
+    name = "build_script",
+    srcs = [
+        "build.rs",
+        "version_pin.rs",
+    ],
+    crate_root = "build.rs",
+    data = [
+        "Cargo.toml",
+        "//:tooling/codex-cli/release.json",
+    ],
+    edition = crate_edition(),
+    rustc_env_files = [":cargo_environment"],
+    deps = all_crate_deps(build = True),
+)
+
+rust_library(
+    name = "signalbox_model_runtime_codex_cli",
+    crate_root = "src/lib.rs",
+    deps = [
+        ":build_script",
+        "//crates/model-runtime:signalbox_model_runtime",
+    ],
+)
+
+rust_binary(
+    name = "signalbox-fake-codex-cli",
+    srcs = glob(["tests/support/**/*.rs"]),
+    crate_root = "tests/support/fake_codex_app_server.rs",
+    deps = [
+        ":build_script",
+        ":signalbox_model_runtime_codex_cli",
+        "//crates/model-runtime:signalbox_model_runtime",
+    ],
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    compile_data = ["tests/support/protocol_peer.rs"],
+    crate = ":signalbox_model_runtime_codex_cli",
+    # These tests execute host shell or process utilities.
+    tags = ["external"],
+    deps = ["//crates/test-bin:signalbox_test_bin"],
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_model_runtime_codex_cli",
+)

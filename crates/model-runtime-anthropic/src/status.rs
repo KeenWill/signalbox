@@ -60,8 +60,8 @@ pub(crate) fn classify_error(status: u16, token: Option<&str>) -> ProviderErrorK
     }
 }
 
-/// Classifies an error envelope and grants substitution proof only to an
-/// admitted native availability token paired with its documented status.
+/// Classifies an error envelope and grants non-acceptance proof only to an
+/// admitted native transient token paired with its documented status.
 pub(crate) fn classify_error_with_proof(
     status: u16,
     token: Option<&str>,
@@ -69,7 +69,9 @@ pub(crate) fn classify_error_with_proof(
     let kind = classify_error(status, token);
     let non_acceptance_proven = matches!(
         (status, token),
-        (429, Some("rate_limit_error")) | (529, Some("overloaded_error"))
+        (429, Some("rate_limit_error"))
+            | (500, Some("api_error"))
+            | (529, Some("overloaded_error"))
     );
     (kind, non_acceptance_proven)
 }
@@ -77,27 +79,19 @@ pub(crate) fn classify_error_with_proof(
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use super::{
         classify_error, classify_error_status, classify_error_token, classify_error_with_proof,
     };
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct TokenRow {
         token: &'static str,
         kind: String,
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct StatusRow {
         status: u16,
         kind: String,
@@ -158,6 +152,20 @@ mod tests {
             (signalbox_model_runtime::ProviderErrorKind::Overloaded, true)
         );
         assert_eq!(
+            classify_error_with_proof(500, Some("api_error")),
+            (
+                signalbox_model_runtime::ProviderErrorKind::ProviderInternal,
+                true
+            )
+        );
+        assert_eq!(
+            classify_error_with_proof(529, Some("api_error")),
+            (
+                signalbox_model_runtime::ProviderErrorKind::ProviderInternal,
+                false
+            )
+        );
+        assert_eq!(
             classify_error_with_proof(429, Some("future_limit_error")),
             (
                 signalbox_model_runtime::ProviderErrorKind::RateLimited,
@@ -202,7 +210,7 @@ mod tests {
             │ billing_error_from_the_future │ Unrecognized       │
             └───────────────────────────────┴────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 
     #[test]
@@ -224,6 +232,6 @@ mod tests {
             │    503 │ Unrecognized       │
             └────────┴────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 }

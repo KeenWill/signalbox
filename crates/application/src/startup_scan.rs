@@ -2,10 +2,10 @@
 //!
 //! docs/spec/turn-lifecycle-and-scheduling.md requires the inventory scan to
 //! finish before the scheduler starts. docs/spec/sessions-and-transcript.md
-//! owns the failed marker and terminal frontier, while INV-034 requires
-//! prior-process nonterminal attempts to end as Lost.
+//! owns the failed marker and terminal frontier. Prior-process nonterminal
+//! attempts end as Lost.
 
-use std::{error::Error, fmt, future::Future};
+use std::future::Future;
 
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnFailureIdentities, ContextFrontierId,
@@ -81,6 +81,11 @@ pub enum StartupScanSessionOutcome {
         /// Active turn whose result/next-attempt boundary is ready.
         turn: TurnId,
     },
+    /// A durable unsent model call remains prepared for ordinary scheduling.
+    ResumablePreparedModelCall {
+        /// Active turn whose exact prepared call remains retryable.
+        turn: TurnId,
+    },
     /// A prior process already ended this turn's tenure and parked it on an
     /// exact ambiguity set. The scan has nothing left to classify; bounded
     /// runtime reconciliation or an operator decision can release the slot.
@@ -139,9 +144,13 @@ impl StartupScanOutcome {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error(transparent)]
+#[operator(delegate = repository_error, code = delegate)]
 /// Repository failure annotated with the startup-scan aggregate scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartupScanError<RepositoryError> {
+    #[source]
     repository_error: RepositoryError,
     session: Option<SessionId>,
 }
@@ -177,37 +186,6 @@ impl<RepositoryError> StartupScanError<RepositoryError> {
     /// Consumes the scan annotation and returns the adapter-specific failure.
     pub fn into_repository_error(self) -> RepositoryError {
         self.repository_error
-    }
-}
-
-impl<RepositoryError> fmt::Display for StartupScanError<RepositoryError>
-where
-    RepositoryError: fmt::Display,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.repository_error.fmt(formatter)
-    }
-}
-
-impl<RepositoryError> Error for StartupScanError<RepositoryError>
-where
-    RepositoryError: Error + 'static,
-{
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.repository_error)
-    }
-}
-
-impl<RepositoryError> ClassifyOperatorFailure for StartupScanError<RepositoryError>
-where
-    RepositoryError: ClassifyOperatorFailure,
-{
-    fn operator_failure_class(&self) -> OperatorFailureClass {
-        self.repository_error.operator_failure_class()
-    }
-
-    fn operator_failure_cause_code(&self) -> &'static str {
-        self.repository_error.operator_failure_cause_code()
     }
 }
 
@@ -287,7 +265,10 @@ where
                         }
                         break;
                     }
-                    Ok(StartupScanSessionOutcome::ResumableToolBatch { .. }) => break,
+                    Ok(
+                        StartupScanSessionOutcome::ResumableToolBatch { .. }
+                        | StartupScanSessionOutcome::ResumablePreparedModelCall { .. },
+                    ) => break,
                     Ok(StartupScanSessionOutcome::AwaitingRecoveryDecision { .. }) => {
                         awaiting_recovery_decision_sessions.push(session);
                         break;
@@ -411,10 +392,10 @@ mod tests {
         }
     }
 
-    /// INV-034: the finite startup inventory is handled once and an
+    /// the finite startup inventory is handled once and an
     /// identity-collision retry receives fresh identities.
     #[test]
-    fn inv034_retries_collision_and_scans_finite_inventory() {
+    fn retries_collision_and_scans_finite_inventory() {
         let first = session(1);
         let second = session(2);
         let repository = FakeRepository {
@@ -436,10 +417,10 @@ mod tests {
         assert_eq!(outcome.recovered_turn_count(), 0);
     }
 
-    /// INV-034: a turn parked for bounded reconciliation is neither counted as
+    /// a turn parked for bounded reconciliation is neither counted as
     /// recovered nor hidden — it is reported and startup proceeds.
     #[test]
-    fn inv034_reports_awaiting_recovery_decision_without_blocking_startup() {
+    fn reports_awaiting_recovery_decision_without_blocking_startup() {
         let parked = session(1);
         let healthy = session(2);
         let repository = FakeRepository {

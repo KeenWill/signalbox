@@ -1,4 +1,4 @@
-//! Reviewed SQL statements that acquire explicit persistence row locks.
+//! Explicit persistence row and advisory locks, including schema functions.
 //!
 //! Session/scheduler pair order: every transaction that locks both a
 //! `session` row and a `session_scheduler` row acquires the `session` row
@@ -10,6 +10,161 @@
 //! transactions wait on this pair in opposite orders. A scheduler-first
 //! acquisition of the pair would deadlock against every path above and must
 //! not be introduced.
+//!
+//! The `session_lifecycle` satellite sits inside that prefix, between the
+//! `session` row and the `session_scheduler` row, and is never acquired after
+//! the scheduler row. Every statement below that locks a scheduler row locks
+//! the satellite first, in a common table expression the scheduler predicate
+//! reads, so the order is the statement's own structure rather than a
+//! convention a caller could reorder. Turn-lifecycle writers inherit it: the
+//! standing rule that every turn-lifecycle writer acquires the scheduler lock
+//! before touching a turn row means every transaction whose turn write
+//! projects a new session state already holds the satellite when the
+//! projection runs.
+//!
+//! Paths that acquire the satellite outside a scheduler statement hold no
+//! scheduler row in the same transaction. Session creation inserts it. The
+//! lifecycle store's own park, closure, and ownership writes take the `session`
+//! row first.
+//!
+//! Additional row-lock protocols:
+//! - `review_workflow::append_finding_event`: ordinary events lock every `review_finding` for the
+//!   target `FOR NO KEY UPDATE`, by `finding_id`; publication reconciliation takes the external
+//!   link before its finding.
+//! - `runner_protocol::load_enrollment_request_facts`: `runner_enrollment_request_receipt` by
+//!   request `FOR SHARE`.
+//! - `runner_protocol::lock_runner_lease_claim_connection_authority`: `runner_enrollment`, then
+//!   `runner_connection_authority_head`, both by enrollment `FOR SHARE`.
+//! - `context_compaction::complete`: source `context_frontier` `FOR SHARE` after the lifecycle
+//!   session lock.
+//!
+//! Advisory-lock protocols:
+//! - `hub_fence::advance_hub_fence`: after `HUB_FENCE_GENERATION`, exclusive
+//!   `pg_advisory_xact_lock` on the prior generation's `advisory_key`, then `pg_try_advisory_lock`
+//!   on that same key to retain it across commit. `AdvancedHubFence::connect_pool` takes
+//!   `pg_advisory_lock_shared` on the pool generation for each connection's lifetime;
+//!   `retire_hub_fence_generation` takes exclusive `pg_advisory_lock` on it.
+//! - The following use exclusive `pg_advisory_xact_lock` with `hashtextextended(key, 0)`:
+//!   - `model_execution::acquire_model_call_outbox_order_guard`: the
+//!     `MODEL_CALL_OUTBOX_ORDER_GUARD` key before credential or outbox locks;
+//!     `lock_credential_pool_action_head`: `credential_pool_action_head:` plus profile reference,
+//!     in sorted profile order for several profiles.
+//!   - `commissioned_dispatch::lock_pull_request_target`: `commissioned-dispatch:` plus repository
+//!     and pull-request number, before target admission or release.
+//!   - `search::SearchRepository::publish`: source kind and artifact identity joined with
+//!     `chr(31)`, before identity checks/write.
+//!
+//! SQL lock sites below name functions in migration files, grouped by family.
+//! Arrows describe acquisition within a function; row sets name their SQL sort
+//! order. Advisory locks are exclusive transaction locks with
+//! `hashtextextended(key, 0)`. Repeated definitions share an entry where their
+//! lock sites agree; caller-held locks still precede the function's locks.
+//!
+//! `sessions` (including the `provider_compaction` transcript function):
+//! - `append_session_timeline_input_bytes`, `append_session_timeline_transcript_bytes`,
+//!   `reconcile_session_timeline_goal_work_fact`, `update_session_timeline_work_fact`:
+//!   `outbox_sequence_state FOR UPDATE` before timeline fact writes.
+//! - `guard_session_model_credential_head`,
+//!   `reject_session_model_credential_entry_after_publication`: `session FOR UPDATE`.
+//! - `guard_session_plan_event_append`: `session FOR NO KEY UPDATE` -> authorized `tool_attempt FOR
+//!   SHARE`.
+//! - `next_session_plan_event_ordinal`: `session FOR NO KEY UPDATE`.
+//! - `reject_sealed_session_metadata_receipt_satellite_insert`: `durable_command FOR UPDATE`.
+//!
+//! `turns`:
+//! - `assert_turn_runner_recovery_complete`, `recheck_session_turn_runner_recovery`:
+//!   `session_scheduler FOR UPDATE` for the checked session.
+//! - `require_pending_steering_active_source`: source `turn_lifecycle FOR UPDATE`.
+//!
+//! `tool_loop` (also `lifecycle_commands` for decision authority):
+//! - `reject_tool_approval_judge_call_invalid_change`: `tool_request FOR UPDATE` -> active
+//!   approval-waiting `turn_lifecycle FOR UPDATE` on insertion.
+//! - `require_tool_approval_decision_authority`: `tool_request FOR UPDATE`.
+//!
+//! `delegation`:
+//! - `guard_session_delegation_event_append`: `session_delegation FOR UPDATE`.
+//! - `guard_session_pending_delivery_append`: recipient `session FOR NO KEY UPDATE`.
+//! - `lock_delegation_parent_for_spawn`: parent `session FOR NO KEY UPDATE`.
+//! - `lock_delegation_termination_session_frontier`: `session FOR NO KEY UPDATE`, by session
+//!   identity; `lock_delegation_termination_frontier`: calls that session prefix, then takes
+//!   `session_delegation FOR UPDATE`, by spawning tool-request identity.
+//! - `require_delegation_cascade_disposition_count`: sessions in session order `FOR NO KEY UPDATE`
+//!   -> relations in spawning tool-request order `FOR UPDATE`.
+//!
+//! `goals` (also `session_lifecycle_satellite` for event continuity):
+//! - `credit_goal_turn_generation_work_fact`, `refresh_session_live_goal_queue`,
+//!   `refresh_session_live_queued_turn`: `outbox_sequence_state FOR UPDATE` before fact/queue
+//!   writes.
+//! - `enforce_goal_scheduler_failure_turn`: failed `turn_lifecycle FOR SHARE`.
+//! - `goal_event_names_current_goal_turn`, `require_goal_event_continuity`: `session FOR NO KEY
+//!   UPDATE`.
+//!
+//! `runners`:
+//! - `guard_runner_claimed_retry_attempt_authority`: source `runner_current_lease_event FOR
+//!   UPDATE`.
+//! - `guard_runner_connection_event_insert`: active `runner_enrollment FOR UPDATE`.
+//! - `guard_runner_lease_generation`: `runner_current_session_placement FOR SHARE` ->
+//!   `runner_enrollment FOR SHARE` -> `tool_attempt FOR UPDATE` -> `runner_current_registration FOR
+//!   SHARE` -> credential-bearing `runner_current_credential_grant_audit FOR SHARE`.
+//! - `guard_runner_placement_record`: prior `runner_current_credential_grant_audit FOR SHARE`;
+//!   `guard_runner_registration_insert`: `runner_enrollment FOR SHARE`.
+//! - `lock_runner_loss_identity`: advisory key `signalbox.runner-loss-identity.` plus runner
+//!   identity, also called by the Rust runner store, `serialize_runner_enrollment_loss_identity`,
+//!   and completion in `guard_runner_connection_loss_propagation`.
+//! - `lock_scheduler_before_runner_recovery_dependency_insert`: `session_scheduler FOR UPDATE`.
+//! - `reject_runner_lease_claim_after_connection_loss` and
+//!   `reject_runner_lease_generation_after_connection_loss`: `runner_enrollment FOR SHARE` ->
+//!   `runner_connection_authority_head FOR SHARE`; generation validation then takes
+//!   `runner_current_connection_loss FOR SHARE`.
+//! - `require_runner_retryable_loss_live_attempt`: `tool_attempt FOR SHARE`.
+//! - `serialize_runner_placement_loss_identity`: `session_scheduler FOR UPDATE` -> selected
+//!   runner's `lock_runner_loss_identity`.
+//! - `set_runner_placement_loss_baseline`: `session_scheduler FOR UPDATE` -> `runner_enrollment FOR
+//!   SHARE` -> `runner_connection_authority_head FOR SHARE` -> `runner_current_connection_loss FOR
+//!   SHARE`.
+//!
+//! Migration-only sites in `repo_watch`, `session_lifecycle_satellite`, and
+//! `session_deadline_runtime`: `202609050105_drop_repo_watch_v1.sql` removes
+//! these locks from the installed schema.
+//! - `adjust_repo_watch_pull_request_work_count`: `repo_watch_current_pull_request_work_count FOR
+//!   UPDATE`.
+//! - `repo_watch_owe_dispatch_requeue`: singleton-key advisory lock -> `repo_watch_rule_activation
+//!   FOR UPDATE`.
+//! - `repo_watch_release_completed_dispatch_batches_for_turn`: candidate `repo_watch_dispatch_batch
+//!   FOR UPDATE`.
+//! - `repo_watch_release_dispatch_obligation_park_for_progress`,
+//!   `repo_watch_release_parked_dispatch_obligation`: obligation-identity advisory lock using
+//!   `repo_watch_dispatch_obligation_lock_key` -> subject `session_lifecycle FOR UPDATE` in session
+//!   order -> `repo_watch_dispatch_obligation FOR UPDATE`. The `repo_watch` definitions contain the
+//!   obligation row lock.
+//! - `project_session_lifecycle_from_goal`: unreleased dispatch cohort `session_lifecycle FOR
+//!   UPDATE` in session order.
+//! - `lock_repo_watch_deactivation_session_lifecycles`: subject `session_lifecycle FOR UPDATE` in
+//!   session order.
+//!
+//! `repo_watch_v2_dispatch`:
+//! - `enforce_dispatch_reference_origin`: advisory key `dispatch:` plus dispatch reference before
+//!   origin checking.
+//!
+//! `review`:
+//! - `authenticate_review_finding_event_head`: subject/referenced `review_finding_event_head FOR
+//!   UPDATE` in finding order.
+//! - `guard_review_external_link_attachment_insert`: `review_external_link FOR NO KEY UPDATE` ->
+//!   advisory external-object key (provider, object kind, external object key separated by
+//!   `chr(31)`).
+//! - `guard_review_external_object_identity_insert`: that external-object key.
+//! - `require_review_external_observation_sequence`, `require_review_pass_external_result`:
+//!   `review_external_link FOR NO KEY UPDATE`.
+//! - `require_review_finding_event_sequence`: subject/referenced `review_finding FOR NO KEY UPDATE`
+//!   in finding order.
+//!
+//! `blobs_and_web`:
+//! - `bounded_web_usage_profile`, `enforce_web_usage_oversized_profile_identity`: advisory key
+//!   equal to the exact profile reference's MD5 digest.
+//!
+//! `programs` and `operator_attention`:
+//! - `require_program_journal_append_sequence`: `program_run_journal_sequence_state FOR UPDATE`.
+//! - `next_operator_attention_change_sequence`: `outbox_sequence_state FOR UPDATE`.
 
 use signalbox_domain::SessionId;
 
@@ -30,55 +185,13 @@ pub(crate) const PROGRAM_JOURNAL_SEQUENCE: &str = "SELECT
   WHERE run_id = $1
   FOR UPDATE";
 
-pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
-    "SELECT latest_event_id, settled_kind, settled_dispatch_id,
-            parked_at IS NOT NULL AS parked
-       FROM repo_watch_dispatch_obligation
-      WHERE obligation_id = $1
-      FOR UPDATE";
-
-pub(crate) const REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION: &str = "SELECT obligation.obligation_id
-           FROM repo_watch_dispatch_obligation AS obligation
-          WHERE obligation.rule_id = $1
-            AND obligation.rule_version = $2
-            AND obligation.singleton_scope = $3
-            AND obligation.singleton_repository IS NOT DISTINCT FROM $4
-            AND obligation.singleton_pull_request_number IS NOT DISTINCT FROM $5
-            AND obligation.singleton_stack_root_pull_request_number
-                 IS NOT DISTINCT FROM $6
-            AND obligation.settled_kind IS NULL
-            FOR UPDATE";
-
-pub(crate) const REPO_WATCH_TERMINAL_TARGET_OBLIGATIONS: &str = "SELECT obligation.obligation_id
-           FROM repo_watch_dispatch_obligation AS obligation
-          WHERE obligation.settled_kind IS NULL
-            AND obligation.parked_state_event_id IS DISTINCT FROM $3
-            AND (
-                EXISTS (
-                    SELECT 1
-                      FROM repo_watch_event AS event
-                     WHERE event.event_id = obligation.latest_event_id
-                       AND event.repository = $1
-                       AND event.pull_request_number = $2
-                       AND event.event_id <> $3
-                )
-                OR EXISTS (
-                    SELECT 1
-                      FROM repo_watch_event AS parked_state
-                     WHERE parked_state.event_id = obligation.parked_state_event_id
-                       AND parked_state.repository = $1
-                       AND parked_state.pull_request_number = $2
-                )
+pub(crate) const START_ELIGIBLE_TURN: &str = "WITH satellite AS (
+                SELECT session_id
+                  FROM session_lifecycle
+                 WHERE session_id = $1
+                 FOR NO KEY UPDATE
             )
-          ORDER BY obligation.obligation_id
-            FOR UPDATE";
-
-pub(crate) const REPO_WATCH_WEBHOOK_DELIVERY: &str = "SELECT receipt_sequence
-       FROM repo_watch_webhook_delivery
-      WHERE hook_id = $1 AND delivery_id = $2
-      FOR UPDATE";
-
-pub(crate) const START_ELIGIBLE_TURN: &str = "SELECT
+            SELECT
             EXISTS (
                 SELECT 1
                   FROM session
@@ -87,59 +200,17 @@ pub(crate) const START_ELIGIBLE_TURN: &str = "SELECT
             (
                 SELECT session_id
                   FROM session_scheduler
-                 WHERE session_id = $1
+                 WHERE session_id = (SELECT session_id FROM satellite)
                  FOR UPDATE
             )";
 
-pub(crate) const EXPIRED_DISPATCH_START_LEASE: &str = "SELECT EXISTS (
-        SELECT 1
-          FROM repo_watch_dispatch_start_lease AS lease
-         WHERE lease.session_id = $1
-           AND lease.expires_at <= clock_timestamp()
-           AND NOT EXISTS (
-                SELECT 1
-                  FROM model_call AS call
-                 WHERE call.session_id = lease.session_id
-           )
-           AND (
-                (
-                    NOT EXISTS (
-                        SELECT 1
-                          FROM repo_watch_dispatch_start_lease_expiration AS expired
-                         WHERE expired.dispatch_id = lease.dispatch_id
-                           AND expired.action_ordinal = lease.action_ordinal
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1
-                          FROM repo_watch_dispatch_release AS released
-                         WHERE released.dispatch_id = lease.dispatch_id
-                    )
-                )
-                OR EXISTS (
-                    SELECT 1
-                      FROM turn_lifecycle AS lifecycle
-                      JOIN goal_turn AS goal
-                        ON goal.session_id = lifecycle.session_id
-                       AND goal.turn_id = lifecycle.turn_id
-                      JOIN repo_watch_dispatch_start_lease_expiration AS expired
-                        ON expired.dispatch_id = lease.dispatch_id
-                       AND expired.action_ordinal = lease.action_ordinal
-                       AND expired.goal_command_id IS NOT NULL
-                     WHERE lifecycle.session_id = lease.session_id
-                       AND lifecycle.state_kind = 'active'
-                       AND goal.goal_generation = 1
-                       AND NOT EXISTS (
-                            SELECT 1
-                              FROM goal_turn AS successor_goal
-                             WHERE successor_goal.session_id = lease.session_id
-                               AND successor_goal.goal_generation >
-                                   goal.goal_generation
-                       )
-                )
-           )
-    )";
-
-pub(crate) const STARTUP_RECOVERY: &str = "SELECT
+pub(crate) const STARTUP_RECOVERY: &str = "WITH satellite AS (
+                SELECT session_id
+                  FROM session_lifecycle
+                 WHERE session_id = $1
+                 FOR NO KEY UPDATE
+            )
+            SELECT
             EXISTS (
                 SELECT 1
                   FROM session
@@ -148,7 +219,7 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
             (
                 SELECT session_id
                   FROM session_scheduler
-                 WHERE session_id = $1
+                 WHERE session_id = (SELECT session_id FROM satellite)
                  FOR UPDATE
             ),
             (
@@ -159,6 +230,19 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                    AND NOT delegation_runtime_terminal
             )";
 
+/// Enrolls newly parked recovery-waiting turns, one bounded page per lap.
+///
+/// The page locks each turn row `FOR NO KEY UPDATE`, at the same strength an
+/// accepting operator interrupt's terminalizing `UPDATE` takes. Without that
+/// lock nothing made the two contend: under `READ COMMITTED` discovery's
+/// snapshot could still read a turn as recovery-waiting while an interrupt's
+/// terminalization sat uncommitted, and the interrupt's own supersession could
+/// not see discovery's uncommitted insert, so both committed and left a
+/// terminal turn beside a live `scheduled` recovery row — the shape
+/// `process_read` rejects as corruption. Contending settles it either way:
+/// the interrupt commits first and this statement's re-check drops the row, or
+/// discovery commits first and the interrupt's supersession sees the row it
+/// inserted.
 pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
             SELECT after_turn_id, high_turn_id
               FROM automatic_reconciliation_discovery_state
@@ -204,6 +288,7 @@ pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
                AND turn_id <= bounds.high_turn_id
              ORDER BY turn_id
              LIMIT $1
+             FOR NO KEY UPDATE OF turn_lifecycle
          ), inserted AS (
             INSERT INTO automatic_reconciliation
                 (turn_id, session_id, model_call_id, tool_attempt_id)
@@ -383,7 +468,13 @@ pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                JOIN recorded USING (turn_id)
               ORDER BY claimed.turn_id";
 
-pub(crate) const CONTEXT_COMPACTION_SCHEDULER: &str = "SELECT
+pub(crate) const CONTEXT_COMPACTION_SCHEDULER: &str = "WITH satellite AS (
+                SELECT session_id
+                  FROM session_lifecycle
+                 WHERE session_id = $1
+                 FOR NO KEY UPDATE
+            )
+            SELECT
             EXISTS (
                 SELECT 1
                   FROM session
@@ -392,7 +483,7 @@ pub(crate) const CONTEXT_COMPACTION_SCHEDULER: &str = "SELECT
             (
                 SELECT session_id
                   FROM session_scheduler
-                 WHERE session_id = $1
+                 WHERE session_id = (SELECT session_id FROM satellite)
                  FOR UPDATE
             )";
 
@@ -409,12 +500,29 @@ pub(crate) const REPLACE_SESSION_DEFAULTS_CURRENT: &str = "SELECT current_versio
 pub(crate) const CONTEXT_COMPACTION_LIFECYCLE_SESSION: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
+/// Serializes one session's own lifecycle writes — park, closure, ownership.
+///
+/// Taken after the session row and before any scheduler row, which is the
+/// satellite's declared place in the order. These transactions hold no
+/// scheduler row at all, so the pair they take is session then satellite.
+pub(crate) const SESSION_LIFECYCLE_SESSION: &str =
+    "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
+
+pub(crate) const SESSION_LIFECYCLE_SATELLITE: &str =
+    "SELECT session_id FROM session_lifecycle WHERE session_id = $1 FOR NO KEY UPDATE";
+
 pub(crate) const SUBMIT_INPUT_SESSION: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
-pub(crate) const SUBMIT_INPUT_SCHEDULER: &str = "SELECT session_id
+pub(crate) const SUBMIT_INPUT_SCHEDULER: &str = "WITH satellite AS (
+            SELECT session_id
+              FROM session_lifecycle
+             WHERE session_id = $1
+             FOR NO KEY UPDATE
+        )
+        SELECT session_id
            FROM session_scheduler
-          WHERE session_id = $1
+          WHERE session_id = (SELECT session_id FROM satellite)
           FOR UPDATE";
 
 pub(crate) const SUBMIT_INPUT_DEFAULTS: &str = "SELECT current_version
@@ -627,8 +735,8 @@ pub(crate) const PLAN_APPEND_ATTEMPT: &str = "SELECT attempt.attempt_id
  FOR SHARE OF attempt";
 
 pub(crate) const OUTBOX_DELIVERY: &str = "SELECT delivered_through
-           FROM outbox_delivery_state
-          WHERE singleton
+           FROM outbox_consumer_cursor
+          WHERE consumer_name = $1
           FOR UPDATE";
 
 pub(crate) const OUTBOX_SEQUENCE_ALLOCATOR: &str = "SELECT singleton
@@ -719,9 +827,15 @@ pub(crate) const RUNNER_PLACEMENT_CURRENT_LOSS: &str = "SELECT loss_epoch
               WHERE enrollment_id = $1
               FOR SHARE";
 
-pub(crate) const RUNNER_RETRY_REPLACEMENT_SCHEDULER: &str = "SELECT session_id
+pub(crate) const RUNNER_RETRY_REPLACEMENT_SCHEDULER: &str = "WITH satellite AS (
+                SELECT session_id
+                  FROM session_lifecycle
+                 WHERE session_id = $1
+                 FOR NO KEY UPDATE
+            )
+            SELECT session_id
                FROM session_scheduler
-              WHERE session_id = $1
+              WHERE session_id = (SELECT session_id FROM satellite)
               FOR UPDATE";
 
 pub(crate) const RUNNER_LEASE_HEAD: &str = "SELECT current_event.event_ordinal, event.state_kind,
@@ -869,3 +983,54 @@ pub(crate) const REVIEW_EXTERNAL_LINK_TRANSITION: &str = "SELECT external_link_i
        FROM review_external_link
       WHERE external_link_id = $1
       FOR NO KEY UPDATE";
+
+pub(crate) const REVIEW_TARGET_FINDINGS_TRANSITION: &str = "SELECT finding_id
+                   FROM review_finding
+                  WHERE target_id = (
+                            SELECT target_id
+                              FROM review_finding
+                             WHERE finding_id = $1
+                        )
+                  ORDER BY finding_id
+                  FOR NO KEY UPDATE";
+
+pub(crate) const RUNNER_ENROLLMENT_REQUEST_FACTS: &str =
+    "SELECT enrollment_id, runner_id, authentication_reference_id,
+                registration_revision
+           FROM runner_enrollment_request_receipt
+          WHERE request_id = $1
+          FOR SHARE";
+
+pub(crate) const RUNNER_LEASE_CLAIM_ENROLLMENT: &str = "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE enrollment_id = $1
+          FOR SHARE";
+
+pub(crate) const RUNNER_LEASE_CLAIM_CONNECTION_AUTHORITY: &str = "SELECT enrollment_id
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1
+          FOR SHARE";
+
+pub(crate) const CONTEXT_COMPACTION_SOURCE_FRONTIER: &str = "SELECT member_count
+               FROM context_frontier
+              WHERE owning_session_id = $1
+                AND context_frontier_id = $2
+              FOR SHARE";
+
+pub(crate) const HUB_FENCE_POOL_GENERATION: &str = "SELECT pg_advisory_lock_shared($1)";
+
+pub(crate) const HUB_FENCE_PRIOR_GENERATION: &str = "SELECT pg_advisory_xact_lock($1)";
+
+pub(crate) const HUB_FENCE_RETAIN_PRIOR_GENERATION: &str = "SELECT pg_try_advisory_lock($1)";
+
+pub(crate) const HUB_FENCE_RETIRE_GENERATION: &str = "SELECT pg_advisory_lock($1)";
+
+pub(crate) const HASHED_TRANSACTION_ADVISORY_LOCK: &str =
+    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))";
+
+pub(crate) const SEARCH_ARTIFACT_IDENTITY: &str = "SELECT pg_advisory_xact_lock(
+                 hashtextextended(
+                     concat_ws(chr(31), $1::text, $2::text),
+                     0
+                 )
+             )";

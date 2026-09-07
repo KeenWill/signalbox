@@ -1,0 +1,43 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_unit_test")
+
+TEST_DEPS = [
+    "//apps/signalboxd:signalboxd_lib",
+    "//crates/application:signalbox_application",
+    "//crates/domain:signalbox_domain",
+    "//crates/model-provider-runtime:signalbox_model_provider_runtime",
+    "//crates/model-runtime:signalbox_model_runtime",
+    "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
+    "//crates/persistence:signalbox_persistence",
+    "//crates/test-bin:signalbox_test_bin",
+]
+
+rust_package()
+
+rust_library(
+    name = "signalbox_client",
+    crate_root = "src/lib.rs",
+    deps = ["//crates/process-protocol:signalbox_process_protocol"],
+)
+
+rust_binary(
+    name = "signalbox",
+    crate_root = "src/main.rs",
+    deps = [
+        ":signalbox_client",
+        "//crates/process-protocol:signalbox_process_protocol",
+    ],
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_client",
+    deps = TEST_DEPS,
+)
+
+rust_unit_test(
+    name = "signalbox_unit_tests",
+    crate = ":signalbox",
+    deps = TEST_DEPS,
+)

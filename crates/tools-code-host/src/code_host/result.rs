@@ -11,9 +11,7 @@ use super::{
     arguments::{CodeHostFilePath, valid_opaque_id, valid_revision},
 };
 
-// numeric-bound: guard - the tool contract advertises accepting result URLs only to this length
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
-// numeric-bound: guard - one encoded tool result exhausting transport memory
 pub(super) const MAX_ENCODED_RESULT_BYTES: usize = 512 * 1024;
 
 /// Whether a bounded code-host result exhausted its source.
@@ -66,9 +64,14 @@ pub(super) fn absolute_https_url(url: &Url) -> bool {
         && url.password().is_none()
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded absolute credential-free HTTPS result location.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CodeHostUrl(String);
+pub struct CodeHostUrl(
+    /// Borrows the checked absolute HTTPS location.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CodeHostUrl {
     fn try_new(value: String) -> Option<Self> {
@@ -76,11 +79,6 @@ impl CodeHostUrl {
             && !value.chars().any(char::is_control)
             && Url::parse(&value).is_ok_and(|url| absolute_https_url(&url)))
         .then_some(Self(value))
-    }
-
-    /// Borrows the checked absolute HTTPS location.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     fn into_string(self) -> String {
@@ -202,9 +200,12 @@ impl ChangeRequestSummaryResult {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One changed-file summary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangedFile {
+    /// Borrows the repository-relative path.
+    #[get(str)]
     path: String,
     status: String,
     additions: u64,
@@ -226,11 +227,6 @@ impl ChangedFile {
             additions,
             deletions,
         })
-    }
-
-    /// Borrows the repository-relative path.
-    pub fn path(&self) -> &str {
-        &self.path
     }
 
     fn into_value(self) -> Value {
@@ -729,13 +725,13 @@ pub enum CodeHostResult {
     /// Accepted rerun request.
     RerunFailedJobs(RerunFailedJobsResult),
     /// Deterministic convergence evidence and verdict.
-    ConvergenceState(super::ConvergenceStateResult),
+    ConvergenceState(super::ConvergenceReadResult),
     /// Parent and immediate-child stack ancestry evidence.
     StackState(super::StackStateResult),
     /// Structured bounded thread inventory.
     ThreadInventory(super::ThreadInventoryResult),
     /// Pure review-protocol gate composition.
-    ReviewGateCheck(super::ReviewGateCheckResult),
+    ReviewGateCheck(super::ConvergenceReadResult),
 }
 
 impl CodeHostResult {
@@ -754,10 +750,10 @@ impl CodeHostResult {
             Self::ThreadResolve(result) => result.into_value(),
             Self::CiJobLog(result) => result.into_value(),
             Self::RerunFailedJobs(result) => result.into_value(),
-            Self::ConvergenceState(result) => super::review_slog::convergence_into_value(result),
+            Self::ConvergenceState(result) => result.into_value(),
             Self::StackState(result) => super::review_slog::stack_into_value(result),
             Self::ThreadInventory(result) => super::review_slog::inventory_into_value(result),
-            Self::ReviewGateCheck(result) => super::review_slog::gate_into_value(result),
+            Self::ReviewGateCheck(result) => result.into_value(),
         }
     }
 }

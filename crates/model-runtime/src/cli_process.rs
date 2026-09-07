@@ -10,8 +10,7 @@ use tokio::process::{Child, Command};
 
 use crate::{
     CancellationSignal, LossCause, Observation, ObservationFact, ObservationSink,
-    ProvenUnsentEvidence, ProviderErrorKind, REDACTED, RedactingSink, TerminalEvidence,
-    TransportFacts, UnsentCause,
+    ProvenUnsentEvidence, REDACTED, RedactingSink, TerminalEvidence, TransportFacts, UnsentCause,
 };
 
 const TRUNCATION_SUFFIX: &str = "… [truncated]";
@@ -216,6 +215,14 @@ pub trait CliSession<C>: Sized {
     fn terminal_text_capture(&self) -> CliTerminalTextCapture;
     /// Whether the decoder has observed terminal provider evidence.
     fn terminal_observed(&self) -> bool;
+    /// Keeps stdin open for framed requests while stdout is decoded.
+    fn keeps_stdin_open(&self) -> bool {
+        false
+    }
+    /// Takes the next complete outbound frame, including its delimiter.
+    fn take_stdin_frame(&mut self) -> Option<Vec<u8>> {
+        None
+    }
     /// Decodes and emits one bounded JSONL event.
     fn push(
         &mut self,
@@ -256,13 +263,11 @@ pub trait CliSession<C>: Sized {
         cause: LossCause,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
-    /// Collapses raw non-successful-exit material to a closed kind.
-    fn classify_provider_error_after_exit(classification: &str) -> ProviderErrorKind;
-    /// Produces a provider failure from sanitized material and its closed kind.
+    /// Produces a provider failure from sanitized evidence and bounded raw exit material.
     fn provider_error_after_exit(
         self,
         message: &str,
-        kind: ProviderErrorKind,
+        classification: &str,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
 }
@@ -491,7 +496,10 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             redacting_sink.begin_streaming_terminal_text_capture();
         }
     }
-    let input_step = {
+    let duplex = decoder.keeps_stdin_open();
+    let input_step = if duplex {
+        InputStep::Written(Ok(()))
+    } else {
         let send_prompt = async {
             stdin.write_all(&prompt).await?;
             stdin.shutdown().await
@@ -508,7 +516,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             () = wait_for_deadline(deadline) => InputStep::TimedOut,
         }
     };
-    let input_error = match input_step {
+    let mut input_error = match input_step {
         InputStep::Written(Ok(())) => None,
         InputStep::Written(Err(error)) => Some(error),
         InputStep::Cancelled => {
@@ -551,7 +559,14 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             }
         }
     };
-    drop(stdin);
+    let mut stdin = if duplex {
+        Some(stdin)
+    } else {
+        drop(stdin);
+        None
+    };
+    let mut pending_frame = (duplex && !prompt.is_empty()).then_some(prompt);
+    let mut write_offset = 0;
 
     let mut stdout = BufReader::new(stdout);
     // Survives each read future so an interrupted read can say whether it had
@@ -560,12 +575,65 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
     let mut reaped_status = None;
     let mut deadline_stderr = None;
     loop {
+        if stdin.is_some() && pending_frame.is_none() {
+            pending_frame = decoder.take_stdin_frame();
+            write_offset = 0;
+        }
+        if pending_frame.is_some() && input_error.is_none() {
+            input_error = Some(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "outbound CLI frame was not completely written",
+            ));
+        }
         let terminal_observed = decoder.terminal_observed();
-        let next = tokio::select! {
-            biased;
-            result = read_bounded_line(&mut stdout, event_limit, labels, &mut line_progress) => ProcessStep::Line(result),
-            () = &mut *cancellation => ProcessStep::Cancelled,
-            () = wait_for_deadline(deadline) => ProcessStep::TimedOut,
+        if terminal_observed && pending_frame.is_none() {
+            drop(stdin.take());
+        }
+        let next = {
+            let read_line = read_bounded_line(&mut stdout, event_limit, labels, &mut line_progress);
+            tokio::pin!(read_line);
+            // A partial read survives every completed write. Dropping and
+            // recreating it would discard bytes already removed from stdout.
+            loop {
+                tokio::select! {
+                    biased;
+                    result = async {
+                        match (stdin.as_mut(), pending_frame.as_ref()) {
+                            (Some(stdin), Some(frame)) => stdin.write(&frame[write_offset..]).await,
+                            _ => std::future::pending().await,
+                        }
+                    }, if stdin.is_some() && pending_frame.is_some() => {
+                        match result {
+                            Ok(0) => {
+                                input_error = Some(std::io::Error::from(std::io::ErrorKind::WriteZero));
+                                drop(stdin.take());
+                                pending_frame = None;
+                            }
+                            Ok(written) => {
+                                write_offset += written;
+                                if pending_frame.as_ref().is_some_and(|frame| write_offset == frame.len()) {
+                                    pending_frame = decoder.take_stdin_frame();
+                                    write_offset = 0;
+                                    if pending_frame.is_none() {
+                                        input_error = None;
+                                        if terminal_observed {
+                                            drop(stdin.take());
+                                        }
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                input_error = Some(error);
+                                drop(stdin.take());
+                                pending_frame = None;
+                            }
+                        }
+                    }
+                    result = &mut read_line => break ProcessStep::Line(result),
+                    () = &mut *cancellation => break ProcessStep::Cancelled,
+                    () = wait_for_deadline(deadline) => break ProcessStep::TimedOut,
+                }
+            }
         };
         match next {
             ProcessStep::Line(Ok(Some(line))) => {
@@ -967,8 +1035,8 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             };
             // Evidence is built before the sink flushes so the failure
             // message still sees the held cross-fragment redaction state.
-            let kind = D::classify_provider_error_after_exit(&classification);
-            let evidence = decoder.provider_error_after_exit(&message, kind, &mut redacting_sink);
+            let evidence =
+                decoder.provider_error_after_exit(&message, &classification, &mut redacting_sink);
             redacting_sink.finish();
             evidence
         }
@@ -1073,7 +1141,7 @@ const PROXY_URL_VARIABLES: &[&str] = &[
 /// that embeds userinfo — such a credential would transit to the child verbatim
 /// and a CLI that reflects its proxy configuration would hand the password to
 /// output the adapter can only shape-redact, and `redact_text` has no
-/// proxy-userinfo rule (INV-035) — and a `HOME`/`CODEX_HOME` the parent cannot
+/// proxy-userinfo rule — and a `HOME`/`CODEX_HOME` the parent cannot
 /// resolve to an absolute directory, which would point the child's credential
 /// store somewhere under its working directory and select an unintended ambient
 /// login (see [`absolute_credential_home`]). Both must never reach the child.
@@ -1791,8 +1859,8 @@ mod tests {
         sanitized_stderr, validated_environment_overrides,
     };
     use crate::{
-        BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, ProviderErrorKind,
-        REDACTED, RedactingSink, TerminalEvidence, TokenUsage, ToolCallsAtLoss, UnsentCause,
+        BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, REDACTED,
+        RedactingSink, TerminalEvidence, TokenUsage, ToolCallsAtLoss, UnsentCause,
     };
 
     const TEST_ENVIRONMENT: &[CliEnvironmentVariable] = &[
@@ -1865,14 +1933,10 @@ mod tests {
             unused_terminal_evidence()
         }
 
-        fn classify_provider_error_after_exit(_classification: &str) -> ProviderErrorKind {
-            ProviderErrorKind::Unrecognized
-        }
-
         fn provider_error_after_exit(
             self,
             _message: &str,
-            _kind: ProviderErrorKind,
+            _classification: &str,
             _sink: &mut RedactingSink<'_, u8>,
         ) -> TerminalEvidence {
             unused_terminal_evidence()
@@ -1964,14 +2028,10 @@ mod tests {
             unused_terminal_evidence()
         }
 
-        fn classify_provider_error_after_exit(_classification: &str) -> ProviderErrorKind {
-            ProviderErrorKind::Unrecognized
-        }
-
         fn provider_error_after_exit(
             self,
             _message: &str,
-            _kind: ProviderErrorKind,
+            _classification: &str,
             _sink: &mut RedactingSink<'_, u8>,
         ) -> TerminalEvidence {
             unused_terminal_evidence()
@@ -2932,5 +2992,279 @@ mod tests {
         );
 
         assert_eq!(loss_tool_calls(evidence), ToolCallsAtLoss::Unobserved);
+    }
+    #[cfg(unix)]
+    enum FixtureInputMode {
+        OneShot,
+        Duplex,
+    }
+
+    #[cfg(unix)]
+    struct DuplexSession {
+        correlation: u8,
+        input_mode: FixtureInputMode,
+        lines: Vec<String>,
+        outbound: std::collections::VecDeque<Vec<u8>>,
+        terminal: bool,
+    }
+
+    #[cfg(unix)]
+    impl CliSession<u8> for DuplexSession {
+        const LABELS: CliProcessLabels = TEST_LABELS;
+        fn correlation(&self) -> &u8 {
+            &self.correlation
+        }
+        fn terminal_text_capture(&self) -> CliTerminalTextCapture {
+            CliTerminalTextCapture::Disabled
+        }
+        fn terminal_observed(&self) -> bool {
+            self.terminal
+        }
+        fn keeps_stdin_open(&self) -> bool {
+            matches!(self.input_mode, FixtureInputMode::Duplex)
+        }
+        fn take_stdin_frame(&mut self) -> Option<Vec<u8>> {
+            self.outbound.pop_front()
+        }
+        fn push(
+            &mut self,
+            line: &[u8],
+            _sink: &mut RedactingSink<'_, u8>,
+        ) -> Result<(), CliDecodeFailure> {
+            let line = std::str::from_utf8(line)
+                .expect("fixture sends UTF-8")
+                .trim_end();
+            match line {
+                "response" => {
+                    self.outbound.push_back(b"follow-up\n".to_vec());
+                    self.outbound.push_back(b"last-request\n".to_vec());
+                }
+                "notification" => self.terminal = true,
+                "flood" => return Ok(()),
+                _ => {}
+            }
+            self.lines.push(line.to_string());
+            Ok(())
+        }
+        fn decode_failure(self, _class: CliDecodeFailureClass, detail: String) -> TerminalEvidence {
+            self.boundary_loss(LossCause::StreamProtocolViolation { detail })
+        }
+        fn finish(self, _sink: &mut RedactingSink<'_, u8>) -> TerminalEvidence {
+            TerminalEvidence::Completed(crate::CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: crate::CompletionFinish::EndTurn,
+                content: self
+                    .lines
+                    .into_iter()
+                    .map(crate::AssistantPart::Text)
+                    .collect(),
+                usage: TokenUsage::unreported(),
+            })
+        }
+        fn boundary_loss(self, cause: LossCause) -> TerminalEvidence {
+            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                cause,
+                exchange: ExchangeFacts::default(),
+                reported_model: None,
+                finish_reported: None,
+                tool_calls: ToolCallsAtLoss::Unobserved,
+                usage: TokenUsage::unreported(),
+            })
+        }
+        fn boundary_loss_unless_provider_failure(
+            self,
+            cause: LossCause,
+            _sink: &mut RedactingSink<'_, u8>,
+        ) -> TerminalEvidence {
+            self.boundary_loss(cause)
+        }
+        fn provider_error_after_exit(
+            self,
+            message: &str,
+            _classification: &str,
+            _sink: &mut RedactingSink<'_, u8>,
+        ) -> TerminalEvidence {
+            self.boundary_loss(LossCause::StreamProtocolViolation {
+                detail: message.to_string(),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn duplex_request(script: &str, prompt: Vec<u8>) -> CliProcessRequest<DuplexSession> {
+        const ENVIRONMENT: &[CliEnvironmentVariable] = &[CliEnvironmentVariable::inherited("PATH")];
+        let mut command = std::process::Command::new("python3");
+        command.args(["-c", script]);
+        CliProcessRequest {
+            command,
+            prompt,
+            decoder: DuplexSession {
+                correlation: 7,
+                input_mode: FixtureInputMode::Duplex,
+                lines: Vec::new(),
+                outbound: Default::default(),
+                terminal: false,
+            },
+            exchange_timeout: Some(std::time::Duration::from_secs(30)),
+            interrupt_grace: std::time::Duration::from_millis(10),
+            post_kill_reap_bound: Some(std::time::Duration::from_secs(5)),
+            event_limit: 1024,
+            stderr_limit: 1024,
+            environment: ENVIRONMENT,
+            environment_overrides: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn one_shot_upload_closes_stdin_before_reading_terminal_output() {
+        let mut request = duplex_request(
+            r#"
+import sys
+assert sys.stdin.read() == 'request\n'
+print('notification', flush=True)
+"#,
+            b"request\n".to_vec(),
+        );
+        request.decoder.input_mode = FixtureInputMode::OneShot;
+        let mut observations = Vec::new();
+        let evidence =
+            execute_cli_process(request, &mut observations, &mut CancellationSignal::never()).await;
+        let TerminalEvidence::Completed(completed) = evidence else {
+            panic!("one-shot upload did not close stdin: {evidence:?}")
+        };
+        assert_eq!(
+            completed.content,
+            vec![crate::AssistantPart::Text("notification".into())]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn duplex_requests_responses_and_notifications_share_one_process() {
+        let request = duplex_request(
+            r#"
+import sys
+assert sys.stdin.readline() == 'request\n'
+print('response', flush=True)
+assert sys.stdin.readline() == 'follow-up\n'
+assert sys.stdin.readline() == 'last-request\n'
+print('notification', flush=True)
+assert sys.stdin.read() == ''
+"#,
+            b"request\n".to_vec(),
+        );
+        let mut observations = Vec::new();
+        let evidence =
+            execute_cli_process(request, &mut observations, &mut CancellationSignal::never()).await;
+        let TerminalEvidence::Completed(completed) = evidence else {
+            panic!("duplex loopback failed: {evidence:?}")
+        };
+        assert_eq!(
+            completed.content,
+            vec![
+                crate::AssistantPart::Text("response".into()),
+                crate::AssistantPart::Text("notification".into())
+            ]
+        );
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|observation| matches!(
+                    observation.fact,
+                    crate::ObservationFact::SendCommenced
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn duplex_upload_drains_stdout_while_the_child_reads_one_byte_at_a_time() {
+        const FRAME_BYTES: usize = 1024 * 1024;
+        let mut prompt = vec![b'x'; FRAME_BYTES];
+        prompt.push(b'\n');
+        let request = duplex_request(
+            r#"
+import os
+count = 0
+while True:
+    byte = os.read(0, 1)
+    assert byte
+    if byte == b'\n':
+        break
+    assert byte == b'x'
+    count += 1
+    if count % 4096 == 0:
+        os.write(1, b'flood\n' * 128)
+assert count == 1024 * 1024
+os.write(1, b'notification\n')
+assert os.read(0, 1) == b''
+"#,
+            prompt,
+        );
+        let mut observations = Vec::new();
+        let evidence =
+            execute_cli_process(request, &mut observations, &mut CancellationSignal::never()).await;
+        let TerminalEvidence::Completed(completed) = evidence else {
+            panic!("concurrent upload and drain failed: {evidence:?}")
+        };
+        assert_eq!(
+            completed.content,
+            vec![crate::AssistantPart::Text("notification".into())]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn duplex_partial_stdout_survives_pending_stdin_writes() {
+        const FRAME_BYTES: usize = 1024 * 1024;
+        let request = duplex_request(
+            r#"
+import os
+os.write(1, b'notifi')
+remaining = 1024 * 1024
+while remaining:
+    chunk = os.read(0, min(remaining, 4096))
+    assert chunk
+    remaining -= len(chunk)
+os.write(1, b'cation\n')
+assert os.read(0, 1) == b''
+"#,
+            vec![b'x'; FRAME_BYTES],
+        );
+        let mut observations = Vec::new();
+        let evidence =
+            execute_cli_process(request, &mut observations, &mut CancellationSignal::never()).await;
+        let TerminalEvidence::Completed(completed) = evidence else {
+            panic!("partial-line preservation failed: {evidence:?}")
+        };
+        assert_eq!(
+            completed.content,
+            vec![crate::AssistantPart::Text("notification".into())]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn duplex_completion_cannot_hide_an_incomplete_frame_write() {
+        const FRAME_BYTES: usize = 1024 * 1024;
+        let request = duplex_request(
+            r#"
+import os
+os.write(1, b'notification\n')
+"#,
+            vec![b'x'; FRAME_BYTES],
+        );
+        let mut observations = Vec::new();
+        let evidence =
+            execute_cli_process(request, &mut observations, &mut CancellationSignal::never()).await;
+        assert!(
+            matches!(evidence, TerminalEvidence::BoundaryLoss(_)),
+            "incomplete frame must demote completion: {evidence:?}"
+        );
     }
 }

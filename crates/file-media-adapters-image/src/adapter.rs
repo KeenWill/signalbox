@@ -13,7 +13,6 @@ use crate::{
     PIXEL_LIMIT_EXCEEDED_REASON, SOURCE_TOO_LARGE_REASON, options_are_empty, source,
 };
 
-// numeric-bound: ceiling - protects worker memory from runaway decoder allocation
 const MAX_DECODER_ALLOCATION_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,10 +28,11 @@ pub(crate) async fn probe(
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorProbeOutput, ProcessorFailure> {
     let prefix = source::read_probe_prefix(source, cancellation).await?;
-    if format.matches_signature(&prefix) {
+    if image::guess_format(&prefix).ok() == Some(format.image_format()) {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(format.media_type()),
             strength: ProbeStrength::Strong,
+            evidence_bytes: u64::try_from(prefix.len()).map_err(|_| ProcessorFailure::Failed)?,
         })
     } else {
         Ok(ProcessorProbeOutput::NoMatch)

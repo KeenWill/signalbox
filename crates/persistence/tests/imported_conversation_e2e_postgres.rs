@@ -52,7 +52,9 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+#[path = "../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+use postgres_test_image::POSTGRES_IMAGE_TAG;
 const DATABASE_NAME: &str = "signalbox_imported_conversation_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
@@ -169,6 +171,14 @@ impl SubmitInputIdGenerator for FixedSubmitIds {
             .pop_front()
             .expect("one cancellation frontier candidate is supplied")
     }
+
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId {
+        panic!("the import fixture never submits a closure interrupt")
+    }
+
+    fn next_closure_turn_attempt_id(&mut self) -> TurnAttemptId {
+        panic!("the import fixture never submits a closure interrupt")
+    }
 }
 
 #[derive(Debug)]
@@ -269,14 +279,12 @@ async fn assert_session_reloads(
     Ok(())
 }
 
-/// S28 / INV-002 / INV-015 / INV-038 / INV-039: synthetic Claude JSONL is
-/// ingested losslessly, an interior imported boundary seeds one later session,
-/// the exact prefix plus native origin reaches the provider, and the ordinary
-/// native turn completes and reconstitutes from PostgreSQL.
+/// synthetic Claude JSONL is ingested losslessly, an interior imported boundary seeds one later
+/// session, the exact prefix plus native origin reaches the provider, and the ordinary native turn
+/// completes and reconstitutes from PostgreSQL.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_end_to_end()
--> Result<(), Box<dyn Error>> {
+async fn import_seed_and_native_turn_complete_end_to_end() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x100));
     let imported_entries = [
@@ -680,13 +688,11 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
     Ok(())
 }
 
-/// S28 / INV-009 / INV-015 / INV-039: one 300-entry imported seed remains
-/// exact when the production scheduling projection derives its first native
-/// successor, while physical storage adds only the one-entry suffix.
+/// one 300-entry imported seed remains exact when the production scheduling projection derives its
+/// first native successor, while physical storage adds only the one-entry suffix.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_inv009_inv015_long_frontier_projection_uses_linear_physical_deltas()
--> Result<(), Box<dyn Error>> {
+async fn long_frontier_projection_uses_linear_physical_deltas() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let identity = |family: u128, index: usize| {
         Uuid::from_u128(
@@ -844,12 +850,11 @@ async fn s28_inv009_inv015_long_frontier_projection_uses_linear_physical_deltas(
     Ok(())
 }
 
-/// S28 / INV-039: the process reader preserves the exact order, identities,
-/// and content of one transcript with hundreds of entries.
+/// the process reader preserves the exact order, identities, and content of one transcript with
+/// hundreds of entries.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_inv039_process_read_preserves_long_imported_transcript() -> Result<(), Box<dyn Error>>
-{
+async fn process_read_preserves_long_imported_transcript() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let identity = |family: u128, index: usize| {
         Uuid::from_u128(

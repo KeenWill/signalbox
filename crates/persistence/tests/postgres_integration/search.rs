@@ -1,0 +1,1004 @@
+//! PostgreSQL integration proof for bounded indexed lexical search.
+
+use std::error::Error;
+
+use signalbox_application::{
+    SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
+    SearchPageLimit, SearchProjectionText, SearchQuery, SearchResultSource, SearchScope,
+    SearchStrategy, SearchText, TimelineAddress, TimelineWindowAnchor, TimelineWindowLimits,
+    max_search_projection_text_bytes,
+};
+use signalbox_domain::{
+    AcceptedInputId, DirectModelSelection, ModelSelectionOverride, ModelTargetCatalog,
+    ModelTargetDefinition, ProviderModelIdentity, ResolvedProviderTarget, SessionId,
+    SubmitInputAppliedResult, SubmitInputResult, TurnId,
+};
+use signalbox_persistence::{
+    create_session::CreateSessionRepository,
+    search::{SearchProjectionCorruption, SearchRepository, SearchRepositoryError},
+    session_timeline::SessionTimelineRepository,
+    submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository},
+};
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
+
+use super::{
+    EarliestQueuedTurnActivation, TestSubmitInputHandle, activate_earliest_queued_turn,
+    complete_text_turn, direct, migrated_postgres, model_credential_reference, prepared,
+    start_input, test_session_credential_pin,
+};
+
+const SEARCH_FIXTURE_SEED: u128 = 0x994_0000;
+const LARGE_RESULT_COUNT: i32 = 251;
+const LARGE_PAGE_SIZE: u16 = 100;
+
+async fn create_search_session(pool: &PgPool, offset: u128) -> Result<SessionId, Box<dyn Error>> {
+    let session_seed = SEARCH_FIXTURE_SEED + offset;
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            session_seed + 1,
+            session_seed,
+            direct(session_seed + 2),
+        ))
+        .await?;
+    Ok(SessionId::from_uuid(Uuid::from_u128(session_seed)))
+}
+
+fn lexical_query(
+    text: &str,
+    scope: SearchScope,
+    limit: u16,
+    after: Option<signalbox_application::SearchCursor>,
+) -> SearchQuery {
+    SearchQuery {
+        strategy: SearchStrategy::Lexical,
+        scope,
+        text: SearchText::try_new(text.to_owned()).expect("fixture query text is admitted"),
+        limit: SearchPageLimit::new(limit).expect("fixture page size is bounded"),
+        after,
+    }
+}
+
+async fn insert_generated_projections(
+    pool: &PgPool,
+    session: SessionId,
+    marker: &str,
+    count: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO web_search_projection
+            (source_kind, source_id, session_id, event_sequence,
+             item_kind, item_id, turn_id, content_class, content_text)
+         SELECT 'derived_artifact', md5($1 || generated::text)::uuid,
+                $2, created.event_sequence,
+                'derived_artifact', md5($1 || generated::text)::uuid,
+                NULL, 'derived_text_artifact',
+                $1 || ' result ' || generated::text
+           FROM generate_series(1, $3) AS generated
+           JOIN session_created_outbox_event AS created
+             ON created.session_id = $2",
+    )
+    .bind(marker)
+    .bind(session.into_uuid())
+    .bind(count)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn session_created_address(
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<TimelineAddress, Box<dyn Error>> {
+    let sequence: rust_decimal::Decimal = sqlx::query(
+        "SELECT event_sequence
+           FROM session_created_outbox_event
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(pool)
+    .await?
+    .try_get("event_sequence")?;
+    let sequence = u64::try_from(sequence)?;
+    Ok(TimelineAddress::new(
+        std::num::NonZeroU64::new(sequence).ok_or("fixture event sequence was zero")?,
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn lexical_hit_outside_the_loaded_tail_reveals_its_exact_around_window()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x100).await?;
+    let input = AcceptedInputId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x110));
+    let turn = TurnId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x111));
+    let submitted = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                SEARCH_FIXTURE_SEED + 0x112,
+                session.as_uuid().as_u128(),
+                "locomotive-unloaded-window",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            input,
+            Some(turn),
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(_),
+    )) = submitted
+    else {
+        return Err("fixture input was not accepted as a turn origin".into());
+    };
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                SEARCH_FIXTURE_SEED + 0x113,
+                session.as_uuid().as_u128(),
+                "newer unrelated tail",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x114)),
+            Some(TurnId::from_uuid(Uuid::from_u128(
+                SEARCH_FIXTURE_SEED + 0x115,
+            ))),
+        )
+        .await?;
+    let timeline = SessionTimelineRepository::new(pool.clone());
+    let limits = TimelineWindowLimits::new(1, 256).expect("fixture limits are bounded");
+    let latest = timeline
+        .read_window(session, TimelineWindowAnchor::Latest, limits)
+        .await?
+        .expect("fixture session exists");
+    let page = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "locomotive unloaded",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await?;
+    let result = page.results.first().expect("canonical input is indexed");
+    let around = timeline
+        .read_window(
+            session,
+            TimelineWindowAnchor::Around(result.address),
+            limits,
+        )
+        .await?
+        .expect("fixture session exists");
+
+    assert_ne!(latest.items[0].address, result.address);
+    assert_eq!(around.items[0].address, result.address);
+    assert_eq!(
+        result.source,
+        SearchResultSource::AcceptedInput { input, turn }
+    );
+    assert_eq!(result.content_class, SearchContentClass::UserTranscript);
+    assert!(!result.highlights.is_empty());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x200).await?;
+    let repository = SearchRepository::new(pool.clone());
+    let before = repository
+        .search(lexical_query(
+            "quartz derivation",
+            SearchScope::Global,
+            10,
+            None,
+        ))
+        .await?;
+    let artifact = SearchArtifactId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x201));
+    let address = session_created_address(&pool, session).await?;
+    repository
+        .publish(SearchArtifactProjection {
+            session,
+            address,
+            artifact,
+            class: SearchArtifactProjectionClass::DerivedText,
+            text: SearchProjectionText::try_new(String::from("quartz-derivation"))
+                .expect("fixture projection text is admitted"),
+        })
+        .await?;
+    let after = repository
+        .search(lexical_query(
+            "quartz derivation",
+            SearchScope::Global,
+            10,
+            None,
+        ))
+        .await?;
+
+    assert!(before.results.is_empty());
+    assert_eq!(after.results.len(), 1);
+    assert_eq!(
+        after.results[0].content_class,
+        SearchContentClass::DerivedTextArtifact
+    );
+    assert_eq!(
+        after.results[0].source,
+        SearchResultSource::DerivedArtifact { artifact }
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn conflicting_artifact_republication_is_atomic() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x210).await?;
+    let repository = SearchRepository::new(pool.clone());
+    let artifact = SearchArtifactId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x211));
+    let address = session_created_address(&pool, session).await?;
+    repository
+        .publish(SearchArtifactProjection {
+            session,
+            address,
+            artifact,
+            class: SearchArtifactProjectionClass::DerivedText,
+            text: SearchProjectionText::try_new(String::from("quartz-derivation"))
+                .expect("fixture projection text is admitted"),
+        })
+        .await?;
+
+    let conflict = repository
+        .publish(SearchArtifactProjection {
+            session,
+            address,
+            artifact,
+            class: SearchArtifactProjectionClass::DerivedText,
+            text: SearchProjectionText::try_new(format!(
+                "quartz-derivation {} conflicting-extension",
+                "x".repeat(20_000)
+            ))
+            .expect("fixture conflicting projection is admitted"),
+        })
+        .await;
+    let stored_chunks: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM web_search_projection
+          WHERE source_kind = 'derived_artifact'
+            AND source_id = $1
+            AND content_class = 'derived_text_artifact'",
+    )
+    .bind(artifact.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(conflict.is_err());
+    assert_eq!(stored_chunks, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn artifact_identity_rejects_cross_session_cross_class_publication()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x220).await?;
+    let other_session = create_search_session(&pool, 0x230).await?;
+    let repository = SearchRepository::new(pool.clone());
+    let attachment = SearchArtifactId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x221));
+    repository
+        .publish(SearchArtifactProjection {
+            session,
+            address: session_created_address(&pool, session).await?,
+            artifact: attachment,
+            class: SearchArtifactProjectionClass::AttachmentFilename,
+            text: SearchProjectionText::try_new(String::from("fixture.txt"))
+                .expect("fixture filename is admitted"),
+        })
+        .await?;
+
+    let conflict = repository
+        .publish(SearchArtifactProjection {
+            session: other_session,
+            address: session_created_address(&pool, other_session).await?,
+            artifact: attachment,
+            class: SearchArtifactProjectionClass::AttachmentMediaMetadata,
+            text: SearchProjectionText::try_new(String::from("text/plain"))
+                .expect("fixture media metadata is admitted"),
+        })
+        .await;
+    let attachment_sessions: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT session_id)
+           FROM web_search_projection
+          WHERE source_kind = 'attachment' AND source_id = $1",
+    )
+    .bind(attachment.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(conflict.is_err());
+    assert_eq!(attachment_sessions, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn project_oversized_assistant_text(
+    pool: &PgPool,
+    session_offset: u128,
+) -> Result<(SessionId, String), Box<dyn Error>> {
+    let session_seed = SEARCH_FIXTURE_SEED + session_offset;
+    let session = create_search_session(pool, session_offset).await?;
+    let turn = TurnId::from_uuid(Uuid::from_u128(session_seed + 0x10));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                session_seed + 0x11,
+                session.as_uuid().as_u128(),
+                "search an oversized assistant reply",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(session_seed + 0x12)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(session_seed + 0x13),
+            starting_frontier: Uuid::from_u128(session_seed + 0x14),
+            initial_attempt: Uuid::from_u128(session_seed + 0x15),
+        },
+    )
+    .await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(session_seed + 2));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+            session_seed + 0x16,
+        ))),
+    )])
+    .expect("fixture selection resolves to one target");
+    let boundary_lexeme = "boundarylexeme".repeat(30);
+    let response = format!(
+        "head-chunk-anchor {} {boundary_lexeme} {} tail-chunk-needle",
+        "x".repeat(16_200),
+        "x".repeat(max_search_projection_text_bytes() + 1)
+    );
+    complete_text_turn(
+        pool,
+        session,
+        targets,
+        model_credential_reference(),
+        session_seed + 0x17,
+        &response,
+    )
+    .await?;
+    Ok((session, boundary_lexeme))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn oversized_assistant_text_matches_terms_across_projection_chunks()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, _) = project_oversized_assistant_text(&pool, 0x280).await?;
+    let page = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "head anchor tail needle",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await?;
+
+    assert_eq!(page.results.len(), 1);
+    assert_eq!(
+        page.results[0].content_class,
+        SearchContentClass::AssistantTranscript
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_chunk_overlap_preserves_a_boundary_lexeme() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, boundary_lexeme) = project_oversized_assistant_text(&pool, 0x2a0).await?;
+    let page = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            &boundary_lexeme,
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await?;
+
+    assert_eq!(page.results.len(), 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn assistant_projection_chunks_stay_below_the_storage_ceiling() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, _) = project_oversized_assistant_text(&pool, 0x2b0).await?;
+    let chunk_bounds: (i64, i32) = sqlx::query_as(
+        "SELECT count(*), max(octet_length(content_text))
+           FROM web_search_projection
+          WHERE session_id = $1 AND content_class = 'assistant_transcript'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(chunk_bounds.0 > 1);
+    assert!(usize::try_from(chunk_bounds.1).expect("fixture chunk size fits") <= 65_536);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn search_rejects_a_canonical_source_rewired_to_another_session() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let source_session = create_search_session(&pool, 0x2b8).await?;
+    let result_session = create_search_session(&pool, 0x2b9).await?;
+    let input = AcceptedInputId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2ba));
+    let turn = TurnId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2bb));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                SEARCH_FIXTURE_SEED + 0x2bc,
+                source_session.as_uuid().as_u128(),
+                "rewired canonical source",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            input,
+            Some(turn),
+        )
+        .await?;
+    let result_address = session_created_address(&pool, result_session).await?;
+
+    sqlx::query(
+        "UPDATE web_search_projection
+            SET session_id = $1, event_sequence = $2
+          WHERE source_kind = 'accepted_input' AND source_id = $3",
+    )
+    .bind(result_session.into_uuid())
+    .bind(rust_decimal::Decimal::from(result_address.sequence().get()))
+    .bind(input.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "rewired canonical source",
+            SearchScope::Session(result_session),
+            10,
+            None,
+        ))
+        .await
+        .expect_err("cross-session canonical source must fail closed");
+
+    assert!(matches!(
+        error,
+        SearchRepositoryError::Corruption(SearchProjectionCorruption::SourceShape)
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn search_fails_closed_when_a_matching_chunk_has_contradictory_correlations()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x2c0).await?;
+    let other_session = create_search_session(&pool, 0x2d0).await?;
+    let source = Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2c1);
+    let address = session_created_address(&pool, session).await?;
+    let sequence = rust_decimal::Decimal::from(address.sequence().get());
+    let other_sequence = rust_decimal::Decimal::from(
+        session_created_address(&pool, other_session)
+            .await?
+            .sequence()
+            .get(),
+    );
+
+    sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind, item_id,
+             turn_id, content_class, projection_ordinal, content_text
+         ) VALUES
+             ('derived_artifact', $1, $2, $3, 'derived_artifact', $1,
+              NULL, 'derived_text_artifact', 0, 'correlated alpha'),
+             ('derived_artifact', $1, $4, $5, 'derived_artifact', $1,
+              NULL, 'derived_text_artifact', 1, 'contradictory omega')",
+    )
+    .bind(source)
+    .bind(session.into_uuid())
+    .bind(sequence)
+    .bind(other_session.into_uuid())
+    .bind(other_sequence)
+    .execute(&pool)
+    .await?;
+
+    let error = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "alpha omega",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await
+        .expect_err("contradictory chunk correlation must fail closed");
+
+    assert!(matches!(
+        error,
+        SearchRepositoryError::Corruption(SearchProjectionCorruption::SourceShape)
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_address_must_belong_to_its_stored_session() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x2d8).await?;
+    let other_session = create_search_session(&pool, 0x2d9).await?;
+    let source = Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2da);
+    let other_address = session_created_address(&pool, other_session).await?;
+
+    let error = sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind, item_id,
+             turn_id, content_class, projection_ordinal, content_text
+         ) VALUES (
+             'derived_artifact', $1, $2, $3, 'derived_artifact', $1,
+             NULL, 'derived_text_artifact', 0, 'mismatched address'
+         )",
+    )
+    .bind(source)
+    .bind(session.into_uuid())
+    .bind(rust_decimal::Decimal::from(other_address.sequence().get()))
+    .execute(&pool)
+    .await
+    .expect_err("cross-session projection address must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("web search projection address does not belong to its session")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headline_keeps_a_match_after_a_token_beyond_the_former_sql_cap()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x2e0).await?;
+    let source = Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2e1);
+    let address = session_created_address(&pool, session).await?;
+    let content = format!("{} needle after", "x".repeat(2_049));
+
+    sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind, item_id,
+             turn_id, content_class, projection_ordinal, content_text
+         ) VALUES (
+             'derived_artifact', $1, $2, $3, 'derived_artifact', $1,
+             NULL, 'derived_text_artifact', 0, $4
+         )",
+    )
+    .bind(source)
+    .bind(session.into_uuid())
+    .bind(rust_decimal::Decimal::from(address.sequence().get()))
+    .bind(content)
+    .execute(&pool)
+    .await?;
+
+    let page = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "needle",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await?;
+    let result = page.results.first().expect("fixture projection matches");
+
+    assert!(result.snippet.contains("needle"));
+    assert!(result.highlights.iter().any(|highlight| {
+        &result.snippet[usize::from(highlight.start_byte)..usize::from(highlight.end_byte)]
+            == "needle"
+    }));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headline_preserves_literal_private_use_marker_characters() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x2f0).await?;
+    let source = Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2f1);
+    let address = session_created_address(&pool, session).await?;
+    let content = "before <sb-search-start> &lt; \u{e000} needle \u{e001} <sb-search-stop> after";
+
+    sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind, item_id,
+             turn_id, content_class, projection_ordinal, content_text
+         ) VALUES (
+             'derived_artifact', $1, $2, $3, 'derived_artifact', $1,
+             NULL, 'derived_text_artifact', 0, $4
+         )",
+    )
+    .bind(source)
+    .bind(session.into_uuid())
+    .bind(rust_decimal::Decimal::from(address.sequence().get()))
+    .bind(content)
+    .execute(&pool)
+    .await?;
+
+    let page = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "needle",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await?;
+    let result = page.results.first().expect("fixture projection matches");
+
+    assert_eq!(result.snippet, content);
+    assert!(result.highlights.iter().any(|highlight| {
+        &result.snippet[usize::from(highlight.start_byte)..usize::from(highlight.end_byte)]
+            == "needle"
+    }));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn large_result_set_pages_with_stable_strict_cursors() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x300).await?;
+    insert_generated_projections(&pool, session, "stable-pagination", LARGE_RESULT_COUNT).await?;
+    let repository = SearchRepository::new(pool.clone());
+    let first = repository
+        .search(lexical_query(
+            "stable pagination",
+            SearchScope::Session(session),
+            LARGE_PAGE_SIZE,
+            None,
+        ))
+        .await?;
+    let second = repository
+        .search(lexical_query(
+            "stable pagination",
+            SearchScope::Session(session),
+            LARGE_PAGE_SIZE,
+            first.next,
+        ))
+        .await?;
+    let third = repository
+        .search(lexical_query(
+            "stable pagination",
+            SearchScope::Session(session),
+            LARGE_PAGE_SIZE,
+            second.next,
+        ))
+        .await?;
+    let repeat = repository
+        .search(lexical_query(
+            "stable pagination",
+            SearchScope::Session(session),
+            LARGE_PAGE_SIZE,
+            first.next,
+        ))
+        .await?;
+
+    assert_eq!(first.results.len(), usize::from(LARGE_PAGE_SIZE));
+    assert_eq!(second.results.len(), usize::from(LARGE_PAGE_SIZE));
+    assert_eq!(
+        third.results.len(),
+        usize::try_from(LARGE_RESULT_COUNT).expect("fixture count fits")
+            - (usize::from(LARGE_PAGE_SIZE) * 2)
+    );
+    assert_eq!(second, repeat);
+    assert!(first.next.is_some());
+    assert!(second.next.is_some());
+    assert!(third.next.is_none());
+    assert_ne!(first.results.last(), second.results.first());
+
+    let projected_count: i64 = sqlx::query(
+        "SELECT count(*) AS projected_count
+           FROM web_search_projection
+          WHERE session_id = $1 AND content_class = 'derived_text_artifact'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?
+    .try_get("projected_count")?;
+    assert_eq!(projected_count, i64::from(LARGE_RESULT_COUNT));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn absent_term_returns_an_empty_page() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x310).await?;
+    insert_generated_projections(&pool, session, "present-corpus", 8).await?;
+
+    let page = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "present nonexistentterm",
+            SearchScope::Global,
+            10,
+            None,
+        ))
+        .await?;
+
+    assert!(page.results.is_empty());
+    assert!(page.next.is_none());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn common_term_query_pages_through_the_keyset_traversal() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x320).await?;
+    // Above the rare-term candidate cap for every query term, so this page is
+    // served by the ordered keyset traversal rather than the seeded candidate
+    // relation.
+    insert_generated_projections(&pool, session, "commonplace traversal", 1_200).await?;
+    let repository = SearchRepository::new(pool.clone());
+
+    let first = repository
+        .search(lexical_query(
+            "commonplace traversal",
+            SearchScope::Session(session),
+            LARGE_PAGE_SIZE,
+            None,
+        ))
+        .await?;
+    let second = repository
+        .search(lexical_query(
+            "commonplace traversal",
+            SearchScope::Session(session),
+            LARGE_PAGE_SIZE,
+            first.next,
+        ))
+        .await?;
+
+    assert_eq!(first.results.len(), usize::from(LARGE_PAGE_SIZE));
+    assert_eq!(second.results.len(), usize::from(LARGE_PAGE_SIZE));
+    assert!(first.next.is_some());
+    assert_ne!(first.results, second.results);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn search_rejects_an_input_rewired_to_a_different_reveal_event() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x330).await?;
+    let input = AcceptedInputId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x331));
+    let turn = TurnId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x332));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                SEARCH_FIXTURE_SEED + 0x333,
+                session.as_uuid().as_u128(),
+                "rewired reveal alpha",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            input,
+            Some(turn),
+        )
+        .await?;
+    let decoy = AcceptedInputId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x334));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                SEARCH_FIXTURE_SEED + 0x335,
+                session.as_uuid().as_u128(),
+                "unrelated decoy beta",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            decoy,
+            Some(TurnId::from_uuid(Uuid::from_u128(
+                SEARCH_FIXTURE_SEED + 0x336,
+            ))),
+        )
+        .await?;
+
+    // Rewire the first input's projection to the decoy's reveal event: still a
+    // valid same-session address, but not the event that revealed this input.
+    sqlx::query(
+        "UPDATE web_search_projection
+            SET event_sequence = (
+                SELECT event_sequence
+                  FROM input_accepted_outbox_event
+                 WHERE accepted_input_id = $1
+            )
+          WHERE source_kind = 'accepted_input' AND source_id = $2",
+    )
+    .bind(decoy.into_uuid())
+    .bind(input.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "rewired reveal alpha",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await
+        .expect_err("a mismatched reveal event must fail closed");
+
+    assert!(matches!(
+        error,
+        SearchRepositoryError::Corruption(SearchProjectionCorruption::SourceShape)
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn search_rejects_a_semantic_entry_with_a_mismatched_payload_class()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, _) = project_oversized_assistant_text(&pool, 0x340).await?;
+
+    // Reclassify the assistant entry as a session-owned derived artifact: the
+    // entry and its terminal reveal event both exist, but the payload kind
+    // contradicts the claimed content class.
+    sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind,
+             item_id, turn_id, content_class, projection_ordinal, content_text
+         )
+         SELECT 'semantic_entry', entry.semantic_entry_id,
+                entry.source_session_id, event.event_sequence,
+                'transcript_entry', entry.semantic_entry_id, NULL,
+                'derived_text_artifact', 0, 'misfiled summary sentinel'
+           FROM semantic_transcript_entry AS entry
+           JOIN model_call AS call
+             ON call.model_call_id = entry.producing_model_call_id
+           JOIN model_call_transition_outbox_event AS event
+             ON event.model_call_id = call.model_call_id
+            AND event.call_state_kind = 'terminal'
+          WHERE entry.source_session_id = $1
+            AND entry.payload_kind = 'assistant_text'",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "misfiled summary sentinel",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await
+        .expect_err("a contradicted payload kind must fail closed");
+
+    assert!(matches!(
+        error,
+        SearchRepositoryError::Corruption(SearchProjectionCorruption::SourceShape)
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn search_validates_the_lookahead_row_before_advertising_continuation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x350).await?;
+    let address = session_created_address(&pool, session).await?;
+
+    // Oldest matching row (lowest projection identity) is corrupt: it claims
+    // an accepted input that has no canonical record. Two valid rows follow.
+    sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind,
+             item_id, turn_id, content_class, projection_ordinal, content_text
+         ) VALUES (
+             'accepted_input', $1, $2, $3, 'accepted_input', $1,
+             $4, 'user_transcript', 0, 'lookahead sentinel corrupt'
+         )",
+    )
+    .bind(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x351))
+    .bind(session.into_uuid())
+    .bind(rust_decimal::Decimal::from(address.sequence().get()))
+    .bind(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x352))
+    .execute(&pool)
+    .await?;
+    insert_generated_projections(&pool, session, "lookahead sentinel", 2).await?;
+
+    let error = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "lookahead sentinel",
+            SearchScope::Session(session),
+            2,
+            None,
+        ))
+        .await
+        .expect_err("a corrupt lookahead row must fail the read that observes it");
+
+    assert!(matches!(
+        error,
+        SearchRepositoryError::Corruption(SearchProjectionCorruption::SourceShape)
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

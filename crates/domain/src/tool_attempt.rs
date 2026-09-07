@@ -134,6 +134,8 @@ pub enum ToolExecutionErrorKind {
     UnknownTool,
     /// Arguments were undecodable or outside the selected tool's schema.
     InvalidArguments,
+    /// A typed request-scoped resource or visibility check refused dispatch.
+    PreauthorizationRejected,
     /// The executor reported a definitive failure.
     ExecutionFailed,
     /// Successful content exceeded its admission bound.
@@ -555,8 +557,8 @@ impl CurrentToolAttempt {
         })
     }
 
-    /// Applies pre-execution lookup or argument failure without authorizing an
-    /// executor effect.
+    /// Applies pre-execution lookup, argument, or preauthorization failure
+    /// without authorizing an executor effect.
     pub fn end_preflight_error(
         self,
         error: ToolExecutionError,
@@ -569,7 +571,9 @@ impl CurrentToolAttempt {
         }
         if !matches!(
             error.kind(),
-            ToolExecutionErrorKind::UnknownTool | ToolExecutionErrorKind::InvalidArguments
+            ToolExecutionErrorKind::UnknownTool
+                | ToolExecutionErrorKind::InvalidArguments
+                | ToolExecutionErrorKind::PreauthorizationRejected
         ) {
             return Err(ToolAttemptTransitionError {
                 attempt: self,
@@ -1111,10 +1115,55 @@ mod tests {
         approved_request().prepare_attempt(tool_attempt_id(6), turn_attempt_id(7), effect_class)
     }
 
-    /// S12 / INV-011: version one rejects stored attempts that claim a later
-    /// dispatch generation.
+    #[track_caller]
+    fn assert_preflight_resolves_known_failed(kind: ToolExecutionErrorKind) {
+        let ended = prepared(ToolEffectClass::ExternalEffect)
+            .end_preflight_error(ToolExecutionError::new(kind, None))
+            .expect("an unsent attempt resolves on a preflight error");
+
+        assert_eq!(
+            ended.end(),
+            &ToolAttemptEnd::KnownFailed {
+                error: ToolExecutionError::new(kind, None),
+            }
+        );
+    }
+
+    #[track_caller]
+    fn assert_preflight_rejects_error_kind(kind: ToolExecutionErrorKind) {
+        let error = prepared(ToolEffectClass::ExternalEffect)
+            .end_preflight_error(ToolExecutionError::new(kind, None))
+            .expect_err("preflight cannot claim dispatched evidence");
+
+        assert_eq!(
+            error.failure(),
+            ToolAttemptTransitionFailure::InvalidPreflightError
+        );
+    }
+
+    #[track_caller]
+    fn assert_executor_observation_rejects_error_kind(kind: ToolExecutionErrorKind) {
+        let authorized = prepared(ToolEffectClass::ExternalEffect)
+            .authorize()
+            .expect("prepared work can be authorized");
+        let (in_flight, correlation) = authorized.into_parts();
+        let error = in_flight
+            .apply_terminal_observation(IssuedExecutorFence { correlation }.bind(
+                ToolAttemptObservation::KnownFailed {
+                    error: ToolExecutionError::new(kind, None),
+                },
+            ))
+            .expect_err("the executor cannot manufacture reserved evidence");
+
+        assert_eq!(
+            error.failure(),
+            ToolAttemptTransitionFailure::InvalidObservationError
+        );
+    }
+
+    /// version one rejects stored attempts that claim a later dispatch generation.
     #[test]
-    fn s12_inv011_reconstitution_rejects_nonfirst_dispatch_generation() {
+    fn reconstitution_rejects_nonfirst_dispatch_generation() {
         let input = ToolAttemptReconstitutionInput::new(
             tool_attempt_id(1),
             tool_request_id(2),
@@ -1133,10 +1182,9 @@ mod tests {
         assert_eq!(error.into_input(), input);
     }
 
-    /// S18 / INV-011: restart cannot admit an external-effect child wait that
-    /// the live transition forbids.
+    /// restart cannot admit an external-effect child wait that the live transition forbids.
     #[test]
-    fn s18_inv011_reconstitution_rejects_external_effect_child_wait() {
+    fn reconstitution_rejects_external_effect_child_wait() {
         let input = ToolAttemptReconstitutionInput::new(
             tool_attempt_id(1),
             tool_request_id(2),
@@ -1158,10 +1206,10 @@ mod tests {
         assert_eq!(error.into_input(), input);
     }
 
-    /// S12: persisted error detail rejects POSIX edge whitespace while
-    /// preserving admitted nonbreaking-space evidence exactly.
+    /// persisted error detail rejects POSIX edge whitespace while preserving admitted
+    /// nonbreaking-space evidence exactly.
     #[test]
-    fn s12_error_detail_rejects_posix_edges_and_preserves_nonbreaking_space() {
+    fn error_detail_rejects_posix_edges_and_preserves_nonbreaking_space() {
         for value in [" failed", "failed\n", "\tfailed", "failed\u{000b}"] {
             assert_eq!(
                 ToolExecutionErrorDetail::try_new(String::from(value))
@@ -1176,10 +1224,9 @@ mod tests {
         assert_eq!(admitted.as_str(), "\u{00a0}failed\u{00a0}");
     }
 
-    /// S12 / INV-004 / INV-011 / INV-021: result application requires the
-    /// exact request/turn/attempt/generation fence.
+    /// result application requires the exact request/turn/attempt/generation fence.
     #[test]
-    fn s12_inv004_inv011_inv021_result_rejects_a_stale_fence_unchanged() {
+    fn result_rejects_a_stale_fence_unchanged() {
         let authorized = prepared(ToolEffectClass::ExternalEffect)
             .authorize()
             .expect("prepared work can be authorized");
@@ -1203,10 +1250,9 @@ mod tests {
         assert_eq!(error.attempt(), &in_flight);
     }
 
-    /// S15 / INV-024: executor success is evidence only; the hub transition
-    /// creates terminal content authority.
+    /// executor success is evidence only; the hub transition creates terminal content authority.
     #[test]
-    fn s15_inv024_authorized_success_commits_exact_result_evidence() {
+    fn authorized_success_commits_exact_result_evidence() {
         let authorized = prepared(ToolEffectClass::EffectFree)
             .authorize()
             .expect("prepared work can be authorized");
@@ -1229,10 +1275,10 @@ mod tests {
         ));
     }
 
-    /// S18 / INV-011: foreground waiting ends the exact effect-free in-flight
-    /// request with typed child-wait evidence.
+    /// foreground waiting ends the exact effect-free in-flight request with typed child-wait
+    /// evidence.
     #[test]
-    fn s18_inv011_foreground_wait_parks_exact_in_flight_attempt() {
+    fn foreground_wait_parks_exact_in_flight_attempt() {
         let in_flight = prepared(ToolEffectClass::EffectFree)
             .authorize()
             .expect("prepared work can be authorized")
@@ -1257,9 +1303,9 @@ mod tests {
         );
     }
 
-    /// S18 / INV-011: child waiting cannot park external-effect work.
+    /// child waiting cannot park external-effect work.
     #[test]
-    fn s18_inv011_foreground_wait_rejects_external_effect_attempt() {
+    fn foreground_wait_rejects_external_effect_attempt() {
         let external = prepared(ToolEffectClass::ExternalEffect)
             .authorize()
             .expect("prepared work can be authorized")
@@ -1280,9 +1326,9 @@ mod tests {
         );
     }
 
-    /// S18 / INV-011: child waiting cannot park a different logical request.
+    /// child waiting cannot park a different logical request.
     #[test]
-    fn s18_inv011_foreground_wait_rejects_foreign_logical_request() {
+    fn foreground_wait_rejects_foreign_logical_request() {
         let effect_free = prepared(ToolEffectClass::EffectFree)
             .authorize()
             .expect("prepared work can be authorized")
@@ -1303,10 +1349,10 @@ mod tests {
         );
     }
 
-    /// S12 / INV-011 / INV-024: ambiguous commit recovery can reconstruct
-    /// dispatch authority only from the exact durable in-flight checkpoint.
+    /// ambiguous commit recovery can reconstruct dispatch authority only from the exact durable
+    /// in-flight checkpoint.
     #[test]
-    fn s12_inv011_inv024_in_flight_reread_restores_exact_dispatch_authority() {
+    fn in_flight_reread_restores_exact_dispatch_authority() {
         let authorized = prepared(ToolEffectClass::ExternalEffect)
             .authorize()
             .expect("prepared work can be authorized");
@@ -1325,38 +1371,39 @@ mod tests {
         );
     }
 
-    /// S15 / INV-024: executor observations cannot claim error kinds reserved
-    /// for preflight validation or restart classification.
+    /// an unsent attempt resolves on every preflight error kind the durable closed set admits,
+    /// preauthorization rejection included.
     #[test]
-    fn s15_inv024_executor_cannot_claim_preflight_or_crash_errors() {
-        for kind in [
-            ToolExecutionErrorKind::UnknownTool,
-            ToolExecutionErrorKind::InvalidArguments,
-            ToolExecutionErrorKind::CrashLost,
-        ] {
-            let authorized = prepared(ToolEffectClass::ExternalEffect)
-                .authorize()
-                .expect("prepared work can be authorized");
-            let (in_flight, correlation) = authorized.into_parts();
-            let error = in_flight
-                .apply_terminal_observation(IssuedExecutorFence { correlation }.bind(
-                    ToolAttemptObservation::KnownFailed {
-                        error: ToolExecutionError::new(kind, None),
-                    },
-                ))
-                .expect_err("the executor cannot manufacture reserved evidence");
-
-            assert_eq!(
-                error.failure(),
-                ToolAttemptTransitionFailure::InvalidObservationError
-            );
-        }
+    fn preflight_resolves_every_unsent_error_kind() {
+        assert_preflight_resolves_known_failed(ToolExecutionErrorKind::UnknownTool);
+        assert_preflight_resolves_known_failed(ToolExecutionErrorKind::InvalidArguments);
+        assert_preflight_resolves_known_failed(ToolExecutionErrorKind::PreauthorizationRejected);
     }
 
-    /// S05 / INV-024 / INV-026: crash loss of effect-free issued work is a
-    /// known failure and never an automatic retry.
+    /// preflight cannot manufacture evidence that only a dispatched executor or restart
+    /// classification may produce.
     #[test]
-    fn s05_inv024_inv026_effect_free_crash_loss_is_known_failed() {
+    fn preflight_cannot_claim_dispatched_or_crash_errors() {
+        assert_preflight_rejects_error_kind(ToolExecutionErrorKind::ExecutionFailed);
+        assert_preflight_rejects_error_kind(ToolExecutionErrorKind::ResultTooLarge);
+        assert_preflight_rejects_error_kind(ToolExecutionErrorKind::CrashLost);
+    }
+
+    /// executor observations cannot claim error kinds reserved for preflight validation or restart
+    /// classification.
+    #[test]
+    fn executor_cannot_claim_preflight_or_crash_errors() {
+        assert_executor_observation_rejects_error_kind(ToolExecutionErrorKind::UnknownTool);
+        assert_executor_observation_rejects_error_kind(ToolExecutionErrorKind::InvalidArguments);
+        assert_executor_observation_rejects_error_kind(
+            ToolExecutionErrorKind::PreauthorizationRejected,
+        );
+        assert_executor_observation_rejects_error_kind(ToolExecutionErrorKind::CrashLost);
+    }
+
+    /// crash loss of effect-free issued work is a known failure and never an automatic retry.
+    #[test]
+    fn effect_free_crash_loss_is_known_failed() {
         let in_flight = prepared(ToolEffectClass::EffectFree)
             .authorize()
             .expect("prepared work can be authorized")
@@ -1373,10 +1420,9 @@ mod tests {
         ));
     }
 
-    /// S06 / INV-025 / INV-026: crash loss of in-flight external-effect work
-    /// is ambiguous and retains the exact attempt.
+    /// crash loss of in-flight external-effect work is ambiguous and retains the exact attempt.
     #[test]
-    fn s06_inv025_inv026_external_effect_crash_loss_is_ambiguous() {
+    fn external_effect_crash_loss_is_ambiguous() {
         let in_flight = prepared(ToolEffectClass::ExternalEffect)
             .authorize()
             .expect("prepared work can be authorized")
@@ -1391,12 +1437,11 @@ mod tests {
         assert_eq!(ended.end(), &ToolAttemptEnd::Ambiguous);
     }
 
-    /// S06 / INV-025 / INV-026: an executor that cannot establish the outcome
-    /// of an external effect ends the attempt ambiguous, which is the sole
-    /// entry to reconciliation; reporting it as a definite failure would let
-    /// an unknown-outcome push or GitHub mutation be repeated.
+    /// an executor that cannot establish the outcome of an external effect ends the attempt
+    /// ambiguous, which is the sole entry to reconciliation; reporting it as a definite failure
+    /// would let an unknown-outcome push or GitHub mutation be repeated.
     #[test]
-    fn s06_inv025_inv026_external_effect_observation_ends_ambiguous() {
+    fn external_effect_observation_ends_ambiguous() {
         let authorized = prepared(ToolEffectClass::ExternalEffect)
             .authorize()
             .expect("prepared work can be authorized");
@@ -1412,11 +1457,10 @@ mod tests {
         assert_eq!(ended.end(), &ToolAttemptEnd::Ambiguous);
     }
 
-    /// S06 / INV-025 / INV-026: effect-free work cannot claim external-effect
-    /// ambiguity, so the rejection retains the unchanged in-flight attempt
-    /// rather than opening a reconciliation wait nothing can resolve.
+    /// effect-free work cannot claim external-effect ambiguity, so the rejection retains the
+    /// unchanged in-flight attempt rather than opening a reconciliation wait nothing can resolve.
     #[test]
-    fn s06_inv025_inv026_effect_free_observation_cannot_be_ambiguous() {
+    fn effect_free_observation_cannot_be_ambiguous() {
         let authorized = prepared(ToolEffectClass::EffectFree)
             .authorize()
             .expect("prepared work can be authorized");
@@ -1435,9 +1479,9 @@ mod tests {
         assert_eq!(error.attempt(), &in_flight);
     }
 
-    /// S10 / INV-027: a denial cannot produce approved-request authority.
+    /// a denial cannot produce approved-request authority.
     #[test]
-    fn s10_inv027_denial_cannot_authorize_an_attempt() {
+    fn denial_cannot_authorize_an_attempt() {
         let request = ToolRequestReconstitutionInput::new(
             tool_request_id(10),
             session_id(2),

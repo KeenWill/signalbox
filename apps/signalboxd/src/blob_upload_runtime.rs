@@ -60,6 +60,7 @@ pub(crate) enum BlobUploadError {
     LengthMismatch { observed: u64 },
     DigestMismatch { observed: BlobDigest },
     Unavailable,
+    PublicationAmbiguous,
     CommitAmbiguous,
     Integrity,
 }
@@ -241,6 +242,7 @@ fn map_store_error(error: signalbox_blob_store::BlobStoreError) -> BlobUploadErr
         BlobStoreFailureKind::NotFound | BlobStoreFailureKind::VerificationFailed => {
             BlobUploadError::Integrity
         }
+        BlobStoreFailureKind::PublicationAmbiguous => BlobUploadError::PublicationAmbiguous,
         BlobStoreFailureKind::Unavailable => BlobUploadError::Unavailable,
     }
 }
@@ -284,6 +286,14 @@ mod tests {
             Box::pin(async { Err(BlobStoreError::unavailable("unexpected test open")) })
         }
 
+        fn open_verified<'a>(
+            &'a self,
+            _expected: ExpectedBlob,
+            _key: &'a BlobObjectKey,
+        ) -> BlobStoreFuture<'a, OpenedBlob> {
+            Box::pin(async { Err(BlobStoreError::unavailable("unexpected verified test open")) })
+        }
+
         fn open_range<'a>(
             &'a self,
             _expected: ExpectedBlob,
@@ -325,10 +335,10 @@ mod tests {
         (root, upload)
     }
 
-    /// INV-060: exceeding either the declared length or deployment ceiling
+    /// exceeding either the declared length or deployment ceiling
     /// rejects before the bytes enter the private spool.
     #[tokio::test]
-    async fn inv060_append_rejects_an_oversized_cumulative_length() {
+    async fn append_rejects_an_oversized_cumulative_length() {
         let expected =
             ExpectedBlob::try_new(BlobDigest::digest(b"abc"), 3).expect("fixture blob is nonempty");
         let (_root, mut upload) = pending_fixture(expected).await;
@@ -344,10 +354,10 @@ mod tests {
         assert_eq!(observed, 4);
     }
 
-    /// INV-060: commit rejects a short assembled stream before publication or
+    /// commit rejects a short assembled stream before publication or
     /// catalog access.
     #[tokio::test]
-    async fn inv060_commit_rejects_a_short_stream_before_publication() {
+    async fn commit_rejects_a_short_stream_before_publication() {
         let expected =
             ExpectedBlob::try_new(BlobDigest::digest(b"abc"), 3).expect("fixture blob is nonempty");
         let (_root, mut upload) = pending_fixture(expected).await;
@@ -371,10 +381,10 @@ mod tests {
         assert_eq!(observed, 2);
     }
 
-    /// INV-060: equal length with different bytes rejects before publication
+    /// equal length with different bytes rejects before publication
     /// or catalog access and retains only the observed digest as evidence.
     #[tokio::test]
-    async fn inv060_commit_rejects_a_digest_mismatch_before_publication() {
+    async fn commit_rejects_a_digest_mismatch_before_publication() {
         let expected =
             ExpectedBlob::try_new(BlobDigest::digest(b"abc"), 3).expect("fixture blob is nonempty");
         let (_root, mut upload) = pending_fixture(expected).await;
@@ -396,5 +406,16 @@ mod tests {
             panic!("digest mismatch returned another error class")
         };
         assert_eq!(observed, BlobDigest::digest(b"abd"));
+    }
+
+    /// an adapter that cannot reconcile a possible publication keeps
+    /// that ambiguity distinct for the wire retry contract.
+    #[test]
+    fn store_publication_ambiguity_survives_upload_mapping() {
+        let mapped = map_store_error(BlobStoreError::publication_ambiguous(
+            "reconcile fixture publication",
+        ));
+
+        assert!(matches!(mapped, BlobUploadError::PublicationAmbiguous));
     }
 }

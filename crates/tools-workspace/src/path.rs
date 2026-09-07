@@ -10,11 +10,10 @@
 
 use std::{
     collections::BinaryHeap,
-    error::Error,
     ffi::OsStr,
     fmt,
     fs::File,
-    io::{self, Read},
+    io::{self, Read, Seek, SeekFrom},
     os::fd::OwnedFd,
     os::unix::ffi::OsStrExt,
     path::{Component, Path, PathBuf},
@@ -28,67 +27,41 @@ pub const MAX_WORKSPACE_PATH_CHARACTERS: usize = 4096;
 /// Maximum accepted UTF-8 byte length implied by the character bound.
 pub const MAX_WORKSPACE_PATH_BYTES: usize = MAX_WORKSPACE_PATH_CHARACTERS * 4;
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a model-supplied path was rejected before filesystem access.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspacePathRejection {
+    #[error("absolute workspace path rejected")]
     /// The supplied path was absolute.
     Absolute,
+    #[error("parent traversal in workspace path rejected")]
     /// The supplied path contained a parent-directory component.
     ParentTraversal,
+    #[error("invalid workspace path rejected")]
     /// The supplied path contained a NUL, exceeded its bounded shape, or had a
     /// component not representable by the relative-path contract.
     Invalid,
+    #[error("symbolic link in workspace path rejected")]
     /// A symbolic link occurred in the supplied path.
     Symlink,
 }
 
-impl fmt::Display for WorkspacePathRejection {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Absolute => "absolute workspace path rejected",
-            Self::ParentTraversal => "parent traversal in workspace path rejected",
-            Self::Invalid => "invalid workspace path rejected",
-            Self::Symlink => "symbolic link in workspace path rejected",
-        })
-    }
-}
-
-impl Error for WorkspacePathRejection {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Construction failure for an injected workspace root.
 #[derive(Debug)]
 pub enum WorkspaceRootError {
+    #[error("injected workspace root `{}` could not be opened", path.display())]
     /// The injected root could not be opened without following a symlink.
     Io {
         /// Injected root path associated with the failure.
         path: PathBuf,
+        #[source]
         /// Underlying operating-system failure.
         source: io::Error,
     },
+    #[error("injected workspace root is not a directory")]
     /// The opened injected root is not a directory.
     NotDirectory,
-}
-
-impl fmt::Display for WorkspaceRootError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io { path, .. } => write!(
-                formatter,
-                "injected workspace root `{}` could not be opened",
-                path.display()
-            ),
-            Self::NotDirectory => formatter.write_str("injected workspace root is not a directory"),
-        }
-    }
-}
-
-impl Error for WorkspaceRootError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::NotDirectory => None,
-        }
-    }
 }
 
 /// Stable filesystem identity of one pinned workspace-root descriptor.
@@ -229,15 +202,19 @@ fn validate_resolved_path(path: &Path) -> Result<(), WorkspacePathRejection> {
     Ok(())
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Failure while resolving or accessing one model-supplied path.
 #[derive(Debug)]
 pub enum WorkspaceResolveError {
+    #[error(transparent)]
     /// Typed evidence that the authority boundary rejected the path.
-    Rejected(WorkspacePathRejection),
+    Rejected(#[source] WorkspacePathRejection),
+    #[error("workspace path `{}` could not be resolved", path.display())]
     /// The admitted path could not be resolved.
     Io {
         /// Root-relative path associated with the failure.
         path: PathBuf,
+        #[source]
         /// Underlying operating-system failure.
         source: io::Error,
     },
@@ -250,28 +227,6 @@ impl WorkspaceResolveError {
         match self {
             Self::Rejected(reason) => Some(*reason),
             Self::Io { .. } => None,
-        }
-    }
-}
-
-impl fmt::Display for WorkspaceResolveError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Rejected(reason) => reason.fmt(formatter),
-            Self::Io { path, .. } => write!(
-                formatter,
-                "workspace path `{}` could not be resolved",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl Error for WorkspaceResolveError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Rejected(reason) => Some(reason),
-            Self::Io { source, .. } => Some(source),
         }
     }
 }
@@ -345,13 +300,29 @@ pub trait WorkspaceFileSystem: Clone + Send + Sync + 'static {
         max_inspections: usize,
         max_path_bytes: usize,
     ) -> Result<WorkspaceDirectoryRead, WorkspaceResolveError>;
+    /// Reads a bounded window plus four lookahead bytes from a regular file,
+    /// beginning at `offset` bytes from the start.
+    ///
+    /// An `offset` at or past the file's end reads no bytes; `total_bytes`
+    /// still describes the whole file, so a caller can tell an exhausted
+    /// cursor from an empty file.
+    fn read_file_range(
+        &self,
+        root: &WorkspaceRoot,
+        path: &Path,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<WorkspaceFileBytes, WorkspaceResolveError>;
+
     /// Reads a bounded prefix plus four lookahead bytes from a regular file.
     fn read_file_prefix(
         &self,
         root: &WorkspaceRoot,
         path: &Path,
         max_bytes: usize,
-    ) -> Result<WorkspaceFileBytes, WorkspaceResolveError>;
+    ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
+        self.read_file_range(root, path, 0, max_bytes)
+    }
 }
 
 /// Production adapter over descriptor-relative `rustix` operations.
@@ -443,10 +414,11 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
         })
     }
 
-    fn read_file_prefix(
+    fn read_file_range(
         &self,
         root: &WorkspaceRoot,
         path: &Path,
+        offset: u64,
         max_bytes: usize,
     ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
         let descriptor = open_relative(root, path, OFlags::RDONLY | OFlags::NONBLOCK)?;
@@ -461,9 +433,23 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
             ));
         }
         let initial_total_bytes = status.st_size.max(0) as u64;
+        // An exhausted cursor is answered before the seek rather than through
+        // it: `lseek` carries a signed offset, so a `u64` past that range
+        // fails the read outright instead of returning the empty page this
+        // contract promises for every offset at or past the end.
+        if offset >= initial_total_bytes {
+            return Ok(WorkspaceFileBytes {
+                bytes: Vec::new(),
+                total_bytes: initial_total_bytes,
+                truncated: false,
+                mode: status.st_mode as _,
+            });
+        }
         let lookahead = max_bytes.saturating_add(4);
         let mut bytes = Vec::with_capacity(lookahead);
         let mut file = File::from(descriptor);
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|source| resolve_std_io(path, source))?;
         (&mut file)
             .take(lookahead as u64)
             .read_to_end(&mut bytes)
@@ -472,10 +458,12 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
             .metadata()
             .map_err(|source| resolve_std_io(path, source))?
             .len();
-        let total_bytes = initial_total_bytes
-            .max(final_total_bytes)
-            .max(bytes.len() as u64);
-        let truncated = bytes.len() > max_bytes || total_bytes > bytes.len() as u64;
+        let read_end = offset.saturating_add(bytes.len() as u64);
+        // An exhausted cursor sits past the end, so it proves nothing about
+        // the file's size and never raises the observed total.
+        let observed_end = if bytes.is_empty() { 0 } else { read_end };
+        let total_bytes = initial_total_bytes.max(final_total_bytes).max(observed_end);
+        let truncated = bytes.len() > max_bytes || total_bytes > read_end;
         Ok(WorkspaceFileBytes {
             bytes,
             total_bytes,

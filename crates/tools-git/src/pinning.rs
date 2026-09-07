@@ -28,6 +28,7 @@ use crate::descriptor::{
     descriptor_path_from_fd, file_identity, file_snapshot_identity,
     unsupported_control_files_are_absent,
 };
+use crate::descriptor_identity::{bind_still_holds, descriptor_identity};
 use crate::failure::LocalGitFailure;
 use crate::layout::{
     object_id_bytes, open_repository_config_at, open_repository_head_at, open_repository_refs_at,
@@ -413,25 +414,7 @@ fn validate_directory_binding(
     name: &OsStr,
     pinned: &fs::File,
 ) -> Result<(), LocalGitFailure> {
-    let expected = file_identity(&pinned.metadata().map_err(|_| LocalGitFailure::Repository)?);
-    let current = fs::File::from(
-        openat(
-            parent,
-            name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| LocalGitFailure::Repository)?,
-    );
-    if file_identity(
-        &current
-            .metadata()
-            .map_err(|_| LocalGitFailure::Repository)?,
-    ) != expected
-    {
-        return Err(LocalGitFailure::Repository);
-    }
-    Ok(())
+    bind_still_holds(parent.as_fd(), name, pinned, || LocalGitFailure::Repository)
 }
 
 fn validate_head_at(
@@ -907,7 +890,7 @@ pub(super) fn parse_pack_index(
         .get(offset_start..offset_end)
         .ok_or(LocalGitFailure::Repository)?;
     let mut large_offsets = 0_usize;
-    for offset in offsets.chunks_exact(4) {
+    for offset in offsets.as_chunks::<4>().0 {
         if read_be_u32(offset, 0)? >> 31 == 1 {
             large_offsets = large_offsets.saturating_add(1);
         }
@@ -1103,36 +1086,13 @@ fn validate_owned_directory_binding<Parent: AsFd>(
     pinned: &OwnedFd,
 ) -> Result<(), LocalGitFailure> {
     let pinned_file = fs::File::from(dup(pinned).map_err(|_| LocalGitFailure::Repository)?);
-    let expected = file_identity(
-        &pinned_file
-            .metadata()
-            .map_err(|_| LocalGitFailure::Repository)?,
-    );
-    let current = fs::File::from(
-        openat(
-            parent,
-            name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| LocalGitFailure::Repository)?,
-    );
-    if file_identity(
-        &current
-            .metadata()
-            .map_err(|_| LocalGitFailure::Repository)?,
-    ) != expected
-    {
-        return Err(LocalGitFailure::Repository);
-    }
-    Ok(())
+    bind_still_holds(parent.as_fd(), name, &pinned_file, || {
+        LocalGitFailure::Repository
+    })
 }
 
 fn owned_directory_identity(directory: &OwnedFd) -> Result<FileIdentity, LocalGitFailure> {
-    let file = fs::File::from(dup(directory).map_err(|_| LocalGitFailure::Repository)?);
-    file.metadata()
-        .map(|metadata| file_identity(&metadata))
-        .map_err(|_| LocalGitFailure::Repository)
+    descriptor_identity(directory.as_fd()).ok_or(LocalGitFailure::Repository)
 }
 
 fn validate_object_child_bindings(

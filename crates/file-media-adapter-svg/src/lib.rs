@@ -24,7 +24,7 @@ use signalbox_file_media_runtime::{
 const MEDIA_TYPE: &str = "image/svg+xml";
 const PROVIDER_NAME: &str = "svg";
 const READER_NAME: &str = "quick-xml";
-const READER_REVISION: &str = "quick-xml-0-41-data-only-v1";
+const READER_REVISION: &str = "quick-xml-0-41-svgtypes-0-16-v2";
 const SVG_NAMESPACE: &[u8] = b"http://www.w3.org/2000/svg";
 const XLINK_NAMESPACE: &[u8] = b"http://www.w3.org/1999/xlink";
 const XML_EVENTS_NAMESPACE: &[u8] = b"http://www.w3.org/2001/xml-events";
@@ -96,6 +96,8 @@ impl FileMediaProvider for SvgProvider {
                 ProbeRoot::Svg => ProcessorProbeOutput::Candidate {
                     media_type: String::from(MEDIA_TYPE),
                     strength: ProbeStrength::StructuralCandidate,
+                    evidence_bytes: u64::try_from(bytes.len())
+                        .map_err(|_| FileMediaProviderFailure::Failed)?,
                 },
                 ProbeRoot::MalformedSvg => malformed_probe(MALFORMED_REASON),
                 ProbeRoot::ActiveSvg => malformed_probe(ACTIVE_CONTENT_REASON),
@@ -336,6 +338,9 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
         return ProbeRoot::Indeterminate;
     };
     let mut reader = NsReader::from_reader(document.as_bytes());
+    reader
+        .resolver_mut()
+        .set_max_namespace_bindings(MAX_ATTRIBUTES);
     let mut buffer = Vec::new();
     let mut declaration_matches_source = true;
     let mut forbidden_prolog_event = false;
@@ -343,7 +348,8 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
     loop {
         match reader.read_resolved_event_into(&mut buffer) {
             Ok((namespace, Event::Start(start) | Event::Empty(start))) => {
-                if start.local_name().as_ref() != b"svg" || !is_svg_namespace(&namespace) {
+                if start.local_name().as_ref().as_bytes() != b"svg" || !is_svg_namespace(&namespace)
+                {
                     return ProbeRoot::Other;
                 }
                 return if active_prolog_event {
@@ -361,10 +367,12 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
             Ok((_, Event::PI(instruction))) => {
                 if instruction
                     .as_ref()
+                    .as_bytes()
                     .get(..3)
                     .is_some_and(|target| target.eq_ignore_ascii_case(b"xml"))
                     && instruction
                         .as_ref()
+                        .as_bytes()
                         .get(3)
                         .is_none_or(|byte| !is_name_character(char::from(*byte)))
                 {
@@ -376,11 +384,11 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
             Ok((_, Event::DocType(_) | Event::GeneralRef(_) | Event::CData(_))) => {
                 forbidden_prolog_event = true;
             }
-            Ok((_, Event::Text(text))) => match text.xml10_content() {
-                Ok(text) if is_xml_whitespace(&text) => {}
-                Ok(_) => forbidden_prolog_event = true,
-                Err(_) => return ProbeRoot::Indeterminate,
-            },
+            Ok((_, Event::Text(text))) => {
+                if !is_xml_whitespace(&text.xml10_content()) {
+                    forbidden_prolog_event = true;
+                }
+            }
             Ok((_, Event::Eof)) | Err(_) => return ProbeRoot::Indeterminate,
             _ => {}
         }
@@ -395,11 +403,11 @@ fn classify_svg_root(bytes: &[u8]) -> Result<bool, ParseIssue> {
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(start) | Event::Empty(start)) => {
-                if start.local_name().as_ref() != b"svg" {
+                if start.local_name().as_ref().as_bytes() != b"svg" {
                     return Ok(false);
                 }
                 let qualified_name = start.name();
-                let qualified_name = qualified_name.as_ref();
+                let qualified_name = qualified_name.as_ref().as_bytes();
                 let prefix = qualified_name
                     .iter()
                     .position(|byte| *byte == b':')
@@ -412,21 +420,18 @@ fn classify_svg_root(bytes: &[u8]) -> Result<bool, ParseIssue> {
                     let Ok(attribute) = attribute else {
                         return Ok(true);
                     };
-                    let Some(value) = std::str::from_utf8(attribute.value.as_ref())
-                        .ok()
-                        .and_then(|value| unescape(value).ok())
-                    else {
+                    let Ok(value) = unescape(attribute.value.as_ref()) else {
                         return Ok(true);
                     };
                     if value.as_bytes() != SVG_NAMESPACE {
                         continue;
                     }
-                    if attribute.key.as_ref() == b"xmlns" {
+                    if attribute.key.as_ref().as_bytes() == b"xmlns" {
                         default_svg_namespace = true;
                     }
                     if prefixed_namespace
                         .as_ref()
-                        .is_some_and(|key| attribute.key.as_ref() == key.as_slice())
+                        .is_some_and(|key| attribute.key.as_ref().as_bytes() == key.as_slice())
                     {
                         prefixed_svg_namespace = true;
                     }
@@ -450,6 +455,9 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
     }
     let (document, source_encoding) = decode_xml(bytes, false)?;
     let mut reader = NsReader::from_reader(document.as_bytes());
+    reader
+        .resolver_mut()
+        .set_max_namespace_bindings(MAX_ATTRIBUTES);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let mut parsed = ParsedSvg {
@@ -474,7 +482,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
             .map_err(|_| ParseIssue::Malformed)?
         {
             Event::Start(start) => {
-                validate_qname(start.name().as_ref())?;
+                validate_qname(start.name().as_ref().as_bytes())?;
                 let (namespace, _) = reader.resolver().resolve_element(start.name());
                 prolog_event_seen = true;
                 inspect_element(
@@ -499,14 +507,14 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 if depth > MAX_DEPTH {
                     return Err(ParseIssue::StructureLimit);
                 }
-                if is_svg_element(&namespace, start.local_name().as_ref(), b"text") {
+                if is_svg_element(&namespace, start.local_name().as_ref().as_bytes(), b"text") {
                     text_depth = text_depth
                         .checked_add(1)
                         .ok_or(ParseIssue::StructureLimit)?;
                 }
             }
             Event::Empty(empty) => {
-                validate_qname(empty.name().as_ref())?;
+                validate_qname(empty.name().as_ref().as_bytes())?;
                 let (namespace, _) = reader.resolver().resolve_element(empty.name());
                 prolog_event_seen = true;
                 let prospective_depth = depth.checked_add(1).ok_or(ParseIssue::StructureLimit)?;
@@ -531,7 +539,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     return Err(issue);
                 }
                 if mode.collects_text()
-                    && is_svg_element(&namespace, empty.local_name().as_ref(), b"text")
+                    && is_svg_element(&namespace, empty.local_name().as_ref().as_bytes(), b"text")
                     && !parsed.text.ends_with('\n')
                 {
                     append_text(&mut parsed.text, "\n")?;
@@ -542,12 +550,12 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 }
             }
             Event::End(end) => {
-                validate_qname(end.name().as_ref())?;
+                validate_qname(end.name().as_ref().as_bytes())?;
                 let (namespace, _) = reader.resolver().resolve_element(end.name());
                 if depth == 0 {
                     return Err(ParseIssue::Malformed);
                 }
-                if is_svg_element(&namespace, end.local_name().as_ref(), b"text") {
+                if is_svg_element(&namespace, end.local_name().as_ref().as_bytes(), b"text") {
                     text_depth = text_depth.checked_sub(1).ok_or(ParseIssue::Malformed)?;
                     if mode.collects_text() && !parsed.text.ends_with('\n') {
                         append_text(&mut parsed.text, "\n")?;
@@ -559,10 +567,15 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 }
             }
             Event::Text(text) => {
-                if text.as_ref().windows(3).any(|window| window == b"]]>") {
+                if text
+                    .as_ref()
+                    .as_bytes()
+                    .windows(3)
+                    .any(|window| window == b"]]>")
+                {
                     return Err(ParseIssue::Malformed);
                 }
-                let decoded = text.xml10_content().map_err(|_| ParseIssue::Malformed)?;
+                let decoded = text.xml10_content();
                 if !has_only_xml10_characters(&decoded) {
                     return Err(ParseIssue::Malformed);
                 }
@@ -589,7 +602,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     buffer.clear();
                     continue;
                 }
-                let decoded = cdata.xml10_content().map_err(|_| ParseIssue::Malformed)?;
+                let decoded = cdata.xml10_content();
                 if !has_only_xml10_characters(&decoded) {
                     return Err(ParseIssue::Malformed);
                 }
@@ -601,8 +614,8 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 if depth == 0 {
                     return Err(ParseIssue::Malformed);
                 }
-                let decoded = reference.decode().map_err(|_| ParseIssue::Malformed)?;
-                let value = decode_reference(decoded.as_ref())?;
+                let decoded = reference.as_ref();
+                let value = decode_reference(decoded)?;
                 if mode.collects_text() && text_depth > 0 {
                     append_text(&mut parsed.text, &value)?;
                 }
@@ -614,12 +627,16 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 }
             }
             Event::Comment(comment) => {
-                let decoded = comment.xml10_content().map_err(|_| ParseIssue::Malformed)?;
+                let decoded = comment.xml10_content();
                 if !has_only_xml10_characters(&decoded) {
                     return Err(ParseIssue::Malformed);
                 }
-                if comment.as_ref().windows(2).any(|window| window == b"--")
-                    || comment.as_ref().ends_with(b"-")
+                if comment
+                    .as_ref()
+                    .as_bytes()
+                    .windows(2)
+                    .any(|window| window == b"--")
+                    || comment.as_ref().as_bytes().ends_with(b"-")
                 {
                     return Err(ParseIssue::Malformed);
                 }
@@ -660,10 +677,10 @@ fn inspect_element(
         return Err(ParseIssue::Malformed);
     }
     let binding = element.local_name();
-    let name = binding.as_ref();
+    let name = binding.as_ref().as_bytes();
     if depth == 0 {
         if matches!(namespace, ResolveResult::Unbound)
-            && !element.name().as_ref().contains(&b':')
+            && !element.name().as_ref().as_bytes().contains(&b':')
             && name != b"svg"
         {
             return Err(ParseIssue::NoMatch);
@@ -671,7 +688,8 @@ fn inspect_element(
         if !is_svg_element(namespace, name, b"svg") {
             let declares_default_svg_namespace = element.attributes().any(|attribute| {
                 attribute.is_ok_and(|attribute| {
-                    attribute.key.as_ref() == b"xmlns" && attribute.value.as_ref() == SVG_NAMESPACE
+                    attribute.key.as_ref().as_bytes() == b"xmlns"
+                        && attribute.value.as_ref().as_bytes() == SVG_NAMESPACE
                 })
             });
             return Err(if name == b"svg" && declares_default_svg_namespace {
@@ -711,12 +729,11 @@ fn inspect_element(
         if *attribute_count > MAX_ATTRIBUTES || attribute.value.len() > MAX_ATTRIBUTE_BYTES {
             return Err(ParseIssue::StructureLimit);
         }
-        validate_qname(attribute.key.as_ref())?;
-        let qualified_key = attribute.key.as_ref();
+        validate_qname(attribute.key.as_ref().as_bytes())?;
+        let qualified_key = attribute.key.as_ref().as_bytes();
         let key_binding = attribute.key.local_name();
-        let key = key_binding.as_ref();
-        let raw_value =
-            std::str::from_utf8(attribute.value.as_ref()).map_err(|_| ParseIssue::Malformed)?;
+        let key = key_binding.as_ref().as_bytes();
+        let raw_value = attribute.value.as_ref();
         if raw_value.contains('<') || !has_only_xml10_characters(raw_value) {
             return Err(ParseIssue::Malformed);
         }
@@ -739,14 +756,10 @@ fn inspect_element(
             None
         };
         let expanded_namespace = match &attribute_namespace {
-            Some(ResolveResult::Bound(namespace)) => {
-                let namespace =
-                    std::str::from_utf8(namespace.as_ref()).map_err(|_| ParseIssue::Malformed)?;
-                unescape(namespace)
-                    .map_err(|_| ParseIssue::Malformed)?
-                    .into_owned()
-                    .into_bytes()
-            }
+            Some(ResolveResult::Bound(namespace)) => unescape(namespace.as_ref())
+                .map_err(|_| ParseIssue::Malformed)?
+                .into_owned()
+                .into_bytes(),
             Some(ResolveResult::Unbound | ResolveResult::Unknown(_)) => {
                 return Err(ParseIssue::Malformed);
             }
@@ -803,9 +816,8 @@ fn namespace_matches(namespace: &ResolveResult<'_>, expected: &[u8]) -> bool {
     let ResolveResult::Bound(namespace) = namespace else {
         return false;
     };
-    std::str::from_utf8(namespace.as_ref())
+    unescape(namespace.as_ref())
         .ok()
-        .and_then(|namespace| unescape(namespace).ok())
         .is_some_and(|namespace| namespace.as_bytes() == expected)
 }
 
@@ -1055,10 +1067,6 @@ fn is_name_character(character: char) -> bool {
 }
 
 fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
-    parse_dimension_with_sign(value, false)
-}
-
-fn parse_dimension_with_sign(value: &str, allow_negative: bool) -> Result<Option<f64>, ParseIssue> {
     let value = value.trim_matches(|character| matches!(character, ' ' | '\t' | '\n' | '\r'));
     if [
         "auto",
@@ -1076,35 +1084,109 @@ fn parse_dimension_with_sign(value: &str, allow_negative: bool) -> Result<Option
     if let Some(calculation) = parse_css_calculation(value) {
         if calculation
             .value
-            .is_some_and(|result| !result.is_finite() || (!allow_negative && result < 0.0))
+            .is_some_and(|result| !result.is_finite() || result < 0.0)
         {
             return Err(ParseIssue::Malformed);
         }
         return Ok(None);
     }
-    let parse_number = if allow_negative {
-        parse_finite
-    } else {
-        parse_nonnegative_finite
+    let scalar = parse_scalar(value)?;
+    if scalar.number < 0.0 {
+        return Err(ParseIssue::Malformed);
+    }
+    Ok(match scalar.unit.as_deref() {
+        None | Some("px") => Some(scalar.number),
+        Some(_) => None,
+    })
+}
+
+struct DimensionScalar {
+    number: f64,
+    unit: Option<String>,
+}
+
+// svgtypes accepts trailing decimal points and only SVG length units. CSS token
+// boundaries retain strict decimal syntax; the additional CSS units have no numeric metadata.
+fn parse_scalar(value: &str) -> Result<DimensionScalar, ParseIssue> {
+    let mut input = cssparser::ParserInput::new(value);
+    let mut parser = cssparser::Parser::new(&mut input);
+    let unit = match parser
+        .next_including_whitespace_and_comments()
+        .map_err(|_| ParseIssue::Malformed)?
+    {
+        cssparser::Token::Number { .. } => None,
+        cssparser::Token::Percentage { .. } => Some(String::from("%")),
+        cssparser::Token::Dimension { unit, .. } => Some(unit.to_ascii_lowercase()),
+        _ => return Err(ParseIssue::Malformed),
     };
-    if let Ok(parsed) = parse_number(value) {
-        return Ok(Some(parsed));
+    if parser.position().byte_index() != value.len() {
+        return Err(ParseIssue::Malformed);
     }
-    for unit in [
-        "dvmax", "dvmin", "lvmax", "lvmin", "svmax", "svmin", "rcap", "dvb", "dvh", "dvi", "dvw",
-        "lvb", "lvh", "lvi", "lvw", "rch", "rem", "rex", "ric", "rlh", "svb", "svh", "svi", "svw",
-        "cqmax", "cqmin", "vmax", "vmin", "cap", "cqb", "cqh", "cqi", "cqw", "ch", "cm", "em",
-        "ex", "ic", "in", "lh", "mm", "pc", "pt", "vb", "vh", "vi", "vw", "q", "%",
-    ] {
-        if let Some(number) = strip_ascii_case_suffix(value, unit) {
-            parse_number(number)?;
-            return Ok(None);
+    let normalized = value.to_ascii_lowercase();
+    let length = match normalized.parse::<svgtypes::Length>() {
+        Ok(length) => length,
+        Err(_) => {
+            let unit = unit.as_deref().ok_or(ParseIssue::Malformed)?;
+            if !matches!(
+                unit,
+                "dvmax"
+                    | "dvmin"
+                    | "lvmax"
+                    | "lvmin"
+                    | "svmax"
+                    | "svmin"
+                    | "rcap"
+                    | "dvb"
+                    | "dvh"
+                    | "dvi"
+                    | "dvw"
+                    | "lvb"
+                    | "lvh"
+                    | "lvi"
+                    | "lvw"
+                    | "rch"
+                    | "rem"
+                    | "rex"
+                    | "ric"
+                    | "rlh"
+                    | "svb"
+                    | "svh"
+                    | "svi"
+                    | "svw"
+                    | "cqmax"
+                    | "cqmin"
+                    | "vmax"
+                    | "vmin"
+                    | "cap"
+                    | "cqb"
+                    | "cqh"
+                    | "cqi"
+                    | "cqw"
+                    | "ch"
+                    | "ic"
+                    | "lh"
+                    | "vb"
+                    | "vh"
+                    | "vi"
+                    | "vw"
+                    | "q"
+            ) {
+                return Err(ParseIssue::Malformed);
+            }
+            normalized
+                .strip_suffix(unit)
+                .ok_or(ParseIssue::Malformed)?
+                .parse::<svgtypes::Length>()
+                .map_err(|_| ParseIssue::Malformed)?
         }
+    };
+    if !length.number.is_finite() {
+        return Err(ParseIssue::Malformed);
     }
-    if let Some(number) = strip_ascii_case_suffix(value, "px") {
-        return parse_number(number).map(Some);
-    }
-    Err(ParseIssue::Malformed)
+    Ok(DimensionScalar {
+        number: length.number,
+        unit,
+    })
 }
 
 fn parse_css_calculation(value: &str) -> Option<CalculationValue> {
@@ -1127,16 +1209,13 @@ struct CalculationValue {
 }
 
 struct CalculationParser<'a> {
-    input: &'a [u8],
+    input: &'a str,
     position: usize,
 }
 
 impl<'a> CalculationParser<'a> {
     const fn new(input: &'a str) -> Self {
-        Self {
-            input: input.as_bytes(),
-            position: 0,
-        }
+        Self { input, position: 0 }
     }
 
     fn at_end(&mut self) -> bool {
@@ -1211,7 +1290,7 @@ impl<'a> CalculationParser<'a> {
             if self.position == whitespace_start {
                 return None;
             }
-            let operator = self.input[self.position];
+            let operator = self.input.as_bytes()[self.position];
             self.position += 1;
             let whitespace_start = self.position;
             self.skip_whitespace();
@@ -1238,7 +1317,7 @@ impl<'a> CalculationParser<'a> {
         loop {
             let whitespace_start = self.position;
             self.skip_whitespace();
-            let Some(operator) = self.input.get(self.position).copied() else {
+            let Some(operator) = self.input.as_bytes().get(self.position).copied() else {
                 return Some(left);
             };
             if operator != b'*' && operator != b'/' {
@@ -1274,6 +1353,7 @@ impl<'a> CalculationParser<'a> {
         let checkpoint = self.position;
         if self
             .input
+            .as_bytes()
             .get(self.position)
             .is_some_and(|byte| byte.is_ascii_alphabetic())
         {
@@ -1288,89 +1368,34 @@ impl<'a> CalculationParser<'a> {
 
     fn parse_dimension_value(&mut self) -> Option<CalculationValue> {
         self.skip_whitespace();
-        let start = self.position;
-        if self.peek_is(b'+') || self.peek_is(b'-') {
-            self.position += 1;
-        }
-        let integer_start = self.position;
-        while self
-            .input
-            .get(self.position)
-            .is_some_and(u8::is_ascii_digit)
-        {
-            self.position += 1;
-        }
-        let mut has_digits = self.position > integer_start;
-        if self.peek_is(b'.') {
-            self.position += 1;
-            let fraction_start = self.position;
-            while self
-                .input
-                .get(self.position)
-                .is_some_and(u8::is_ascii_digit)
-            {
-                self.position += 1;
-            }
-            has_digits |= self.position > fraction_start;
-        }
-        if !has_digits {
-            self.position = start;
-            return None;
-        }
-        if self.peek_is(b'e') || self.peek_is(b'E') {
-            let mut exponent_end = self.position + 1;
-            if self
-                .input
-                .get(exponent_end)
-                .is_some_and(|byte| matches!(byte, b'+' | b'-'))
-            {
-                exponent_end += 1;
-            }
-            let exponent_start = exponent_end;
-            while self.input.get(exponent_end).is_some_and(u8::is_ascii_digit) {
-                exponent_end += 1;
-            }
-            if exponent_end > exponent_start {
-                self.position = exponent_end;
-            }
-        }
-        let unit_start = self.position;
-        while self
-            .input
-            .get(self.position)
-            .is_some_and(u8::is_ascii_alphabetic)
-        {
-            self.position += 1;
-        }
-        if self.peek_is(b'%') {
-            self.position += 1;
-        }
-        let token_bytes = self.input.get(start..self.position)?;
-        let Ok(token) = core::str::from_utf8(token_bytes) else {
-            return None;
-        };
-        parse_dimension_with_sign(token, true).ok()?;
-        let kind = if self.position == unit_start {
-            CalculationKind::Number
-        } else {
+        let remaining = self.input.get(self.position..)?;
+        let mut input = cssparser::ParserInput::new(remaining);
+        let mut parser = cssparser::Parser::new(&mut input);
+        parser.next_including_whitespace_and_comments().ok()?;
+        let consumed = parser.position().byte_index();
+        let scalar = parse_scalar(remaining.get(..consumed)?).ok()?;
+        self.position += consumed;
+        let kind = if scalar.unit.is_some() {
             CalculationKind::Dimension
+        } else {
+            CalculationKind::Number
         };
-        let number = core::str::from_utf8(self.input.get(start..unit_start)?)
-            .ok()
-            .and_then(|number| parse_finite(number).ok());
-        let raw_unit = (kind == CalculationKind::Dimension)
-            .then(|| token[unit_start - start..].to_ascii_lowercase());
-        let (value, unit) = match (number, raw_unit.as_deref()) {
-            (Some(number), Some("px")) => (Some(number), Some(String::from("px"))),
-            (Some(number), Some("in")) => (Some(number * 96.0), Some(String::from("px"))),
-            (Some(number), Some("cm")) => (Some(number * 96.0 / 2.54), Some(String::from("px"))),
-            (Some(number), Some("mm")) => (Some(number * 96.0 / 25.4), Some(String::from("px"))),
-            (Some(number), Some("q")) => (Some(number * 96.0 / 101.6), Some(String::from("px"))),
-            (Some(number), Some("pt")) => (Some(number * 96.0 / 72.0), Some(String::from("px"))),
-            (Some(number), Some("pc")) => (Some(number * 16.0), Some(String::from("px"))),
-            (value, _) => (value, raw_unit),
+        let number = scalar.number;
+        let raw_unit = scalar.unit;
+        let (value, unit) = match raw_unit.as_deref() {
+            Some("in") => (number * 96.0, Some(String::from("px"))),
+            Some("cm") => (number * 96.0 / 2.54, Some(String::from("px"))),
+            Some("mm") => (number * 96.0 / 25.4, Some(String::from("px"))),
+            Some("q") => (number * 96.0 / 101.6, Some(String::from("px"))),
+            Some("pt") => (number * 96.0 / 72.0, Some(String::from("px"))),
+            Some("pc") => (number * 16.0, Some(String::from("px"))),
+            _ => (number, raw_unit),
         };
-        Some(CalculationValue { kind, value, unit })
+        Some(CalculationValue {
+            kind,
+            value: Some(value),
+            unit,
+        })
     }
 
     fn parse_identifier(&mut self) -> Option<&'a [u8]> {
@@ -1378,12 +1403,13 @@ impl<'a> CalculationParser<'a> {
         let start = self.position;
         while self
             .input
+            .as_bytes()
             .get(self.position)
             .is_some_and(u8::is_ascii_alphabetic)
         {
             self.position += 1;
         }
-        (self.position > start).then_some(&self.input[start..self.position])
+        (self.position > start).then_some(&self.input.as_bytes()[start..self.position])
     }
 
     fn consume(&mut self, expected: u8) -> bool {
@@ -1397,38 +1423,33 @@ impl<'a> CalculationParser<'a> {
     }
 
     fn peek_is(&self, expected: u8) -> bool {
-        self.input.get(self.position) == Some(&expected)
+        self.input.as_bytes().get(self.position) == Some(&expected)
     }
 
     fn skip_whitespace(&mut self) {
         loop {
             while self
                 .input
+                .as_bytes()
                 .get(self.position)
                 .is_some_and(u8::is_ascii_whitespace)
             {
                 self.position += 1;
             }
-            if self.input.get(self.position..self.position + 2) != Some(b"/*") {
+            if self.input.as_bytes().get(self.position..self.position + 2) != Some(b"/*") {
                 return;
             }
             self.position += 2;
-            let comment_end = self.input[self.position..]
+            let comment_end = self.input.as_bytes()[self.position..]
                 .windows(2)
                 .position(|window| window == b"*/");
             let Some(comment_end) = comment_end else {
-                self.position = self.input.len();
+                self.position -= 2;
                 return;
             };
             self.position += comment_end + 2;
         }
     }
-}
-
-fn strip_ascii_case_suffix<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
-    let split = value.len().checked_sub(suffix.len())?;
-    let (number, candidate) = value.split_at(split);
-    candidate.eq_ignore_ascii_case(suffix).then_some(number)
 }
 
 fn is_xml_whitespace(value: &str) -> bool {
@@ -1437,80 +1458,22 @@ fn is_xml_whitespace(value: &str) -> bool {
         .all(|character| matches!(character, ' ' | '\t' | '\n' | '\r'))
 }
 
-fn parse_nonnegative_finite(value: &str) -> Result<f64, ParseIssue> {
-    let parsed = parse_finite(value)?;
-    if parsed >= 0.0 {
-        Ok(parsed)
-    } else {
-        Err(ParseIssue::Malformed)
-    }
-}
-
-fn parse_finite(value: &str) -> Result<f64, ParseIssue> {
-    if !valid_number_token(value) {
-        return Err(ParseIssue::Malformed);
-    }
-    let parsed = value.parse::<f64>().map_err(|_| ParseIssue::Malformed)?;
-    if parsed.is_finite() {
-        Ok(parsed)
-    } else {
-        Err(ParseIssue::Malformed)
-    }
-}
-
-fn valid_number_token(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let mut position = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
-    let integer_start = position;
-    while bytes.get(position).is_some_and(u8::is_ascii_digit) {
-        position += 1;
-    }
-    let integer_digits = position > integer_start;
-    let mut fraction_digits = false;
-    if bytes.get(position) == Some(&b'.') {
-        position += 1;
-        let fraction_start = position;
-        while bytes.get(position).is_some_and(u8::is_ascii_digit) {
-            position += 1;
-        }
-        fraction_digits = position > fraction_start;
-        if !fraction_digits {
-            return false;
-        }
-    }
-    if !integer_digits && !fraction_digits {
-        return false;
-    }
-    if matches!(bytes.get(position), Some(b'e' | b'E')) {
-        position += 1;
-        if matches!(bytes.get(position), Some(b'+' | b'-')) {
-            position += 1;
-        }
-        let exponent_start = position;
-        while bytes.get(position).is_some_and(u8::is_ascii_digit) {
-            position += 1;
-        }
-        if position == exponent_start {
-            return false;
-        }
-    }
-    position == bytes.len()
-}
-
 fn parse_view_box(value: &str) -> Result<[f64; 4], ParseIssue> {
-    let comma_groups: Vec<&str> = value.split(',').collect();
-    if comma_groups.iter().any(|group| group.trim().is_empty()) {
-        return Err(ParseIssue::Malformed);
-    }
-    let mut values = comma_groups
-        .into_iter()
-        .flat_map(str::split_ascii_whitespace)
-        .map(|part| {
-            if !valid_number_token(part) {
+    // NumberListParser permits a trailing comma and decimal point; neither is
+    // admitted by the data-only SVG contract.
+    for group in value.split(',') {
+        if group.trim().is_empty() {
+            return Err(ParseIssue::Malformed);
+        }
+        for token in group.split_ascii_whitespace() {
+            let scalar = parse_scalar(token)?;
+            if scalar.unit.is_some() {
                 return Err(ParseIssue::Malformed);
             }
-            part.parse::<f64>().map_err(|_| ParseIssue::Malformed)
-        });
+        }
+    }
+    let mut values = svgtypes::NumberListParser::from(value)
+        .map(|number| number.map_err(|_| ParseIssue::Malformed));
     let view_box = [
         values.next().ok_or(ParseIssue::Malformed)??,
         values.next().ok_or(ParseIssue::Malformed)??,
@@ -1648,7 +1611,10 @@ fn declaration_matches_encoding(
 ) -> Result<bool, ()> {
     match declaration.encoding() {
         None => Ok(true),
-        Some(Ok(encoding)) => Ok(encoding_matches_source(encoding.as_ref(), source_encoding)),
+        Some(Ok(encoding)) => Ok(encoding_matches_source(
+            encoding.as_bytes(),
+            source_encoding,
+        )),
         Some(Err(_)) => Err(()),
     }
 }
@@ -1657,7 +1623,7 @@ fn validate_declaration(
     declaration: &BytesDecl<'_>,
     source_encoding: XmlEncoding,
 ) -> Result<(), ParseIssue> {
-    let mut input = declaration.as_ref();
+    let mut input = declaration.as_ref().as_bytes();
     input = input.strip_prefix(b"xml").ok_or(ParseIssue::Malformed)?;
     if !input
         .first()
@@ -1779,7 +1745,7 @@ fn decode_xml(
         XmlEncoding::Utf16Be | XmlEncoding::Utf16BeBom => false,
         XmlEncoding::Utf8 => return Err(ParseIssue::Malformed),
     };
-    let units = payload.chunks_exact(2).map(|pair| {
+    let units = payload.as_chunks::<2>().0.iter().map(|pair| {
         if little_endian {
             u16::from_le_bytes([pair[0], pair[1]])
         } else {

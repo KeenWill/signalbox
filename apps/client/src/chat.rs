@@ -30,11 +30,11 @@ use crate::{
     error::ClientError,
     presentation::{ChatTurnStatus, Output},
     read_session_defaults, read_session_summaries, read_snapshot, selection_display, stop_turn,
-    submit_input, terminal_snapshot_selection, transcript,
+    submit_input, terminal_snapshot_selection,
     transcript::SnapshotIdentitySet,
+    transcript_command as transcript,
 };
 
-// numeric-bound: guard - one unterminated terminal line exhausting input memory
 const MAX_CHAT_LINE_BYTES: usize = MAX_INPUT_CONTENT_FRAME_BYTES + ":steer ".len();
 
 const COMMANDS: &str = ":stop TEXT | :steer TEXT | :approve ID | :deny ID REASON | \

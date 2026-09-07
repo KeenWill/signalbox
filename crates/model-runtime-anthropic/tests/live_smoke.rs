@@ -9,12 +9,8 @@
 //! What it proves is protocol compatibility, which is what a public API
 //! change actually breaks: `POST /v1/messages` still accepts the request the
 //! adapter builds, and its response still decodes as a completed outcome, or
-//! as the adapter's downgraded-refusal `ProviderError` shape (this transport
-//! exposes no independent proof that a response arrived only after the
-//! complete request was sent, so `AnthropicRuntime::execute` never returns a
-//! raw `Refused` — see `require_decoded_response` below), through the
-//! adapter's own types, with usage reported. It deliberately asserts nothing
-//! about answer quality.
+//! as refusal evidence, through the adapter's own types with usage reported.
+//! It deliberately asserts nothing about answer quality.
 //!
 //! Streamed delivery: the operation requests `DeliveryMode::Streamed`, which
 //! is what `RuntimeModelCallProvider` in `crates/model-provider-runtime` sets
@@ -178,71 +174,27 @@ struct DecodedResponse {
     usage: TokenUsage,
 }
 
-/// Accepts a completion, or the adapter's own decoded-refusal shape, as
-/// well-formed evidence that the response contract still holds. Only a
-/// terminal outcome the adapter never decoded (a transport, protocol, or
-/// genuine provider-error class) fails this gate.
-///
-/// `AnthropicRuntime::execute` never returns a raw `TerminalEvidence::Refused`
-/// to its caller. That downgrade is unconditional, so it covers this smoke's
-/// streamed exchange too; the specification's refusal-downgrade rule states
-/// why it is unconditional (a fully buffered HTTP request exposes no
-/// independent proof that the response arrived only after the complete
-/// upload, and the adapter fails toward known failure rather than inventing
-/// evidence). `execute` therefore rewrites a decoded refusal into
-/// `ProviderError { kind: Unrecognized, native: { error_token: Some("refusal"), .. }, .. }`
-/// from the same HTTP 200 exchange before returning (`without_unproven_refusal`,
-/// runtime.rs:716,729-742; the "Refusal downgrade" rule in
-/// `docs/spec/runtime-substrate.md`). Matching the dead `Refused` arm here
-/// would make this smoke fail a correctly decoded refusal, so this recognizes
-/// what the adapter actually returns instead.
-///
-/// `kind` and outer status alone would not identify that downgrade, because a
-/// genuine failure can wear both: a mid-stream `error` event inside an HTTP 200
-/// SSE body is terminal `ProviderError` evidence carrying that same 200
-/// (`stream.rs::apply_error`), and an error whose native type is not a
-/// recognized token classifies as `Unrecognized`. The guard therefore requires
-/// the whole shape `without_unproven_refusal` constructs and nothing else:
-///
-/// - `native == NativeErrorFacts { error_token: Some("refusal"), .. }` with no
-///   code and no message. A native error event populates its facts from the
-///   provider's own error object, which carries a rendered message.
-/// - An observed `FinishReported(FinishReason::Refusal)`. The decoder emits
-///   that only after the provider reports the refusal stop reason; the
-///   error-event branch returns terminal evidence immediately, emitting no
-///   finish at all.
-///
-/// Both are checked because either alone is defeatable: an error event whose
-/// type happened to be the token `refusal` and which carried no message would
-/// clear the first, and the second cannot by itself rule out a stream that
-/// reported a refusal stop reason and then failed natively.
+/// Accepts decoded completion or refusal evidence from the compatibility exchange.
 #[track_caller]
 fn require_decoded_response(
     evidence: TerminalEvidence,
-    observations: &[Observation<String>],
+    _observations: &[Observation<String>],
 ) -> DecodedResponse {
     match evidence {
         TerminalEvidence::Completed(completed) => DecodedResponse {
             exchange: completed.exchange,
             usage: completed.usage,
         },
-        TerminalEvidence::ProviderError(error)
-            if error.kind == ProviderErrorKind::Unrecognized
-                && error.exchange.http_status == Some(200)
-                && error.native == downgraded_refusal_facts()
-                && refusal_finish_observed(observations) =>
-        {
-            DecodedResponse {
-                exchange: error.exchange,
-                usage: error.usage,
-            }
-        }
+        TerminalEvidence::Refused(refusal) => DecodedResponse {
+            exchange: refusal.exchange,
+            usage: refusal.usage,
+        },
         // Adapter-produced evidence is already credential-shape redacted, so
         // printing it here cannot surface credential material. Every variant
         // is named rather than caught by a wildcard, so a future
         // `TerminalEvidence` variant fails to compile here instead of
         // silently inheriting this panic path.
-        rejected @ (TerminalEvidence::Refused(_)
+        rejected @ (TerminalEvidence::CompletedWithProviderCompaction { .. }
         | TerminalEvidence::ProviderError(_)
         | TerminalEvidence::CancellationConfirmed(_)
         | TerminalEvidence::ProvenUnsent(_)
@@ -255,45 +207,13 @@ fn require_decoded_response(
 /// The exact native facts `without_unproven_refusal` fabricates for the
 /// downgrade: a stable discriminator token and nothing the provider actually
 /// sent.
+#[cfg(test)]
 fn downgraded_refusal_facts() -> NativeErrorFacts {
     NativeErrorFacts {
         error_token: Some("refusal".to_string()),
         error_code: None,
         message: None,
     }
-}
-
-/// Whether this execution observed the provider reporting a refusal stop
-/// reason — the corroboration `require_decoded_response` requires before
-/// accepting the downgraded-refusal shape, and the one signal a mid-stream
-/// native error event cannot manufacture.
-fn refusal_finish_observed(observations: &[Observation<String>]) -> bool {
-    observations
-        .iter()
-        .any(|observation| match &observation.fact {
-            // Both owned enums are enumerated rather than wildcarded: this
-            // discriminator decides whether a provider error is waved through
-            // as a refusal, so a new observation class *or* a new finish
-            // reason must fail to compile here and be considered, not
-            // silently default to "no refusal".
-            ObservationFact::FinishReported(finish) => match finish {
-                FinishReason::Refusal => true,
-                FinishReason::EndTurn
-                | FinishReason::MaxOutputTokens
-                | FinishReason::ContextWindowExceeded
-                | FinishReason::StopSequence { .. }
-                | FinishReason::ToolUse
-                | FinishReason::Unrecognized { .. } => false,
-            },
-            ObservationFact::SendCommenced
-            | ObservationFact::ExchangeEstablished(_)
-            | ObservationFact::ProviderModelReported(_)
-            | ObservationFact::TextDelta { .. }
-            | ObservationFact::ThinkingDelta { .. }
-            | ObservationFact::ToolArgumentsDelta { .. }
-            | ObservationFact::ToolCallProposed(_)
-            | ObservationFact::UsageReported(_) => false,
-        })
 }
 
 /// Asserts a decoded response is well-formed under the compatibility-smoke
@@ -303,8 +223,8 @@ fn refusal_finish_observed(observations: &[Observation<String>]) -> bool {
 /// least one — but output tokens are asserted only present, not positive: a
 /// valid `Completed` response can legitimately report zero output tokens
 /// (the adapter's own streamed fixtures cover an `end_turn` with
-/// `output_tokens: Some(0)` as `Completed`), and a downgraded-refusal
-/// `ProviderError` can be blocked before any completion token is produced.
+/// `output_tokens: Some(0)` as `Completed`), and a refusal
+/// can be blocked before any completion token is produced.
 /// Straight-line and credential-free: no test body branches on which
 /// accepted shape arrived.
 #[track_caller]
@@ -408,21 +328,19 @@ mod require_decoded_response_tests {
     }
 
     #[test]
-    fn downgraded_refusal_provider_error_is_accepted() {
-        // The exact shape `without_unproven_refusal` constructs: `kind:
-        // Unrecognized` carried by the same HTTP 200 exchange, with the
-        // fabricated discriminator token and no provider material, plus the
-        // refusal stop reason the decoder reported on the way there.
+    fn refusal_is_accepted() {
         let expected_exchange = exchange(200);
         let expected_usage = usage();
 
         let decoded = require_decoded_response(
-            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
                 exchange: expected_exchange.clone(),
+                message_id: None,
+                content: Vec::new(),
+                retained_input_tokens: None,
+                retained_output_tokens: None,
                 reported_model: None,
-                kind: ProviderErrorKind::Unrecognized,
-                non_acceptance_proven: false,
-                native: downgraded_refusal_facts(),
                 usage: expected_usage,
             }),
             &refusal_observed(),
@@ -433,13 +351,7 @@ mod require_decoded_response_tests {
     }
 
     #[test]
-    fn downgraded_refusal_with_zero_output_tokens_is_accepted() {
-        // A refusal can be blocked before any completion token is produced —
-        // `output_tokens: Some(0)` is a valid, honest report here too (see
-        // `completed_with_zero_output_tokens_is_accepted` above for the
-        // completed path). The classifier accepts both shapes identically;
-        // only `assert_well_formed_response`'s single, uniform
-        // usage-presence check applies to either.
+    fn refusal_with_zero_output_tokens_is_accepted() {
         let expected_exchange = exchange(200);
         let expected_usage = TokenUsage {
             input_tokens: Some(3),
@@ -448,12 +360,14 @@ mod require_decoded_response_tests {
         };
 
         let decoded = require_decoded_response(
-            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
                 exchange: expected_exchange.clone(),
+                message_id: None,
+                content: Vec::new(),
+                retained_input_tokens: None,
+                retained_output_tokens: None,
                 reported_model: None,
-                kind: ProviderErrorKind::Unrecognized,
-                non_acceptance_proven: false,
-                native: downgraded_refusal_facts(),
                 usage: expected_usage,
             }),
             &refusal_observed(),
@@ -466,12 +380,6 @@ mod require_decoded_response_tests {
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn native_error_event_inside_a_200_body_panics() {
-        // A mid-stream `error` event reaches the caller as terminal provider
-        // evidence carrying the outer HTTP 200 and whatever usage had
-        // accumulated. Even with the same `kind` and a type token that
-        // happened to read `refusal`, the provider's rendered message is
-        // material the downgrade never fabricates, so this genuine failure
-        // stays red.
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: exchange(200),
@@ -492,10 +400,6 @@ mod require_decoded_response_tests {
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn downgraded_refusal_shape_without_an_observed_refusal_panics() {
-        // The residual case native facts alone cannot catch: an error event
-        // carrying only the token `refusal` and nothing else would clear the
-        // native check. No refusal stop reason was ever reported for it, so
-        // the observation check still rejects it.
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: exchange(200),
@@ -512,10 +416,6 @@ mod require_decoded_response_tests {
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn an_ordinary_observation_is_not_mistaken_for_a_refusal() {
-        // The discriminator's negative path, exercised with real observations
-        // rather than an empty slice: a stream that reported usage and an
-        // end-turn finish never reported a refusal, so the downgrade-shaped
-        // provider error must still fail.
         let observations = vec![
             Observation {
                 correlation: "call-1".to_string(),
@@ -542,25 +442,7 @@ mod require_decoded_response_tests {
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
-    fn raw_refused_panics() {
-        let _ = require_decoded_response(
-            TerminalEvidence::Refused(RefusalEvidence {
-                exchange: exchange(200),
-                message_id: None,
-                reported_model: None,
-                content: Vec::new(),
-                usage: usage(),
-            }),
-            &refusal_observed(),
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "returned no decoded response")]
     fn unrecognized_provider_error_from_a_non_200_status_panics() {
-        // Same `kind` as the accepted downgraded-refusal shape, but from a
-        // real error status: the `http_status == 200` guard must keep this
-        // from being swallowed as a well-formed decode.
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: exchange(500),

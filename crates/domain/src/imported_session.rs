@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use crate::{
     ContextFrontierId, CreateSessionFromImportedFrontier, ImportedConversation,
     ImportedConversationId, ImportedSessionRelationship, ImportedSessionSeed,
-    ImportedTranscriptEntryId, ImportedTranscriptPosition, InitialSession,
-    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+    ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+    InitialSession, ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, Session, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
@@ -266,7 +266,7 @@ impl CreateSessionFromImportedFrontier {
             }
         };
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: self.imported_frontier(),
                 relationship: self.relationship(),
@@ -929,6 +929,171 @@ fn validate_imported_seed_projection(
     })
 }
 
+fn validate_normalized_imported_seed_projection(
+    session: SessionId,
+    provenance: SessionCreationProvenance,
+    imported_entries: &[ImportedTranscriptEntryInput],
+    seed_records: &[ImportedSessionSeedReconstitutionInput],
+    seed_snapshots: &[ResolvedContextFrontierReconstitutionInput],
+    semantic_inputs: &[SemanticTranscriptEntryReconstitutionInput],
+) -> Result<ValidatedImportedSeedProjection, ImportedSessionSeedReconstitutionFailure> {
+    let TranscriptAncestry::ImportedConversation {
+        source_frontier, ..
+    } = provenance.ancestry()
+    else {
+        return Err(ImportedSessionSeedReconstitutionFailure::AncestryNotImported);
+    };
+    let expected_count = usize::try_from(source_frontier.through_position().as_u64())
+        .map_err(|_| ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound)?;
+    if imported_entries.len() != expected_count
+        || imported_entries
+            .last()
+            .map(ImportedTranscriptEntryInput::identity)
+            != Some(source_frontier.through_entry())
+    {
+        return Err(ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound);
+    }
+    let mut expected_position = ImportedTranscriptPosition::first();
+    for (index, imported) in imported_entries.iter().enumerate() {
+        if imported.conversation() != source_frontier.conversation() {
+            return Err(ImportedSessionSeedReconstitutionFailure::ImportedConversationMismatch);
+        }
+        if imported.position() != expected_position {
+            return Err(ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound);
+        }
+        if index + 1 < imported_entries.len() {
+            expected_position = expected_position
+                .checked_next()
+                .ok_or(ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound)?;
+        }
+    }
+
+    validate_imported_seed_records(
+        session,
+        imported_entries,
+        seed_records,
+        seed_snapshots,
+        semantic_inputs,
+    )
+}
+
+fn validate_imported_seed_records(
+    session: SessionId,
+    imported_entries: &[ImportedTranscriptEntryInput],
+    seed_records: &[ImportedSessionSeedReconstitutionInput],
+    seed_snapshots: &[ResolvedContextFrontierReconstitutionInput],
+    semantic_inputs: &[SemanticTranscriptEntryReconstitutionInput],
+) -> Result<ValidatedImportedSeedProjection, ImportedSessionSeedReconstitutionFailure> {
+    let [seed_record] = seed_records else {
+        return Err(if seed_records.is_empty() {
+            ImportedSessionSeedReconstitutionFailure::MissingSeedRecord
+        } else {
+            ImportedSessionSeedReconstitutionFailure::DuplicateSeedRecord
+        });
+    };
+    if seed_record.session != session {
+        return Err(ImportedSessionSeedReconstitutionFailure::SeedSessionMismatch);
+    }
+    let [seed_snapshot] = seed_snapshots else {
+        return Err(if seed_snapshots.is_empty() {
+            ImportedSessionSeedReconstitutionFailure::MissingSeedSnapshot
+        } else {
+            ImportedSessionSeedReconstitutionFailure::DuplicateSeedSnapshot
+        });
+    };
+    if seed_snapshot.owning_session() != session {
+        return Err(ImportedSessionSeedReconstitutionFailure::SeedSnapshotSessionMismatch);
+    }
+    if seed_snapshot.snapshot() != seed_record.seed_frontier {
+        return Err(ImportedSessionSeedReconstitutionFailure::SeedSnapshotIdentityMismatch);
+    }
+    if semantic_inputs.len() != imported_entries.len() {
+        return Err(
+            ImportedSessionSeedReconstitutionFailure::SemanticEntryCountMismatch {
+                expected: imported_entries.len(),
+                actual: semantic_inputs.len(),
+            },
+        );
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut semantic_entries = Vec::with_capacity(imported_entries.len());
+    for (semantic, imported) in semantic_inputs.iter().zip(imported_entries) {
+        if semantic.source_session() != session {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::SemanticEntrySourceSessionMismatch {
+                    entry: semantic.identity(),
+                },
+            );
+        }
+        if !seen.insert(semantic.identity()) {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::DuplicateSemanticEntry {
+                    entry: semantic.identity(),
+                },
+            );
+        }
+        let SemanticTranscriptEntryPayload::Imported {
+            imported_entry,
+            source_speaker,
+            content,
+        } = semantic.payload()
+        else {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::SemanticEntryNotImported {
+                    entry: semantic.identity(),
+                },
+            );
+        };
+        if *imported_entry != imported.identity() {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::ImportedEntryIdentityMismatch {
+                    entry: semantic.identity(),
+                },
+            );
+        }
+        if source_speaker != imported.source_speaker() {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::ImportedSpeakerMismatch {
+                    entry: semantic.identity(),
+                },
+            );
+        }
+        if content != imported.content() {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::ImportedContentMismatch {
+                    entry: semantic.identity(),
+                },
+            );
+        }
+        semantic_entries.push(SemanticTranscriptEntry::from_validated_parts(
+            semantic.identity(),
+            semantic.source_session(),
+            semantic.payload().clone(),
+        ));
+    }
+
+    let snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+        seed_snapshot.owning_session(),
+        seed_snapshot.snapshot(),
+        seed_snapshot.ordered_entries().to_vec(),
+    )
+    .map_err(|_| ImportedSessionSeedReconstitutionFailure::SeedSnapshotMalformed)?;
+    if semantic_entries
+        .iter()
+        .map(SemanticTranscriptEntry::reference)
+        .ne(snapshot.ordered_entries())
+    {
+        return Err(ImportedSessionSeedReconstitutionFailure::SeedSnapshotMembershipMismatch);
+    }
+
+    Ok(ValidatedImportedSeedProjection {
+        seed: ImportedSessionSeed::from_validated_parts(session, seed_record.seed_frontier),
+        snapshot,
+        semantic_entries: semantic_entries.into_boxed_slice(),
+    })
+}
+
 /// Complete stored facts for one purpose-specific imported semantic-context
 /// read.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1176,6 +1341,179 @@ pub enum ImportedSessionReconstitutionFailure {
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
 
+/// Complete stored runtime facts for an imported session, using the normalized
+/// entry projection without loading audit-source bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportedSessionNormalizedReconstitutionInput {
+    requested_session: SessionId,
+    stored_session: SessionId,
+    provenance: SessionCreationProvenance,
+    current_defaults_session: SessionId,
+    current_defaults_version: SessionConfigurationDefaultsVersion,
+    defaults_session: SessionId,
+    defaults_version: SessionConfigurationDefaultsVersion,
+    defaults: SessionConfigurationDefaults,
+    placement: SessionPlacementReconstitutionFacts,
+    imported_entries: Vec<ImportedTranscriptEntryInput>,
+    seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+    seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+    semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+}
+
+impl ImportedSessionNormalizedReconstitutionInput {
+    /// Supplies every independently stored runtime fact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
+        imported_entries: Vec<ImportedTranscriptEntryInput>,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Self {
+        Self {
+            requested_session,
+            stored_session,
+            provenance,
+            current_defaults_session,
+            current_defaults_version,
+            defaults_session,
+            defaults_version,
+            defaults,
+            placement,
+            imported_entries,
+            seed_records,
+            seed_snapshots,
+            semantic_entries,
+        }
+    }
+
+    /// Reconstructs one complete imported runtime projection without audit bytes.
+    pub fn reconstitute(
+        self,
+    ) -> Result<ReconstitutedImportedSession, ImportedSessionNormalizedReconstitutionError> {
+        let fail = |input, failure| ImportedSessionNormalizedReconstitutionError {
+            input: Box::new(input),
+            failure,
+        };
+        if self.requested_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::RequestedSessionMismatch,
+            ));
+        }
+        if self.current_defaults_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::CurrentDefaultsSessionMismatch,
+            ));
+        }
+        if self.defaults_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::DefaultsSessionMismatch,
+            ));
+        }
+        if self.current_defaults_version != self.defaults_version {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
+            ));
+        }
+        if self.placement.current_pointer_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::CurrentPlacementSessionMismatch,
+            ));
+        }
+        if self.placement.selected_event_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::PlacementSessionMismatch,
+            ));
+        }
+        if self.placement.current_pointer_version != self.placement.selected_event.version() {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::CurrentPlacementVersionMismatch,
+            ));
+        }
+        if delegated_imported_session_mismatch(self.provenance) {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::DelegatedAncestryMismatch,
+            ));
+        }
+        let projection = match validate_normalized_imported_seed_projection(
+            self.stored_session,
+            self.provenance,
+            &self.imported_entries,
+            &self.seed_records,
+            &self.seed_snapshots,
+            &self.semantic_entries,
+        ) {
+            Ok(projection) => projection,
+            Err(failure) => {
+                return Err(fail(
+                    self,
+                    ImportedSessionReconstitutionFailure::Seed(failure),
+                ));
+            }
+        };
+        let session = Session::from_validated_imported_reconstitution(
+            self.stored_session,
+            self.provenance,
+            VersionedSessionConfigurationDefaults::reconstitute(
+                self.defaults_version,
+                self.defaults,
+            ),
+            self.placement.selected_event,
+        );
+        Ok(ReconstitutedImportedSession {
+            session,
+            imported_seed: projection.seed,
+            seed_snapshot: projection.snapshot,
+            semantic_entries: projection.semantic_entries,
+        })
+    }
+}
+
+/// Failed normalized imported-session reconstitution retaining every input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportedSessionNormalizedReconstitutionError {
+    input: Box<ImportedSessionNormalizedReconstitutionInput>,
+    failure: ImportedSessionReconstitutionFailure,
+}
+
+impl ImportedSessionNormalizedReconstitutionError {
+    /// Returns why reconstitution failed.
+    pub const fn failure(&self) -> ImportedSessionReconstitutionFailure {
+        self.failure
+    }
+
+    /// Borrows the complete unchanged input.
+    pub const fn input(&self) -> &ImportedSessionNormalizedReconstitutionInput {
+        &self.input
+    }
+
+    /// Returns the complete unchanged input and failure.
+    pub fn into_parts(
+        self,
+    ) -> (
+        ImportedSessionNormalizedReconstitutionInput,
+        ImportedSessionReconstitutionFailure,
+    ) {
+        (*self.input, self.failure)
+    }
+}
+
 /// Failed imported semantic-context reconstitution retaining every input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedSessionReconstitutionError {
@@ -1319,7 +1657,7 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
             ));
         }
         let expected_provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: self.command.imported_frontier(),
                 relationship: self.command.relationship(),
@@ -1749,7 +2087,7 @@ mod tests {
         BoundedImportedSessionReconstitutionInput::from_stored_imported_parts(
             prepared.session().id(),
             prepared.session().id(),
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             imported_frontier.conversation(),
             imported_frontier.through_entry(),
             imported_frontier.through_position(),
@@ -1853,11 +2191,10 @@ mod tests {
         assert_eq!(error.input(), &unchanged);
     }
 
-    /// S28 / INV-015 / INV-038 / INV-039: preparation projects every exact
-    /// imported prefix member once, in order, and couples it to one exact
-    /// separately identified seed frontier.
+    /// preparation projects every exact imported prefix member once, in order, and couples it to
+    /// one exact separately identified seed frontier.
     #[test]
-    fn s28_inv015_inv038_inv039_preparation_materializes_exact_imported_seed() {
+    fn preparation_materializes_exact_imported_seed() {
         let conversation = conversation(1);
         let command = command_for(&conversation);
         let calls = Cell::new(0_u128);
@@ -1903,10 +2240,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-012 / INV-039: mismatched target identities fail before any
-    /// semantic identity is generated or command identity is claimed.
+    /// mismatched target identities fail before any semantic identity is generated or command
+    /// identity is claimed.
     #[test]
-    fn s28_inv012_inv039_target_mismatch_precedes_projection() {
+    fn target_mismatch_precedes_projection() {
         let selected = conversation(1);
         let supplied = conversation(2);
         let command = command_for(&selected);
@@ -1950,10 +2287,10 @@ mod tests {
         assert_eq!(calls.get(), 0);
     }
 
-    /// S28 / INV-001 / INV-039: a faulty generator is called exactly once per
-    /// prefix member, then duplicate semantic identity fails closed.
+    /// a faulty generator is called exactly once per prefix member, then duplicate semantic
+    /// identity fails closed.
     #[test]
-    fn s28_inv001_inv039_duplicate_generated_identity_fails_closed() {
+    fn duplicate_generated_identity_fails_closed() {
         let conversation = conversation(1);
         let command = command_for(&conversation);
         let calls = Cell::new(0);
@@ -1974,10 +2311,9 @@ mod tests {
         );
     }
 
-    /// S28 / INV-003 / INV-008 / INV-012 / INV-039: complete matching
-    /// creation facts reconstruct the exact prepared session seed.
+    /// complete matching creation facts reconstruct the exact prepared session seed.
     #[test]
-    fn s28_inv003_inv008_inv012_inv039_creation_reconstitutes_complete_seed() {
+    fn creation_reconstitutes_complete_seed() {
         let (conversation, command, prepared) = prepared_fixture();
         let input = creation_input(&conversation, command.clone(), &prepared);
 
@@ -1996,10 +2332,9 @@ mod tests {
         assert_eq!(reconstituted.applied_result(), prepared.applied_result());
     }
 
-    /// S28 / INV-002 / INV-003 / INV-015 / INV-039: current-session
-    /// reconstitution requires and returns the exact seed identity and prefix.
+    /// current-session reconstitution requires and returns the exact seed identity and prefix.
     #[test]
-    fn s28_inv002_inv003_inv015_inv039_current_session_reconstitutes_seed() {
+    fn current_session_reconstitutes_seed() {
         let (conversation, _, prepared) = prepared_fixture();
         let mut input = current_input(&conversation, &prepared);
         let placement = VersionedSessionPlacement::reconstitute(
@@ -2031,11 +2366,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-002 / INV-015 / INV-039: an ordinary imported-session load
-    /// proves the immutable seed from constant-size records without loading
-    /// semantic-prefix members.
+    /// an ordinary imported-session load proves the immutable seed from constant-size records
+    /// without loading semantic-prefix members.
     #[test]
-    fn s28_inv002_inv015_inv039_bounded_current_session_reconstitutes() {
+    fn bounded_current_session_reconstitutes() {
         let (_, _, prepared) = prepared_fixture();
         let mut input = bounded_input(&prepared);
         let placement = VersionedSessionPlacement::reconstitute(
@@ -2065,9 +2399,9 @@ mod tests {
         assert_eq!(session.current_placement(), &placement);
     }
 
-    /// S18 / INV-003: delegated bounded current sessions reject imported ancestry.
+    /// delegated bounded current sessions reject imported ancestry.
     #[test]
-    fn s18_inv003_bounded_current_session_rejects_delegated_imported_ancestry() {
+    fn bounded_current_session_rejects_delegated_imported_ancestry() {
         let (_, _, prepared) = prepared_fixture();
         let mut input = bounded_input(&prepared);
         input.provenance = SessionCreationProvenance::new(
@@ -2083,10 +2417,10 @@ mod tests {
         );
     }
 
-    /// S18 / INV-003: full imported-session reconstitution rejects the same
-    /// impossible delegated/imported provenance pairing before yielding a session.
+    /// full imported-session reconstitution rejects the same impossible delegated/imported
+    /// provenance pairing before yielding a session.
     #[test]
-    fn s18_inv003_full_current_session_rejects_delegated_imported_ancestry() {
+    fn full_current_session_rejects_delegated_imported_ancestry() {
         let (conversation, _, prepared) = prepared_fixture();
         let mut input = current_input(&conversation, &prepared);
         input.provenance = SessionCreationProvenance::new(
@@ -2107,10 +2441,10 @@ mod tests {
         assert_eq!(error.input(), &unchanged);
     }
 
-    /// S18 / INV-003: delegated no-ancestry facts remain a request to use the
-    /// wrong reconstitution seam, rather than claiming imported ancestry.
+    /// delegated no-ancestry facts remain a request to use the wrong reconstitution seam, rather
+    /// than claiming imported ancestry.
     #[test]
-    fn s18_inv003_bounded_delegated_no_ancestry_is_not_imported() {
+    fn bounded_delegated_no_ancestry_is_not_imported() {
         let (_, _, prepared) = prepared_fixture();
         let mut input = bounded_input(&prepared);
         input.provenance = SessionCreationProvenance::delegated(tool_request_id(90));
@@ -2121,10 +2455,10 @@ mod tests {
         );
     }
 
-    /// S18 / INV-003: the full imported-session seam preserves the same
-    /// no-ancestry classification for delegated creation.
+    /// the full imported-session seam preserves the same no-ancestry classification for delegated
+    /// creation.
     #[test]
-    fn s18_inv003_full_delegated_no_ancestry_is_not_imported() {
+    fn full_delegated_no_ancestry_is_not_imported() {
         let (conversation, _, prepared) = prepared_fixture();
         let mut input = current_input(&conversation, &prepared);
         input.provenance = SessionCreationProvenance::delegated(tool_request_id(90));
@@ -2142,11 +2476,10 @@ mod tests {
         assert_eq!(error.input(), &unchanged);
     }
 
-    /// S28 / INV-002 / INV-003 / INV-015 / INV-039: every constructible
-    /// bounded imported-session mismatch retains its input and reports one
+    /// every constructible bounded imported-session mismatch retains its input and reports one
     /// exact typed cause.
     #[test]
-    fn s28_inv002_inv003_inv015_inv039_bounded_seed_corruption_is_typed() {
+    fn bounded_seed_corruption_is_typed() {
         let (_, _, prepared) = prepared_fixture();
 
         let mut requested_session = bounded_input(&prepared);
@@ -2204,7 +2537,7 @@ mod tests {
 
         let mut ancestry = bounded_input(&prepared);
         ancestry.provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None,
         );
         assert_bounded_failure(
@@ -2288,10 +2621,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-002 / INV-003: current imported-session placement rows and
-    /// pointers cannot be cross-wired across session identities or versions.
+    /// current imported-session placement rows and pointers cannot be cross-wired across session
+    /// identities or versions.
     #[test]
-    fn s28_inv002_inv003_current_placement_corruption_is_typed() {
+    fn current_placement_corruption_is_typed() {
         let (conversation, _, prepared) = prepared_fixture();
 
         let mut current_placement_session = current_input(&conversation, &prepared);
@@ -2318,10 +2651,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-015 / INV-039: missing, duplicate, cross-session, and
-    /// equal-content-but-different-identity seed facts are typed corruption.
+    /// missing, duplicate, cross-session, and equal-content-but-different-identity seed facts are
+    /// typed corruption.
     #[test]
-    fn s28_inv015_inv039_seed_record_and_identity_corruption_is_typed() {
+    fn seed_record_and_identity_corruption_is_typed() {
         let (conversation, _, prepared) = prepared_fixture();
 
         let mut missing = current_input(&conversation, &prepared);
@@ -2381,10 +2714,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038 / INV-039: imported identity, speaker, content, and
-    /// ordered snapshot membership are independently checked.
+    /// imported identity, speaker, content, and ordered snapshot membership are independently
+    /// checked.
     #[test]
-    fn s28_inv038_inv039_semantic_prefix_corruption_is_typed() {
+    fn semantic_prefix_corruption_is_typed() {
         let (conversation, _, prepared) = prepared_fixture();
 
         let mut wrong_imported_entry = current_input(&conversation, &prepared);
@@ -2468,17 +2801,16 @@ mod tests {
         );
     }
 
-    /// S28 / INV-002 / INV-003 / INV-015 / INV-038 / INV-039: every
-    /// constructible imported-seed corruption branch retains its complete
-    /// input and reports one exact typed cause.
+    /// every constructible imported-seed corruption branch retains its complete input and reports
+    /// one exact typed cause.
     #[test]
-    fn s28_inv002_inv003_inv015_inv038_inv039_seed_corruption_matrix_is_complete() {
+    fn seed_reconstitution_rejects_corruption_with_typed_causes_and_unchanged_input() {
         let (imported_conversation, _, prepared) = prepared_fixture();
         let other_conversation = conversation(2);
 
         let mut ancestry_not_imported = current_input(&imported_conversation, &prepared);
         ancestry_not_imported.provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None,
         );
         assert_seed_reconstitution_failure(
@@ -2488,7 +2820,7 @@ mod tests {
 
         let mut conversation_mismatch = current_input(&imported_conversation, &prepared);
         conversation_mismatch.provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: other_conversation
                     .frontiers()
@@ -2625,11 +2957,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-002 / INV-003 / INV-008 / INV-012 / INV-039: every
-    /// constructible top-level creation mismatch returns the complete
-    /// unchanged reconstitution input.
+    /// every constructible top-level creation mismatch returns the complete unchanged
+    /// reconstitution input.
     #[test]
-    fn s28_inv002_inv003_inv008_inv012_inv039_creation_corruption_matrix_is_complete() {
+    fn creation_reconstitution_rejects_mismatches_with_unchanged_input() {
         let (conversation, command, prepared) = prepared_fixture();
 
         let mut result_mismatch = creation_input(&conversation, command.clone(), &prepared);
@@ -2641,7 +2972,7 @@ mod tests {
 
         let mut provenance_mismatch = creation_input(&conversation, command.clone(), &prepared);
         provenance_mismatch.provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: command.imported_frontier(),
                 relationship: crate::ImportedSessionRelationship::Fork,
@@ -2678,14 +3009,14 @@ mod tests {
         );
     }
 
-    /// S28 / INV-039: a different selected imported boundary cannot
-    /// reconstruct the semantic prefix of another boundary.
+    /// a different selected imported boundary cannot reconstruct the semantic prefix of another
+    /// boundary.
     #[test]
-    fn s28_inv039_mismatched_boundary_fails_closed() {
+    fn mismatched_boundary_fails_closed() {
         let (conversation, _, prepared) = prepared_fixture();
         let mut input = current_input(&conversation, &prepared);
         input.provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: conversation.frontiers().next().expect("first frontier"),
                 relationship: crate::ImportedSessionRelationship::Resume,

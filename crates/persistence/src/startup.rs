@@ -1,6 +1,6 @@
 //! Atomic PostgreSQL recovery of prior-process active attempts.
 
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{collections::BTreeSet, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StartupScanIdGenerator,
@@ -12,7 +12,8 @@ use signalbox_domain::{
     ModelCallTerminalOutcome, PendingSteeringReclassificationIdentity,
     PreparedAcceptedInputTurnFailure, ReconstitutedToolAttempt,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
-    ToolAttemptCrashOutcome, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
+    ToolAttemptCrashOutcome, TurnDisposition, TurnId, TurnTerminalCause,
+    UnstoppedAttemptDisposition,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -20,8 +21,9 @@ use crate::{
     commit_failure_is_ambiguous,
     mapping::{
         input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
-        turn_id_to_uuid,
+        turn_id_to_uuid, turn_terminal_cause_to_str,
     },
+    model_execution::persist_reclassified_pending_steering,
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
         fail_tool_crash_in_transaction, insert_snapshot, lock_delegated_turn_terminal_frontier,
@@ -37,112 +39,68 @@ use crate::{
 };
 
 /// Which fresh startup-recovery identity collided durably.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum StartupScanIdentityCollision {
     /// A proposed tool-closure semantic-entry identity already exists.
+    #[error("tool-closure semantic-entry identity already exists")]
     ToolClosureEntry,
     /// The proposed `TurnFailed` entry identity already exists.
+    #[error("failure semantic-entry identity already exists")]
     FailureEntry,
     /// The proposed terminal context-frontier identity already exists.
+    #[error("terminal context-frontier identity already exists")]
     TerminalFrontier,
     /// A proposed reclassified successor-turn identity already exists.
+    #[error("reclassified successor-turn identity already exists")]
     ReclassifiedTurn,
 }
 
-impl fmt::Display for StartupScanIdentityCollision {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let identity = match self {
-            Self::ToolClosureEntry => "tool-closure semantic-entry",
-            Self::FailureEntry => "failure semantic-entry",
-            Self::TerminalFrontier => "terminal context-frontier",
-            Self::ReclassifiedTurn => "reclassified successor-turn",
-        };
-        write!(formatter, "{identity} identity already exists")
-    }
-}
-
-impl Error for StartupScanIdentityCollision {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct or commit startup recovery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StartupScanCorruption {
+    #[error("missing startup-scan {field_0}")]
     /// One required durable record is absent.
     Missing(&'static str),
+    #[error("inconsistent startup-scan {field_0}")]
     /// Correlated durable records disagree.
     Inconsistent(&'static str),
+    #[error("startup-scan current Session is invalid: {field_0}")]
     /// The current session projection is invalid.
     CurrentSession(SessionCorruption),
+    #[error("startup-scan scheduling projection is invalid: {field_0}")]
     /// Complete scheduling records fail checked persistence mapping.
     Scheduling(SubmitInputCorruption),
+    #[error(transparent)]
     /// Complete model-call records fail checked persistence mapping.
     ModelCall(ModelCallCorruption),
 }
 
-impl fmt::Display for StartupScanCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(record) => write!(formatter, "missing startup-scan {record}"),
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent startup-scan {relationship}")
-            }
-            Self::CurrentSession(error) => {
-                write!(
-                    formatter,
-                    "startup-scan current Session is invalid: {error}"
-                )
-            }
-            Self::Scheduling(error) => {
-                write!(
-                    formatter,
-                    "startup-scan scheduling projection is invalid: {error}"
-                )
-            }
-            Self::ModelCall(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for StartupScanCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database, integrity, or identity-collision failure during startup scan.
 #[derive(Debug)]
 pub enum StartupScanRepositoryError {
+    #[error("startup scan failed: {source}")]
     /// PostgreSQL could not complete the operation.
     Database {
+        #[source]
         /// The underlying SQLx failure.
         source: sqlx::Error,
         /// Whether failure occurred while awaiting commit.
         commit_ambiguous: bool,
     },
+    #[error(transparent)]
     /// Durable records cannot reconstruct or commit the accepted shape.
     Corruption {
+        #[source]
         /// The invalid durable shape.
         source: StartupScanCorruption,
         /// The active durable turn observed for the scoped session.
         turn: Option<TurnId>,
     },
+    #[error(transparent)]
     /// A supplied fresh identity already names a durable record.
-    IdentityCollision(StartupScanIdentityCollision),
-}
-
-impl fmt::Display for StartupScanRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => write!(formatter, "startup scan failed: {source}"),
-            Self::Corruption { source, .. } => source.fmt(formatter),
-            Self::IdentityCollision(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for StartupScanRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption { source, .. } => Some(source),
-            Self::IdentityCollision(error) => Some(error),
-        }
-    }
+    IdentityCollision(#[source] StartupScanIdentityCollision),
 }
 
 impl ClassifyOperatorFailure for StartupScanRepositoryError {
@@ -385,15 +343,68 @@ fn startup_recovery_created_ambiguous_wait(outcome: &StartupScanSessionOutcome) 
         StartupScanSessionOutcome::Recovered(_)
         | StartupScanSessionOutcome::RecoveredContextCompaction { .. }
         | StartupScanSessionOutcome::ResumableToolBatch { .. }
+        | StartupScanSessionOutcome::ResumablePreparedModelCall { .. }
         | StartupScanSessionOutcome::AwaitingRecoveryDecision { .. }
         | StartupScanSessionOutcome::NoActiveTurn => false,
     }
+}
+
+/// Recovers only the compaction an expired pre-activation pass abandoned.
+///
+/// [`recover_in_transaction`] falls through to whichever turn is active when a
+/// session holds no unterminalized compaction, which is correct for a startup
+/// scan: nothing else is running yet. The expiry handoff has no such
+/// guarantee. It runs detached, its pass released the admission slot the moment
+/// the bound expired, and it waits between attempts, so a later eligibility
+/// sweep can activate a healthy successor turn before this transaction opens.
+/// Falling through would then terminalize that successor. Reporting `None`
+/// instead keeps recovery correlated with the evidence that justifies it — a
+/// compaction still holding the session boundary — and leaves every other
+/// shape to the watchdog that owns it.
+///
+/// `abandoned_call` is that evidence stated exactly. The session alone is not
+/// enough to name it: expiry inside the read-only preflight leaves no durable
+/// call at all, and by the time a delayed attempt opens this transaction a
+/// later admitted pass can be running a different compaction for the same
+/// session, which selecting on the session would terminalize. Only the call the
+/// expired window itself made durable is recovered here.
+pub(crate) async fn recover_abandoned_compaction_in_transaction(
+    connection: &mut PgConnection,
+    requested_session: SessionId,
+    abandoned_call: ModelCallId,
+    write_lock_wait: Option<Duration>,
+) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError> {
+    let (session_exists, scheduler_session, active_turn) =
+        sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
+            crate::lock_inventory::STARTUP_RECOVERY,
+        )
+        .bind(session_id_to_uuid(requested_session))
+        .fetch_one(&mut *connection)
+        .await?;
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(crate::turn_liveness::postgres_lock_timeout(write_lock_wait))
+        .execute(&mut *connection)
+        .await?;
+    if scheduler_session.is_none() {
+        if session_exists {
+            return Err(StartupScanCorruption::Missing("session scheduler row").into());
+        }
+        return Ok(None);
+    }
+    recover_context_compaction(
+        connection,
+        requested_session,
+        Some(abandoned_call),
+        active_turn,
+    )
+    .await
 }
 
 pub(crate) async fn recover_observed_slot_held_in_transaction<Generator>(
     connection: &mut PgConnection,
     candidate: StaleTurnCandidate,
     identities: AcceptedInputTurnFailureIdentities,
+    write_lock_wait: Option<Duration>,
     ids: &mut Generator,
 ) -> Result<Option<TransactionDecision>, StartupScanRepositoryError>
 where
@@ -423,6 +434,16 @@ where
         )
         .bind(session_uuid)
         .fetch_one(&mut *connection)
+        .await?;
+    // The acquisition budget has done its work: the scheduler row is held. The
+    // write phase takes over with a budget of its own, exactly as the sibling
+    // terminalization does — wide enough that the outbox's shared sequence row,
+    // which every writer holds until it commits, is not mistaken for a stall.
+    // Recovery reaches that same row, so without this switch its post-lock
+    // statements are refused on ordinary busy-daemon traffic.
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(crate::turn_liveness::postgres_lock_timeout(write_lock_wait))
+        .execute(&mut *connection)
         .await?;
     if active_turn != Some(turn_id_to_uuid(candidate.turn())) {
         return Ok(None);
@@ -468,7 +489,7 @@ where
     }
 
     if let Some(recovered) =
-        recover_context_compaction(connection, requested_session, active_turn).await?
+        recover_context_compaction(connection, requested_session, None, active_turn).await?
     {
         return Ok(TransactionDecision::Commit(recovered));
     }
@@ -679,14 +700,18 @@ where
         .await
         .map_err(map_model_call_error)?;
     if let Some(call_state) = model_execution.current_call().map(|call| call.state()) {
+        if call_state == CurrentModelCallState::Prepared {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::ResumablePreparedModelCall {
+                    turn: model_execution.turn(),
+                },
+            ));
+        }
         let mut failure_identities = FailedModelCallTurnIdentities::new(
             identities.failure_entry(),
             identities.terminal_frontier(),
         );
-        if matches!(
-            call_state,
-            CurrentModelCallState::Prepared | CurrentModelCallState::CancellationRequested
-        ) {
+        if call_state == CurrentModelCallState::CancellationRequested {
             let mut proposed_turns = BTreeSet::new();
             let mut reclassifications = Vec::new();
             for pending in model_execution.active_turn().pending_steering() {
@@ -718,9 +743,13 @@ where
         ) {
             return Err(StartupScanCorruption::Inconsistent("model-call restart outcome").into());
         }
-        persist_terminal_outcome(connection, &outcome)
-            .await
-            .map_err(map_model_call_error)?;
+        persist_terminal_outcome(
+            connection,
+            &outcome,
+            Some(TurnTerminalCause::AbandonedAtRestart),
+        )
+        .await
+        .map_err(map_model_call_error)?;
         return Ok(TransactionDecision::Commit(
             StartupScanSessionOutcome::RecoveredModelCall(Box::new(outcome)),
         ));
@@ -753,14 +782,19 @@ where
                 StartupScanCorruption::Inconsistent("evidence-free restart classification")
             })?;
         let outcome = ModelCallTerminalOutcome::Failed(failed);
-        persist_terminal_outcome(connection, &outcome)
-            .await
-            .map_err(map_model_call_error)?;
+        persist_terminal_outcome(
+            connection,
+            &outcome,
+            Some(TurnTerminalCause::AbandonedAtRestart),
+        )
+        .await
+        .map_err(map_model_call_error)?;
         return Ok(TransactionDecision::Commit(
             StartupScanSessionOutcome::RecoveredModelCall(Box::new(outcome)),
         ));
     }
 
+    let identities = lost_failure_identities(identities, &scheduling, ids);
     let prepared = match scheduling.prepare_active_turn_lost_failure(identities) {
         Ok(prepared) => prepared,
         Err(error) => match error.failure() {
@@ -779,7 +813,7 @@ where
                     StartupScanIdentityCollision::TerminalFrontier,
                 ));
             }
-            AcceptedInputTurnFailureFailure::PendingSteering { .. }
+            AcceptedInputTurnFailureFailure::PendingSteeringReclassificationMismatch
             | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
             | AcceptedInputTurnFailureFailure::ActiveStartMissing
             | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
@@ -791,17 +825,55 @@ where
         },
     };
 
-    let failed = insert_prepared_failure(connection, prepared).await?;
+    let failed =
+        insert_prepared_failure(connection, prepared, TurnTerminalCause::AbandonedAtRestart)
+            .await?;
     Ok(TransactionDecision::Commit(
         StartupScanSessionOutcome::Recovered(Box::new(failed)),
     ))
 }
 
+/// Commits one prepared failed-turn transition, recording `cause` as why the
+/// turn ended.
+///
+/// The startup scan and the liveness watchdog commit the identical transition,
+/// which is what keeps every terminal trigger firing for both; the cause is
+/// what makes the two distinguishable in the rows rather than only in a log.
+/// Proposes one fresh successor turn per steering input pending on the
+/// active turn, so a lost failure reclassifies rather than refuses.
+pub(crate) fn lost_failure_identities<Generator>(
+    identities: AcceptedInputTurnFailureIdentities,
+    scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,
+    ids: &mut Generator,
+) -> AcceptedInputTurnFailureIdentities
+where
+    Generator: StartupScanIdGenerator,
+{
+    let reclassifications = scheduling
+        .active_turn_execution()
+        .map(|execution| {
+            execution
+                .pending_steering()
+                .iter()
+                .map(|pending| {
+                    let accepted_input = pending.accepted_input();
+                    PendingSteeringReclassificationIdentity::new(
+                        accepted_input,
+                        ids.next_reclassified_turn_id(accepted_input),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    identities.with_pending_steering_reclassifications(reclassifications)
+}
+
 pub(crate) async fn insert_prepared_failure(
     connection: &mut PgConnection,
     prepared: PreparedAcceptedInputTurnFailure,
+    cause: TurnTerminalCause,
 ) -> Result<signalbox_domain::FailedAcceptedInputTurn, StartupScanRepositoryError> {
-    let (failed, failure_entry, terminal_snapshot) = prepared.into_parts();
+    let (failed, failure_entry, terminal_snapshot, reclassified) = prepared.into_parts();
     let session = failed.session();
     let turn = failed.turn();
     if failure_entry.source_session() != session
@@ -858,6 +930,9 @@ pub(crate) async fn insert_prepared_failure(
     insert_snapshot(connection, &terminal_snapshot)
         .await
         .map_err(map_model_call_error)?;
+    persist_reclassified_pending_steering(connection, session, turn, &reclassified)
+        .await
+        .map_err(map_model_call_error)?;
 
     let updated = sqlx::query(
         "UPDATE turn_lifecycle
@@ -868,6 +943,7 @@ pub(crate) async fn insert_prepared_failure(
                 current_attempt_id = NULL,
                 terminal_model_call_id = NULL,
                 terminal_disposition_kind = 'failed',
+                terminal_cause_kind = $8,
                 active_tool_round_call_id = NULL,
                 approval_tool_request_id = NULL,
                 recovery_tool_attempt_id = NULL
@@ -889,6 +965,7 @@ pub(crate) async fn insert_prepared_failure(
     ))
     .bind(failed.start().frontier().snapshot().into_uuid())
     .bind(attempt.id().into_uuid())
+    .bind(turn_terminal_cause_to_str(cause))
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -900,11 +977,13 @@ pub(crate) async fn insert_prepared_failure(
 
     outbox::append(
         connection,
-        outbox::OutboxEvent::TurnFailed {
+        outbox::OutboxEvent::TurnTerminal {
             session,
             turn,
-            failure_entry: failure_entry.identity(),
-            terminal_frontier: terminal_snapshot.frontier().snapshot(),
+            disposition: outbox::TurnTerminalOutboxDisposition::Failed {
+                failure_entry: failure_entry.identity(),
+                terminal_frontier: terminal_snapshot.frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -912,9 +991,15 @@ pub(crate) async fn insert_prepared_failure(
     Ok(failed)
 }
 
+/// `only_call`, when given, restricts recovery to that exact compaction call.
+/// A startup scan passes `None`: it runs before anything else can be inside the
+/// session, so whatever nonterminal compaction it finds is by construction the
+/// one the prior process abandoned. The expiry handoff cannot assume that and
+/// names its call.
 async fn recover_context_compaction(
     connection: &mut PgConnection,
     session: SessionId,
+    only_call: Option<ModelCallId>,
     active_turn: Option<Uuid>,
 ) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError> {
     let rows = sqlx::query(
@@ -926,11 +1011,16 @@ async fn recover_context_compaction(
             AND command.model_call_id = call.model_call_id
           WHERE COALESCE(call.session_id, command.session_id) = $1
             AND (
+                $2::uuid IS NULL
+                OR COALESCE(call.model_call_id, command.model_call_id) = $2
+            )
+            AND (
                 call.state_kind <> 'terminal'
                 OR command.result_kind = 'pending'
             )",
     )
     .bind(session_id_to_uuid(session))
+    .bind(only_call.map(ModelCallId::into_uuid))
     .fetch_all(&mut *connection)
     .await?;
     if rows.is_empty() {
@@ -964,7 +1054,8 @@ async fn recover_context_compaction(
     };
     let call_rows = sqlx::query(
         "UPDATE context_compaction_model_call
-            SET state_kind = 'terminal', terminal_disposition_kind = $1
+            SET state_kind = 'terminal', terminal_at = statement_timestamp(),
+                terminal_disposition_kind = $1
           WHERE session_id = $2
             AND model_call_id = $3
             AND state_kind = $4",
@@ -1116,10 +1207,10 @@ mod tests {
     };
     use crate::tool_loop::ToolLoopRepositoryError;
 
-    /// INV-034: a generated source-turn identity is a retryable collision, not
+    /// a generated source-turn identity is a retryable collision, not
     /// durable corruption.
     #[test]
-    fn inv034_generated_successor_source_candidate_is_a_retryable_collision() {
+    fn generated_successor_source_candidate_is_a_retryable_collision() {
         let source = TurnId::from_uuid(Uuid::from_u128(1));
         let mut proposed = BTreeSet::new();
 
@@ -1131,10 +1222,10 @@ mod tests {
         ));
     }
 
-    /// INV-034: a duplicate generated successor is a retryable collision, not
+    /// a duplicate generated successor is a retryable collision, not
     /// durable corruption.
     #[test]
-    fn inv034_generated_successor_duplicate_is_a_retryable_collision() {
+    fn generated_successor_duplicate_is_a_retryable_collision() {
         let source = TurnId::from_uuid(Uuid::from_u128(1));
         let successor = TurnId::from_uuid(Uuid::from_u128(2));
         let mut proposed = BTreeSet::new();

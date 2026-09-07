@@ -199,10 +199,10 @@ Signalbox's evidence-shaped contract (exit-0-without-a-terminal-marker is
 BoundaryLoss, not success). Open design tensions the track's spec-diff must
 resolve, not decide here: (1) a subprocess is one physical request the adapter
 cannot prove is retry-free internally, so the spec-diff has to reconcile that
-boundary with the one-physical-request invariants (INV-025/026); (2) for the
-wrapped-CLI tracks below, auth rides the CLI's ambient subscription login, so
-the spec-diff has to reconcile that with the credential-reference boundary and
-per-request value durability the `ModelRuntime` contract pins (recovered calls,
+boundary with the one-physical-request invariants; (2) for the wrapped-CLI
+tracks below, auth rides the CLI's ambient subscription login, so the spec-diff
+has to reconcile that with the credential-reference boundary and per-request
+value durability the `ModelRuntime` contract pins (recovered calls,
 logged-in-account changes).
 
 The FIRST of these to wire also introduces the provider-dispatch mechanism
@@ -226,17 +226,16 @@ model, real credentials from environment-protected secrets never exposed to fork
 PRs, main-only or manually dispatched — verifies each bump before it lands under
 us.
 
-Owner direction, 2026-07-25 (orientation only; the invariant amendment and its
-decision-log entries land with the pickup spec-diff, not here): the CLI-wrap
-path is the supported subscription integration, and the direct-transport
-reimplementation below is parked by owner call — a cost/priority judgment,
-revisitable later. The rationale is that the choice is reversible by
-construction: the wrapped CLI is an intended external-control surface, and the
-runtime trait seam keeps a future direct adapter a drop-in replacement behind
-the same two-method contract.
+Owner direction, 2026-07-25 (orientation only; the invariant amendment lands
+with the pickup spec-diff, not here): the CLI-wrap path is the supported
+subscription integration, and the direct-transport reimplementation below is
+parked by owner call — a cost/priority judgment, revisitable later. The
+rationale is that the choice is reversible by construction: the wrapped CLI is
+an intended external-control surface, and the runtime trait seam keeps a future
+direct adapter a drop-in replacement behind the same two-method contract.
 
 On open tension (1) above, the owner set the dispatch-boundary direction — it
-governs any subprocess adapter, both wrap tracks included: INV-025/026 are
+governs any subprocess adapter, both wrap tracks included: the invariants are
 reconciled by re-anchoring the invariant's subject to the adapter's unit of
 irrevocable dispatch — one HTTPS request for the direct adapters, one process
 spawn for a subprocess adapter. At that boundary the invariants hold at full
@@ -251,7 +250,7 @@ capturing emitted rate-limit events); and a platform retry after BoundaryLoss
 can duplicate provider-side effects, which is cost-only for chat calls.
 Cancellation prefers the CLI's protocol-level interrupt with process kill as the
 fallback, and the evidence distinguishes the two. The formal invariant-text
-amendment and its decision entry land with the pickup spec-diff, not now.
+amendment lands with the pickup spec-diff, not now.
 
 On statelessness: stateless-exact integration is the aim — each prepared call
 spawns a fresh invocation with the full context rendered in, so every existing
@@ -328,14 +327,14 @@ call, the same bucket as the owner-revisit parking on the reimplementation
 track.
 
 Owner direction, 2026-07-25 (orientation only; the pickup spec-diff still
-carries the real design and its decision-log entries): the owner set the
-reaction doctrine per evidence kind, answering open tensions (1) and (2) above.
-RateLimited and Overloaded get platform-owned deferred retry — a durable
-cooldown window, bounded re-attempts, and each re-attempt is a new prepared
-call, so the one-dispatch-per-prepared-call evidence law holds unmodified.
-QuotaExhausted never auto-retries on the same credential — billing state, not
-weather — and instead marks the credential failover-eligible. CredentialRejected
-and PermissionDenied fail closed with no failover: silently rotating past a
+carries the real design): the owner set the reaction doctrine per evidence kind,
+answering open tensions (1) and (2) above. RateLimited and Overloaded get
+platform-owned deferred retry — a durable cooldown window, bounded re-attempts,
+and each re-attempt is a new prepared call, so the
+one-dispatch-per-prepared-call evidence law holds unmodified. QuotaExhausted
+never auto-retries on the same credential — billing state, not weather — and
+instead marks the credential failover-eligible. CredentialRejected and
+PermissionDenied fail closed with no failover: silently rotating past a
 misconfigured credential would hide the problem from the owner. All other kinds
 keep today's behavior.
 
@@ -484,11 +483,10 @@ and can hop into any session. Owner-flagged high priority — the daily-driver
 item.
 
 The owner commissioned the pickup on 2026-07-25. The bottom specification diff
-and its decision-log entries govern the implementation:
-[sessions-and-transcript](../spec/sessions-and-transcript.md#session-metadata-and-list-projection)
-owns the metadata and listing contract,
-[process-protocol](../spec/process-protocol.md) owns the additive wire surface,
-and
+governs the implementation:
+[sessions-and-transcript](../spec/sessions-and-transcript.md) owns the metadata
+and listing contract, [process-protocol](../spec/process-protocol.md) owns the
+additive wire surface, and
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention)
 owns deferred visibility and filter design.
 
@@ -593,8 +591,8 @@ licensed CLI implementations may be vendored with attribution; closed-source
 clients are reference-only — observe, do not copy.
 
 Owner direction, 2026-07-25 (orientation only; the pickup spec-diff still
-carries the real design and its decision-log entries): composed context follows
-a derivation-with-pinning-plus-observation model, with two stage kinds. Pure
+carries the real design): composed context follows a
+derivation-with-pinning-plus-observation model, with two stage kinds. Pure
 transforms are typed frontier-to-frontier, or frontier-to-provider-messages at
 render, and deterministic — the call records the stage identity/version vector
 it was rendered under, so attribution is durable and core stages are
@@ -653,18 +651,18 @@ tool catalog; runner auth (separate credentials, allowlists, no
 permission-downgrade on re-registration) is designed in from day one.
 
 Owner direction, 2026-07-25 (orientation only; the design pass still carries the
-real design and its decision-log entries): runners are the processes that host
-goal runs and automation sessions, and they ship as a separate
-`signalbox-runner` binary — a thin binary over shared workspace crates, distinct
-from `signalboxd` — so this entry also owns that binary when it is built. The
-lifetime spectrum is a design input: some deployments run persistent daemon
-runners on owner machines, others run short-lived dynamically-registered runners
-(ephemeral cloud sandboxes) that register with the server, work, and disconnect.
-Consequences the design pass takes as given: registration and deregistration are
-first-class protocol flows, runner identity is not machine-pinned, and
-authentication must work for a runner that did not exist minutes earlier — which
-sharpens the standing design-runner-authentication-in-from-day-one caution.
-Everything else stays with the design pass.
+real design): runners are the processes that host goal runs and automation
+sessions, and they ship as a separate `signalbox-runner` binary — a thin binary
+over shared workspace crates, distinct from `signalboxd` — so this entry also
+owns that binary when it is built. The lifetime spectrum is a design input: some
+deployments run persistent daemon runners on owner machines, others run
+short-lived dynamically-registered runners (ephemeral cloud sandboxes) that
+register with the server, work, and disconnect. Consequences the design pass
+takes as given: registration and deregistration are first-class protocol flows,
+runner identity is not machine-pinned, and authentication must work for a runner
+that did not exist minutes earlier — which sharpens the standing
+design-runner-authentication-in-from-day-one caution. Everything else stays with
+the design pass.
 
 Owner direction, 2026-07-25 (second pass — placement, dispatch, effect classes;
 orientation only, same standing caveat): placement is a registry property. Each
@@ -697,9 +695,9 @@ excluded, or fails closed to confirmation. A runner never widens its own
 approval surface, and the no-permission-downgrade-on-re-registration point above
 stands. Credential doctrine for the first slice: a tool declaring credential
 access is Daemon-only, and signalboxd hands no credentials over the runner
-protocol — INV-035 read as placement law. Runners may hold their own ambient
-machine or environment credentials, which sit outside this model;
-credential-scoped runner classes are a recorded deferred extension.
+protocol. Runners may hold their own ambient machine or environment credentials,
+which sit outside this model; credential-scoped runner classes are a recorded
+deferred extension.
 
 Runner identity and session placement, kernel only (the design pass owns the
 rest): runner identity is logical — enrollment-based, not hardware-fingerprinted

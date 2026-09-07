@@ -1,0 +1,20 @@
+{
+  "source": "rename-only-head.json",
+  "edge": "edited rename",
+  "mutations": [
+    {
+      "path": "/comparisons/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...113746d23d6c7b398ef34464a071dca532791898/files",
+      "value": [
+        {
+          "filename": "src/new.rs",
+          "status": "renamed",
+          "changes": 2,
+          "additions": 1,
+          "deletions": 1,
+          "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+          "patch": "@@ -1 +1 @@\n-let old = 1;\n+let new = 2;"
+        }
+      ]
+    }
+  ]
+}

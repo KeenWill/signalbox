@@ -1,0 +1,46 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+
+CRATE_FEATURES = ["test-worker"]
+
+rust_package()
+
+rust_library(
+    name = "signalbox_file_media_processor_runtime",
+    crate_features = CRATE_FEATURES,
+    crate_root = "src/lib.rs",
+    deps = [
+        "//crates/file-media-linux-sandbox:signalbox_file_media_linux_sandbox",
+        "//crates/file-media-runtime:signalbox_file_media_runtime",
+    ],
+)
+
+rust_binary(
+    name = "signalbox-file-media-synthetic-worker",
+    crate_features = CRATE_FEATURES,
+    crate_root = "src/bin/signalbox-file-media-synthetic-worker.rs",
+    deps = [
+        ":signalbox_file_media_processor_runtime",
+        "//crates/file-media-linux-sandbox:signalbox_file_media_linux_sandbox",
+        "//crates/file-media-runtime:signalbox_file_media_runtime",
+    ],
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_file_media_processor_runtime",
+    crate_features = CRATE_FEATURES,
+)
+
+rust_unit_test(
+    name = "signalbox_file_media_synthetic_worker_unit_tests",
+    crate = ":signalbox-file-media-synthetic-worker",
+    crate_features = CRATE_FEATURES,
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_file_media_processor_runtime",
+    crate_features = CRATE_FEATURES,
+)

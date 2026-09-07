@@ -12,6 +12,7 @@ mod construction;
 mod contracts;
 mod decode;
 mod descriptor;
+mod descriptor_identity;
 mod diff;
 mod executor;
 mod failure;

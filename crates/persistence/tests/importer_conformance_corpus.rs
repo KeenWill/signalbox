@@ -34,23 +34,16 @@ use signalbox_domain::{
 };
 use sqlx::types::Uuid;
 
-/// Absolute path to one golden under this crate's fixture directory.
-///
-/// A relative `expect_file!` path is joined onto a workspace root expect-test
-/// derives at run time, which follows Cargo's configuration discovery and so
-/// depends on the directory the run was launched from rather than on the tree
-/// that was compiled. `CARGO_MANIFEST_DIR` is substituted at compile time by
-/// the checkout doing the compiling, so an absolute path built from it names
-/// that checkout's goldens under every launch, and expect-test takes an
-/// absolute path verbatim for both the comparison and the `UPDATE_EXPECT=1`
-/// rewrite.
+/// Cargo supplies an absolute crate path; Bazel supplies a runfiles-relative
+/// path. Anchor either before passing it to expect-test's workspace discovery.
 macro_rules! golden {
     ($name:literal) => {
-        concat!(
+        std::path::absolute(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/importer-conformance/golden/",
             $name
-        )
+        ))
+        .expect("the golden path is absolute or relative to the test working directory")
     };
 }
 
@@ -454,7 +447,7 @@ fn render_conversation(imported: &ImportedConversation) -> String {
 }
 
 #[test]
-fn s28_fixture_text_member_returns_the_named_fixture_value() {
+fn fixture_text_member_returns_the_named_fixture_value() {
     let expected = ImportedText::new(String::from("selected-value"));
     let fixture = ImportedStructuredValue::Object(
         vec![
@@ -474,7 +467,7 @@ fn s28_fixture_text_member_returns_the_named_fixture_value() {
 }
 
 #[test]
-fn s28_fixture_object_member_returns_the_named_nested_object() {
+fn fixture_object_member_returns_the_named_nested_object() {
     let expected = ImportedStructuredValue::Object(
         vec![ImportedStructuredObjectMember::new(
             ImportedText::new(String::from("id")),
@@ -500,7 +493,7 @@ fn s28_fixture_object_member_returns_the_named_nested_object() {
 }
 
 #[test]
-fn s28_fixture_array_member_returns_the_named_array_elements() {
+fn fixture_array_member_returns_the_named_array_elements() {
     let expected = vec![
         ImportedStructuredValue::String(ImportedText::new(String::from("first"))),
         ImportedStructuredValue::Null,
@@ -523,7 +516,7 @@ fn s28_fixture_array_member_returns_the_named_array_elements() {
 }
 
 #[test]
-fn s28_conformance_renderer_reports_each_raw_record_and_entry_boundary() {
+fn conformance_renderer_reports_each_raw_record_and_entry_boundary() {
     let imported = convert_claude(br#"{"type":"system"}"#);
 
     assert_eq!(
@@ -544,7 +537,7 @@ fn s28_conformance_renderer_reports_each_raw_record_and_entry_boundary() {
 }
 
 #[test]
-fn s28_inv038_stored_claude_code_v1_tool_round_matches_golden() {
+fn stored_claude_code_v1_tool_round_matches_golden() {
     let imported = reconstitute_stored_claude_v1(CLAUDE_V1_TOOL_ROUND);
 
     assert_eq!(
@@ -570,7 +563,7 @@ fn s28_inv038_stored_claude_code_v1_tool_round_matches_golden() {
 }
 
 #[test]
-fn s28_inv038_claude_code_v2_boundary_losses_match_golden() {
+fn claude_code_v2_boundary_losses_match_golden() {
     let imported = convert_claude(CLAUDE_V2_BOUNDARY_LOSSES);
 
     assert_eq!(
@@ -599,7 +592,7 @@ fn s28_inv038_claude_code_v2_boundary_losses_match_golden() {
 }
 
 #[test]
-fn s28_inv038_codex_rollout_v1_tool_round_matches_golden() {
+fn codex_rollout_v1_tool_round_matches_golden() {
     let imported = convert_codex(CODEX_V1_TOOL_ROUND);
 
     assert_eq!(
@@ -640,14 +633,13 @@ fn assert_entry_maps(
     assert_eq!(entry.content(), &expected);
 }
 
-/// S28 / INV-038: the Codex era's structured tool vocabulary — tool search
-/// call and output, local shell call, web search call, and the custom tool call
-/// and its output — retains each call identity, structured argument or action
-/// value, and result content in converted order. The targeted asserts below
-/// carry that enforcement (testing-style rule 10); the golden supplements them
-/// with the full raw-record, source-metadata, and frontier shape.
+/// the Codex era's structured tool vocabulary — tool search call and output, local shell call, web
+/// search call, and the custom tool call and its output — retains each call identity, structured
+/// argument or action value, and result content in converted order. The targeted asserts below
+/// carry that enforcement (testing-style rule 10); the golden supplements them with the full
+/// raw-record, source-metadata, and frontier shape.
 #[test]
-fn s28_inv038_codex_rollout_v1_structured_tools_match_golden() {
+fn codex_rollout_v1_structured_tools_match_golden() {
     let imported = convert_codex(CODEX_V1_STRUCTURED_TOOLS);
     let session_meta = imported.raw_records()[0].normalized();
     let search_call = fixture_object_member(imported.raw_records()[1].normalized(), "payload");
@@ -771,7 +763,7 @@ fn s28_inv038_codex_rollout_v1_structured_tools_match_golden() {
 }
 
 #[test]
-fn s28_inv038_claude_code_v2_depth_128_matches_golden() {
+fn claude_code_v2_depth_128_matches_golden() {
     let imported = convert_claude(CLAUDE_V2_DEPTH_128);
 
     assert_eq!(imported.raw_records().len(), 1);
@@ -785,7 +777,7 @@ fn s28_inv038_claude_code_v2_depth_128_matches_golden() {
 }
 
 #[test]
-fn s28_inv038_claude_code_v2_depth_129_rejection_matches_golden() {
+fn claude_code_v2_depth_129_rejection_matches_golden() {
     let mut identity_calls = 0_u64;
     let error = ClaudeCodeJsonlConverter
         .convert(conversation_id(0x900), CLAUDE_V2_DEPTH_129, || {
@@ -807,7 +799,7 @@ fn s28_inv038_claude_code_v2_depth_129_rejection_matches_golden() {
 }
 
 #[test]
-fn s28_inv038_claude_code_undecodable_fragment_rejection_matches_golden() {
+fn claude_code_undecodable_fragment_rejection_matches_golden() {
     let mut identity_calls = 0_u64;
     let error = ClaudeCodeJsonlConverter
         .convert(
@@ -833,7 +825,7 @@ fn s28_inv038_claude_code_undecodable_fragment_rejection_matches_golden() {
 }
 
 #[test]
-fn s28_inv038_codex_truncated_fragment_rejection_matches_golden() {
+fn codex_truncated_fragment_rejection_matches_golden() {
     let mut identity_calls = 0_u64;
     let error = CodexRolloutJsonlConverter
         .convert(conversation_id(0xd00), CODEX_V1_TRUNCATED_FRAGMENT, || {
@@ -855,7 +847,7 @@ fn s28_inv038_codex_truncated_fragment_rejection_matches_golden() {
 }
 
 #[test]
-fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
+fn import_only_resume_and_fork_match_golden() {
     let imported = convert_claude(CLAUDE_V2_BOUNDARY_LOSSES);
     let selected = imported
         .frontiers()
@@ -989,7 +981,7 @@ fn checkout_root() -> &'static Path {
 /// Guards the pin that keeps `UPDATE_EXPECT=1` rewriting inline `expect![...]`
 /// literals in the checkout being compiled.
 ///
-/// The goldens above no longer depend on it: [`golden!`] hands expect-test an
+/// The goldens above do not depend on it: [`golden!`] hands expect-test an
 /// absolute path. Inline literals cannot be anchored that way — expect-test
 /// locates the source file to rewrite by joining `file!()` onto a workspace
 /// root it derives at run time, from `CARGO_WORKSPACE_DIR` or, without it, the
@@ -1002,7 +994,7 @@ fn checkout_root() -> &'static Path {
 /// a guard watching the loaded value would report how a run was launched
 /// instead of whether the mechanism is still there.
 #[test]
-fn s28_inline_expectations_are_pinned_to_the_compiled_checkout() {
+fn inline_expectations_are_pinned_to_the_compiled_checkout() {
     let configuration = fs::read_to_string(checkout_root().join(".cargo/config.toml"))
         .expect("the checkout's Cargo configuration is committed");
     let configuration: toml::Table = configuration

@@ -19,15 +19,19 @@ on:
   push:
     branches: [main]
 
-# Superseded pull-request runs release their slots against the public
-# concurrency cap. Every other event takes a group of its own: sharing one
-# group would let a third run cancel a second still pending behind the first,
-# which `cancel-in-progress: false` does not prevent.
+# Superseded runs release their slots against the public concurrency cap:
+# pull-request runs group per PR, and other non-main runs group per
+# event+ref (today only workflow_dispatch reaches that arm — every push
+# trigger in this repo is filtered to main). Main runs each take a group
+# of their own and are never canceled: sharing one group would let a third
+# run cancel a second still pending behind the first, which
+# `cancel-in-progress: false` does not prevent.
 concurrency:
   group: >-
-    tool-live-smokes-${{ github.event_name == 'pull_request'
-    && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    tool-live-smokes-${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref)
+    || github.ref == 'refs/heads/main' && github.run_id
+    || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -46,7 +50,7 @@ jobs:
   live-smokes:
     name: Tool live smokes (report only)
     continue-on-error: true
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 25
     steps:
       - name: Check out repository
@@ -104,6 +108,13 @@ jobs:
   # procedural macro executes while the key is readable.
   web-smoke:
     name: Web search live smoke (report only)
+    # Skipped: every recent invocation has terminated at ProviderRejected
+    # before exercising anything, so each run burns a runner slot to prove
+    # nothing the last forty runs did not. Delete the `if` line below to
+    # re-enable once the provider credential is serviceable again; the
+    # triggers above are untouched, so coverage resumes with no further
+    # edits.
+    if: ${{ false }}
     continue-on-error: true
     permissions:
       contents: read

@@ -3,7 +3,7 @@ import XCTest
 @testable import SignalboxNative
 
 final class ProcessServiceIntegrationTests: XCTestCase {
-  /// S28: an imported transcript frontier creates an independent native session.
+  /// An imported transcript frontier creates an independent native session.
   func testImportedTranscriptCanContinueAsANativeSession() async throws {
     let service = makeService()
     let conversations = try await service.listConversations(includeArchived: true)
@@ -36,7 +36,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(continued.origin, .native)
   }
 
-  /// S28: imported transcript inspection rejects a noncontiguous frontier inventory.
+  /// Imported transcript inspection rejects a noncontiguous frontier inventory.
   func testImportedTranscriptRejectsANoncontiguousFirstPosition() async throws {
     let conversations = try await makeService().listConversations(includeArchived: true)
     let imported = try fixtureConversation(
@@ -7099,7 +7099,9 @@ private enum ProcessProjectionFixture {
           "state":{
             "type":"active_awaiting_model_call_recovery",
             "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
-            "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)"
+            "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "automatic_reconciliation_attempts":"0",
+            "operator_action_required":false
           }
         }
         """,
@@ -8820,7 +8822,9 @@ private enum ProcessProjectionFixture {
     {
       "type":"active_awaiting_model_call_recovery",
       "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
-      "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)"
+      "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)",
+      "automatic_reconciliation_attempts":"0",
+      "operator_action_required":false
     }
     """
 
@@ -8987,7 +8991,9 @@ private enum ProcessProjectionFixture {
         {
           "type":"active_awaiting_model_call_recovery",
           "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
-          "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "automatic_reconciliation_attempts":"0",
+          "operator_action_required":false
         }
         """
     )

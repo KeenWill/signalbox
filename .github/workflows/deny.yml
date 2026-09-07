@@ -7,22 +7,26 @@ on:
     # surface between pull requests.
     - cron: "17 6 * * 1"
 
-# Superseded pull-request runs release their slots against the public
-# concurrency cap. Every other event takes a group of its own: sharing one
-# group would let a third run cancel a second still pending behind the first,
-# which `cancel-in-progress: false` does not prevent.
+# Superseded runs release their slots against the public concurrency cap:
+# pull-request runs group per PR, and other non-main runs group per
+# event+ref (today only workflow_dispatch reaches that arm — every push
+# trigger in this repo is filtered to main). Main runs each take a group
+# of their own and are never canceled: sharing one group would let a third
+# run cancel a second still pending behind the first, which
+# `cancel-in-progress: false` does not prevent.
 concurrency:
   group: >-
-    supply-chain-${{ github.event_name == 'pull_request'
-    && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    supply-chain-${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref)
+    || github.ref == 'refs/heads/main' && github.run_id
+    || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
 
 jobs:
   cargo-deny:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -30,7 +34,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install cargo-deny
-        uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
+        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
         with:
           tool: cargo-deny@0.20.2
       - name: Check advisories, bans, licenses, and sources

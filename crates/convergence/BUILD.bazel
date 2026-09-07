@@ -1,0 +1,44 @@
+load("//tooling/bazel:package.bzl", "rust_package")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+
+filegroup(
+    name = "fixtures",
+    srcs = glob(["fixtures/**"]) + ["examples/repository.toml"],
+    visibility = ["//:__subpackages__"],
+)
+
+rust_package(exports = [
+    "Cargo.toml",
+    "examples/repository.toml",
+])
+
+rust_library(
+    name = "signalbox_convergence",
+    crate_root = "src/lib.rs",
+)
+
+rust_binary(
+    name = "signalbox-converge",
+    crate_root = "src/main.rs",
+    deps = [":signalbox_convergence"],
+)
+
+rust_unit_test(
+    name = "unit_tests",
+    crate = ":signalbox_convergence",
+)
+
+rust_unit_test(
+    name = "signalbox_converge_unit_tests",
+    crate = ":signalbox-converge",
+    data = [":fixtures"],
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/convergence"},
+    # These tests execute host shell or process utilities.
+    tags = ["external"],
+)
+
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_convergence",
+)

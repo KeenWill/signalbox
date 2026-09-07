@@ -219,7 +219,7 @@ impl<C: Clone> EventDecoder<C> {
                 // does on a `result` event, and a value arriving before any
                 // init is not a repeated identity at all. Anything this
                 // predicate cannot vouch for stays provider-controlled content
-                // and seeds the dropped lookbehind (INV-035), because a
+                // and seeds the dropped lookbehind, because a
                 // credential prefix discarded here would let its continuation
                 // escape the shape redactor in a later field.
                 match (
@@ -277,7 +277,18 @@ impl<C: Clone> EventDecoder<C> {
                 "Claude init carries an empty session or model id",
             ));
         }
-        if event.claude_code_version != SUPPORTED_CLAUDE_CLI_VERSION {
+        let observed_version =
+            semver::Version::parse(&event.claude_code_version).map_err(|_| {
+                DecodeFailure::stream_protocol(format!(
+                    "Claude Code version `{}` is not SemVer",
+                    event.claude_code_version
+                ))
+            })?;
+        let supported_version =
+            semver::Version::parse(SUPPORTED_CLAUDE_CLI_VERSION).map_err(|_| {
+                DecodeFailure::stream_protocol("the pinned Claude Code version is not SemVer")
+            })?;
+        if observed_version != supported_version {
             return Err(DecodeFailure::stream_protocol(format!(
                 "Claude Code version `{}` does not match pinned `{SUPPORTED_CLAUDE_CLI_VERSION}`",
                 event.claude_code_version
@@ -688,11 +699,14 @@ impl<C: Clone> EventDecoder<C> {
             let content = self.redacted_content(&mut capture);
             self.report_usage(sink);
             return TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
                 exchange: self.exchange,
                 message_id: self.message_id,
                 reported_model: self.reported_model,
                 content,
                 usage: self.usage,
+                retained_input_tokens: None,
+                retained_output_tokens: None,
             });
         }
         let has_proposals = !self.proposal_indexes.is_empty();
@@ -839,12 +853,25 @@ impl<C: Clone> EventDecoder<C> {
     fn validate_tool_requirement(&self) -> Result<(), String> {
         match &self.tool_requirement {
             ToolRequirement::Optional => Ok(()),
-            ToolRequirement::Any if self.proposal_indexes.is_empty() => Err("Claude did not satisfy the required any-tool choice".to_string()),
+            ToolRequirement::Any if self.proposal_indexes.is_empty() => {
+                Err("Claude did not satisfy the required any-tool choice".to_string())
+            }
             ToolRequirement::Any => Ok(()),
+            // Suppression withholds a proposal's arguments, never its admitted
+            // tool name, so a suppressed foreign proposal violates the choice
+            // exactly as an admitted one does.
             ToolRequirement::Named(name)
                 if self.proposal_indexes.is_empty()
-                    || self.content.iter().any(|part| {
-                        matches!(part, AssistantPart::ToolCall(call) if call.name.as_str() != name)
+                    || self.content.iter().any(|part| match part {
+                        AssistantPart::ToolCall(call) => call.name.as_str() != name,
+                        AssistantPart::SuppressedToolCall(suppressed) => {
+                            suppressed.as_str() != name
+                        }
+                        AssistantPart::Text(_)
+                        | AssistantPart::Thinking { .. }
+                        | AssistantPart::RedactedThinking { .. }
+                        | AssistantPart::ProviderCompaction { .. }
+                        | AssistantPart::ProviderReasoning { .. } => false,
                     }) =>
             {
                 Err(format!("Claude tool choice permits only `{name}`"))
@@ -884,6 +911,12 @@ impl<C: Clone> EventDecoder<C> {
                 AssistantPart::RedactedThinking { data } => Some(AssistantPart::RedactedThinking {
                     data: redact_text(&data),
                 }),
+                AssistantPart::ProviderReasoning { item_json } => {
+                    Some(AssistantPart::ProviderReasoning { item_json })
+                }
+                AssistantPart::ProviderCompaction { block_json } => {
+                    Some(AssistantPart::ProviderCompaction { block_json })
+                }
                 AssistantPart::ToolCall(mut call) => {
                     call.arguments_json = redact_json(&call.arguments_json);
                     Some(AssistantPart::ToolCall(call))
@@ -1109,16 +1142,13 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         EventDecoder::boundary_loss_unless_provider_failure(self, cause, sink)
     }
 
-    fn classify_provider_error_after_exit(classification: &str) -> ProviderErrorKind {
-        classify_error(None, "process_exit", classification)
-    }
-
     fn provider_error_after_exit(
         self,
         message: &str,
-        kind: ProviderErrorKind,
+        classification: &str,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
+        let kind = classify_error(None, "process_exit", classification);
         EventDecoder::provider_error_after_exit(self, message, kind, sink)
     }
 }

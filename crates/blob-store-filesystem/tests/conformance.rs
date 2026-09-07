@@ -10,6 +10,7 @@ use std::{num::NonZeroU64, path::Path};
 use signalbox_blob_store::{BlobObjectKey, BlobStore, BlobStoreFailureKind};
 use signalbox_blob_store_filesystem::FilesystemBlobStore;
 use tempfile::TempDir;
+use tokio::io::AsyncReadExt as _;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -33,49 +34,49 @@ fn fixture() -> (TempDir, FilesystemBlobStore) {
 }
 
 #[tokio::test]
-async fn inv059_filesystem_puts_and_reads_exact_bytes() {
+async fn filesystem_puts_and_reads_exact_bytes() {
     let (_root, store) = fixture();
 
     signalbox_blob_store::conformance::assert_put_and_exact_read_back(&store).await;
 }
 
 #[tokio::test]
-async fn inv059_filesystem_reads_exact_bounded_ranges() {
+async fn filesystem_reads_exact_bounded_ranges() {
     let (_root, store) = fixture();
 
     signalbox_blob_store::conformance::assert_exact_range_read_back(&store).await;
 }
 
 #[tokio::test]
-async fn inv059_filesystem_rejects_oversized_ranges() {
+async fn filesystem_rejects_oversized_ranges() {
     let (_root, store) = fixture();
 
     signalbox_blob_store::conformance::assert_oversized_range_is_rejected(&store).await;
 }
 
 #[tokio::test]
-async fn inv059_filesystem_deduplicates_an_existing_destination() {
+async fn filesystem_deduplicates_an_existing_destination() {
     let (_root, store) = fixture();
 
     signalbox_blob_store::conformance::assert_existing_destination_deduplicates(&store).await;
 }
 
 #[tokio::test]
-async fn inv059_filesystem_concurrent_publication_is_no_clobber() {
+async fn filesystem_concurrent_publication_is_no_clobber() {
     let (_root, store) = fixture();
 
     signalbox_blob_store::conformance::assert_concurrent_publication_deduplicates(&store).await;
 }
 
 #[tokio::test]
-async fn inv059_filesystem_rejects_publication_verification_failure() {
+async fn filesystem_rejects_publication_verification_failure() {
     let (_root, store) = fixture();
 
     signalbox_blob_store::conformance::assert_verification_failure(&store).await;
 }
 
 #[tokio::test]
-async fn inv059_filesystem_repairs_a_corrupt_existing_destination() {
+async fn filesystem_repairs_a_corrupt_existing_destination() {
     let (root, store) = fixture();
     let expected = signalbox_blob_store::conformance::expected_fixture();
     let key = BlobObjectKey::for_digest(expected.digest());
@@ -172,7 +173,7 @@ async fn filesystem_rejects_reserved_publication_keys() {
 }
 
 #[tokio::test]
-async fn inv059_filesystem_rejects_reserved_namespace_marker_key() {
+async fn filesystem_rejects_reserved_namespace_marker_key() {
     let (root, store) = fixture();
     let marker = root.path().join(".signalbox-blob-namespace-v1");
     std::fs::write(&marker, b"namespace marker").expect("the namespace marker fixture is created");
@@ -190,7 +191,7 @@ async fn inv059_filesystem_rejects_reserved_namespace_marker_key() {
 }
 
 #[tokio::test]
-async fn inv059_filesystem_rejects_multiply_linked_blob_candidates() {
+async fn filesystem_rejects_multiply_linked_blob_candidates() {
     let (root, store) = fixture();
     let outside = tempfile::NamedTempFile::new_in(
         root.path()
@@ -241,7 +242,7 @@ async fn filesystem_rejects_fifo_candidates_without_waiting_for_a_writer() {
 }
 
 #[tokio::test]
-async fn inv059_filesystem_range_reverifies_the_generation_it_reads() {
+async fn filesystem_range_reverifies_the_generation_it_reads() {
     let (root, store) = fixture();
     let expected = signalbox_blob_store::conformance::expected_fixture();
     let key = BlobObjectKey::for_digest(expected.digest());
@@ -270,7 +271,40 @@ async fn inv059_filesystem_range_reverifies_the_generation_it_reads() {
 }
 
 #[tokio::test]
-async fn inv059_filesystem_pins_the_validated_root_namespace() {
+async fn filesystem_verified_stream_pins_the_verified_bytes() {
+    let (root, store) = fixture();
+    let expected = signalbox_blob_store::conformance::expected_fixture();
+    let key = BlobObjectKey::for_digest(expected.digest());
+    store
+        .put(
+            expected,
+            Box::new(std::io::Cursor::new(
+                signalbox_blob_store::conformance::fixture_content().to_vec(),
+            )),
+        )
+        .await
+        .expect("the valid stream fixture is published");
+    let opened = store
+        .open_verified(expected, &key)
+        .await
+        .expect("the verified bytes are pinned before delivery");
+    std::fs::write(
+        root.path().join(key.as_str()),
+        signalbox_blob_store::conformance::corrupt_fixture_content(),
+    )
+    .expect("the published inode is mutated after verification");
+    let mut reader = opened.into_reader();
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .await
+        .expect("the pinned verified stream remains readable");
+
+    assert_eq!(bytes, signalbox_blob_store::conformance::fixture_content());
+}
+
+#[tokio::test]
+async fn filesystem_pins_the_validated_root_namespace() {
     let (root, store) = fixture();
     let configured_root = root.path().to_path_buf();
     let moved_root = configured_root.with_extension("moved");

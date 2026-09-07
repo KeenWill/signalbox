@@ -43,14 +43,6 @@ const productNavigationCommands = [
     run: (context: ProductCommandContext) => context.navigate('/sessions'),
   },
   {
-    id: 'navigate.activity',
-    title: 'Go to Activity',
-    description: 'Open the system-wide event stream.',
-    category: 'Navigate',
-    bindings: [],
-    run: (context: ProductCommandContext) => context.navigate('/activity'),
-  },
-  {
     id: 'navigate.imports',
     title: 'Go to Imports',
     description: 'Open conversation import operations.',
@@ -102,6 +94,14 @@ const productNavigationCommands = [
       },
     ],
     run: (context: ProductCommandContext) => context.navigate('/settings'),
+  },
+  {
+    id: 'navigate.scenario',
+    title: 'Go to Scenario Studio',
+    description: 'Open the streaming interaction scenario.',
+    category: 'Navigate',
+    bindings: [],
+    run: (context: ProductCommandContext) => context.navigate('/scenario/streaming'),
   },
 ] as const
 

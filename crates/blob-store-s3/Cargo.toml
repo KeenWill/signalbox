@@ -1,0 +1,66 @@
+[package]
+name = "signalbox-blob-store-s3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+bytes = "1.12.1"
+futures-util = { version = "0.3.32", default-features = false }
+http-body = "1.0.1"
+instant-xml = "0.7.6"
+jiff = { version = "0.2.35", default-features = false, features = ["std"] }
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "rustls-no-provider",
+    "stream",
+] }
+rustls = { version = "0.23.35", default-features = false, features = ["ring"] }
+rustix = { version = "1.1.4", default-features = false, features = [
+    "fs",
+    "process",
+    "std",
+] }
+rusty-s3 = { version = "0.10.2", default-features = false, features = [
+    "rustcrypto",
+    "xml",
+] }
+serde = { version = "1.0.219", features = ["derive"] }
+sha2 = { version = "0.11.0", default-features = false }
+signalbox-blob-store = { path = "../blob-store" }
+signalbox-domain = { path = "../domain" }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "io-util",
+    "rt",
+    "sync",
+    "time",
+] }
+tokio-util = { version = "0.7.18", default-features = false, features = ["io"] }
+toml = { version = "1.1.4", default-features = false, features = [
+    "parse",
+    "serde",
+] }
+url = "2.5.8"
+zeroize = { version = "1.8.2", features = ["derive"] }
+
+[dev-dependencies]
+signalbox-blob-store = { path = "../blob-store", features = ["test-support"] }
+tempfile = "3.27.0"
+tokio = { version = "1.53.0", default-features = false, features = [
+    "macros",
+    "rt-multi-thread",
+] }
+
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"
+required-features = ["test-support"]
+
+[lints]
+workspace = true

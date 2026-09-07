@@ -1,19 +1,18 @@
 //! Atomic persistence and replay for the admitted `CreateSession` slice.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::{CreateSessionOutcome, CreateSessionTransaction};
 use signalbox_domain::{
-    CreateSessionAppliedResult, CreateSessionReconstitutionFailure,
-    CreateSessionReconstitutionInput, DirectModelSelection, DurableCommandId, ModelAlias,
-    ModelSelectionRequest, PreparedCreateSession, ReconstitutedSessionCreation,
+    CommandPrincipal, CommissionedDispatchId, CreateSessionAppliedResult,
+    CreateSessionReconstitutionFailure, CreateSessionReconstitutionInput, DirectModelSelection,
+    DispatchingModule, DurableCommandId, ModelAlias, ModelSelectionRequest, ModuleDispatch,
+    PreparedCreateSession, ReconstitutedSessionCreation, RepoWatchDispatchId,
     RootPlacementGlobalReadIntent, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionPlacement, SessionPlacementEventKind, SessionPlacementPath, SessionPlacementVersion,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
-    TranscriptAncestry, VersionedSessionPlacement,
+    SessionOwnership, SessionPlacement, SessionPlacementEventKind, SessionPlacementPath,
+    SessionPlacementVersion, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, StartGate, TranscriptAncestry, VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -24,9 +23,10 @@ use crate::command_registry::{
 use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
-    defaults_version_to_numeric, durable_command_id_to_uuid, model_settings_from_json,
-    model_settings_to_json, session_creation_cause_to_str, session_id_from_uuid,
-    session_id_to_uuid, session_placement_event_kind_from_str, session_placement_event_kind_to_str,
+    defaults_version_to_numeric, durable_command_id_to_uuid, finish_condition_columns,
+    finish_condition_from_columns, model_settings_from_json, model_settings_to_json,
+    session_creation_cause_to_str, session_id_from_uuid, session_id_to_uuid,
+    session_placement_event_kind_from_str, session_placement_event_kind_to_str,
 };
 use crate::outbox;
 
@@ -52,11 +52,14 @@ pub enum CreateSessionHandlingOutcome {
     },
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct the admitted domain value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CreateSessionCorruption {
+    #[error("missing durable CreateSession {field_0}")]
     /// One required row or field is absent.
     Missing(&'static str),
+    #[error("unsupported CreateSession {field}: {value}")]
     /// A closed discriminator or representation version is unsupported.
     Unsupported {
         /// The record field that could not be decoded.
@@ -64,8 +67,10 @@ pub enum CreateSessionCorruption {
         /// The durable spelling that was observed.
         value: String,
     },
+    #[error("inconsistent CreateSession {field_0}")]
     /// A typed record relationship disagrees with another durable record.
     Inconsistent(&'static str),
+    #[error("invalid CreateSession {field}: {reason}")]
     /// A stored positive ordinal cannot construct the domain value.
     InvalidOrdinal {
         /// The ordinal-bearing record field.
@@ -73,80 +78,30 @@ pub enum CreateSessionCorruption {
         /// Why the numeric value is outside the domain.
         reason: PositiveOrdinalMappingError,
     },
+    #[error("CreateSession domain reconstitution failed: {field_0:?}")]
     /// Complete checked values fail domain-owned correlation.
     Domain(CreateSessionReconstitutionFailure),
 }
 
-impl fmt::Display for CreateSessionCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing durable CreateSession {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported CreateSession {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent CreateSession {relationship}")
-            }
-            Self::InvalidOrdinal { field, reason } => {
-                write!(formatter, "invalid CreateSession {field}: {reason}")
-            }
-            Self::Domain(failure) => {
-                write!(
-                    formatter,
-                    "CreateSession domain reconstitution failed: {failure:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for CreateSessionCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database failure or a fail-closed durable-shape failure.
 #[derive(Debug)]
 pub enum CreateSessionRepositoryError {
+    #[error("CreateSession database failure: {field_0}")]
     /// PostgreSQL failed before any commit could have succeeded.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("CreateSession commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL obscured whether the requested commit succeeded.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("durable command {command_id:?} does not name CreateSession")]
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
         /// The user-global identifier that names another kind.
         command_id: DurableCommandId,
     },
+    #[error(transparent)]
     /// Committed or transaction-visible records cannot reconstruct the domain.
-    Corruption(CreateSessionCorruption),
-}
-
-impl fmt::Display for CreateSessionRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "CreateSession database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "CreateSession commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::DifferentCommandKind { command_id } => {
-                write!(
-                    formatter,
-                    "durable command {command_id:?} does not name CreateSession"
-                )
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for CreateSessionRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::DifferentCommandKind { .. } => None,
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] CreateSessionCorruption),
 }
 
 impl From<sqlx::Error> for CreateSessionRepositoryError {
@@ -176,6 +131,7 @@ impl CreateSessionRepositoryError {
 pub struct CreateSessionRepository {
     pool: PgPool,
     credential_pin: crate::SessionCredentialPin,
+    principal: signalbox_domain::CommandPrincipal,
 }
 
 impl CreateSessionRepository {
@@ -184,7 +140,14 @@ impl CreateSessionRepository {
         Self {
             pool,
             credential_pin,
+            principal: signalbox_domain::CommandPrincipal::Operator,
         }
+    }
+
+    /// Records this explicit issuer on newly claimed creation commands.
+    pub fn with_principal(mut self, principal: signalbox_domain::CommandPrincipal) -> Self {
+        self.principal = principal;
+        self
     }
 
     /// Claims and applies a new command, or resolves replay from the winner.
@@ -233,7 +196,11 @@ impl CreateSessionRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential
+                | CommandKind::SessionLifecycle,
             ) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
@@ -241,15 +208,19 @@ impl CreateSessionRepository {
             None => {}
         }
 
+        let issuer = crate::command_registry::issuer_columns(self.principal);
         let claimed = sqlx::query(
             "INSERT INTO durable_command
-                (command_id, command_kind, storage_version, claimed_at)
-             VALUES ($1, $2, $3, transaction_timestamp())
+                (command_id, command_kind, storage_version, claimed_at,
+                 issuer_kind, issuer_module)
+             VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
              ON CONFLICT DO NOTHING",
         )
         .bind(durable_command_id_to_uuid(command_id))
         .bind(COMMAND_KIND)
         .bind(WRITTEN_STORAGE_VERSION)
+        .bind(issuer.0)
+        .bind(issuer.1)
         .execute(&mut *transaction)
         .await?
         .rows_affected()
@@ -283,7 +254,11 @@ impl CreateSessionRepository {
                     | CommandKind::UpdateSessionPlacement
                     | CommandKind::RegisterWorkspace
                     | CommandKind::MintGitRemote
-                    | CommandKind::WithdrawGitRemote,
+                    | CommandKind::WithdrawGitRemote
+                    | CommandKind::ProvisionOauthCredential
+                    | CommandKind::ReprovisionOauthCredential
+                    | CommandKind::DeleteOauthCredential
+                    | CommandKind::SessionLifecycle,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(
@@ -341,7 +316,11 @@ impl CreateSessionRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential
+                | CommandKind::SessionLifecycle,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -398,21 +377,6 @@ async fn commissioned_dispatch_claims(
     .await?)
 }
 
-pub(crate) async fn insert_fresh_prepared(
-    connection: &mut PgConnection,
-    prepared: PreparedCreateSession,
-    credential_pin: &crate::SessionCredentialPin,
-) -> Result<(), CreateSessionRepositoryError> {
-    let command_id = prepared.command().command_id();
-    if !claim_create_session_command(connection, command_id).await? {
-        return Err(CreateSessionCorruption::Inconsistent(
-            "fresh repository-watch command identity collided",
-        )
-        .into());
-    }
-    insert_prepared(connection, prepared, credential_pin).await
-}
-
 /// Claims one create-session command identity, reporting whether this
 /// transaction won it.
 ///
@@ -422,16 +386,21 @@ pub(crate) async fn insert_fresh_prepared(
 pub(crate) async fn claim_create_session_command(
     connection: &mut PgConnection,
     command_id: DurableCommandId,
+    principal: CommandPrincipal,
 ) -> Result<bool, CreateSessionRepositoryError> {
+    let issuer = crate::command_registry::issuer_columns(principal);
     Ok(sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command_id))
     .bind(COMMAND_KIND)
     .bind(WRITTEN_STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?
     .rows_affected()
@@ -446,19 +415,19 @@ pub(crate) async fn insert_prepared(
     let command = prepared.command();
     let session = prepared.session();
     let defaults = session.configuration_defaults();
-    let command_selection = encode_selection(command.initial_configuration_defaults().model());
     let stored_selection = encode_selection(defaults.defaults().model());
 
+    let cause = command.provenance().cause();
+    let (dispatching_module, dispatch_ref) = encode_module_dispatch(cause);
     sqlx::query(
         "INSERT INTO session
             (session_id, creation_cause, ancestry_kind,
-             template_name, template_content_digest)
-         VALUES ($1, $2, $3, $4, $5)",
+             template_name, template_content_digest,
+             dispatching_module, dispatch_ref)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(session_id_to_uuid(session.id()))
-    .bind(session_creation_cause_to_str(
-        &SessionCreationCause::UserInitiated,
-    ))
+    .bind(session_creation_cause_to_str(&cause))
     .bind(NO_ANCESTRY)
     .bind(
         session
@@ -470,7 +439,18 @@ pub(crate) async fn insert_prepared(
             .template_provenance()
             .map(|value| value.content_digest().as_bytes().to_vec()),
     )
+    .bind(dispatching_module)
+    .bind(dispatch_ref)
     .execute(&mut *connection)
+    .await?;
+    crate::session_lifecycle::insert_created(
+        connection,
+        session.id(),
+        &cause,
+        command.ownership(),
+        command.start_gate(),
+        command.finish_condition(),
+    )
     .await?;
 
     let (placement_path, root_intent) = encode_placement(session.placement().placement());
@@ -548,6 +528,34 @@ pub(crate) async fn insert_prepared(
     .execute(&mut *connection)
     .await?;
 
+    insert_command_record(connection, command, prepared.applied_result()).await?;
+
+    outbox::append(
+        connection,
+        outbox::OutboxEvent::SessionCreated {
+            session: session.id(),
+            cause,
+            ownership: command.ownership(),
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Writes an applied creation's typed command record and `session_created`
+/// receipt.
+async fn insert_command_record(
+    connection: &mut PgConnection,
+    command: &signalbox_domain::CreateSession,
+    applied: CreateSessionAppliedResult,
+) -> Result<(), CreateSessionRepositoryError> {
+    let cause = command.provenance().cause();
+    let (dispatching_module, dispatch_ref) = encode_module_dispatch(cause);
+    let (placement_path, root_intent) = encode_placement(command.placement());
+    let command_selection = encode_selection(command.initial_configuration_defaults().model());
+    let (finish_kind, finish_statement) = finish_condition_columns(command.finish_condition());
+    let created_session = session_id_to_uuid(applied.session());
     sqlx::query(
         "INSERT INTO create_session_command
             (command_id, command_kind, storage_version,
@@ -556,17 +564,20 @@ pub(crate) async fn insert_prepared(
              dangerous_tool_auto_approval, system_prompt, model_settings,
              template_name, template_content_digest,
              placement_path, root_global_read_intent,
-             result_kind, created_session_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+             result_kind, created_session_id,
+             dispatching_module, dispatch_ref,
+             start_gate, ownership, finish_condition_kind, finish_condition)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+                 $19, $20, $21, $22, $23, $24)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
     .bind(WRITTEN_STORAGE_VERSION)
-    .bind(session_creation_cause_to_str(
-        &SessionCreationCause::UserInitiated,
-    ))
+    .bind(session_creation_cause_to_str(&cause))
     .bind(NO_ANCESTRY)
-    .bind(defaults_version_to_numeric(defaults.version()))
+    .bind(defaults_version_to_numeric(
+        SessionConfigurationDefaultsVersion::first(),
+    ))
     .bind(command_selection.kind)
     .bind(command_selection.direct)
     .bind(command_selection.alias)
@@ -597,19 +608,46 @@ pub(crate) async fn insert_prepared(
     .bind(placement_path)
     .bind(root_intent)
     .bind(APPLIED)
-    .bind(session_id_to_uuid(prepared.applied_result().session()))
+    .bind(created_session)
+    .bind(dispatching_module)
+    .bind(dispatch_ref)
+    .bind(start_gate_to_str(command.start_gate()))
+    .bind(ownership_to_str(command.ownership()))
+    .bind(finish_kind)
+    .bind(finish_statement)
     .execute(&mut *connection)
     .await?;
-
-    outbox::append(
-        connection,
-        outbox::OutboxEvent::SessionCreated {
-            session: session.id(),
-        },
-    )
-    .await?;
-
     Ok(())
+}
+
+const fn start_gate_to_str(value: StartGate) -> &'static str {
+    match value {
+        StartGate::Open => "open",
+        StartGate::Held => "held",
+    }
+}
+
+fn start_gate_from_str(value: &str) -> Option<StartGate> {
+    match value {
+        "open" => Some(StartGate::Open),
+        "held" => Some(StartGate::Held),
+        _ => None,
+    }
+}
+
+const fn ownership_to_str(value: SessionOwnership) -> &'static str {
+    match value {
+        SessionOwnership::Owned => "owned",
+        SessionOwnership::Unmonitored => "unmonitored",
+    }
+}
+
+fn ownership_from_str(value: &str) -> Option<SessionOwnership> {
+    match value {
+        "owned" => Some(SessionOwnership::Owned),
+        "unmonitored" => Some(SessionOwnership::Unmonitored),
+        _ => None,
+    }
 }
 
 struct EncodedSelection {
@@ -646,6 +684,8 @@ async fn load_from_connection(
             c.storage_version AS typed_version,
             c.creation_cause AS command_cause,
             c.ancestry_kind AS command_ancestry,
+            c.dispatching_module AS command_dispatching_module,
+            c.dispatch_ref AS command_dispatch_ref,
             c.initial_defaults_version,
             c.model_selection_kind AS command_model_kind,
             c.direct_model_selection_id AS command_direct_id,
@@ -658,11 +698,17 @@ async fn load_from_connection(
             c.placement_path AS command_placement_path,
             c.root_global_read_intent AS command_root_intent,
             c.result_kind,
+            c.start_gate,
+            c.ownership,
+            c.finish_condition_kind,
+            c.finish_condition,
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
             s.creation_cause AS stored_cause,
             s.ancestry_kind AS stored_ancestry,
             s.spawning_tool_request_id AS stored_spawning_request_id,
+            s.dispatching_module AS stored_dispatching_module,
+            s.dispatch_ref AS stored_dispatch_ref,
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
             v.session_id AS defaults_session_id,
@@ -728,6 +774,8 @@ fn decode_complete(
         required(&row, "command_cause")?,
         required(&row, "command_ancestry")?,
         None,
+        row.try_get("command_dispatching_module")?,
+        row.try_get("command_dispatch_ref")?,
     )?;
     let initial_version = decode_ordinal(&row, "initial_defaults_version")?;
     if initial_version != SessionConfigurationDefaultsVersion::first() {
@@ -788,7 +836,32 @@ fn decode_complete(
             command_placement,
         ),
     };
-    require_spelling(&row, "result_kind", APPLIED)?;
+    let start_gate: String = required(&row, "start_gate")?;
+    let ownership: String = required(&row, "ownership")?;
+    let finish_condition = finish_condition_from_columns(
+        row.try_get("finish_condition_kind")?,
+        row.try_get("finish_condition")?,
+    )
+    .map_err(CreateSessionCorruption::Inconsistent)?;
+    let command = command.with_lifecycle(
+        start_gate_from_str(&start_gate).ok_or(CreateSessionCorruption::Unsupported {
+            field: "start_gate",
+            value: start_gate,
+        })?,
+        ownership_from_str(&ownership).ok_or(CreateSessionCorruption::Unsupported {
+            field: "ownership",
+            value: ownership,
+        })?,
+        finish_condition,
+    );
+    let result_kind: String = required(&row, "result_kind")?;
+    if result_kind != APPLIED {
+        return Err(CreateSessionCorruption::Unsupported {
+            field: "result_kind",
+            value: result_kind,
+        }
+        .into());
+    }
     let result_session = session_id_from_uuid(required(&row, "result_session_id")?);
 
     let stored_session_uuid: Uuid = required(&row, "stored_session_id")?;
@@ -797,6 +870,8 @@ fn decode_complete(
         required(&row, "stored_cause")?,
         required(&row, "stored_ancestry")?,
         row.try_get("stored_spawning_request_id")?,
+        row.try_get("stored_dispatching_module")?,
+        row.try_get("stored_dispatch_ref")?,
     )?;
     let stored_template_provenance = decode_template_provenance(
         row.try_get("stored_template_name")?,
@@ -1014,18 +1089,31 @@ fn decode_ordinal(
         .map_err(|reason| CreateSessionCorruption::InvalidOrdinal { field, reason }.into())
 }
 
+/// Encodes the module and dispatch a module-dispatched creation names.
+fn encode_module_dispatch(cause: SessionCreationCause) -> (Option<&'static str>, Option<Uuid>) {
+    match cause {
+        SessionCreationCause::ModuleDispatched { dispatch } => (
+            Some(crate::mapping::dispatching_module_to_str(dispatch.module())),
+            Some(module_dispatch_reference(dispatch)),
+        ),
+        SessionCreationCause::Interactive | SessionCreationCause::Delegated { .. } => (None, None),
+    }
+}
+
+fn module_dispatch_reference(dispatch: ModuleDispatch) -> Uuid {
+    match dispatch {
+        ModuleDispatch::RepositoryWatch { dispatch } => dispatch.into_uuid(),
+        ModuleDispatch::Commissioned { dispatch } => dispatch.into_uuid(),
+    }
+}
+
 fn decode_provenance(
     cause: String,
     ancestry: String,
     spawning_request: Option<Uuid>,
+    dispatching_module: Option<String>,
+    dispatch_ref: Option<Uuid>,
 ) -> Result<SessionCreationProvenance, CreateSessionRepositoryError> {
-    if cause != session_creation_cause_to_str(&SessionCreationCause::UserInitiated) {
-        return Err(CreateSessionCorruption::Unsupported {
-            field: "creation cause",
-            value: cause,
-        }
-        .into());
-    }
     if ancestry != NO_ANCESTRY {
         return Err(CreateSessionCorruption::Unsupported {
             field: "ancestry kind",
@@ -1036,10 +1124,44 @@ fn decode_provenance(
     if spawning_request.is_some() {
         return Err(CreateSessionCorruption::Inconsistent("creation cause provenance").into());
     }
-    Ok(SessionCreationProvenance::new(
-        SessionCreationCause::UserInitiated,
-        TranscriptAncestry::None,
-    ))
+    match (cause.as_str(), dispatching_module, dispatch_ref) {
+        ("interactive", None, None) => Ok(SessionCreationProvenance::new(
+            SessionCreationCause::Interactive,
+            TranscriptAncestry::None,
+        )),
+        ("module_dispatched", Some(module), Some(dispatch)) => {
+            decode_module_dispatch(&module, dispatch)
+                .map(SessionCreationProvenance::module_dispatched)
+        }
+        ("interactive" | "module_dispatched", _, _) => {
+            Err(CreateSessionCorruption::Inconsistent("creation cause provenance").into())
+        }
+        _ => Err(CreateSessionCorruption::Unsupported {
+            field: "creation cause",
+            value: cause,
+        }
+        .into()),
+    }
+}
+
+/// Rebuilds the exact dispatch a module-dispatched creation names.
+fn decode_module_dispatch(
+    module: &str,
+    dispatch: Uuid,
+) -> Result<ModuleDispatch, CreateSessionRepositoryError> {
+    match crate::mapping::dispatching_module_from_str(module) {
+        Some(DispatchingModule::RepositoryWatch) => Ok(ModuleDispatch::RepositoryWatch {
+            dispatch: RepoWatchDispatchId::from_uuid(dispatch),
+        }),
+        Some(DispatchingModule::CommissionedDispatch) => Ok(ModuleDispatch::Commissioned {
+            dispatch: CommissionedDispatchId::from_uuid(dispatch),
+        }),
+        None => Err(CreateSessionCorruption::Unsupported {
+            field: "dispatching module",
+            value: String::from(module),
+        }
+        .into()),
+    }
 }
 
 struct StoredConfigurationFields {
@@ -1180,18 +1302,20 @@ mod tests {
         corruption
     }
 
-    /// S01 / INV-003: the ordinary creation reader cannot silently discard a
-    /// delegated spawning identity from a user-initiated session row.
+    /// the ordinary creation reader cannot silently discard a delegated spawning identity from an
+    /// interactive session row.
     #[test]
-    fn s01_inv003_user_initiated_creation_rejects_spawning_request() {
+    fn interactive_creation_rejects_spawning_request() {
         let error = decode_provenance(
             String::from(session_creation_cause_to_str(
-                &SessionCreationCause::UserInitiated,
+                &SessionCreationCause::Interactive,
             )),
             String::from(NO_ANCESTRY),
             Some(Uuid::from_u128(1)),
+            None,
+            None,
         )
-        .expect_err("user-initiated creation cannot carry a spawning request");
+        .expect_err("interactive creation cannot carry a spawning request");
 
         assert_eq!(
             corruption(error),

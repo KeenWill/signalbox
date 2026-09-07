@@ -6,15 +6,10 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::de::DeserializeOwned;
 use signalbox_domain::NormalizedToolArguments;
 
-// numeric-bound: guard - the tool grammar advertises accepting repository spellings only to this length
 pub(super) const MAX_REPOSITORY_BYTES: usize = 256;
-// numeric-bound: guard - the tool grammar advertises accepting file paths only to this length
 pub(super) const MAX_FILE_PATH_BYTES: usize = 4 * 1024;
-// numeric-bound: guard - the tool grammar advertises accepting comment bodies only to this length
 pub(super) const MAX_COMMENT_BODY_BYTES: usize = 64 * 1024;
-// numeric-bound: guard - the tool grammar advertises accepting opaque identifiers only to this length
 pub(super) const MAX_OPAQUE_ID_BYTES: usize = 512;
-// numeric-bound: guard - the tool grammar advertises accepting pagination cursors only to this length
 pub(super) const MAX_CURSOR_BYTES: usize = 512;
 
 /// A code-host argument value did not satisfy its checked representation.
@@ -34,10 +29,13 @@ pub(super) fn decode<Arguments: DeserializeOwned>(
     serde_json::from_str(arguments.as_str()).map_err(|_| InvalidCodeHostArguments)
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One checked GitHub repository spelling.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(try_from = "String")]
 pub struct CodeHostRepository {
+    /// Borrows the canonical `owner/repository` spelling.
+    #[get(str, as = "as_str")]
     value: String,
     owner_end: usize,
 }
@@ -63,11 +61,6 @@ impl CodeHostRepository {
             return Err(InvalidCodeHostArguments);
         }
         Ok(Self { value, owner_end })
-    }
-
-    /// Borrows the canonical `owner/repository` spelling.
-    pub fn as_str(&self) -> &str {
-        &self.value
     }
 
     pub(super) fn owner(&self) -> &str {
@@ -114,10 +107,15 @@ impl JsonSchema for CodeHostRepository {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One positive change-request number representable by GitHub GraphQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(try_from = "u64")]
-pub struct CodeHostChangeRequestNumber(u32);
+pub struct CodeHostChangeRequestNumber(
+    /// Returns the positive change-request number.
+    #[get(copy, as = "get")]
+    u32,
+);
 
 impl CodeHostChangeRequestNumber {
     pub(super) fn try_new(value: u64) -> Result<Self, InvalidCodeHostArguments> {
@@ -125,11 +123,6 @@ impl CodeHostChangeRequestNumber {
         (value > 0 && value <= i32::MAX as u32)
             .then_some(Self(value))
             .ok_or(InvalidCodeHostArguments)
-    }
-
-    /// Returns the positive change-request number.
-    pub const fn get(self) -> u32 {
-        self.0
     }
 }
 
@@ -248,21 +241,21 @@ pub(super) fn valid_revision(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One exact lowercase 40-hex revision.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(try_from = "String")]
-pub struct CodeHostRevision(String);
+pub struct CodeHostRevision(
+    /// Borrows the exact revision.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CodeHostRevision {
     pub(super) fn try_new(value: String) -> Result<Self, InvalidCodeHostArguments> {
         valid_revision(&value)
             .then_some(Self(value))
             .ok_or(InvalidCodeHostArguments)
-    }
-
-    /// Borrows the exact revision.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -293,10 +286,15 @@ impl JsonSchema for CodeHostRevision {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One checked repository-relative file path.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(try_from = "String")]
-pub struct CodeHostFilePath(String);
+pub struct CodeHostFilePath(
+    /// Borrows the exact repository-relative path.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CodeHostFilePath {
     pub(super) fn try_new(value: String) -> Result<Self, InvalidCodeHostArguments> {
@@ -309,11 +307,6 @@ impl CodeHostFilePath {
                 })))
         .then_some(Self(value))
         .ok_or(InvalidCodeHostArguments)
-    }
-
-    /// Borrows the exact repository-relative path.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -389,21 +382,21 @@ impl JsonSchema for CodeHostChangedFilePath {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One checked nonempty comment body.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(try_from = "String")]
-pub struct CodeHostCommentBody(String);
+pub struct CodeHostCommentBody(
+    /// Borrows the exact comment text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CodeHostCommentBody {
     pub(super) fn try_new(value: String) -> Result<Self, InvalidCodeHostArguments> {
         (!value.is_empty() && value.len() <= MAX_COMMENT_BODY_BYTES && !value.contains('\0'))
             .then_some(Self(value))
             .ok_or(InvalidCodeHostArguments)
-    }
-
-    /// Borrows the exact comment text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -441,21 +434,21 @@ pub(super) fn valid_opaque_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_OPAQUE_ID_BYTES && !value.chars().any(char::is_control)
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded opaque GraphQL node identity.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(try_from = "String")]
-pub struct CodeHostOpaqueId(String);
+pub struct CodeHostOpaqueId(
+    /// Borrows the opaque identity.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CodeHostOpaqueId {
     pub(super) fn try_new(value: String) -> Result<Self, InvalidCodeHostArguments> {
         valid_opaque_id(&value)
             .then_some(Self(value))
             .ok_or(InvalidCodeHostArguments)
-    }
-
-    /// Borrows the opaque identity.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -486,21 +479,21 @@ impl JsonSchema for CodeHostOpaqueId {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded opaque GraphQL pagination cursor.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(try_from = "String")]
-pub struct CodeHostCursor(String);
+pub struct CodeHostCursor(
+    /// Borrows the opaque cursor exactly as the code host returned it.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CodeHostCursor {
     pub(super) fn try_new(value: String) -> Result<Self, InvalidCodeHostArguments> {
         valid_cursor(&value)
             .then_some(Self(value))
             .ok_or(InvalidCodeHostArguments)
-    }
-
-    /// Borrows the opaque cursor exactly as the code host returned it.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 

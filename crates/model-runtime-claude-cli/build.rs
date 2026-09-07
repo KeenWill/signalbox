@@ -2,6 +2,8 @@
 //! `package.json` and exports it as the `SIGNALBOX_CLAUDE_CLI_VERSION` build
 //! environment variable the adapter and its `tests/pin.rs` compare against.
 
+mod version_pin;
+
 use std::path::PathBuf;
 
 const PIN_MANIFEST: &str = "package.json";
@@ -10,7 +12,7 @@ const PIN_PACKAGE: &str = "@anthropic-ai/claude-code";
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={PIN_MANIFEST}");
 
-    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(PIN_MANIFEST);
+    let manifest_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join(PIN_MANIFEST);
     let manifest = std::fs::read_to_string(&manifest_path).map_err(|error| {
         std::io::Error::other(format!("{} is readable: {error}", manifest_path.display()))
     })?;
@@ -30,9 +32,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 manifest_path.display()
             ))
         })?;
-    if !is_exact_pin(pinned) {
+    if !version_pin::is_exact_pin(pinned) {
         return Err(std::io::Error::other(format!(
-            "{} must pin {PIN_PACKAGE} at an exact major.minor.patch version",
+            "{} must pin {PIN_PACKAGE} at an exact major.minor.patch release",
             manifest_path.display()
         ))
         .into());
@@ -40,12 +42,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rustc-env=SIGNALBOX_CLAUDE_CLI_VERSION={pinned}");
     Ok(())
-}
-
-fn is_exact_pin(version: &str) -> bool {
-    let components: Vec<&str> = version.split('.').collect();
-    components.len() == 3
-        && components
-            .iter()
-            .all(|component| !component.is_empty() && component.bytes().all(|b| b.is_ascii_digit()))
 }

@@ -189,7 +189,7 @@ async fn delegation_outbox_dispatch_decodes_update_and_wake_shapes() -> Result<(
 
     let update_outcome = OutboxDispatcher::new(pool.clone())
         .dispatch_next(|event| {
-            assert_eq!(event.session(), SessionId::from_uuid(session));
+            assert_eq!(event.session(), Some(SessionId::from_uuid(session)));
             assert_eq!(
                 event.kind(),
                 &DispatchedOutboxEventKind::DelegationUpdate(
@@ -239,7 +239,7 @@ async fn delegation_outbox_dispatch_decodes_update_and_wake_shapes() -> Result<(
 
     let wake_outcome = OutboxDispatcher::new(pool.clone())
         .dispatch_next(|event| {
-            assert_eq!(event.session(), SessionId::from_uuid(session));
+            assert_eq!(event.session(), Some(SessionId::from_uuid(session)));
             assert_eq!(
                 event.kind(),
                 &DispatchedOutboxEventKind::DelegationWake(DispatchedDelegationWake::Result {

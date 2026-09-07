@@ -13,7 +13,7 @@ use signalbox_model_runtime::{
     ProvenUnsentEvidence, ReasoningLevel, ServiceTier, TerminalEvidence, TerminalReport,
     UnsentCause, execute_cli_process,
 };
-use tempfile::NamedTempFile;
+use tempfile::TempDir;
 
 use crate::config::CodexCliConfig;
 use crate::event::EventDecoder;
@@ -77,6 +77,7 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
     "code_mode_host",
     "code_mode_only",
     "computer_use",
+    "context_management",
     "current_time_reminder",
     "default_mode_request_user_input",
     "deferred_executor",
@@ -87,32 +88,42 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
     "external_agent_memory_import",
     "goals",
     "guardian_approval",
+    // The registry gate for the CLI's guardian extension — the subsystem whose
+    // two wired gates, immediately above and below, are already disabled: it
+    // installs review contributors that spawn their own model exchanges. The
+    // pinned release reads this name nowhere, so disabling it changes nothing
+    // today; classifying an unwired name in that subsystem as behavior would
+    // instead make the release that wires it a silent capability gain.
+    "guardian_ext",
     "guardianv2",
     "hooks",
     "image_generation",
     "in_app_browser",
-    // The CLI's own update check and update flow: it reaches package-registry
-    // hosts unrelated to the model exchange and can replace the executable
-    // whose version this adapter pins. Its machinery lives in the interactive
-    // front end and the app-server daemon, so a `codex exec` dispatch does not
-    // reach it today; disabling it keeps that boundary explicit rather than
-    // inherited from where the CLI happens to wire the feature.
+    "in_app_chat",
+    "in_app_dictation",
+    "in_app_local_automation",
+    // The CLI update flow can replace the pinned executable.
     "in_app_updates",
     "mcp_2026_07_28",
+    "mcp_oauth_refresh_coordination",
     "memories",
     "multi_agent",
     "multi_agent_v2",
     "plugin_sharing",
     "plugins",
+    "powershell_shell_version",
     "realtime_conversation",
     "recommended_plugins",
     "remote_plugin",
     "request_permissions_tool",
     "shell_snapshot",
+    "shell_snapshot_v2",
     "shell_tool",
     "skill_mcp_dependency_install",
     "skill_search",
+    "sleep_tool",
     "standalone_web_search",
+    "step_model_switching",
     "token_budget",
     "tool_call_mcp_elicitation",
     "tool_suggest",
@@ -124,7 +135,7 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
 /// Codex CLI protocol snapshot covered by this adapter's offline fixtures.
 ///
 /// The build derives this marker from the exact pin in
-/// `tooling/codex-cli/package.json`, so a Renovate change is mechanically
+/// `tooling/codex-cli/release.json`, so a Renovate change is mechanically
 /// complete and the binding smoke tests that same version. That live exchange
 /// does not prove the offline fixture corpus still represents the CLI's current
 /// event shapes; fixture regeneration or validation against the installed CLI
@@ -140,7 +151,9 @@ const VERSION_PROBE_SPAWN_RETRY_DELAY: Duration = Duration::from_millis(20);
 pub enum CodexCliVersionProbeError {
     /// The configured probe bound was zero.
     InvalidBound,
-    /// The executable could not be started.
+    /// The executable file could not be read for SHA-256 verification.
+    ExecutableReadFailed,
+    /// The executable could not be started or its path was not absolute.
     SpawnFailed,
     /// The executable did not finish within the deployment-owned bound.
     TimedOut,
@@ -158,6 +171,7 @@ impl std::fmt::Display for CodexCliVersionProbeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::InvalidBound => "Codex CLI version probe bound is invalid",
+            Self::ExecutableReadFailed => "Codex CLI executable could not be read",
             Self::SpawnFailed => "Codex CLI version probe could not start",
             Self::TimedOut => "Codex CLI version probe exceeded its bound",
             Self::OutputFailed => "Codex CLI version probe output could not be collected",
@@ -171,13 +185,17 @@ impl std::fmt::Display for CodexCliVersionProbeError {
 impl std::error::Error for CodexCliVersionProbeError {}
 
 /// Proves that the executable invoked by the composition matches this
-/// adapter's exact protocol pin before the composition admits model work.
+/// adapter's upstream version and executable SHA-256 pin before the composition
+/// admits model work. The path must be absolute; both checks share `bound`.
 pub async fn verify_pinned_codex_cli_version(
     executable: &Path,
     bound: Duration,
 ) -> Result<(), CodexCliVersionProbeError> {
     if bound.is_zero() {
         return Err(CodexCliVersionProbeError::InvalidBound);
+    }
+    if !executable.is_absolute() {
+        return Err(CodexCliVersionProbeError::SpawnFailed);
     }
     let deadline = tokio::time::Instant::now()
         .checked_add(bound)
@@ -221,12 +239,22 @@ pub async fn verify_pinned_codex_cli_version(
     let version = banner
         .lines()
         .next()
-        .and_then(|line| line.split_whitespace().next_back())
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|token| semver::Version::parse(token).ok())
+        })
         .ok_or(CodexCliVersionProbeError::InvalidBanner)?;
-    if version != SUPPORTED_CODEX_CLI_VERSION {
+    let supported = semver::Version::parse(SUPPORTED_CODEX_CLI_VERSION)
+        .map_err(|_| CodexCliVersionProbeError::InvalidBanner)?;
+    if version != supported {
         return Err(CodexCliVersionProbeError::VersionMismatch);
     }
-    Ok(())
+    crate::executable_pin::verify_executable_digest(
+        executable,
+        env!("SIGNALBOX_CODEX_CLI_SHA256"),
+        deadline,
+    )
+    .await
 }
 
 async fn spawn_version_probe(
@@ -310,11 +338,12 @@ pub struct CodexCliRuntime {
     event_limit: usize,
     stderr_limit: usize,
     model_capabilities: ModelCapabilityCatalog,
+    model_context_window_overrides: HashMap<String, u32>,
 }
 
 /// Opaque one-shot capability for one Codex CLI spawn.
 ///
-/// It owns the rendered full context and the temporary output files.
+/// It owns the rendered full context and the private operation home.
 /// It deliberately implements neither `Clone`, serialization, nor diagnostic
 /// formatting.
 #[must_use]
@@ -322,8 +351,7 @@ pub struct CodexCliPreparedRequest<C> {
     executable: PathBuf,
     working_directory: PathBuf,
     prompt: Vec<u8>,
-    output_schema: NamedTempFile,
-    output_last_message: NamedTempFile,
+    operation_home: OperationHome,
     correlation: C,
     resolved_target: String,
     delivery: DeliveryMode,
@@ -334,7 +362,7 @@ pub struct CodexCliPreparedRequest<C> {
     event_limit: usize,
     stderr_limit: usize,
     controls: CodexControls,
-    credential_home: Option<PathBuf>,
+    model_context_window_override: Option<u32>,
 }
 
 struct CodexControls {
@@ -355,7 +383,7 @@ pub enum CodexCliConstructionError {
     /// The working directory does not exist or is not a directory.
     InvalidWorkingDirectory,
     /// The working directory is relative and would be resolved twice by the
-    /// child process and its `--cd` argument.
+    /// child process and its thread working-directory field.
     RelativeWorkingDirectory,
     /// Whole-process timeout is zero or cannot be represented by the runtime
     /// clock.
@@ -372,6 +400,8 @@ pub enum CodexCliConstructionError {
     UnreadableCredentialHome,
     /// A configured credential home contains no provisioned entries.
     EmptyCredentialHome,
+    /// A model context-window override has an invalid target or value.
+    InvalidModelContextWindowOverride,
 }
 
 impl std::fmt::Display for CodexCliConstructionError {
@@ -409,6 +439,9 @@ impl std::fmt::Display for CodexCliConstructionError {
                 formatter.write_str("Codex credential home cannot be enumerated")
             }
             Self::EmptyCredentialHome => formatter.write_str("Codex credential home is empty"),
+            Self::InvalidModelContextWindowOverride => formatter.write_str(
+                "Codex model context-window overrides require exact targets and positive values",
+            ),
         }
     }
 }
@@ -461,6 +494,15 @@ impl CodexCliRuntime {
         if config.event_limit == 0 || config.stderr_limit == 0 {
             return Err(CodexCliConstructionError::InvalidOutputLimit);
         }
+        if config
+            .model_context_window_overrides
+            .iter()
+            .any(|(target, value)| {
+                target.is_empty() || target.trim() != target || target.contains('\0') || *value == 0
+            })
+        {
+            return Err(CodexCliConstructionError::InvalidModelContextWindowOverride);
+        }
         for home in config.credential_homes.values() {
             if !home.is_absolute() {
                 return Err(CodexCliConstructionError::RelativeCredentialHome);
@@ -489,6 +531,7 @@ impl CodexCliRuntime {
             event_limit: config.event_limit,
             stderr_limit: config.stderr_limit,
             model_capabilities: config.model_capabilities,
+            model_context_window_overrides: config.model_context_window_overrides,
         })
     }
 
@@ -509,6 +552,8 @@ impl CodexCliRuntime {
             tool_choice: operation.tool_choice,
             output_contract: operation.output_contract,
             delivery: operation.delivery,
+            provider_compaction: operation.provider_compaction,
+            provider_compaction_supported: operation.provider_compaction_supported,
         };
         let capabilities = match self
             .model_capabilities
@@ -582,71 +627,27 @@ impl CodexCliRuntime {
                 };
             }
         };
-        // The child interprets `--output-schema` after `current_dir` moves it
-        // to the configured working root, so a schema path that is relative
-        // there — as under a relative `TMPDIR` — would name a file that
-        // preparation never created. Create the file under the absolutized
-        // temporary directory so its retained path cannot be relative.
-        let temporary_directory = match std::path::absolute(std::env::temp_dir()) {
-            Ok(directory) => directory,
-            Err(error) => {
+        let operation_home = match operation_home(credential_home) {
+            Ok(home) => home,
+            Err(_) => {
                 return PreparationOutcome::Defect {
                     correlation,
                     defect: PreparationDefect::RequestConstructionFailed {
-                        detail: format!(
-                            "could not absolutize the temporary directory for the \
-                             output-schema file: {error}"
-                        ),
-                    },
-                };
-            }
-        };
-        let mut output_schema = match tempfile::Builder::new()
-            .prefix("signalbox-codex-output-")
-            .suffix(".json")
-            .tempfile_in(&temporary_directory)
-        {
-            Ok(file) => file,
-            Err(error) => {
-                return PreparationOutcome::Defect {
-                    correlation,
-                    defect: PreparationDefect::RequestConstructionFailed {
-                        detail: format!("could not create output-schema file: {error}"),
-                    },
-                };
-            }
-        };
-        if let Err(error) = std::io::Write::write_all(&mut output_schema, OUTPUT_SCHEMA.as_bytes())
-        {
-            return PreparationOutcome::Defect {
-                correlation,
-                defect: PreparationDefect::RequestConstructionFailed {
-                    detail: format!("could not write output-schema file: {error}"),
-                },
-            };
-        }
-        let output_last_message = match tempfile::Builder::new()
-            .prefix("signalbox-codex-last-message-")
-            .suffix(".json")
-            .tempfile_in(&temporary_directory)
-        {
-            Ok(file) => file,
-            Err(error) => {
-                return PreparationOutcome::Defect {
-                    correlation,
-                    defect: PreparationDefect::RequestConstructionFailed {
-                        detail: format!("could not create output-last-message file: {error}"),
+                        detail: "could not prepare Codex operation home".into(),
                     },
                 };
             }
         };
         let prompt = std::mem::take(&mut translated.prompt);
+        let model_context_window_override = self
+            .model_context_window_overrides
+            .get(operation.resolved_target.as_str())
+            .copied();
         PreparationOutcome::Prepared(CodexCliPreparedRequest {
             executable: self.executable.clone(),
             working_directory: self.working_directory.clone(),
             prompt,
-            output_schema,
-            output_last_message,
+            operation_home,
             correlation,
             resolved_target: operation.resolved_target.as_str().to_string(),
             delivery: operation.delivery,
@@ -657,7 +658,7 @@ impl CodexCliRuntime {
             event_limit: self.event_limit,
             stderr_limit: self.stderr_limit,
             controls,
-            credential_home,
+            model_context_window_override,
         })
     }
 }
@@ -769,34 +770,37 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for CodexCliRuntime {
     }
 }
 
+enum OperationHome {
+    Ready(TempDir),
+    UnresolvableCredentialHome,
+}
+
 async fn execute_process<C: Clone + Send + Sync>(
     prepared: CodexCliPreparedRequest<C>,
     sink: &mut (dyn ObservationSink<C> + Send),
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
+    let operation_home = match prepared.operation_home {
+        OperationHome::Ready(home) => home,
+        OperationHome::UnresolvableCredentialHome => {
+            return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(signalbox_model_runtime::TransportFacts::new(
+                    "Codex credential home cannot be resolved to an absolute directory; exchange refused before spawn",
+                )),
+            });
+        }
+    };
     let mut command = std::process::Command::new(&prepared.executable);
-    command
-        .arg("exec")
-        .arg("--json")
-        .arg("--ephemeral")
-        .arg("--ignore-user-config")
-        .arg("--ignore-rules")
-        .arg("--strict-config");
     for feature in DISABLED_CODEX_CLI_CAPABILITY_FEATURES {
         command.arg("--disable").arg(feature);
     }
     if prepared.controls.service_tier.is_some() {
         command.arg("--enable").arg("fast_mode");
     }
-    if let Some(effort) = prepared.controls.reasoning_effort {
+    if let Some(context_window) = prepared.model_context_window_override {
         command
             .arg("--config")
-            .arg(format!("model_reasoning_effort=\"{effort}\""));
-    }
-    if let Some(tier) = prepared.controls.service_tier {
-        command
-            .arg("--config")
-            .arg(format!("service_tier=\"{tier}\""));
+            .arg(format!("model_context_window={context_window}"));
     }
     command
         .arg("--config")
@@ -809,41 +813,45 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg("web_search=\"disabled\"")
         .arg("--config")
         .arg("project_doc_max_bytes=0")
-        .arg("--sandbox")
-        .arg("read-only")
-        .arg("--skip-git-repo-check")
-        .arg("--cd")
-        .arg(&prepared.working_directory)
-        .arg("--model")
-        .arg(&prepared.resolved_target)
-        .arg("--output-schema")
-        .arg(prepared.output_schema.path())
-        .arg("--output-last-message")
-        .arg(prepared.output_last_message.path())
-        .arg("-")
+        .arg("app-server")
+        .arg("--stdio")
+        .arg("--strict-config")
+        .arg("--ignore-user-config")
+        .arg("--ignore-rules")
         .current_dir(&prepared.working_directory);
+    use crate::app_server::{
+        client::Client,
+        frame::{TextInput, TextInputKind, ThreadOptions, TurnInput},
+    };
+    let client = Client::new(
+        ThreadOptions {
+            model: prepared.resolved_target,
+            cwd: prepared.working_directory.to_string_lossy().into_owned(),
+            service_tier: prepared.controls.service_tier.map(str::to_owned),
+        },
+        TurnInput {
+            input: vec![TextInput {
+                kind: TextInputKind::Text,
+                text: String::from_utf8(prepared.prompt).unwrap_or_default(),
+            }],
+            output_schema: serde_json::from_str(OUTPUT_SCHEMA).unwrap_or_default(),
+            effort: prepared.controls.reasoning_effort.map(str::to_owned),
+        },
+    );
     let decoder = EventDecoder::new(
         prepared.correlation.clone(),
         prepared.delivery,
         &prepared.translated,
-        prepared.output_last_message.path().to_path_buf(),
+        client,
         prepared.event_limit,
     );
-    // The selected profile controls this child only; the adapter passes the
-    // path reference and never opens the login material, as required by
-    // `docs/spec/configuration-and-credentials.md#the-codex_home-delivery`.
-    let environment_overrides = prepared
-        .credential_home
-        .map(|home| {
-            vec![CliEnvironmentOverride::replacing_inherited(
-                CODEX_CREDENTIAL_HOME,
-                home.into_os_string(),
-            )]
-        })
-        .unwrap_or_default();
+    let environment_overrides = vec![CliEnvironmentOverride::replacing_inherited(
+        CODEX_CREDENTIAL_HOME,
+        operation_home.path().as_os_str().to_owned(),
+    )];
     let request = CliProcessRequest {
         command,
-        prompt: prepared.prompt,
+        prompt: Vec::new(),
         decoder,
         exchange_timeout: prepared.exchange_timeout,
         interrupt_grace: prepared.interrupt_grace,
@@ -853,9 +861,29 @@ async fn execute_process<C: Clone + Send + Sync>(
         environment: CODEX_ENVIRONMENT,
         environment_overrides,
     };
-    let _output_schema = prepared.output_schema;
-    let _output_last_message = prepared.output_last_message;
+    let _operation_home = operation_home;
     execute_cli_process(request, sink, cancellation).await
+}
+
+fn operation_home(selected: Option<PathBuf>) -> std::io::Result<OperationHome> {
+    let directory = std::path::absolute(std::env::temp_dir())?;
+    let home = tempfile::Builder::new()
+        .prefix("signalbox-codex-")
+        .tempdir_in(directory)?;
+    std::fs::write(home.path().join("config.toml"), "")?;
+    let source = selected
+        .or_else(|| std::env::var_os(CODEX_CREDENTIAL_HOME).map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")));
+    #[cfg(unix)]
+    if let Some(source) = source {
+        let source = match std::path::absolute(source) {
+            Ok(source) if source.is_absolute() => source,
+            _ => return Ok(OperationHome::UnresolvableCredentialHome),
+        };
+        // Only the CLI opens the login store; auxiliary state stays private.
+        std::os::unix::fs::symlink(source.join("auth.json"), home.path().join("auth.json"))?;
+    }
+    Ok(OperationHome::Ready(home))
 }
 
 #[cfg(test)]
@@ -894,14 +922,14 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn pinned_version_probe_accepts_the_exact_adapter_pin() {
+    async fn pinned_version_probe_rejects_an_unpinned_executable_reporting_the_supported_version() {
         let script =
             format!("#!/bin/sh\nprintf 'codex-cli %s\\n' '{SUPPORTED_CODEX_CLI_VERSION}'\n");
         let (_directory, executable) = version_fixture(&script);
 
         let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
 
-        assert_eq!(result, Ok(()));
+        assert_eq!(result, Err(CodexCliVersionProbeError::VersionMismatch));
     }
 
     #[cfg(unix)]
@@ -913,6 +941,16 @@ mod tests {
         let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
 
         assert_eq!(result, Err(CodexCliVersionProbeError::VersionMismatch));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_version_probe_rejects_a_non_semver_banner() {
+        let (_directory, executable) = version_fixture("#!/bin/sh\nprintf 'codex-cli latest\\n'\n");
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
+
+        assert_eq!(result, Err(CodexCliVersionProbeError::InvalidBanner));
     }
 
     #[cfg(unix)]
@@ -935,10 +973,10 @@ mod tests {
         assert_eq!(result, Err(CodexCliVersionProbeError::InvalidBanner));
     }
 
-    /// INV-035: the CLI receives only a reference to its ambient login store;
+    /// the CLI receives only a reference to its ambient login store;
     /// direct credential-value variables are absent from the inherited set.
     #[test]
-    fn inv_035_cli_environment_excludes_direct_credential_values() {
+    fn cli_environment_excludes_direct_credential_values() {
         assert!(
             CODEX_ENVIRONMENT
                 .iter()

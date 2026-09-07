@@ -1,3 +1,6 @@
+//! Provider, reader, probe, and view declarations governed by
+//! `docs/spec/file-and-media.md`.
+
 use std::{error::Error, fmt, future::Future, pin::Pin};
 
 use crate::{
@@ -6,7 +9,6 @@ use crate::{
     ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode, VerifiedBlobSource,
 };
 
-// numeric-bound: ceiling - bounds retained model-facing view-description memory
 const MAX_VIEW_DESCRIPTION_BYTES: usize = 512;
 
 /// Strength of one byte-derived probe candidate.
@@ -25,12 +27,21 @@ pub enum ProbeStrength {
     Strong,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Finite source-read envelope for one probe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProbeDeclaration {
+    /// Returns the prefix budget.
+    #[get(copy)]
     prefix_bytes: u64,
+    /// Returns the suffix budget.
+    #[get(copy)]
     suffix_bytes: u64,
+    /// Returns the arbitrary-range count.
+    #[get(copy)]
     range_count: u32,
+    /// Returns the cumulative byte budget.
+    #[get(copy)]
     cumulative_bytes: u64,
 }
 
@@ -67,32 +78,17 @@ impl ProbeDeclaration {
             cumulative_bytes: input.cumulative_bytes,
         }
     }
-
-    /// Returns the prefix budget.
-    pub const fn prefix_bytes(self) -> u64 {
-        self.prefix_bytes
-    }
-
-    /// Returns the suffix budget.
-    pub const fn suffix_bytes(self) -> u64 {
-        self.suffix_bytes
-    }
-
-    /// Returns the arbitrary-range count.
-    pub const fn range_count(self) -> u32 {
-        self.range_count
-    }
-
-    /// Returns the cumulative byte budget.
-    pub const fn cumulative_bytes(self) -> u64 {
-        self.cumulative_bytes
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Finite source-read envelope for one validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValidationDeclaration {
+    /// Returns the cumulative source-byte budget.
+    #[get(copy)]
     source_bytes: u64,
+    /// Returns the exact-range request budget.
+    #[get(copy)]
     range_count: u32,
 }
 
@@ -103,16 +99,6 @@ impl ValidationDeclaration {
             source_bytes,
             range_count,
         }
-    }
-
-    /// Returns the cumulative source-byte budget.
-    pub const fn source_bytes(self) -> u64 {
-        self.source_bytes
-    }
-
-    /// Returns the exact-range request budget.
-    pub const fn range_count(self) -> u32 {
-        self.range_count
     }
 }
 
@@ -237,11 +223,18 @@ impl ReadViewBounds {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One provider-owned read view.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReadViewDeclaration {
+    /// Borrows the view name.
+    #[get]
     name: ReadViewName,
+    /// Borrows the model-facing bounded description.
+    #[get(str)]
     description: String,
+    /// Borrows the object schema.
+    #[get]
     arguments_schema: CanonicalJsonObjectSchema,
     access: ReadAccessPattern,
     bounds: ReadViewBounds,
@@ -272,21 +265,6 @@ impl ReadViewDeclaration {
         })
     }
 
-    /// Borrows the view name.
-    pub const fn name(&self) -> &ReadViewName {
-        &self.name
-    }
-
-    /// Borrows the model-facing bounded description.
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-
-    /// Borrows the object schema.
-    pub const fn arguments_schema(&self) -> &CanonicalJsonObjectSchema {
-        &self.arguments_schema
-    }
-
     /// Returns the declared access posture.
     pub const fn access(&self) -> ReadAccessPattern {
         self.access
@@ -303,14 +281,23 @@ impl ReadViewDeclaration {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Static declaration for one reader implementation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReaderDeclaration {
+    /// Borrows the immutable reader identity.
+    #[get]
     identity: ReaderIdentity,
+    /// Borrows exact owned media types.
+    #[get(slice)]
     media_types: Vec<CanonicalMediaType>,
     probe: ProbeDeclaration,
     validation: ValidationDeclaration,
+    /// Borrows provider-owned views.
+    #[get(slice)]
     views: Vec<ReadViewDeclaration>,
+    /// Borrows registered sanitized reason codes.
+    #[get(slice)]
     reason_codes: Vec<ReasonCode>,
     streaming_text_fallback: StreamingTextFallback,
 }
@@ -355,16 +342,6 @@ impl ReaderDeclaration {
         })
     }
 
-    /// Borrows the immutable reader identity.
-    pub const fn identity(&self) -> &ReaderIdentity {
-        &self.identity
-    }
-
-    /// Borrows exact owned media types.
-    pub fn media_types(&self) -> &[CanonicalMediaType] {
-        &self.media_types
-    }
-
     /// Returns the probe envelope.
     pub const fn probe(&self) -> ProbeDeclaration {
         self.probe
@@ -375,27 +352,23 @@ impl ReaderDeclaration {
         self.validation
     }
 
-    /// Borrows provider-owned views.
-    pub fn views(&self) -> &[ReadViewDeclaration] {
-        &self.views
-    }
-
-    /// Borrows registered sanitized reason codes.
-    pub fn reason_codes(&self) -> &[ReasonCode] {
-        &self.reason_codes
-    }
-
     /// Returns text fallback posture.
     pub const fn streaming_text_fallback(&self) -> StreamingTextFallback {
         self.streaming_text_fallback
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Static declaration contributed by one compiled provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileMediaProviderDeclaration {
+    /// Borrows the provider identity.
+    #[get]
     provider: FileReaderProviderName,
+    /// Borrows declared readers.
+    #[get(slice)]
     readers: Vec<ReaderDeclaration>,
+    observed_container_entries: Option<u64>,
 }
 
 impl FileMediaProviderDeclaration {
@@ -403,6 +376,15 @@ impl FileMediaProviderDeclaration {
     pub fn try_new(
         provider: FileReaderProviderName,
         readers: Vec<ReaderDeclaration>,
+    ) -> Result<Self, RegistryDeclarationError> {
+        Self::try_new_with_container_entries(provider, readers, None)
+    }
+
+    /// Constructs one provider with an optional maximum observed container inventory.
+    pub fn try_new_with_container_entries(
+        provider: FileReaderProviderName,
+        readers: Vec<ReaderDeclaration>,
+        observed_container_entries: Option<u64>,
     ) -> Result<Self, RegistryDeclarationError> {
         if readers.is_empty() {
             return Err(RegistryDeclarationError::EmptyInventory);
@@ -413,17 +395,16 @@ impl FileMediaProviderDeclaration {
         {
             return Err(RegistryDeclarationError::ForeignReader);
         }
-        Ok(Self { provider, readers })
+        Ok(Self {
+            provider,
+            readers,
+            observed_container_entries,
+        })
     }
 
-    /// Borrows the provider identity.
-    pub const fn provider(&self) -> &FileReaderProviderName {
-        &self.provider
-    }
-
-    /// Borrows declared readers.
-    pub fn readers(&self) -> &[ReaderDeclaration] {
-        &self.readers
+    /// Returns the provider's maximum observed container inventory, when applicable.
+    pub const fn observed_container_entries(&self) -> Option<u64> {
+        self.observed_container_entries
     }
 
     pub(crate) fn sort_readers(&mut self) {
@@ -462,6 +443,8 @@ pub struct FileMediaProviderReadRequest {
     pub validation: crate::ValidationEvidence,
     /// Registry-sanitized provider metadata.
     pub metadata: crate::BoundedMetadata,
+    /// Maximum source prefix covered by validation and available to this read.
+    pub maximum_source_bytes: u64,
     /// Exact provider-owned view.
     pub view: ReadViewName,
     /// Closed initial-options or continuation input.

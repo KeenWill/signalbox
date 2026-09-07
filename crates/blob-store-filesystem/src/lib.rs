@@ -637,6 +637,52 @@ impl FilesystemBlobStore {
         Ok(OpenedBlob::new(byte_length, Box::new(file)))
     }
 
+    async fn open_verified_inner(
+        &self,
+        expected: ExpectedBlob,
+        key: &BlobObjectKey,
+    ) -> Result<OpenedBlob, BlobStoreError> {
+        if !filesystem_key_is_admitted(key) {
+            return Err(BlobStoreError::unavailable("reject reserved object key"));
+        }
+        let (mut file, byte_length) =
+            open_private_regular_file(self.root.clone(), key.clone(), "open verified object")
+                .await?;
+        #[cfg(target_os = "linux")]
+        let _publication_lock = acquire_publication_lock(
+            self.publication_directory.clone(),
+            FlockOperation::LockShared,
+        )
+        .await?;
+        #[cfg(not(target_os = "linux"))]
+        let _publication_lock =
+            acquire_publication_lock(self.publication_directory.clone(), ()).await?;
+        let publication_directory = self.publication_directory.clone();
+        let (temporary, pinned_file) =
+            tokio::task::spawn_blocking(move || create_temporary_blob_file(publication_directory))
+                .await
+                .map_err(|source| BlobStoreError::io("join verified spool creation", source))?
+                .map_err(|source| BlobStoreError::io("create verified spool", source))?;
+        let mut pinned_file = tokio::fs::File::from_std(pinned_file);
+        verify_opened_file_into(
+            &mut file,
+            &mut pinned_file,
+            expected,
+            "verify opened object",
+        )
+        .await?;
+        pinned_file
+            .flush()
+            .await
+            .map_err(|source| BlobStoreError::io("flush verified spool", source))?;
+        pinned_file
+            .seek(std::io::SeekFrom::Start(0))
+            .await
+            .map_err(|source| BlobStoreError::io("rewind verified spool", source))?;
+        remove_temporary_file(temporary).await?;
+        Ok(OpenedBlob::new(byte_length, Box::new(pinned_file)))
+    }
+
     async fn open_range_inner(
         &self,
         expected: ExpectedBlob,
@@ -676,6 +722,14 @@ impl BlobStore for FilesystemBlobStore {
 
     fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob> {
         Box::pin(self.open_inner(key))
+    }
+
+    fn open_verified<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        Box::pin(self.open_verified_inner(expected, key))
     }
 
     fn open_range<'a>(
@@ -767,6 +821,24 @@ async fn verify_opened_file(
     expected: ExpectedBlob,
     operation: &'static str,
 ) -> Result<(), BlobStoreError> {
+    verify_opened_file_with_destination(file, None, expected, operation).await
+}
+
+async fn verify_opened_file_into(
+    file: &mut tokio::fs::File,
+    destination: &mut tokio::fs::File,
+    expected: ExpectedBlob,
+    operation: &'static str,
+) -> Result<(), BlobStoreError> {
+    verify_opened_file_with_destination(file, Some(destination), expected, operation).await
+}
+
+async fn verify_opened_file_with_destination(
+    file: &mut tokio::fs::File,
+    mut destination: Option<&mut tokio::fs::File>,
+    expected: ExpectedBlob,
+    operation: &'static str,
+) -> Result<(), BlobStoreError> {
     let mut digest = Sha256::new();
     let mut observed_length = 0_u64;
     let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
@@ -793,6 +865,12 @@ async fn verify_opened_file(
             ));
         }
         digest.update(&buffer[..read]);
+        if let Some(destination) = destination.as_deref_mut() {
+            destination
+                .write_all(&buffer[..read])
+                .await
+                .map_err(|source| BlobStoreError::io("write verified spool", source))?;
+        }
     }
     let observed_digest = BlobDigest::from_bytes(digest.finalize().into());
     if observed_length == expected.byte_length() && observed_digest == expected.digest() {
@@ -1826,10 +1904,10 @@ mod tests {
         FilesystemBlobStore::from_opened_bound(opened, Uuid::from_u128(namespace), state)
     }
 
-    /// INV-059: descriptor-authenticated root inspection is mutation-free so
+    /// descriptor-authenticated root inspection is mutation-free so
     /// registry overlap checks always precede marker creation and recovery sweeps.
     #[test]
-    fn inv059_opened_root_defers_every_namespace_mutation() {
+    fn opened_root_defers_every_namespace_mutation() {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture root is private");
@@ -1879,7 +1957,7 @@ mod tests {
     }
 
     #[test]
-    fn inv059_namespace_initialization_leaves_another_attempts_temporary_file_untouched() {
+    fn namespace_initialization_leaves_another_attempts_temporary_file_untouched() {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture root is private");
@@ -1981,10 +2059,10 @@ mod tests {
         assert!(!spool.exists());
     }
 
-    /// INV-060: an active upload retains only one private linked spool, then
+    /// an active upload retains only one private linked spool, then
     /// hands its descriptor to publication after unlinking the staging name.
     #[tokio::test]
-    async fn inv060_upload_spool_streams_exact_bytes_after_unlink() {
+    async fn upload_spool_streams_exact_bytes_after_unlink() {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture root is private");
@@ -2024,10 +2102,10 @@ mod tests {
         assert_eq!(bytes, b"first-second");
     }
 
-    /// INV-060: abandoning one connection-local upload removes its linked
+    /// abandoning one connection-local upload removes its linked
     /// private spool without needing a daemon-wide sweep.
     #[tokio::test]
-    async fn inv060_dropped_upload_spool_is_removed() {
+    async fn dropped_upload_spool_is_removed() {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture root is private");
@@ -2081,7 +2159,7 @@ mod tests {
     }
 
     #[test]
-    fn inv059_filesystem_rejects_mounted_child_directories() {
+    fn filesystem_rejects_mounted_child_directories() {
         let root = fs::File::from(
             open(
                 "/",
@@ -2098,7 +2176,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv059_filesystem_rejects_an_unreachable_retained_parent_publication() {
+    async fn filesystem_rejects_an_unreachable_retained_parent_publication() {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -2192,7 +2270,7 @@ mod tests {
     }
 
     #[test]
-    fn inv059_filesystem_accepts_only_explicitly_local_block_transport_leaves() {
+    fn filesystem_accepts_only_explicitly_local_block_transport_leaves() {
         let local = Path::new("/sys/devices/pci0000:00/0000:00:01.0/nvme/nvme0/nvme0n1");
         let usb_ip = Path::new(
             "/sys/devices/platform/vhci_hcd.0/usb2/2-1/2-1:1.0/host7/target7:0:0/7:0:0:0/block/sdb",
@@ -2209,7 +2287,7 @@ mod tests {
     }
 
     #[test]
-    fn inv059_filesystem_sweeps_an_interrupted_mode_zero_temporary_file() {
+    fn filesystem_sweeps_an_interrupted_mode_zero_temporary_file() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
@@ -2233,10 +2311,10 @@ mod tests {
         assert!(!temporary_path.exists());
     }
 
-    /// INV-059: cancelling a publication unlinks its temporary file before the
+    /// cancelling a publication unlinks its temporary file before the
     /// publication lock can leave scope.
     #[test]
-    fn inv059_temporary_publication_drop_unlinks_before_returning() {
+    fn temporary_publication_drop_unlinks_before_returning() {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         let directory = Arc::new(fs::File::from(
             open(
@@ -2257,10 +2335,10 @@ mod tests {
         assert!(!temporary_path.exists());
     }
 
-    /// INV-059: recovery sweeps for one publication namespace serialize even
+    /// recovery sweeps for one publication namespace serialize even
     /// when a replacement process begins opening the same bound store.
     #[test]
-    fn inv059_publication_recovery_waits_for_the_namespace_lock() {
+    fn publication_recovery_waits_for_the_namespace_lock() {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture root is private");

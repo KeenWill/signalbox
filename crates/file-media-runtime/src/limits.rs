@@ -209,14 +209,27 @@ pub struct FileMediaProcessLimitOverrides {
     pub stderr_bytes: usize,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Daemon-supervised process limits with a fixed protocol frame and lowerable resources.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileMediaProcessCeilings {
+    /// Returns the fixed maximum length-delimited protocol frame bytes.
+    #[get(copy)]
     frame_bytes: usize,
+    /// Returns the combined worker-memory budget split between address space and writable tmpfs.
+    #[get(copy)]
     memory_bytes: u64,
+    /// Returns the CPU-second limit applied before worker startup.
+    #[get(copy)]
     cpu_seconds: u64,
+    /// Returns the daemon wall-clock deadline.
+    #[get(copy)]
     wall_seconds: u64,
+    /// Returns the descriptor limit applied before worker startup.
+    #[get(copy)]
     file_descriptors: u64,
+    /// Returns the retained, never-model-visible diagnostic byte limit.
+    #[get(copy)]
     stderr_bytes: usize,
 }
 
@@ -265,36 +278,6 @@ impl FileMediaProcessCeilings {
             && candidate.stderr_bytes > 0
             && candidate.stderr_bytes <= self.stderr_bytes
     }
-
-    /// Returns the fixed maximum length-delimited protocol frame bytes.
-    pub const fn frame_bytes(self) -> usize {
-        self.frame_bytes
-    }
-
-    /// Returns the combined worker-memory budget split between address space and writable tmpfs.
-    pub const fn memory_bytes(self) -> u64 {
-        self.memory_bytes
-    }
-
-    /// Returns the CPU-second limit applied before worker startup.
-    pub const fn cpu_seconds(self) -> u64 {
-        self.cpu_seconds
-    }
-
-    /// Returns the daemon wall-clock deadline.
-    pub const fn wall_seconds(self) -> u64 {
-        self.wall_seconds
-    }
-
-    /// Returns the descriptor limit applied before worker startup.
-    pub const fn file_descriptors(self) -> u64 {
-        self.file_descriptors
-    }
-
-    /// Returns the retained, never-model-visible diagnostic byte limit.
-    pub const fn stderr_bytes(self) -> usize {
-        self.stderr_bytes
-    }
 }
 
 impl Default for FileMediaProcessCeilings {
@@ -319,9 +302,9 @@ mod tests {
         MIN_WORKER_FILE_DESCRIPTORS,
     };
 
-    /// INV-088: deployment configuration can lower but never raise a compiled ceiling.
+    /// deployment configuration can lower but never raise a compiled ceiling.
     #[test]
-    fn inv088_file_media_ceiling_overrides_are_lowerable_only() {
+    fn file_media_ceiling_overrides_are_lowerable_only() {
         let media = FileMediaCeilings::version_one();
         assert_eq!(
             media.media_references_per_call,

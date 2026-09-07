@@ -26,6 +26,7 @@ mod model_settings;
 mod program_journal;
 mod provider_evidence;
 mod queue_order;
+mod rate_limit;
 mod replace_session_defaults;
 mod repo_watch;
 mod review_workflow;
@@ -33,6 +34,8 @@ mod runner;
 mod semantic_entry;
 mod session;
 mod session_delegation;
+mod session_lifecycle;
+mod session_lifecycle_command;
 mod session_metadata;
 mod session_placement;
 mod session_template;
@@ -53,7 +56,11 @@ pub use accepted_input::{
 };
 pub use actor::Actor;
 pub use applied_interrupt::{AppliedInterruptCommandResult, AppliedInterruptProof};
-pub use blob::{BlobDigest, BlobDigestParseError, BlobDigestParseFailure};
+pub use blob::{
+    BlobDerivation, BlobDerivationError, BlobDerivationProducer, BlobDigest, BlobDigestParseError,
+    BlobDigestParseFailure, BlobTransformation, BlobTransformationError, BlobTransformationName,
+    DeterministicBlobDerivationKey,
+};
 pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
@@ -80,12 +87,12 @@ pub use git_remote::{
     max_git_remote_name_bytes, max_git_remote_url_bytes,
 };
 pub use goal::{
-    Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalEvent, GoalEventKind, GoalEventOrdinal,
-    GoalGeneration, GoalGenerationSnapshot, GoalGuidance, GoalModelBlockedReasonKind,
-    GoalModelProvenance, GoalNeed, GoalReconstitutionError, GoalReconstitutionFailure,
-    GoalReconstitutionInput, GoalReport, GoalReportRef, GoalSchedulerProvenance, GoalState,
-    GoalStatement, GoalTextError, GoalTransitionError, GoalTransitionFailure, GoalTurnSource,
-    GoalUserProvenance,
+    FinishConditionStatement, Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalEvent,
+    GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGenerationSnapshot, GoalGuidance,
+    GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed, GoalReconstitutionError,
+    GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport, GoalReportRef,
+    GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
+    GoalTransitionFailure, GoalTurnSource, GoalUserProvenance,
 };
 pub use goal_command::{
     GoalCommandRejection, GoalCommandResult, GoalUserAction, GoalUserCommand,
@@ -113,11 +120,13 @@ pub use imported_session::{
     CreateSessionFromImportedFrontierPreparationFailure,
     CreateSessionFromImportedFrontierReconstitutionError,
     CreateSessionFromImportedFrontierReconstitutionFailure,
-    CreateSessionFromImportedFrontierReconstitutionInput, ImportedSessionReconstitutionError,
-    ImportedSessionReconstitutionFailure, ImportedSessionReconstitutionInput,
-    ImportedSessionSeedHeaderReconstitutionInput, ImportedSessionSeedReconstitutionFailure,
-    ImportedSessionSeedReconstitutionInput, PreparedCreateSessionFromImportedFrontier,
-    ReconstitutedImportedSession, ReconstitutedSessionCreationFromImportedFrontier,
+    CreateSessionFromImportedFrontierReconstitutionInput,
+    ImportedSessionNormalizedReconstitutionError, ImportedSessionNormalizedReconstitutionInput,
+    ImportedSessionReconstitutionError, ImportedSessionReconstitutionFailure,
+    ImportedSessionReconstitutionInput, ImportedSessionSeedHeaderReconstitutionInput,
+    ImportedSessionSeedReconstitutionFailure, ImportedSessionSeedReconstitutionInput,
+    PreparedCreateSessionFromImportedFrontier, ReconstitutedImportedSession,
+    ReconstitutedSessionCreationFromImportedFrontier,
 };
 pub use model_call::{
     CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
@@ -170,6 +179,7 @@ pub use queue_order::{
     AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
     AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
 };
+pub use rate_limit::{ProviderRateLimitSnapshot, ProviderRateLimitWindow};
 pub use replace_session_defaults::{
     PreparedReplaceSessionDefaults, ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaults,
     ReplaceSessionDefaultsAppliedResult, ReplaceSessionDefaultsCurrentVersionMismatch,
@@ -179,19 +189,17 @@ pub use replace_session_defaults::{
     ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
 };
 pub use repo_watch::{
-    BranchContext, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
-    DispatchSessionAction, DispatchSessionParameters, GitHubObjectId, LabelName, MergeableState,
-    PullRequestBody, PullRequestContext, PullRequestEventContext, PullRequestEventContextInput,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
+    MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
     PullRequestNumber, PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject,
-    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError,
-    RepoWatchDispatchContextShape, RepoWatchEvent, RepoWatchEventConstructionError,
-    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher,
-    RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId,
-    RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest, RepoWatchRuleValidationError,
-    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
-    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepoWatchWorkflowRunAttempt,
-    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    RepoWatchAuthorLogin, RepoWatchDispatchContextShape, RepoWatchEvent,
+    RepoWatchEventConstructionError, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
+    RepoWatchEventTarget, RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1,
+    RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
+    RepoWatchRuleContentDigest, RepoWatchRuleId, RepoWatchRuleIdentityField,
+    RepoWatchRuleIdentityFieldDigest, RepoWatchRuleValidationError, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepoWatchTextError, RepoWatchWorkflowRunAttempt, RepositorySlug,
+    ReviewState, ReviewThreadId, WorkflowName,
 };
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
@@ -247,7 +255,8 @@ pub use runner::{
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
-    AssistantText, SemanticTranscriptEntry, SemanticTranscriptEntryPayload,
+    AssistantText, ProviderCompactionBlock, ProviderCompactionBlockError, ProviderReasoningItem,
+    ProviderReasoningItemError, SemanticTranscriptEntry, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput,
 };
 pub use session::{
@@ -274,6 +283,19 @@ pub use session_delegation::{
     SessionDelegationReconstitutionFailure, SessionDelegationReconstitutionInput,
     TerminalChildTurn, await_session_tool_name, send_session_message_tool_name,
     spawn_session_tool_name,
+};
+pub use session_lifecycle::{
+    CoreAgency, DispatchingModule, LifecycleActor, ModuleDispatch, SessionClosureOutcome,
+    SessionDeadlineExpiry, SessionDeadlineKind, SessionFailureCause, SessionLifecycleState,
+    SessionLifecycleTransitionError, SessionOwnership, SessionOwnershipTransition,
+    SessionParkCause, SessionParkResponder, SessionRecoveryOperation, SessionRetirementCause,
+    SessionRetryableCause, SessionStructuralCause, SessionTerminalOutcome, SessionWait,
+    SessionWaitKind, SessionWaker, StopStickiness,
+};
+pub use session_lifecycle_command::{
+    CommandPrincipal, FinishCheckVerdict, FinishCondition, SessionLifecycleApplication,
+    SessionLifecycleCommand, SessionLifecycleCommandRejection, SessionLifecycleCommandResult,
+    SessionLifecycleOperation, StartGate,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
@@ -393,6 +415,7 @@ pub use turn_lifecycle::{
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
     AppliedStopForReconciliationProof, IssuedOperationRef, NonEmptyIssuedOperationRefs,
     NonEmptyIssuedOperationRefsError, ReconciliationMarker, ReconciliationReason, TurnDisposition,
+    TurnTerminalCause,
 };
 pub use user_content::{
     AttachmentBlobFact, AttachmentDisplayFilename, AttachmentDisplayFilenameError,
@@ -442,6 +465,11 @@ define_identity!(
     ///
     /// This identity does not prove that the command was applied.
     DurableCommandId
+);
+
+define_identity!(
+    /// Identifies one immutable blob-to-blob derivation fact.
+    BlobDerivationId
 );
 
 define_identity!(
@@ -593,7 +621,7 @@ pub(crate) mod test_support {
     //! constructors keep the `from_uuid(Uuid::from_u128(..))` pattern in one
     //! place instead of repeating it in each module's test helpers. Snapshot
     //! tables for the expect tests described in `docs/agents/testing-style.md` come
-    //! from the `signalbox-expect-table` dev-dependency.
+    //! from the `expectable` dev-dependency.
 
     macro_rules! identity_constructors {
         ($($constructor:ident -> $identity:ty),+ $(,)?) => {

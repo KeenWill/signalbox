@@ -1,3 +1,6 @@
+//! Linux worker lifecycle and isolation enforcement governed by
+//! `docs/spec/file-and-media.md`.
+
 use std::{
     collections::BTreeMap,
     error::Error,

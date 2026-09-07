@@ -9,9 +9,90 @@ export type WebApiError = {
 
 export type WebApiErrorKind = "transport" | "application";
 
+export type WebAttentionAction = "provide_goal_need" | "decide_approval" | "reconcile_turn";
+
+export type WebAttentionActivity = {
+  readonly kind: WebAttentionActivityKind;
+  readonly unix_milliseconds: string;
+};
+
+export type WebAttentionActivityKind = "session" | "turn" | "goal" | "approval_judge" | "runner";
+
+export type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure" | "finish_check_failed";
+
+export type WebAttentionGoalBlock = {
+  readonly generation: string;
+  readonly need_summary: string;
+  readonly reason: WebAttentionBlockedReason;
+};
+
+export type WebAttentionJudgeFacts = {
+  readonly actionable: string;
+  readonly completed: string;
+  readonly escalated: string;
+  readonly failed: string;
+};
+
+export type WebAttentionLifecycleState = "created" | "dispatched" | "active" | "waiting" | "recovering" | "blocked" | "parked" | "terminal";
+
+export type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_tool_recovery" | "awaiting_reconciliation" | "runner_lost" | "parked" | "idle";
+
+export type WebAttentionSummary = {
+  readonly action?: WebAttentionAction | null;
+  readonly current_turn_id?: string | null;
+  readonly goal_block?: WebAttentionGoalBlock | null;
+  readonly judge: WebAttentionJudgeFacts;
+  readonly last_activity: WebAttentionActivity;
+  readonly lifecycle_state: WebAttentionLifecycleState;
+  readonly session_id: string;
+  readonly state: WebAttentionState;
+};
+
+export type WebBlobAvailableView = {
+  readonly byte_length: string;
+  readonly content_url: string;
+  readonly derivations: ReadonlyArray<WebBlobDerivation>;
+  readonly kind: WebBlobViewKind;
+  readonly media_type: string;
+};
+
+export type WebBlobDerivation = {
+  readonly derivation_id: string;
+  readonly input_digests: ReadonlyArray<string>;
+  readonly output_digests: ReadonlyArray<string>;
+  readonly parameters_json: string;
+  readonly producer: WebBlobDerivationProducer;
+  readonly transformation_name: string;
+  readonly transformation_version: number;
+};
+
+export type WebBlobDerivationProducer = {
+  readonly cache_key: string;
+  readonly class: "deterministic";
+  readonly implementation_digest: string;
+} | {
+  readonly class: "executed";
+  readonly execution_id: string;
+  readonly implementation_digest: string;
+} | {
+  readonly class: "model_derived";
+  readonly model_call_id: string;
+};
+
+export type WebBlobId = string;
+
+export type WebBlobViewKind = "download" | "browser_native" | "thumbnail" | "preview";
+
 export type WebContractCapabilities = {
+  readonly blob_derivations: boolean;
   readonly bounded_json: boolean;
+  readonly bounded_lexical_search: boolean;
+  readonly bounded_session_live: boolean;
   readonly bounded_session_timeline: boolean;
+  readonly bounded_session_timeline_detail: boolean;
+  readonly bounded_usage_cost: boolean;
+  readonly image_derivatives: boolean;
+  readonly immutable_blob_content: boolean;
   readonly import_discovery: boolean;
   readonly imported_continuations: boolean;
   readonly ndjson_streaming: boolean;
@@ -26,9 +107,19 @@ export type WebContractIdentity = {
 export type WebContractLimits = {
   readonly max_json_body_bytes: number;
   readonly max_ndjson_item_bytes: number;
+  readonly max_search_page_items: number;
+  readonly max_search_query_bytes: number;
+  readonly max_search_snippet_bytes: number;
+  readonly max_session_live_queued_turns: number;
+  readonly max_timeline_detail_bytes: number;
+  readonly max_timeline_detail_items: number;
   readonly max_timeline_window_bytes: number;
   readonly max_timeline_window_items: number;
+  readonly max_usage_aggregate_groups: number;
+  readonly max_usage_call_page_items: number;
 };
+
+export type WebDollarAmount = string;
 
 export type WebImportContinuationReference = {
   readonly imported_conversation_id: string;
@@ -98,6 +189,8 @@ export type WebImportedSessionRelationship = "resume" | "fork";
 
 export type WebImportedSpeakerEvidence = "not_attested" | "attested_absent" | "user" | "assistant";
 
+export type WebLiveResourceId = string;
+
 export type WebModelSelection = {
   readonly kind: "direct";
   readonly selection_id: string;
@@ -106,9 +199,162 @@ export type WebModelSelection = {
   readonly kind: "alias";
 };
 
+export type WebNullableU128 = WebU128 | null;
+
+export type WebNullableU64 = WebU64 | null;
+
+export type WebPositiveU64 = string;
+
+export type WebProviderModelCallFailureCause = "credential_rejected" | "permission_denied" | "invalid_request" | "target_not_found" | "request_too_large" | "rate_limited" | "quota_exhausted" | "overloaded" | "provider_internal" | "unrecognized";
+
+export type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
+
+export type WebSearchHighlight = {
+  readonly end_byte: number;
+  readonly start_byte: number;
+};
+
+export type WebSearchProjectionId = string;
+
+export type WebSearchResult = {
+  readonly address: WebTimelineAddress;
+  readonly content_class: WebSearchContentClass;
+  readonly highlights: ReadonlyArray<WebSearchHighlight>;
+  readonly projection_id: WebSearchProjectionId;
+  readonly session_id: WebSessionId;
+  readonly snippet: string;
+  readonly source: WebSearchResultSource;
+};
+
+export type WebSearchResultSource = {
+  readonly kind: "session";
+  readonly session_id: WebSessionId;
+} | {
+  readonly accepted_input_id: WebUuid;
+  readonly kind: "accepted_input";
+  readonly turn_id: WebUuid;
+} | {
+  readonly accepted_input_id: WebUuid;
+  readonly kind: "steering_input";
+  readonly source_turn_id: WebUuid;
+} | {
+  readonly kind: "turn_transcript_entry";
+  readonly semantic_entry_id: WebUuid;
+  readonly turn_id: WebUuid;
+} | {
+  readonly kind: "session_transcript_entry";
+  readonly semantic_entry_id: WebUuid;
+} | {
+  readonly kind: "tool_request";
+  readonly tool_request_id: WebUuid;
+  readonly turn_id: WebUuid;
+} | {
+  readonly kind: "tool_attempt";
+  readonly tool_attempt_id: WebUuid;
+  readonly turn_id: WebUuid;
+} | {
+  readonly attachment_id: WebUuid;
+  readonly kind: "attachment";
+} | {
+  readonly artifact_id: WebUuid;
+  readonly kind: "derived_artifact";
+};
+
+export type WebSessionCatalogActivity = {
+  readonly kind: WebAttentionActivityKind;
+  readonly unix_microseconds: WebU64;
+};
+
+export type WebSessionCatalogSort = "last_activity_descending" | "session_identity_ascending";
+
+export type WebSessionCatalogSummary = {
+  readonly action: WebAttentionAction | null;
+  readonly active_turn_count: WebU64;
+  readonly archived: boolean;
+  readonly current_turn_id: string | null;
+  readonly goal_block?: WebAttentionGoalBlock | null;
+  readonly judge: WebAttentionJudgeFacts;
+  readonly last_activity: WebSessionCatalogActivity;
+  readonly queued_turn_count: WebU64;
+  readonly session_id: WebSessionId;
+  readonly state: WebAttentionState;
+  readonly title_summary: string | null;
+  readonly title_truncated: boolean;
+};
+
+export type WebSessionGoalDisposition = "session_closed" | "commissioned" | "blocked" | "resumed" | "achieved" | "user_stopped" | "superseded";
+
 export type WebSessionId = string;
 
-export type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
+export type WebSessionLiveActiveState = {
+  readonly kind: "running";
+  readonly model_call_id: string | null;
+} | {
+  readonly kind: "awaiting_model_call_recovery";
+  readonly model_call_id: WebLiveResourceId;
+} | {
+  readonly kind: "awaiting_tool_approval";
+  readonly tool_request_id: WebLiveResourceId;
+} | {
+  readonly child_session_id: WebSessionId;
+  readonly kind: "awaiting_child";
+  readonly tool_request_id: WebLiveResourceId;
+} | {
+  readonly kind: "awaiting_tool_recovery";
+  readonly tool_attempt_id: WebLiveResourceId;
+} | {
+  readonly kind: "awaiting_runner_recovery";
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+};
+
+export type WebSessionLiveRunnerConnectionHealth = "connected" | "suspect" | "shutdown" | "lost";
+
+export type WebSessionRate = {
+  readonly completed_turn_count: WebU64;
+  readonly failed_turn_count: WebU64;
+  readonly goal_disposition?: WebSessionGoalDisposition | null;
+  readonly last_failure_sequence?: WebU64 | null;
+  readonly last_provider_cause?: WebProviderModelCallFailureCause | null;
+  readonly lifecycle_state: WebAttentionLifecycleState;
+  readonly retired_turn_count: WebU64;
+  readonly session_id: WebSessionId;
+  readonly turn_count: WebU64;
+};
+
+export type WebSessionTimelineDetail = {
+  readonly address: WebTimelineAddress;
+  readonly body: WebSessionTimelineDetailBody;
+  readonly kind: WebSessionTimelineEventKind;
+  readonly projected_body_bytes: number;
+};
+
+export type WebSessionTimelineDetailBody = {
+  readonly attachments: ReadonlyArray<WebTimelineBlobReference>;
+  readonly text: WebTimelineTextExcerpt;
+  readonly turn_id: WebSessionId;
+  readonly type: "user_input";
+} | {
+  readonly model_call_id: WebSessionId;
+  readonly model_identity_id: WebSessionId;
+  readonly provider_failure_cause?: WebProviderModelCallFailureCause | null;
+  readonly request_context_items: WebU64;
+  readonly response?: WebTimelineTextExcerpt | null;
+  readonly state: WebTimelineModelCallState;
+  readonly turn_id: WebSessionId;
+  readonly type: "model_call";
+  readonly usage: WebTimelineModelUsage;
+} | {
+  readonly cause_code: string;
+  readonly lifecycle: WebTimelineTurnLifecycleKind;
+  readonly turn_id: WebSessionId;
+  readonly type: "turn_lifecycle";
+} | {
+  readonly kind: WebSessionTimelineEventKind;
+  readonly type: "event_fact";
+};
+
+export type WebSessionTimelineEventKind = "session_created" | "session_state_changed" | "session_terminal" | "goal_changed" | "command_settled" | "injection_settled" | "session_ownership_changed" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
 
 export type WebSessionTimelineItem = {
   readonly address: WebTimelineAddress;
@@ -133,14 +379,152 @@ export type WebTimelineAddress = {
   readonly event_sequence: WebTimelineEventSequence;
 };
 
+export type WebTimelineBlobReference = {
+  readonly blob_id: WebBlobId;
+  readonly length_bytes: WebU64;
+  readonly media_type?: string | null;
+};
+
+export type WebTimelineBodyContinuation = {
+  readonly address: WebTimelineAddress;
+  readonly field: WebTimelineBodyField;
+  readonly member_index: number;
+  readonly offset_bytes: WebU64;
+};
+
+export type WebTimelineBodyField = "input_text" | "model_response";
+
+export type WebTimelineDetailContinuation = {
+  readonly address: WebTimelineAddress;
+  readonly type: "more_at";
+} | {
+  readonly body: WebTimelineBodyContinuation;
+  readonly type: "more_body";
+};
+
 export type WebTimelineEventSequence = string;
 
+export type WebTimelineModelCallDisposition = "completed" | "known_failed" | "refused" | "cancelled" | "ambiguous";
+
+export type WebTimelineModelCallState = {
+  readonly type: "prepared";
+} | {
+  readonly type: "in_flight";
+} | {
+  readonly type: "cancellation_requested";
+} | {
+  readonly disposition: WebTimelineModelCallDisposition;
+  readonly type: "terminal";
+};
+
+export type WebTimelineModelUsage = {
+  readonly cache_creation_input_tokens?: WebU64 | null;
+  readonly cache_read_input_tokens?: WebU64 | null;
+  readonly input_tokens?: WebU64 | null;
+  readonly output_tokens?: WebU64 | null;
+};
+
+export type WebTimelineTextExcerpt = {
+  readonly continuation?: WebTimelineBodyContinuation | null;
+  readonly offset_bytes: WebU64;
+  readonly text: string;
+  readonly total_bytes: WebU64;
+};
+
+export type WebTimelineTurnLifecycleKind = "activated" | "terminalized";
+
+export type WebTurnId = string;
+
+export type WebU128 = string;
+
 export type WebU64 = string;
+
+export type WebUsageAggregateGroup = {
+  readonly call_count: WebUsageCallCount;
+  readonly call_kind: WebUsageCallKind;
+  readonly cost: WebUsageCost;
+  readonly coverage: WebUsageTokenCoverage;
+  readonly input_semantics: WebUsageInputSemantics;
+  readonly model_id: WebUuid;
+  readonly profile_id: WebUsageProfileId;
+  readonly provenance: WebUsageProvenance;
+  readonly tokens: WebUsageAggregateTokenAxes;
+};
+
+export type WebUsageAggregateTokenAxes = {
+  readonly cache_creation_input: WebNullableU128;
+  readonly cache_read_input: WebNullableU128;
+  readonly input: WebNullableU128;
+  readonly output: WebNullableU128;
+};
+
+export type WebUsageCall = {
+  readonly call_id: WebUuid;
+  readonly call_kind: WebUsageCallKind;
+  readonly cost: WebUsageCost;
+  readonly input_semantics: WebUsageInputSemantics;
+  readonly model_id: WebUuid;
+  readonly profile_id: WebUsageProfileId;
+  readonly provenance: WebUsageProvenance;
+  readonly recorded_at_micros: WebUsageTimestampMicros;
+  readonly session_id: WebSessionId;
+  readonly tokens: WebUsageTokenAxes;
+  readonly turn_id: string | null;
+};
+
+export type WebUsageCallCount = string;
+
+export type WebUsageCallKind = "model_call" | "approval_judge" | "context_compaction";
+
+export type WebUsageCost = {
+  readonly amount_usd: WebDollarAmount;
+  readonly label: WebUsageCostLabel;
+  readonly rate_version: WebUsageRateVersion;
+  readonly status: "derived";
+} | {
+  readonly reason: WebUsageCostUnavailableReason;
+  readonly status: "unavailable";
+};
+
+export type WebUsageCostLabel = "real" | "metered_equivalent";
+
+export type WebUsageCostUnavailableReason = "no_token_evidence" | "unknown_input_semantics" | "incomplete_cache_axes" | "invalid_cache_breakdown" | "configuration_unavailable";
+
+export type WebUsageInputSemantics = "unknown" | "cache_exclusive" | "cache_inclusive";
+
+export type WebUsageProfileId = string;
+
+export type WebUsageProvenance = "reported" | "estimated";
+
+export type WebUsageRateVersion = string;
+
+export type WebUsageTimestampMicros = string;
+
+export type WebUsageTokenAxes = {
+  readonly cache_creation_input: WebNullableU64;
+  readonly cache_read_input: WebNullableU64;
+  readonly input: WebNullableU64;
+  readonly output: WebNullableU64;
+};
+
+export type WebUsageTokenCoverage = {
+  readonly cache_creation_input: boolean;
+  readonly cache_read_input: boolean;
+  readonly input: boolean;
+  readonly output: boolean;
+};
+
+export type WebUuid = string;
 
 export type WebContractBootstrap = {
   readonly capabilities: WebContractCapabilities;
   readonly contract: WebContractIdentity;
   readonly limits: WebContractLimits;
+};
+
+export type WebSubmitInputRequest = {
+  readonly command_id: string;
+  readonly message: string;
 };
 
 export type WebContractExample = {
@@ -150,6 +534,14 @@ export type WebContractExample = {
 
 export type WebApiErrorResponse = {
   readonly error: WebApiError;
+};
+
+export type WebBlobDescriptor = {
+  readonly available_views: ReadonlyArray<WebBlobAvailableView>;
+  readonly byte_length: string;
+  readonly declared_media_type: string;
+  readonly digest: string;
+  readonly display_filename: ReadonlyArray<string>;
 };
 
 export type WebSessionTimelineDescriptor = {
@@ -171,6 +563,110 @@ export type WebSessionTimelineWindow = {
   readonly items: ReadonlyArray<WebSessionTimelineItem>;
   readonly projected_structured_bytes: number;
   readonly session_id: WebSessionId;
+};
+
+export type WebSessionTimelineDetailPage = {
+  readonly continuation?: WebTimelineDetailContinuation | null;
+  readonly items: ReadonlyArray<WebSessionTimelineDetail>;
+  readonly projected_body_bytes: number;
+  readonly session_id: WebSessionId;
+};
+
+export type WebAttentionSnapshot = {
+  readonly continuation_after_session_id?: string | null;
+  readonly cursor: string;
+  readonly summaries: ReadonlyArray<WebAttentionSummary>;
+};
+
+export type WebAttentionStreamEvent = {
+  readonly kind: "snapshot";
+  readonly snapshot: WebAttentionSnapshot;
+} | {
+  readonly cursor: string;
+  readonly kind: "update";
+  readonly summaries: ReadonlyArray<WebAttentionSummary>;
+} | {
+  readonly cursor: string;
+  readonly kind: "resync_required";
+};
+
+export type WebSessionRates = {
+  readonly sessions: ReadonlyArray<WebSessionRate>;
+};
+
+export type WebSessionCatalogSnapshot = {
+  readonly continuation: {
+  readonly kind: "last_activity";
+  readonly session_id: WebSessionId;
+  readonly unix_microseconds: WebU64;
+} | {
+  readonly kind: "session_identity";
+  readonly session_id: WebSessionId;
+} | null;
+  readonly cursor: WebU64;
+  readonly sort: WebSessionCatalogSort;
+  readonly summaries: ReadonlyArray<WebSessionCatalogSummary>;
+  readonly total: WebU64;
+};
+
+export type WebSessionLiveSnapshot = {
+  readonly active: {
+  readonly state: WebSessionLiveActiveState;
+  readonly turn_id: WebTurnId;
+} | null;
+  readonly observed_through: WebPositiveU64;
+  readonly queued_turn_count: WebU64;
+  readonly queued_turn_ids: ReadonlyArray<WebTurnId>;
+  readonly reconciliation: {
+  readonly kind: "model_call";
+  readonly model_call_id: WebLiveResourceId;
+  readonly turn_id: WebTurnId;
+} | {
+  readonly kind: "tool_attempt";
+  readonly tool_attempt_id: WebLiveResourceId;
+  readonly turn_id: WebTurnId;
+} | null;
+  readonly runner: {
+  readonly placement_revision: WebPositiveU64;
+  readonly state: "unpinned";
+} | {
+  readonly connection_health: WebSessionLiveRunnerConnectionHealth;
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "pinned";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_lost_before_pin";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_lost";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_abandoned";
+} | null;
+  readonly session_id: WebSessionId;
+};
+
+export type WebSessionLiveStreamEvent = {
+  readonly kind: "snapshot";
+  readonly snapshot: WebSessionLiveSnapshot;
+} | {
+  readonly address: WebTimelineAddress;
+  readonly cursor: WebU64;
+  readonly event_kind: WebSessionTimelineEventKind;
+  readonly kind: "durable";
+} | {
+  readonly content: string;
+  readonly kind: "provider_text_delta";
+  readonly model_call_id: WebLiveResourceId;
+  readonly part_index: number;
+  readonly turn_id: WebTurnId;
+} | {
+  readonly cursor: WebPositiveU64;
+  readonly kind: "resync_required";
 };
 
 export type WebImportListRequest = {
@@ -228,11 +724,41 @@ export type WebImportContinuationResponse = {
   readonly session_id: string;
 };
 
+export type WebSearchPage = {
+  readonly continuation: {
+  readonly address: WebTimelineAddress;
+  readonly projection_id: WebSearchProjectionId;
+} | null;
+  readonly results: ReadonlyArray<WebSearchResult>;
+};
+
+export type WebUsageSummary = {
+  readonly groups: ReadonlyArray<WebUsageAggregateGroup>;
+  readonly truncated: boolean;
+};
+
+export type WebUsageCallPage = {
+  readonly calls: ReadonlyArray<WebUsageCall>;
+  readonly continuation: {
+  readonly call_id: WebUuid;
+  readonly recorded_at_micros: WebUsageTimestampMicros;
+} | null;
+};
+
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
+export function decodeWebSubmitInputRequest(value: unknown): WebSubmitInputRequest;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
+export function decodeWebBlobDescriptor(value: unknown): WebBlobDescriptor;
 export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
+export function decodeWebSessionTimelineDetailPage(value: unknown): WebSessionTimelineDetailPage;
+export function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;
+export function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;
+export function decodeWebSessionRates(value: unknown): WebSessionRates;
+export function decodeWebSessionCatalogSnapshot(value: unknown): WebSessionCatalogSnapshot;
+export function decodeWebSessionLiveSnapshot(value: unknown): WebSessionLiveSnapshot;
+export function decodeWebSessionLiveStreamEvent(value: unknown): WebSessionLiveStreamEvent;
 export function decodeWebImportListRequest(value: unknown): WebImportListRequest;
 export function decodeWebImportListPage(value: unknown): WebImportListPage;
 export function decodeWebImportDescriptor(value: unknown): WebImportDescriptor;
@@ -240,3 +766,6 @@ export function decodeWebImportEntryWindowRequest(value: unknown): WebImportEntr
 export function decodeWebImportEntryWindow(value: unknown): WebImportEntryWindow;
 export function decodeWebImportContinuationRequest(value: unknown): WebImportContinuationRequest;
 export function decodeWebImportContinuationResponse(value: unknown): WebImportContinuationResponse;
+export function decodeWebSearchPage(value: unknown): WebSearchPage;
+export function decodeWebUsageSummary(value: unknown): WebUsageSummary;
+export function decodeWebUsageCallPage(value: unknown, order: "newest"): WebUsageCallPage;
