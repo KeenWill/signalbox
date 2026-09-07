@@ -176,7 +176,8 @@ idempotent only when all retained command metadata agrees. One dispatch
 reference names exactly one rule revision and event evaluation, including its
 complete ordered action batch. Pending ledger rows remain recoverable without
 the removed or inactive rule, and newly resolved template or configuration
-values cannot replace the committed payload. Checkout recovery resolves the
+values cannot replace the committed payload. A recorded checkout head settles
+provisioning replay without configuration. Checkout recovery resolves the
 credential from configuration using the retained repository identity. An
 unconfigured repository terminalizes the dispatch as `repository_unconfigured`
 and closes its held session through a parent-only nonsticky lifecycle stop.
@@ -203,12 +204,13 @@ pull-request dispatch provisions the watched repository at the session's derived
 workspace root, on the retained head branch and SHA, before completing held
 creation. The ledger records checkout path `.` and the provisioned SHA. Git uses
 the polling credential only in its invocation environment, scoped to the watched
-repository URL; fork heads are fetched unauthenticated. Provisioning failure
-retires the dispatch as `checkout_provisioning_failed` with the failing step and
-exit status and stops the session. Pending submission follow-ups remain
-retryable after core command settlement, including interruption of a live turn
-whose session is closing. Synchronous command-identity conflicts settle as
-rejected before submission continues to the next action.
+repository URL; redirects are refused and fork heads are fetched
+unauthenticated. Provisioning failure retires the dispatch as
+`checkout_provisioning_failed` with the failing step and exit status and stops
+the session. Pending submission follow-ups remain retryable after core command
+settlement, including interruption of a live turn whose session is closing.
+Synchronous command-identity conflicts settle as rejected before submission
+continues to the next action.
 
 ## Boundary contracts
 
